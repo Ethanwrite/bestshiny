@@ -117,6 +117,8 @@ class ShotContinuityService:
                     filename=f"shot-{shot_id}-end.jpg",
                     mime_type="image/jpeg",
                     shot_id=shot_id,
+                    parent_asset_id=video_asset_id,
+                    generation_candidate_id=video.generation_candidate_id,
                     metadata={
                         "source_video_asset_id": video_asset_id,
                         "safe_offset_seconds": self.extractor.safe_offset_seconds,
@@ -129,7 +131,10 @@ class ShotContinuityService:
             next_shot = (
                 session.query(Shot).filter(Shot.previous_shot_id == shot.id).order_by(Shot.sequence).first()
             )
-            if next_shot and next_shot.continuity_mode == ContinuityMode.PREVIOUS_END_FRAME.value:
+            if next_shot and next_shot.continuity_mode in {
+                ContinuityMode.PREVIOUS_END_FRAME.value,
+                ContinuityMode.HARD_CONTINUITY.value,
+            }:
                 next_shot.start_frame_asset_id = end_frame.id
             session.flush()
             return session.get(MediaAsset, end_frame.id)

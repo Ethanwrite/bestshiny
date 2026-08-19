@@ -27,7 +27,14 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             )
             job_id = job.id if job else None
         if job_id:
-            await container.gateway.process(job_id)
+            processed = await container.gateway.process(job_id)
+            if processed.status == JobStatus.COMPLETED.value and processed.candidate_id:
+                container.cost.record_job(
+                    processed.id,
+                    estimated_cost=processed.cost_estimate,
+                    actual_cost=processed.actual_cost,
+                )
+                container.candidates.sync_candidate(processed.candidate_id)
         else:
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

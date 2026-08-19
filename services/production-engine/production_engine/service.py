@@ -28,5 +28,6 @@ class ProductionEngine:
                 duration=shot.duration,
                 start_frame_asset_id=shot.start_frame_asset_id,
                 end_frame_asset_id=shot.end_frame_asset_id,
+                generation_policy=shot.generation_policy,
                 idempotency_key=idempotency_key,
             )

@@ -194,4 +194,12 @@ async def test_provider_media_binding_reuses_one_upload(container, project, regi
 
 
 def test_provider_router_has_future_slots(container):
-    assert set(container.providers.list()) == {"google_flow", "grok", "omni", "seedance", "veo_official"}
+    assert set(container.providers.list()) == {
+        "google_flow",
+        "grok",
+        "kling",
+        "omni",
+        "runway",
+        "seedance",
+        "veo_official",
+    }

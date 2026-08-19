@@ -11,14 +11,18 @@ from platform_database import Database
 from production_domain.models import (
     AssetType,
     BrowserWorker,
+    CandidateStatus,
+    GenerationCandidate,
     GenerationEvent,
     GenerationIdempotency,
     GenerationJob,
     JobStatus,
     Project,
     ProviderAccount,
+    ProviderProjectBinding,
     RetryCategory,
     Shot,
+    ShotStatus,
     WorkerCommand,
     WorkerStatus,
     utcnow,
@@ -73,7 +77,7 @@ class GenerationGateway:
         session.add(GenerationEvent(generation_job_id=job_id, event_type=event_type, detail=detail))
 
     def create(self, request: GenerationRequest) -> tuple[GenerationJob, bool]:
-        payload = request.model_dump(mode="json", exclude={"idempotency_key"})
+        payload = request.model_dump(mode="json", exclude={"idempotency_key", "candidate_id"})
         request_hash = canonical_hash(payload)
         with self.database.session() as session:
             if session.get(Project, request.project_id) is None:
@@ -88,12 +92,15 @@ class GenerationGateway:
             job = GenerationJob(
                 project_id=request.project_id,
                 shot_id=request.shot_id,
+                candidate_id=request.candidate_id,
                 generation_type=request.type,
                 provider=request.provider,
                 model=request.model,
                 priority=request.priority,
                 request_json=payload,
                 request_hash=request_hash,
+                policy=request.generation_policy,
+                cost_estimate=request.cost_estimate,
             )
             session.add(job)
             session.flush()
@@ -116,6 +123,13 @@ class GenerationGateway:
                 if not shot or shot.scene.episode.project_id != request.project_id:
                     raise LookupError("shot does not belong to project")
                 shot.generation_job_id = job.id
+                shot.status = ShotStatus.QUEUED.value
+            if request.candidate_id:
+                candidate = session.get(GenerationCandidate, request.candidate_id)
+                if not candidate or candidate.shot_id != request.shot_id:
+                    raise LookupError("candidate does not belong to shot")
+                candidate.generation_job_id = job.id
+                candidate.status = CandidateStatus.GENERATING.value
             session.flush()
             return job, False
 
@@ -288,16 +302,31 @@ class GenerationGateway:
             job.account_id = account.id
             job.worker_id = worker.id
             job.status = JobStatus.QUEUED.value
+            job.started_at = job.started_at or utcnow()
             job.reserved_at = utcnow()
             job.attempt_count += 1
+            project_binding = session.scalar(
+                select(ProviderProjectBinding).where(
+                    ProviderProjectBinding.local_project_id == job.project_id,
+                    ProviderProjectBinding.provider == job.provider,
+                    ProviderProjectBinding.provider_account_id == account.id,
+                    ProviderProjectBinding.status == "READY",
+                )
+            )
+            provider_project_id = (
+                project_binding.provider_project_id
+                if project_binding
+                else account.metadata_json.get("project_id")
+            )
             self._event(session, job.id, "ACCOUNT_SELECTED", account_id=account.id, credits=account.credits)
             self._event(session, job.id, "WORKER_SELECTED", worker_id=worker.id)
             session.flush()
         try:
-            request["_provider_project_id"] = account.metadata_json.get("project_id")
+            request["_provider_project_id"] = provider_project_id
             request = await self._resolve_assets(self.get(job_id), request, provider)
             with self.database.session() as session:
                 job = session.get(GenerationJob, job_id)
+                job.provider_request_json = request
                 job.submission_state = "SENT_UNCONFIRMED"
                 job.safe_to_retry = False
                 self._event(session, job.id, "REQUEST_SUBMITTED", provider=job.provider)
@@ -389,7 +418,7 @@ class GenerationGateway:
                 )
             with self.database.session() as session:
                 job = session.get(GenerationJob, job_id)
-                project_id, shot_id = job.project_id, job.shot_id
+                project_id, shot_id, candidate_id = job.project_id, job.shot_id, job.candidate_id
             asset_type = AssetType.VIDEO.value if capability == "video" else AssetType.IMAGE.value
             suffix = "mp4" if capability == "video" else "png"
             asset = await self.media.download_and_register(
@@ -400,22 +429,37 @@ class GenerationGateway:
                 provider=provider.name,
                 provider_media_id=provider_job_id,
                 shot_id=shot_id,
+                generation_candidate_id=candidate_id,
             )
             with self.database.session() as session:
                 job = session.get(GenerationJob, job_id)
                 job.output_asset_id = asset.id
                 job.status = JobStatus.COMPLETED.value
                 job.completed_at = utcnow()
+                if candidate_id:
+                    candidate = session.get(GenerationCandidate, candidate_id)
+                    if candidate:
+                        candidate.output_asset_id = asset.id
+                        candidate.status = CandidateStatus.VALIDATING.value
+                    asset_record = session.get(type(asset), asset.id)
+                    if asset_record:
+                        asset_record.generation_candidate_id = candidate_id
+                    if shot_id:
+                        shot = session.get(Shot, shot_id)
+                        if shot:
+                            shot.status = ShotStatus.VALIDATING.value
                 idem = session.scalar(
                     select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
                 )
                 idem.status = "SUCCEEDED"
                 idem.result_asset_id = asset.id
                 self._event(session, job.id, "MEDIA_DOWNLOADED", asset_id=asset.id)
+                self._event(session, job.id, "VIDEO_GENERATED", candidate_id=candidate_id)
+                self._event(session, job.id, "DYNAMIC_QA_STARTED", candidate_id=candidate_id)
                 self._event(session, job.id, "PROVIDER_JOB_COMPLETED", provider_job_id=provider_job_id)
                 self._event(session, job.id, "JOB_COMPLETED", output_asset_id=asset.id)
             self.scheduler.release(account_id, worker_id, capability, success=True)
-            if shot_id and capability == "video" and self.continuity:
+            if shot_id and not candidate_id and capability == "video" and self.continuity:
                 try:
                     end_frame = self.continuity.extract_and_chain(shot_id, asset.id)
                     with self.database.session() as session:

@@ -1,0 +1,87 @@
+[project]
+name = "ai-video-production-platform"
+version = "0.1.0"
+description = "Provider-neutral AI video production platform with a Google Flow browser worker"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.16,<2",
+  "cryptography>=45,<47",
+  "fastapi>=0.128,<1",
+  "httpx>=0.28,<1",
+  "pillow>=11,<13",
+  "pydantic-settings>=2.10,<3",
+  "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.40,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+video-platform-api = "video_platform_api.main:run"
+video-platform-worker = "generation_gateway.worker:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+  "apps/api/video_platform_api",
+  "packages/domain/production_domain",
+  "packages/database/platform_database",
+  "packages/provider-sdk/provider_sdk",
+  "packages/shared/platform_shared",
+  "packages/contracts/platform_contracts",
+  "services/generation-gateway/generation_gateway",
+  "services/production-engine/production_engine",
+  "services/browser-runtime/browser_runtime",
+  "services/media-service/media_service",
+  "providers/google-flow/google_flow_provider",
+  "agents/runtime/agent_runtime",
+  "providers/seedance/seedance_provider",
+  "providers/veo/veo_provider",
+  "providers/grok/grok_provider",
+  "providers/omni/omni_provider",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = [
+  "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
+  "packages/shared", "packages/contracts", "services/generation-gateway",
+  "services/production-engine", "services/browser-runtime", "services/media-service",
+  "providers/google-flow", "providers/seedance", "providers/veo", "providers/grok", "providers/omni",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"apps/api/video_platform_api/main.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = false
+files = [
+  "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
+  "packages/shared", "packages/contracts", "services/generation-gateway",
+  "services/production-engine", "services/browser-runtime", "services/media-service",
+  "providers/google-flow",
+  "agents/runtime",
+]

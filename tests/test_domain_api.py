@@ -58,3 +58,9 @@ def test_openai_compatibility_is_only_an_adapter(container, project):
         )
         assert response.status_code == 202
         assert response.json()["object"] == "video.generation"
+
+
+def test_director_and_prompt_compiler_skills_are_discoverable(container):
+    with TestClient(create_app(container)) as client:
+        skills = {item["name"] for item in client.get("/v1/skills").json()}
+    assert {"director", "prompt-compiler"}.issubset(skills)

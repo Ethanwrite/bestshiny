@@ -1,0 +1,4 @@
+interface:
+  display_name: "Director"
+  short_description: "Approve story, hook, visual direction, and final creative"
+  default_prompt: "Use $director to approve this short-drama concept without changing established story facts."

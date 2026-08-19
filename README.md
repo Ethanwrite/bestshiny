@@ -24,6 +24,8 @@ import Flow-specific clients.
 - OpenAI-compatible image/video request adapters that translate into the internal `GenerationRequest`.
 - File-based skills and an Agent runtime that can access only Production Engine, Generation Gateway and Media
   Registry—not provider clients.
+- An explicit Director skill for creative approval and a Prompt Compiler skill that preserves approved facts while
+  adapting instructions to Flow/Veo, Omni, Grok, Wan or Seedance constraints.
 
 The source audit and exact migration map are in [docs/source-audit.md](docs/source-audit.md).
 
@@ -186,4 +188,3 @@ Shot 1 → Shot 2 continuity.
   not fake implementations.
 - The separate dashboard frontend is not built in V1; operations are available through the typed API and OpenAPI
   UI.
-

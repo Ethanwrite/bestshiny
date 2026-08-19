@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: video_platform
+      POSTGRES_USER: video_platform
+      POSTGRES_PASSWORD: video_platform_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U video_platform -d video_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://video_platform:video_platform_dev@postgres:5432/video_platform
+      STORAGE_ROOT: /data/media
+      PUBLIC_BASE_URL: http://localhost:8080
+      SESSION_COOKIE_SECURE: "false"
+    volumes:
+      - media_data:/data/media
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && uvicorn video_platform_api.main:app --host 0.0.0.0 --port 8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://video_platform:video_platform_dev@postgres:5432/video_platform
+      STORAGE_ROOT: /data/media
+      PUBLIC_BASE_URL: http://api:8080
+    volumes:
+      - media_data:/data/media
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["video-platform-worker"]
+
+volumes:
+  postgres_data:
+  media_data:
+

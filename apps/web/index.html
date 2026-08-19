@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Director — 智能导演工作台</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect rx=%2216%22 width=%2264%22 height=%2264%22 fill=%22%2339e7ff%22/><path d=%22M16 21h32M16 32h24M16 43h32%22 stroke=%22%23070a12%22 stroke-width=%225%22/></svg>" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark"><span></span><span></span><span></span></div>
+          <div><strong>AI 智能导演</strong><small>短剧生成工作台</small></div>
+        </div>
+        <div class="project-switcher">
+          <span class="eyebrow">当前项目</span>
+          <select id="projectSelect" aria-label="选择项目"></select>
+        </div>
+        <div class="top-actions">
+          <span id="systemStatus" class="status-pill"><i></i>系统检查中</span>
+          <button id="newProjectBtn" class="button secondary">新建项目</button>
+          <button id="generateBtn" class="button primary">生成当前镜头</button>
+        </div>
+      </header>
+
+      <main class="workspace-grid">
+        <aside class="panel left-panel">
+          <div class="panel-heading">
+            <div><span class="eyebrow">故事输入</span><h2>剧本与场景</h2></div>
+            <span id="episodeStatus" class="mini-badge">未编译</span>
+          </div>
+          <textarea id="scriptInput" class="script-editor" spellcheck="false" placeholder="输入剧本，例如：
+EXT. 酒店雨棚 - NIGHT
+赵凯：你看这部手机。
+林瑾转身，向雨棚边缘走两步。"></textarea>
+          <div class="inline-actions">
+            <button id="compileBtn" class="button primary grow">编译剧本</button>
+            <button id="refineBtn" class="icon-button" title="整理提示词">✦</button>
+          </div>
+          <div class="section-label"><span>场景结构</span><b id="sceneCount">0</b></div>
+          <div id="sceneList" class="scene-list empty-state">创建项目并编译剧本后显示场景</div>
+        </aside>
+
+        <section class="center-stage">
+          <div class="timeline-card">
+            <div class="panel-heading compact">
+              <div><span class="eyebrow">制作进度</span><h2>镜头时间线</h2></div>
+              <div class="legend"><span><i class="dot planned"></i>已规划</span><span><i class="dot committed"></i>已采用</span></div>
+            </div>
+            <div id="shotTimeline" class="shot-timeline empty-state">暂无镜头</div>
+          </div>
+
+          <div class="current-shot-card">
+            <div class="shot-hero">
+              <div class="shot-preview">
+                <div class="preview-grid"></div>
+                <div class="preview-content"><span id="shotNumber">镜头 —</span><strong id="shotAction">选择一个镜头</strong><small id="shotState">开始状态 → 单一动作 → 结束状态</small></div>
+              </div>
+              <div class="shot-summary">
+                <span class="eyebrow">当前镜头</span>
+                <h1 id="shotTitle">尚未选择镜头</h1>
+                <p id="shotPrompt">从左侧编译剧本，系统会生成结构化镜头与时间线状态。</p>
+                <div class="metrics-row">
+                  <div><span>时长</span><strong id="shotDuration">—</strong></div>
+                  <div><span>连续方式</span><strong id="shotContinuity">—</strong></div>
+                  <div><span>生成策略</span><strong id="shotPolicy">—</strong></div>
+                  <div><span>模型</span><strong id="shotProvider">—</strong></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="candidates-card">
+            <div class="panel-heading compact">
+              <div><span class="eyebrow">多个结果对比</span><h2>备选成片</h2></div>
+              <button id="refreshCandidatesBtn" class="text-button">刷新结果 ↻</button>
+            </div>
+            <div id="candidateGrid" class="candidate-grid empty-state">生成后可对比方案 A / B / C、质量检查与成本</div>
+          </div>
+        </section>
+
+        <aside class="panel inspector-panel">
+          <div class="panel-heading"><div><span class="eyebrow">镜头设置</span><h2>导演参数</h2></div></div>
+          <div class="inspector-tabs" role="tablist">
+            <button class="active" data-tab="character">人物</button><button data-tab="camera">摄影</button><button data-tab="prompt">提示词</button>
+          </div>
+          <div class="tab-panel active" id="tab-character">
+            <label>角色名称<input id="characterName" placeholder="例如：林瑾" /></label>
+            <label>角色设定<textarea id="characterDescription" rows="3" placeholder="外貌、发型、服装和不可改变的特征"></textarea></label>
+            <button id="createCharacterBtn" class="button secondary full">建立角色档案</button>
+            <label>角色主参考图<input id="characterAsset" type="file" accept="image/*" /></label>
+            <button id="confirmCharacterBtn" class="button primary full">上传并锁定新版本</button>
+            <div id="characterList" class="binding-list"><p>尚未建立角色</p></div>
+          </div>
+          <div class="tab-panel" id="tab-camera">
+            <div class="field-grid">
+              <label>镜头景别<select id="cameraScale"><option>中景</option><option>近景</option><option>全景</option><option>特写</option></select></label>
+              <label>机位角度<select id="cameraAngle"><option>平视</option><option>低角度</option><option>高角度</option><option>侧面</option></select></label>
+            </div>
+            <label>主要运镜<select id="cameraMove"><option>固定</option><option>缓慢推进</option><option>向左摇镜</option><option>跟随</option><option>环绕</option></select></label>
+            <label>灯光方向<select id="lighting"><option>雨夜冷色侧光</option><option>柔和正面光</option><option>暖色逆光</option><option>高反差轮廓光</option></select></label>
+            <button id="continuityBtn" class="button secondary full">计算连续性策略</button>
+            <div id="continuityResult" class="decision-box">选择镜头后可计算 HARD / HYBRID / RE-ANCHOR</div>
+          </div>
+          <div class="tab-panel" id="tab-prompt">
+            <label>用户原始要求<textarea id="rawPrompt" rows="5" placeholder="保留你的核心意图，系统只整理表达"></textarea></label>
+            <button id="promptRefineBtn" class="button secondary full">专业整理（显示差异）</button>
+            <label>编译后提示词<textarea id="compiledPrompt" rows="9" readonly></textarea></label>
+            <div id="promptDiff" class="decision-box">不会偷偷修改角色身份或剧情事实</div>
+          </div>
+          <div class="generation-settings">
+            <span class="section-label">生成设置</span>
+            <label>首选生成引擎<select id="providerSelect"><option value="google_flow">Google Flow</option><option value="seedance">Seedance</option><option value="veo_official">Veo Official</option><option value="grok">Grok</option></select></label>
+            <label>预计单次成本<input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
+            <small>实际调用会经过能力匹配、账号调度、幂等保护和成本记录。</small>
+          </div>
+        </aside>
+      </main>
+      <div id="toast" class="toast" role="status"></div>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

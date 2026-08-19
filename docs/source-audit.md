@@ -87,7 +87,7 @@ heartbeat expiry, SHA-256 provider bindings, stale media validation and non-dupl
 | Required capability | V1 implementation |
 | --- | --- |
 | Production domain | `packages/domain/production_domain/models.py` |
-| PostgreSQL/SQLite | `packages/database/platform_database/session.py`, Alembic migration `0001` |
+| PostgreSQL/pgvector/SQLite | `packages/database/platform_database/session.py`, Alembic migrations `0001`/`0002` |
 | Media registry | `services/media-service/media_service/registry.py` |
 | Storage abstraction | `packages/shared/platform_shared/storage.py` |
 | Provider interface/router | `packages/provider-sdk/provider_sdk/`, `generation_gateway/providers.py` |
@@ -97,6 +97,11 @@ heartbeat expiry, SHA-256 provider bindings, stale media validation and non-dupl
 | Browser worker runtime | `services/browser-runtime/`, persistent `worker_commands` |
 | Chrome extension | `apps/browser-worker-extension/` |
 | Shot continuity/end frame | `production_engine/continuity.py` |
+| Narrative compiler/state chain | `core/narrative/narrative_core/compiler.py` |
+| Immutable character identity | `core/character/character_core/service.py` |
+| Continuity decision | `core/continuity/continuity_core/engine.py` |
+| Capability-aware policy/router | `core/generation-policy/generation_policy_core/engine.py` |
+| Candidate QA/commit/cost | `core/qa/`, `core/production/`, `core/cost/` |
+| Director Web workspace | `apps/web/` |
 | OpenAI adapters | `/v1/images/generations`, `/v1/videos/generations` in API app |
 | Agent/skills boundary | `agents/runtime/`, `skills/*/SKILL.md` |
-

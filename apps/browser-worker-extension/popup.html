@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{width:320px;margin:0;padding:18px;background:#071022;color:#eaf2ff;font:13px system-ui}h1{font-size:17px}label{display:block;margin:10px 0 4px;color:#9fb0d0}input{box-sizing:border-box;width:100%;padding:9px;background:#030817;color:#fff;border:1px solid #294064;border-radius:9px}button{width:100%;margin-top:12px;padding:11px;border:0;border-radius:10px;font-weight:700;background:linear-gradient(90deg,#3de0ff,#9a4dff);color:#06101b}.secondary{background:#142440;color:#dbe8ff}.status{margin:12px 0;padding:10px;background:#0c1830;border-radius:9px;line-height:1.6}</style></head><body>
+<h1>AI Video Browser Worker</h1><div class="status" id="status">正在读取状态…</div>
+<label>平台地址</label><input id="serverBase"><label>平台 API Key</label><input id="apiKey" type="password"><label>Provider Account ID</label><input id="accountId"><label>Worker ID</label><input id="workerId">
+<button id="save" class="secondary">保存并连接</button><button id="authorize">授权下一次生成</button>
+<p>授权只对下一次需要验证的请求有效。扩展不会自动处理交互式验证。</p><script src="popup.js"></script></body></html>
+

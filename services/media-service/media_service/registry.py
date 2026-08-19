@@ -7,14 +7,14 @@ from typing import BinaryIO
 import httpx
 from PIL import Image
 from platform_database import Database
-from platform_shared import LocalStorage
+from platform_shared import StorageProvider
 from production_domain.models import MediaAsset, MediaProviderBinding, utcnow
 from provider_sdk import GenerationProvider
 from sqlalchemy import select
 
 
 class MediaRegistry:
-    def __init__(self, database: Database, storage: LocalStorage):
+    def __init__(self, database: Database, storage: StorageProvider):
         self.database = database
         self.storage = storage
 
@@ -64,6 +64,8 @@ class MediaRegistry:
         character_id: str | None = None,
         scene_id: str | None = None,
         shot_id: str | None = None,
+        parent_asset_id: str | None = None,
+        generation_candidate_id: str | None = None,
         metadata: dict | None = None,
     ) -> tuple[MediaAsset, bool]:
         stored = self.storage.put(stream, filename=filename, mime_type=mime_type)
@@ -92,6 +94,8 @@ class MediaRegistry:
                 character_id=character_id,
                 scene_id=scene_id,
                 shot_id=shot_id,
+                parent_asset_id=parent_asset_id,
+                generation_candidate_id=generation_candidate_id,
                 metadata_json=metadata or {},
             )
             session.add(asset)
@@ -173,6 +177,7 @@ class MediaRegistry:
         provider: str,
         provider_media_id: str,
         shot_id: str | None = None,
+        generation_candidate_id: str | None = None,
     ) -> MediaAsset:
         async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
             response = await client.get(url)
@@ -186,6 +191,7 @@ class MediaRegistry:
             filename=filename,
             mime_type=mime_type,
             shot_id=shot_id,
+            generation_candidate_id=generation_candidate_id,
             metadata={"source_url": url, "provider": provider},
         )
         with self.database.session() as session:

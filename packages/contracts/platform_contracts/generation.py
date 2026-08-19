@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 class GenerationRequest(BaseModel):
     project_id: str
     shot_id: str | None = None
+    candidate_id: str | None = None
     type: Literal["image", "video"]
     provider: str = "google_flow"
     model: str = "veo"
@@ -20,6 +21,8 @@ class GenerationRequest(BaseModel):
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=20)
     idempotency_key: str = Field(min_length=3, max_length=250)
     priority: int = Field(default=0, ge=-100, le=100)
+    generation_policy: str = "TEXT_TO_VIDEO"
+    cost_estimate: float = Field(default=0.0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -46,12 +49,17 @@ class GenerationView(BaseModel):
 class ProjectCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = ""
+    workspace_id: str | None = None
+    default_aspect_ratio: str = "9:16"
+    default_provider: str = "google_flow"
+    default_language: str = "zh-CN"
 
 
 class EpisodeCreate(BaseModel):
     project_id: str
     title: str = Field(min_length=1, max_length=200)
     episode_number: int = Field(ge=1)
+    script_source: str = ""
 
 
 class SceneCreate(BaseModel):
@@ -59,6 +67,7 @@ class SceneCreate(BaseModel):
     sequence: int = Field(ge=1)
     location_id: str | None = None
     description: str = ""
+    time_context: str = ""
 
 
 class ShotCreate(BaseModel):
@@ -66,8 +75,10 @@ class ShotCreate(BaseModel):
     sequence: int = Field(ge=1)
     duration: float = Field(default=8, ge=1, le=30)
     prompt: str = Field(min_length=1)
+    shot_type: str = "MEDIUM"
     negative_prompt: str = ""
     provider: str = "google_flow"
     model: str = "veo"
     previous_shot_id: str | None = None
     continuity_mode: str = "NONE"
+    generation_policy: str = "TEXT_TO_VIDEO"

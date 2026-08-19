@@ -1,14 +1,16 @@
 [project]
-name = "ai-video-production-platform"
+name = "ai-director-platform"
 version = "0.1.0"
-description = "Provider-neutral AI video production platform with a Google Flow browser worker"
+description = "State-driven AI director workspace with candidate QA, continuity and provider routing"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2",
+  "boto3>=1.40,<2",
   "cryptography>=45,<47",
   "fastapi>=0.128,<1",
   "httpx>=0.28,<1",
   "pillow>=11,<13",
+  "pgvector>=0.4,<1",
   "pydantic-settings>=2.10,<3",
   "psycopg[binary]>=3.2,<4",
   "python-multipart>=0.0.20,<1",
@@ -50,6 +52,16 @@ packages = [
   "providers/veo/veo_provider",
   "providers/grok/grok_provider",
   "providers/omni/omni_provider",
+  "providers/kling/kling_provider",
+  "providers/runway/runway_provider",
+  "core/narrative/narrative_core",
+  "core/character/character_core",
+  "core/continuity/continuity_core",
+  "core/generation-policy/generation_policy_core",
+  "core/qa/qa_core",
+  "core/cost/cost_core",
+  "core/skills/skill_core",
+  "core/production/director_production",
 ]
 
 [tool.pytest.ini_options]
@@ -60,6 +72,8 @@ pythonpath = [
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
   "providers/google-flow", "providers/seedance", "providers/veo", "providers/grok", "providers/omni",
+  "providers/kling", "providers/runway", "core/narrative", "core/character", "core/continuity",
+  "core/generation-policy", "core/qa", "core/cost", "core/skills", "core/production",
 ]
 
 [tool.ruff]
@@ -84,4 +98,6 @@ files = [
   "services/production-engine", "services/browser-runtime", "services/media-service",
   "providers/google-flow",
   "agents/runtime",
+  "core/narrative", "core/character", "core/continuity", "core/generation-policy",
+  "core/qa", "core/cost", "core/skills", "core/production",
 ]

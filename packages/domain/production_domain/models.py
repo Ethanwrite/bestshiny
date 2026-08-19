@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -43,10 +44,15 @@ class AssetType(StrEnum):
     START_FRAME = "START_FRAME"
     END_FRAME = "END_FRAME"
     GENERATED_FRAME = "GENERATED_FRAME"
+    CHARACTER_MASTER = "CHARACTER_MASTER"
+    LOCATION_MASTER = "LOCATION_MASTER"
+    PROP_MASTER = "PROP_MASTER"
+    KEYFRAME = "KEYFRAME"
 
 
 class JobStatus(StrEnum):
     NEW = "NEW"
+    RESERVED = "RESERVED"
     QUEUED = "QUEUED"
     SUBMITTED = "SUBMITTED"
     RUNNING = "RUNNING"
@@ -78,6 +84,55 @@ class ContinuityMode(StrEnum):
     REFERENCE_FRAME = "REFERENCE_FRAME"
     START_END_FRAME = "START_END_FRAME"
     PROVIDER_CONTINUATION = "PROVIDER_CONTINUATION"
+    HARD_CONTINUITY = "HARD_CONTINUITY"
+    HYBRID = "HYBRID"
+    RE_ANCHOR = "RE_ANCHOR"
+
+
+class ShotStatus(StrEnum):
+    DRAFT = "DRAFT"
+    PLANNED = "PLANNED"
+    READY = "READY"
+    QUEUED = "QUEUED"
+    GENERATING = "GENERATING"
+    VALIDATING = "VALIDATING"
+    REPAIRING = "REPAIRING"
+    REGENERATING = "REGENERATING"
+    USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
+    COMMITTED = "COMMITTED"
+    FAILED = "FAILED"
+
+
+class CandidateStatus(StrEnum):
+    CREATED = "CREATED"
+    GENERATING = "GENERATING"
+    VALIDATING = "VALIDATING"
+    PASSED = "PASSED"
+    SOFT_FAILED = "SOFT_FAILED"
+    HARD_FAILED = "HARD_FAILED"
+    USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
+    COMMITTED = "COMMITTED"
+    REJECTED = "REJECTED"
+
+
+class QADecision(StrEnum):
+    PASS = "PASS"
+    SOFT_FAIL = "SOFT_FAIL"
+    HARD_FAIL = "HARD_FAIL"
+    USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
+
+
+class GenerationPolicy(StrEnum):
+    TEXT_TO_VIDEO = "TEXT_TO_VIDEO"
+    IMAGE_TO_VIDEO = "IMAGE_TO_VIDEO"
+    CONTINUE_I2V = "CONTINUE_I2V"
+    CONTINUE_V2V = "CONTINUE_V2V"
+    HYBRID_REFERENCE = "HYBRID_REFERENCE"
+    REANCHOR_CHARACTER = "REANCHOR_CHARACTER"
+    REANCHOR_SCENE = "REANCHOR_SCENE"
+    REANCHOR_FULL = "REANCHOR_FULL"
+    START_END_FRAME = "START_END_FRAME"
+    REFERENCE_TO_VIDEO = "REFERENCE_TO_VIDEO"
 
 
 class RetryCategory(StrEnum):
@@ -98,12 +153,34 @@ class TimestampMixin:
     )
 
 
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
+class Workspace(Base, TimestampMixin):
+    __tablename__ = "workspaces"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
 class Project(Base, TimestampMixin):
     __tablename__ = "projects"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+    default_aspect_ratio: Mapped[str] = mapped_column(String(20), default="9:16", nullable=False)
+    default_provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
+    default_language: Mapped[str] = mapped_column(String(30), default="zh-CN", nullable=False)
     episodes: Mapped[list[Episode]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
@@ -114,6 +191,8 @@ class Episode(Base, TimestampMixin):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     episode_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    script_source: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    script_structured: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
     project: Mapped[Project] = relationship(back_populates="episodes")
     scenes: Mapped[list[Scene]] = relationship(back_populates="episode", cascade="all, delete-orphan")
@@ -127,6 +206,11 @@ class Scene(Base, TimestampMixin):
     location_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    time_context: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    scene_description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    world_state_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_states.id"))
+    lighting_preset_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(40), default="PLANNED", nullable=False)
     episode: Mapped[Episode] = relationship(back_populates="scenes")
     shots: Mapped[list[Shot]] = relationship(back_populates="scene", cascade="all, delete-orphan")
 
@@ -137,21 +221,152 @@ class Shot(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     scene_id: Mapped[str] = mapped_column(ForeignKey("scenes.id", ondelete="CASCADE"), index=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_type: Mapped[str] = mapped_column(String(60), default="MEDIUM", nullable=False)
     duration: Mapped[float] = mapped_column(Float, default=8.0, nullable=False)
+    user_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    compiled_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     negative_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
     model: Mapped[str] = mapped_column(String(120), default="veo", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
     previous_shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), nullable=True)
+    next_shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), nullable=True)
+    input_state_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_states.id"))
+    output_state_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_states.id"))
+    camera_state_id: Mapped[str | None] = mapped_column(String(36))
+    lighting_state_id: Mapped[str | None] = mapped_column(String(36))
+    blocking_state_id: Mapped[str | None] = mapped_column(String(36))
     start_frame_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), nullable=True)
     end_frame_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), nullable=True)
     output_video_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), nullable=True)
     generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), nullable=True)
+    committed_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_candidates.id"), nullable=True
+    )
+    continuity_policy: Mapped[str] = mapped_column(String(60), default="HYBRID", nullable=False)
+    generation_policy: Mapped[str] = mapped_column(
+        String(60), default=GenerationPolicy.TEXT_TO_VIDEO.value, nullable=False
+    )
+    preferred_provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
+    preferred_model: Mapped[str] = mapped_column(String(120), default="veo", nullable=False)
     continuity_mode: Mapped[str] = mapped_column(
         String(50), default=ContinuityMode.NONE.value, nullable=False
     )
     scene: Mapped[Scene] = relationship(back_populates="shots")
+
+
+class TimelineState(Base, TimestampMixin):
+    __tablename__ = "timeline_states"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), index=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    previous_state_id: Mapped[str | None] = mapped_column(ForeignKey("timeline_states.id"))
+    state_kind: Mapped[str] = mapped_column(String(40), default="SHOT_INPUT", nullable=False)
+    state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    semantic_embedding: Mapped[list[float] | None] = mapped_column(Vector(16).with_variant(JSON(), "sqlite"))
+    visual_embedding: Mapped[list[float] | None] = mapped_column(Vector(16).with_variant(JSON(), "sqlite"))
+    camera_embedding: Mapped[list[float] | None] = mapped_column(Vector(16).with_variant(JSON(), "sqlite"))
+    character_track_embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(16).with_variant(JSON(), "sqlite")
+    )
+
+
+class ShotStateSnapshot(Base, TimestampMixin):
+    __tablename__ = "shot_state_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    timeline_state_id: Mapped[str] = mapped_column(ForeignKey("timeline_states.id"), index=True)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class NarrativeEvent(Base, TimestampMixin):
+    __tablename__ = "events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    episode_id: Mapped[str] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), index=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    action: Mapped[str] = mapped_column(String(240), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(36))
+    object_id: Mapped[str | None] = mapped_column(String(36))
+    dialogue: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    preconditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    effects: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    timeline_position: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    source_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class Character(Base, TimestampMixin):
+    __tablename__ = "characters"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    canonical_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
+    current_identity_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+
+
+class CharacterIdentityVersion(Base, TimestampMixin):
+    __tablename__ = "character_identity_versions"
+    __table_args__ = (UniqueConstraint("character_id", "version", name="uq_character_identity_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    character_id: Mapped[str] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    master_asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id"), nullable=False)
+    front_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    left_profile_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    right_profile_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    three_quarter_left_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    three_quarter_right_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    full_body_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    face_embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    appearance_embedding: Mapped[list[float] | None] = mapped_column(JSON)
+    hair_signature: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    costume_signature: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    provider_bindings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="LOCKED", nullable=False)
+    locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Location(Base, TimestampMixin):
+    __tablename__ = "locations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    canonical_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class Prop(Base, TimestampMixin):
+    __tablename__ = "props"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    canonical_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class GenerationCandidate(Base, TimestampMixin):
+    __tablename__ = "generation_candidates"
+    __table_args__ = (UniqueConstraint("shot_id", "attempt_number", name="uq_candidate_attempt"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation_job_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    output_asset_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    qa_result_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CandidateStatus.CREATED.value, index=True, nullable=False
+    )
+    accepted_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class MediaAsset(Base, TimestampMixin):
@@ -176,6 +391,10 @@ class MediaAsset(Base, TimestampMixin):
     character_id: Mapped[str | None] = mapped_column(String(36))
     scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id"))
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"))
+    parent_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), index=True)
+    generation_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_candidates.id"), index=True
+    )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -239,13 +458,16 @@ class GenerationJob(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("generation_candidates.id"), index=True)
     generation_type: Mapped[str] = mapped_column(String(20), nullable=False)
     provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     model: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default=JobStatus.NEW.value, index=True, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    provider_request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy: Mapped[str] = mapped_column(String(60), default=GenerationPolicy.TEXT_TO_VIDEO.value)
     provider_job_id: Mapped[str | None] = mapped_column(String(500), index=True)
     account_id: Mapped[str | None] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
     worker_id: Mapped[str | None] = mapped_column(ForeignKey("browser_workers.id"), index=True)
@@ -261,6 +483,9 @@ class GenerationJob(Base, TimestampMixin):
     reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 
 
 class GenerationIdempotency(Base, TimestampMixin):
@@ -314,3 +539,135 @@ class MediaProviderBinding(Base, TimestampMixin):
     provider_media_id: Mapped[str] = mapped_column(String(500), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="READY", nullable=False)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderProjectBinding(Base, TimestampMixin):
+    __tablename__ = "provider_projects"
+    __table_args__ = (
+        UniqueConstraint("local_project_id", "provider", "provider_account_id", name="uq_provider_project"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    local_project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
+    provider_project_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="READY", nullable=False)
+
+
+class ProviderCharacterBinding(Base, TimestampMixin):
+    __tablename__ = "provider_character_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "character_identity_version_id", "provider", "provider_account_id", name="uq_provider_character"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    character_identity_version_id: Mapped[str] = mapped_column(
+        ForeignKey("character_identity_versions.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
+    binding_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="READY", nullable=False)
+
+
+class ProviderInstructionBinding(Base, TimestampMixin):
+    __tablename__ = "provider_instruction_bindings"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
+    instruction_name: Mapped[str] = mapped_column(String(240), nullable=False)
+    provider_instruction_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="READY", nullable=False)
+
+
+class QAResult(Base, TimestampMixin):
+    __tablename__ = "qa_results"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True
+    )
+    profile: Mapped[str] = mapped_column(String(80), default="DIALOGUE", nullable=False)
+    level_reached: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    decision: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    character_score: Mapped[float | None] = mapped_column(Float)
+    scene_score: Mapped[float | None] = mapped_column(Float)
+    composition_score: Mapped[float | None] = mapped_column(Float)
+    action_score: Mapped[float | None] = mapped_column(Float)
+    camera_score: Mapped[float | None] = mapped_column(Float)
+    lighting_score: Mapped[float | None] = mapped_column(Float)
+    narrative_score: Mapped[float | None] = mapped_column(Float)
+    hard_failures: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class CostRecord(Base, TimestampMixin):
+    __tablename__ = "cost_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("generation_candidates.id"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model: Mapped[str] = mapped_column(String(120), nullable=False)
+    duration: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    resolution: Mapped[str] = mapped_column(String(40), default="", nullable=False)
+    credits: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    retry_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    wasted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class DecisionRecord(Base):
+    __tablename__ = "decision_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    decision_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    input_features: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    selected_action: Mapped[str] = mapped_column(String(160), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(80), default="rules-v1", nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(80), default="v1", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class Skill(Base, TimestampMixin):
+    __tablename__ = "skills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    category: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
+class SkillVersion(Base, TimestampMixin):
+    __tablename__ = "skill_versions"
+    __table_args__ = (UniqueConstraint("skill_id", "version", name="uq_skill_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id", ondelete="CASCADE"), index=True)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    input_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    output_schema: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    compatible_tasks: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    compatible_models: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    dependencies: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
+class PromptCompilation(Base, TimestampMixin):
+    __tablename__ = "prompt_compilations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    user_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    compiled_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    compiler_version: Mapped[str] = mapped_column(String(80), default="v1", nullable=False)
+    skill_versions: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
+    diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

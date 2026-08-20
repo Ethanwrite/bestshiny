@@ -46,6 +46,14 @@ class CharacterIdentityService:
                 raise LookupError("character or master asset not found")
             if asset.project_id != character.project_id:
                 raise ValueError("master asset belongs to a different project")
+            for role, reference_asset_id in references.items():
+                if not reference_asset_id:
+                    continue
+                reference_asset = session.get(MediaAsset, reference_asset_id)
+                if not reference_asset:
+                    raise LookupError(f"character reference asset not found: {role}")
+                if reference_asset.project_id != character.project_id:
+                    raise ValueError(f"character reference asset belongs to a different project: {role}")
             version = (
                 int(
                     session.scalar(

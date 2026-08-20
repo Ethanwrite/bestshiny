@@ -4,8 +4,16 @@ import io
 
 import pytest
 from character_core import IdentityLocked
-from production_domain.models import Character, Episode, Scene, Shot, TimelineState
-from sqlalchemy import select
+from production_domain.models import (
+    Character,
+    CharacterIdentityVersion,
+    Episode,
+    Project,
+    Scene,
+    Shot,
+    TimelineState,
+)
+from sqlalchemy import func, select
 
 
 def test_narrative_compiler_creates_events_shots_and_state_chain(container, project):
@@ -79,6 +87,46 @@ def test_character_identity_version_is_locked_and_versioned(container, project):
     assert version_two.version == 2
     binding = container.characters.binding(character.id)
     assert binding["identity_version_id"] == version_two.id
+
+
+def test_character_identity_rejects_cross_project_reference_assets(container, project):
+    master, _ = container.media.register(
+        project.id,
+        "CHARACTER_MASTER",
+        io.BytesIO(b"canonical-character"),
+        filename="character.png",
+        mime_type="image/png",
+    )
+    with container.database.session() as session:
+        other_project = Project(title="Other tenant project")
+        session.add(other_project)
+        session.flush()
+        other_project_id = other_project.id
+    foreign_reference, _ = container.media.register(
+        other_project_id,
+        "CHARACTER_REFERENCE",
+        io.BytesIO(b"foreign-profile"),
+        filename="profile.png",
+        mime_type="image/png",
+    )
+    character = container.characters.create_character(project.id, "Lin Jin")
+
+    with pytest.raises(ValueError, match="different project"):
+        container.characters.confirm_identity(
+            character.id,
+            master.id,
+            references={"left_profile_asset_id": foreign_reference.id},
+        )
+
+    with container.database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count(CharacterIdentityVersion.id)).where(
+                    CharacterIdentityVersion.character_id == character.id
+                )
+            )
+            == 0
+        )
 
 
 def test_scene_and_shot_have_authoritative_states(container, project):

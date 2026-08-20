@@ -1,4 +1,4 @@
-const fields = ['serverBase', 'apiKey', 'accountId', 'workerId'];
+const fields = ['serverBase', 'workerToken', 'accountId', 'workerId'];
 
 async function refresh() {
   const saved = await chrome.storage.local.get(fields);
@@ -21,4 +21,3 @@ document.getElementById('authorize').onclick = async () => {
 };
 
 refresh();
-

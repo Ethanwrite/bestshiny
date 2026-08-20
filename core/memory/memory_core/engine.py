@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import math
+from datetime import UTC, datetime
+
+from platform_database import Database
+from production_domain.models import Asset, AssetVersion, Episode, Project, Scene, Shot, ShotMemory
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .embedding import EmbeddingProvider
+from .schemas import (
+    MemoryLayer,
+    MemoryQuery,
+    MultimodalContent,
+    RetrievedMemory,
+    ShotMemoryInput,
+)
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    denominator = math.sqrt(sum(item * item for item in left)) * math.sqrt(sum(item * item for item in right))
+    if not denominator:
+        return 0.0
+    return max(-1.0, min(1.0, sum(a * b for a, b in zip(left, right, strict=True)) / denominator))
+
+
+class MultimodalMemoryEngine:
+    """Project-scoped L0/L1/L2 retrieval with metadata filtering before similarity."""
+
+    version = "multimodal-memory-v1"
+
+    def __init__(self, database: Database, embeddings: EmbeddingProvider, *, enabled: bool = False):
+        self.database = database
+        self.embeddings = embeddings
+        self.enabled = enabled
+
+    @staticmethod
+    def _validate_project_links(session: Session, value: ShotMemoryInput) -> None:
+        if session.get(Project, value.project_id) is None:
+            raise LookupError("project not found")
+        if value.scene_id is not None:
+            scene_project_id = session.scalar(
+                select(Episode.project_id)
+                .join(Scene, Scene.episode_id == Episode.id)
+                .where(Scene.id == value.scene_id)
+            )
+            if scene_project_id is None:
+                raise LookupError("scene not found")
+            if scene_project_id != value.project_id:
+                raise ValueError("scene belongs to a different project")
+        if value.shot_id is not None:
+            shot_project_id = session.scalar(
+                select(Episode.project_id)
+                .join(Scene, Scene.episode_id == Episode.id)
+                .join(Shot, Shot.scene_id == Scene.id)
+                .where(Shot.id == value.shot_id)
+            )
+            if shot_project_id is None:
+                raise LookupError("shot not found")
+            if shot_project_id != value.project_id:
+                raise ValueError("shot belongs to a different project")
+        if value.asset_version_ids:
+            requested_ids = set(value.asset_version_ids)
+            rows = session.execute(
+                select(AssetVersion.id, Asset.project_id)
+                .join(Asset, Asset.id == AssetVersion.asset_id)
+                .where(AssetVersion.id.in_(requested_ids))
+            ).all()
+            found_ids = {version_id for version_id, _project_id in rows}
+            missing_ids = sorted(requested_ids - found_ids)
+            if missing_ids:
+                raise LookupError(f"asset version not found: {missing_ids[0]}")
+            if any(project_id != value.project_id for _version_id, project_id in rows):
+                raise ValueError("asset version belongs to a different project")
+
+    def index(self, value: ShotMemoryInput) -> ShotMemory:
+        with self.database.session() as session:
+            self._validate_project_links(session, value)
+        vector = self.embeddings.embed(value.content, input_type="document")
+        provenance = self.embeddings.provenance.model_copy(update={"input_type": "document"})
+        with self.database.session() as session:
+            # Revalidate after the external embedding call so deleted or reassigned
+            # associations cannot be persisted through the JSON version references.
+            self._validate_project_links(session, value)
+            memory = ShotMemory(
+                project_id=value.project_id,
+                layer=value.layer.value,
+                memory_type=value.memory_type,
+                text_content=value.content.text,
+                image_urls=value.content.image_urls,
+                video_urls=value.content.video_urls,
+                entity_ids=value.entity_ids,
+                scene_id=value.scene_id,
+                shot_id=value.shot_id,
+                asset_version_ids=value.asset_version_ids,
+                temporal_position=value.temporal_position,
+                canonical=value.canonical,
+                embedding=vector,
+                embedding_dimension=len(vector),
+                embedding_provider=provenance.provider,
+                embedding_model=provenance.model,
+                metadata_json=value.metadata,
+            )
+            session.add(memory)
+            session.flush()
+            return memory
+
+    def search(self, query: MemoryQuery) -> list[RetrievedMemory]:
+        if not self.enabled:
+            return []
+        query_vector = self.embeddings.embed(
+            MultimodalContent(
+                text=query.text,
+                image_urls=query.image_urls,
+                video_urls=query.video_urls,
+            ),
+            input_type="query",
+        )
+        provenance = self.embeddings.provenance
+        layer_values = [layer.value for layer in query.layers]
+        with self.database.session() as session:
+            statement = select(ShotMemory).where(
+                ShotMemory.project_id == query.project_id,
+                ShotMemory.layer.in_(layer_values),
+                ShotMemory.embedding_provider == provenance.provider,
+                ShotMemory.embedding_model == provenance.model,
+                ShotMemory.embedding_dimension == len(query_vector),
+            )
+            if query.scene_id:
+                # Canonical entity truth can be global; temporal/episodic records
+                # must match the current scene before vector similarity is used.
+                statement = statement.where(
+                    (ShotMemory.scene_id == query.scene_id)
+                    | (ShotMemory.layer == MemoryLayer.CANONICAL.value)
+                )
+            if query.shot_id:
+                statement = statement.where(
+                    (ShotMemory.shot_id == query.shot_id) | (ShotMemory.layer == MemoryLayer.CANONICAL.value)
+                )
+            candidates = list(session.scalars(statement))
+
+        if query.entity_ids:
+            requested = set(query.entity_ids)
+            candidates = [item for item in candidates if requested.intersection(item.entity_ids)]
+
+        now = datetime.now(UTC)
+        ranked: list[RetrievedMemory] = []
+        for item in candidates:
+            similarity = max(0.0, cosine_similarity(query_vector, list(item.embedding or [])))
+            entity_match = (
+                len(set(query.entity_ids).intersection(item.entity_ids)) / len(set(query.entity_ids))
+                if query.entity_ids
+                else 0.5
+            )
+            if query.temporal_position is not None and item.temporal_position is not None:
+                temporal = 1.0 / (1.0 + abs(query.temporal_position - item.temporal_position))
+            else:
+                created = item.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                age_days = max(0.0, (now - created).total_seconds() / 86_400)
+                temporal = 1.0 / (1.0 + age_days / 30.0)
+            scene_match = 1.0 if query.scene_id and item.scene_id == query.scene_id else 0.0
+            canonical = 1.0 if item.canonical or item.layer == MemoryLayer.CANONICAL.value else 0.0
+            components = {
+                "multimodal_similarity": similarity,
+                "entity_match": entity_match,
+                "temporal_relevance": temporal,
+                "scene_match": scene_match,
+                "canonical_priority": canonical,
+            }
+            score = (
+                0.45 * similarity
+                + 0.20 * entity_match
+                + 0.15 * temporal
+                + 0.10 * scene_match
+                + 0.10 * canonical
+            )
+            ranked.append(
+                RetrievedMemory(
+                    id=item.id,
+                    project_id=item.project_id,
+                    layer=MemoryLayer(item.layer),
+                    memory_type=item.memory_type,
+                    text=item.text_content,
+                    image_urls=item.image_urls,
+                    video_urls=item.video_urls,
+                    entity_ids=item.entity_ids,
+                    scene_id=item.scene_id,
+                    shot_id=item.shot_id,
+                    asset_version_ids=item.asset_version_ids,
+                    canonical=item.canonical,
+                    score=round(score, 6),
+                    score_components={key: round(value, 6) for key, value in components.items()},
+                    metadata=item.metadata_json,
+                )
+            )
+        ranked.sort(key=lambda item: (-item.score, item.layer.value, item.id))
+        return ranked[: query.top_k]
+
+    def current_state(self, project_id: str, *, scene_id: str | None = None) -> RetrievedMemory | None:
+        query = MemoryQuery(
+            project_id=project_id,
+            text="current temporal production state",
+            scene_id=scene_id,
+            layers=[MemoryLayer.TEMPORAL],
+            top_k=1,
+        )
+        values = self.search(query)
+        return values[0] if values else None

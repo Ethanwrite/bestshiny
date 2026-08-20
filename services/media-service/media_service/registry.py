@@ -1,22 +1,228 @@
 from __future__ import annotations
 
-import io
+import asyncio
+import ipaddress
+import socket
 import subprocess
-from typing import BinaryIO
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import BinaryIO, cast
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from PIL import Image
 from platform_database import Database
-from platform_shared import StorageProvider
-from production_domain.models import MediaAsset, MediaProviderBinding, utcnow
+from platform_shared import (
+    StorageLimitExceeded,
+    StorageProvider,
+    UnsafeMediaUpload,
+    affected_rows,
+    validate_user_media_upload,
+)
+from production_domain.models import (
+    DecisionRecord,
+    MediaAsset,
+    MediaProviderBinding,
+    ProviderAccount,
+    new_id,
+    utcnow,
+)
 from provider_sdk import GenerationProvider
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+
+
+class RemoteMediaSecurityError(ValueError):
+    pass
+
+
+class ProviderMediaReconciliationRequired(RuntimeError):
+    """An upload may have reached the paid provider and must be reconciled manually."""
+
+
+class ProviderMediaUploadInProgress(RuntimeError):
+    """Another process still owns the live upload claim."""
+
+
+class ProviderMediaReconciliationConflict(RuntimeError):
+    """The binding state changed or does not permit the requested manual action."""
+
+
+class ProviderMediaValidationFailed(RuntimeError):
+    """The provider could not validate the media identifier supplied by an operator."""
+
+
+@dataclass(frozen=True)
+class ProviderMediaReconciliationResult:
+    binding_id: str
+    asset_id: str
+    project_id: str
+    provider: str
+    account_id: str
+    status: str
+    provider_media_id: str | None
+    action: str
+    replayed: bool = False
+
+
+@dataclass(frozen=True)
+class _ProviderMediaBindingContext:
+    binding_id: str
+    asset_id: str
+    project_id: str
+    provider: str
+    account_id: str
+    worker_id: str | None
+    status: str
+    provider_media_id: str | None
+    claim_token: str | None
 
 
 class MediaRegistry:
-    def __init__(self, database: Database, storage: StorageProvider):
+    def __init__(
+        self,
+        database: Database,
+        storage: StorageProvider,
+        *,
+        provider_media_hosts: dict[str, tuple[str, ...]] | None = None,
+        max_download_bytes: int = 100 * 1024 * 1024,
+        max_image_pixels: int = 50_000_000,
+        provider_upload_claim_seconds: float = 120.0,
+        provider_upload_wait_seconds: float | None = None,
+        provider_upload_poll_seconds: float = 0.05,
+    ):
         self.database = database
         self.storage = storage
+        self.provider_media_hosts = provider_media_hosts or {}
+        self.max_download_bytes = max(1, max_download_bytes)
+        self.max_image_pixels = max(1, max_image_pixels)
+        self.provider_upload_claim_seconds = max(1.0, provider_upload_claim_seconds)
+        configured_wait = (
+            provider_upload_wait_seconds
+            if provider_upload_wait_seconds is not None
+            else self.provider_upload_claim_seconds + 5.0
+        )
+        self.provider_upload_wait_seconds = max(0.1, configured_wait)
+        self.provider_upload_poll_seconds = max(0.01, provider_upload_poll_seconds)
+
+    @staticmethod
+    def _expired(value: datetime | None, *, now: datetime) -> bool:
+        if value is None:
+            return True
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return normalized <= now
+
+    def _new_upload_expiry(self, now: datetime) -> datetime:
+        return now + timedelta(seconds=self.provider_upload_claim_seconds)
+
+    def _mark_upload_reconciliation(self, binding_id: str, claim_token: str) -> bool:
+        """Fence a known upload owner after the provider-call boundary was crossed."""
+
+        with self.database.session() as session:
+            result = session.execute(
+                update(MediaProviderBinding)
+                .where(
+                    MediaProviderBinding.id == binding_id,
+                    MediaProviderBinding.status == "UPLOADING",
+                    MediaProviderBinding.upload_claim_token == claim_token,
+                )
+                .values(status="NEEDS_RECONCILIATION", updated_at=utcnow())
+            )
+            return affected_rows(result) == 1
+
+    def _expire_pre_boundary_claim(self, binding_id: str, claim_token: str) -> bool:
+        """Make a failed local preparation claim immediately safe to take over."""
+
+        with self.database.session() as session:
+            result = session.execute(
+                update(MediaProviderBinding)
+                .where(
+                    MediaProviderBinding.id == binding_id,
+                    MediaProviderBinding.status == "UPLOAD_CLAIMED",
+                    MediaProviderBinding.upload_claim_token == claim_token,
+                    MediaProviderBinding.upload_started_at.is_(None),
+                )
+                .values(upload_claim_expires_at=utcnow(), updated_at=utcnow())
+            )
+            return affected_rows(result) == 1
+
+    @staticmethod
+    def _host_matches(host: str, pattern: str) -> bool:
+        normalized = pattern.strip().lower().rstrip(".")
+        if normalized.startswith("*."):
+            suffix = normalized[1:]
+            return host.endswith(suffix) and host != suffix[1:]
+        return host == normalized
+
+    async def _validate_remote_url(self, url: str, *, provider: str) -> None:
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port or 443
+        except ValueError as exc:
+            raise RemoteMediaSecurityError("provider media URL is malformed") from exc
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            raise RemoteMediaSecurityError("provider media URL must use HTTPS")
+        if parsed.username or parsed.password or port != 443:
+            raise RemoteMediaSecurityError("provider media URL contains forbidden authority fields")
+        host = parsed.hostname.lower().rstrip(".")
+        patterns = self.provider_media_hosts.get(provider, ())
+        if not patterns or not any(self._host_matches(host, pattern) for pattern in patterns):
+            raise RemoteMediaSecurityError("provider media host is not allowlisted")
+
+        try:
+            addresses = await asyncio.to_thread(
+                socket.getaddrinfo,
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except socket.gaierror as exc:
+            raise RemoteMediaSecurityError("provider media host could not be resolved") from exc
+        if not addresses:
+            raise RemoteMediaSecurityError("provider media host resolved to no addresses")
+        for address in addresses:
+            try:
+                ip = ipaddress.ip_address(address[4][0])
+            except ValueError as exc:
+                raise RemoteMediaSecurityError("provider media host returned an invalid address") from exc
+            if not ip.is_global:
+                raise RemoteMediaSecurityError("provider media host resolved to a non-public address")
+
+    @staticmethod
+    def _validate_connected_peer(response: httpx.Response) -> None:
+        stream = response.extensions.get("network_stream")
+        if stream is None or not hasattr(stream, "get_extra_info"):
+            return
+        peer = stream.get_extra_info("server_addr")
+        if not peer:
+            return
+        try:
+            ip = ipaddress.ip_address(peer[0] if isinstance(peer, tuple) else peer)
+        except ValueError as exc:
+            raise RemoteMediaSecurityError("provider media peer address is invalid") from exc
+        if not ip.is_global:
+            raise RemoteMediaSecurityError("provider media connection reached a non-public address")
+
+    @staticmethod
+    def _lineage_key(
+        *,
+        character_id: str | None,
+        scene_id: str | None,
+        shot_id: str | None,
+        parent_asset_id: str | None,
+        generation_candidate_id: str | None,
+    ) -> str:
+        associations = (
+            ("candidate", generation_candidate_id),
+            ("shot", shot_id),
+            ("parent", parent_asset_id),
+            ("character", character_id),
+            ("scene", scene_id),
+        )
+        parts = [f"{name}:{value}" for name, value in associations if value]
+        return "|".join(parts) if parts else "shared"
 
     @staticmethod
     def _image_dimensions(path: str, mime_type: str) -> tuple[int | None, int | None]:
@@ -69,21 +275,20 @@ class MediaRegistry:
         metadata: dict | None = None,
     ) -> tuple[MediaAsset, bool]:
         stored = self.storage.put(stream, filename=filename, mime_type=mime_type)
+        lineage_key = self._lineage_key(
+            character_id=character_id,
+            scene_id=scene_id,
+            shot_id=shot_id,
+            parent_asset_id=parent_asset_id,
+            generation_candidate_id=generation_candidate_id,
+        )
         with self.database.session() as session:
-            existing = session.scalar(
-                select(MediaAsset).where(
-                    MediaAsset.project_id == project_id,
-                    MediaAsset.sha256 == stored.sha256,
-                    MediaAsset.asset_type == asset_type,
-                )
-            )
-            if existing:
-                return existing, True
             width, height = self._image_dimensions(stored.local_path, stored.mime_type)
             asset = MediaAsset(
                 project_id=project_id,
                 asset_type=asset_type,
                 sha256=stored.sha256,
+                lineage_key=lineage_key,
                 storage_key=stored.key,
                 local_path=stored.local_path,
                 public_url=stored.public_url,
@@ -98,73 +303,572 @@ class MediaRegistry:
                 generation_candidate_id=generation_candidate_id,
                 metadata_json=metadata or {},
             )
-            session.add(asset)
-            session.flush()
+            try:
+                with session.begin_nested():
+                    session.add(asset)
+                    session.flush()
+            except IntegrityError:
+                winner = session.scalar(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project_id,
+                        MediaAsset.sha256 == stored.sha256,
+                        MediaAsset.asset_type == asset_type,
+                        MediaAsset.lineage_key == lineage_key,
+                    )
+                )
+                if winner is None:
+                    raise
+                return winner, True
             return asset, False
 
     def get(self, asset_id: str) -> MediaAsset | None:
         with self.database.session() as session:
             return session.get(MediaAsset, asset_id)
 
+    def _provider_binding_context(self, binding_id: str) -> _ProviderMediaBindingContext:
+        with self.database.session() as session:
+            binding = session.get(MediaProviderBinding, binding_id)
+            if binding is None:
+                raise LookupError(f"provider media binding not found: {binding_id}")
+            asset = session.get(MediaAsset, binding.asset_id)
+            account = session.get(ProviderAccount, binding.account_id)
+            if asset is None or account is None:
+                raise ProviderMediaReconciliationConflict(
+                    "provider media binding has incomplete local ownership records"
+                )
+            if account.provider != binding.provider:
+                raise ProviderMediaReconciliationConflict(
+                    "provider media binding account does not match its provider"
+                )
+            return _ProviderMediaBindingContext(
+                binding_id=binding.id,
+                asset_id=asset.id,
+                project_id=asset.project_id,
+                provider=binding.provider,
+                account_id=binding.account_id,
+                worker_id=account.worker_id,
+                status=binding.status,
+                provider_media_id=binding.provider_media_id,
+                claim_token=binding.upload_claim_token,
+            )
+
+    @staticmethod
+    def _reconciliation_result(
+        context: _ProviderMediaBindingContext,
+        *,
+        status: str,
+        provider_media_id: str | None,
+        action: str,
+        replayed: bool = False,
+    ) -> ProviderMediaReconciliationResult:
+        return ProviderMediaReconciliationResult(
+            binding_id=context.binding_id,
+            asset_id=context.asset_id,
+            project_id=context.project_id,
+            provider=context.provider,
+            account_id=context.account_id,
+            status=status,
+            provider_media_id=provider_media_id,
+            action=action,
+            replayed=replayed,
+        )
+
+    @staticmethod
+    def _reconciliation_audit(
+        context: _ProviderMediaBindingContext,
+        *,
+        action: str,
+        reason: str,
+        provider_media_id: str | None,
+    ) -> DecisionRecord:
+        return DecisionRecord(
+            project_id=context.project_id,
+            shot_id=None,
+            decision_type="PROVIDER_MEDIA_RECONCILIATION",
+            input_features={
+                "binding_id": context.binding_id,
+                "asset_id": context.asset_id,
+                "project_id": context.project_id,
+                "provider": context.provider,
+                "account_id": context.account_id,
+                "action": action,
+                "reason": reason,
+                "server_actor": "PLATFORM_API_KEY",
+                "provider_media_id": provider_media_id,
+            },
+            selected_action=action,
+            reason_codes=["EXPLICIT_INTERNAL_RECONCILIATION"],
+            model_version="provider-validation-v1",
+            policy_version="provider-media-reconciliation-v1",
+        )
+
+    async def reconcile_provider_media(
+        self,
+        binding_id: str,
+        provider: GenerationProvider,
+        *,
+        action: str,
+        provider_media_id: str | None,
+        reason: str,
+        explicit_confirmation: bool,
+    ) -> ProviderMediaReconciliationResult:
+        """Resolve an uncertain paid upload through one explicit internal action.
+
+        This method never retries ``upload_asset``. It either validates a known remote
+        identifier or records an operator's explicit confirmation that no remote asset
+        was created, after which the normal resolver may establish a new safe claim.
+        """
+
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("a non-empty reconciliation reason is required")
+        if action not in {"SET_KNOWN_MEDIA_ID", "CONFIRM_REMOTE_NOT_CREATED"}:
+            raise ValueError(f"unsupported provider media reconciliation action: {action}")
+
+        normalized_media_id = provider_media_id.strip() if provider_media_id else None
+        if action == "SET_KNOWN_MEDIA_ID" and not normalized_media_id:
+            raise ValueError("provider_media_id is required for SET_KNOWN_MEDIA_ID")
+        if action == "CONFIRM_REMOTE_NOT_CREATED":
+            if not explicit_confirmation:
+                raise ValueError("explicit confirmation is required before allowing a new upload")
+            if normalized_media_id is not None:
+                raise ValueError("provider_media_id is not allowed when confirming no remote creation")
+
+        context = self._provider_binding_context(binding_id)
+        if provider.name != context.provider:
+            raise ProviderMediaReconciliationConflict(
+                "configured provider does not match the uncertain media binding"
+            )
+
+        if action == "SET_KNOWN_MEDIA_ID":
+            assert normalized_media_id is not None
+            if context.status == "READY":
+                if context.provider_media_id == normalized_media_id:
+                    return self._reconciliation_result(
+                        context,
+                        status="READY",
+                        provider_media_id=normalized_media_id,
+                        action=action,
+                        replayed=True,
+                    )
+                raise ProviderMediaReconciliationConflict(
+                    "provider media binding is already READY with a different identifier"
+                )
+            if context.status != "NEEDS_RECONCILIATION":
+                raise ProviderMediaReconciliationConflict(
+                    f"provider media binding cannot be reconciled from {context.status}"
+                )
+            if not context.worker_id:
+                raise ProviderMediaReconciliationConflict(
+                    "provider account has no bound worker for remote media validation"
+                )
+            try:
+                is_valid = await provider.validate_asset(
+                    normalized_media_id,
+                    account_id=context.account_id,
+                    worker_id=context.worker_id,
+                )
+            except Exception as exc:
+                raise ProviderMediaValidationFailed(
+                    "provider validation failed; binding remains quarantined"
+                ) from exc
+            if not is_valid:
+                raise ProviderMediaValidationFailed(
+                    "provider rejected the supplied media identifier; binding remains quarantined"
+                )
+
+            reconciled_at = utcnow()
+            with self.database.session() as session:
+                result = session.execute(
+                    update(MediaProviderBinding)
+                    .where(
+                        MediaProviderBinding.id == context.binding_id,
+                        MediaProviderBinding.status == "NEEDS_RECONCILIATION",
+                        MediaProviderBinding.provider == context.provider,
+                        MediaProviderBinding.account_id == context.account_id,
+                        MediaProviderBinding.asset_id == context.asset_id,
+                        MediaProviderBinding.upload_claim_token == context.claim_token,
+                        MediaProviderBinding.provider_media_id == context.provider_media_id,
+                    )
+                    .values(
+                        provider_media_id=normalized_media_id,
+                        status="READY",
+                        last_validated_at=reconciled_at,
+                        upload_claim_token=None,
+                        upload_claim_expires_at=None,
+                        upload_started_at=None,
+                        updated_at=reconciled_at,
+                    )
+                )
+                if affected_rows(result) == 1:
+                    asset = session.get(MediaAsset, context.asset_id)
+                    if asset is None or asset.project_id != context.project_id:
+                        raise ProviderMediaReconciliationConflict(
+                            "media asset changed during provider reconciliation"
+                        )
+                    asset.provider = context.provider
+                    asset.provider_media_id = normalized_media_id
+                    session.add(
+                        self._reconciliation_audit(
+                            context,
+                            action=action,
+                            reason=normalized_reason,
+                            provider_media_id=normalized_media_id,
+                        )
+                    )
+                    return self._reconciliation_result(
+                        context,
+                        status="READY",
+                        provider_media_id=normalized_media_id,
+                        action=action,
+                    )
+
+            current = self._provider_binding_context(binding_id)
+            if current.status == "READY" and current.provider_media_id == normalized_media_id:
+                return self._reconciliation_result(
+                    current,
+                    status="READY",
+                    provider_media_id=normalized_media_id,
+                    action=action,
+                    replayed=True,
+                )
+            raise ProviderMediaReconciliationConflict(
+                "provider media binding changed while its remote identifier was being validated"
+            )
+
+        if context.status != "NEEDS_RECONCILIATION":
+            raise ProviderMediaReconciliationConflict(
+                f"provider media binding cannot be cleared from {context.status}"
+            )
+        released_at = utcnow()
+        with self.database.session() as session:
+            result = session.execute(
+                update(MediaProviderBinding)
+                .where(
+                    MediaProviderBinding.id == context.binding_id,
+                    MediaProviderBinding.status == "NEEDS_RECONCILIATION",
+                    MediaProviderBinding.provider == context.provider,
+                    MediaProviderBinding.account_id == context.account_id,
+                    MediaProviderBinding.asset_id == context.asset_id,
+                    MediaProviderBinding.upload_claim_token == context.claim_token,
+                    MediaProviderBinding.provider_media_id == context.provider_media_id,
+                )
+                .values(
+                    provider_media_id=None,
+                    status="UPLOAD_CLAIMED",
+                    last_validated_at=None,
+                    upload_claim_token=None,
+                    upload_claim_expires_at=released_at,
+                    upload_started_at=None,
+                    updated_at=released_at,
+                )
+            )
+            if affected_rows(result) != 1:
+                raise ProviderMediaReconciliationConflict(
+                    "provider media binding changed before the operator confirmation was recorded"
+                )
+            session.add(
+                self._reconciliation_audit(
+                    context,
+                    action=action,
+                    reason=normalized_reason,
+                    provider_media_id=None,
+                )
+            )
+            return self._reconciliation_result(
+                context,
+                status="UPLOAD_CLAIMED",
+                provider_media_id=None,
+                action=action,
+            )
+
     async def resolve_provider_media(
-        self, asset_id: str, provider: GenerationProvider, *, account_id: str, worker_id: str
+        self,
+        asset_id: str,
+        provider: GenerationProvider,
+        *,
+        project_id: str,
+        account_id: str,
+        worker_id: str,
+        provider_project_id: str | None = None,
     ) -> tuple[str, bool]:
+        """Resolve one durable provider upload for an asset/provider/account tuple.
+
+        The database claim is deliberately split into a pre-boundary ``UPLOAD_CLAIMED``
+        state and a post-boundary ``UPLOADING`` state. An expired pre-boundary claim can
+        be taken over safely. Once ``upload_asset`` may have reached a paid provider, an
+        exception or expired lease is fail-closed as ``NEEDS_RECONCILIATION`` instead of
+        risking a second charge.
+        """
+
         with self.database.session() as session:
             asset = session.get(MediaAsset, asset_id)
             if asset is None:
                 raise LookupError(f"media asset not found: {asset_id}")
-            binding = session.scalar(
-                select(MediaProviderBinding).where(
-                    MediaProviderBinding.asset_id == asset_id,
-                    MediaProviderBinding.provider == provider.name,
-                    MediaProviderBinding.account_id == account_id,
-                )
-            )
+            if asset.project_id != project_id:
+                raise LookupError("media asset does not belong to the generation project")
             local_path = asset.local_path
             mime_type = asset.mime_type
             storage_key = asset.storage_key
-            binding_id = binding.id if binding else None
-            existing_media_id = binding.provider_media_id if binding else None
-        if existing_media_id:
-            if await provider.validate_asset(existing_media_id, account_id=account_id, worker_id=worker_id):
-                with self.database.session() as session:
-                    current = session.get(MediaProviderBinding, binding_id)
-                    if current:
-                        current.last_validated_at = utcnow()
-                        current.status = "READY"
-                return existing_media_id, True
-        path = local_path or str(self.storage.path_for(storage_key))
-        provider_media_id = await provider.upload_asset(
-            {"asset_id": asset_id, "local_path": path, "mime_type": mime_type},
-            account_id=account_id,
-            worker_id=worker_id,
-        )
-        with self.database.session() as session:
-            current = session.scalar(
-                select(MediaProviderBinding).where(
-                    MediaProviderBinding.asset_id == asset_id,
-                    MediaProviderBinding.provider == provider.name,
-                    MediaProviderBinding.account_id == account_id,
+
+        wait_deadline = time.monotonic() + self.provider_upload_wait_seconds
+        claim_token: str | None = None
+        binding_id: str | None = None
+
+        while claim_token is None:
+            now = utcnow()
+            claim_expiry = self._new_upload_expiry(now)
+            ready_binding: tuple[str, str] | None = None
+            should_wait = False
+            reconciliation_reason: str | None = None
+
+            with self.database.session() as session:
+                binding = session.scalar(
+                    select(MediaProviderBinding).where(
+                        MediaProviderBinding.asset_id == asset_id,
+                        MediaProviderBinding.provider == provider.name,
+                        MediaProviderBinding.account_id == account_id,
+                    )
                 )
-            )
-            if current:
-                current.provider_media_id = provider_media_id
-                current.status = "READY"
-                current.last_validated_at = utcnow()
-            else:
-                session.add(
-                    MediaProviderBinding(
+                if binding is None:
+                    candidate_token = new_id()
+                    candidate = MediaProviderBinding(
                         asset_id=asset_id,
                         provider=provider.name,
                         account_id=account_id,
+                        provider_media_id=None,
+                        status="UPLOAD_CLAIMED",
+                        upload_claim_token=candidate_token,
+                        upload_claim_expires_at=claim_expiry,
+                        upload_started_at=None,
+                    )
+                    try:
+                        with session.begin_nested():
+                            session.add(candidate)
+                            session.flush()
+                    except IntegrityError:
+                        should_wait = True
+                    else:
+                        binding_id = candidate.id
+                        claim_token = candidate_token
+                elif binding.status == "READY" and binding.provider_media_id:
+                    ready_binding = (binding.id, binding.provider_media_id)
+                elif binding.status == "UPLOAD_CLAIMED":
+                    if self._expired(binding.upload_claim_expires_at, now=now):
+                        if binding.upload_started_at is not None:
+                            result = session.execute(
+                                update(MediaProviderBinding)
+                                .where(
+                                    MediaProviderBinding.id == binding.id,
+                                    MediaProviderBinding.status == "UPLOAD_CLAIMED",
+                                    MediaProviderBinding.upload_claim_token == binding.upload_claim_token,
+                                    MediaProviderBinding.upload_started_at.is_not(None),
+                                )
+                                .values(status="NEEDS_RECONCILIATION", updated_at=now)
+                            )
+                            if affected_rows(result) == 1:
+                                reconciliation_reason = (
+                                    "provider upload lease expired after the paid-call boundary"
+                                )
+                            else:
+                                should_wait = True
+                        else:
+                            candidate_token = new_id()
+                            result = session.execute(
+                                update(MediaProviderBinding)
+                                .where(
+                                    MediaProviderBinding.id == binding.id,
+                                    MediaProviderBinding.status == "UPLOAD_CLAIMED",
+                                    MediaProviderBinding.upload_claim_token == binding.upload_claim_token,
+                                    MediaProviderBinding.upload_started_at.is_(None),
+                                )
+                                .values(
+                                    provider_media_id=None,
+                                    upload_claim_token=candidate_token,
+                                    upload_claim_expires_at=claim_expiry,
+                                    updated_at=now,
+                                )
+                            )
+                            if affected_rows(result) == 1:
+                                binding_id = binding.id
+                                claim_token = candidate_token
+                            else:
+                                should_wait = True
+                    else:
+                        should_wait = True
+                elif binding.status == "UPLOADING":
+                    if self._expired(binding.upload_claim_expires_at, now=now):
+                        result = session.execute(
+                            update(MediaProviderBinding)
+                            .where(
+                                MediaProviderBinding.id == binding.id,
+                                MediaProviderBinding.status == "UPLOADING",
+                                MediaProviderBinding.upload_claim_token == binding.upload_claim_token,
+                                MediaProviderBinding.upload_started_at.is_not(None),
+                            )
+                            .values(status="NEEDS_RECONCILIATION", updated_at=now)
+                        )
+                        if affected_rows(result) == 1:
+                            reconciliation_reason = (
+                                "provider upload lease expired after the paid-call boundary"
+                            )
+                        else:
+                            should_wait = True
+                    else:
+                        should_wait = True
+                elif binding.status == "NEEDS_RECONCILIATION":
+                    raise ProviderMediaReconciliationRequired(
+                        "provider upload outcome is uncertain and requires reconciliation"
+                    )
+                else:
+                    raise ProviderMediaReconciliationRequired(
+                        f"provider media binding is not safely reusable: {binding.status}"
+                    )
+
+            if reconciliation_reason is not None:
+                raise ProviderMediaReconciliationRequired(reconciliation_reason)
+            if claim_token is not None:
+                break
+
+            if ready_binding is not None:
+                ready_binding_id, ready_media_id = ready_binding
+                valid = await provider.validate_asset(
+                    ready_media_id,
+                    account_id=account_id,
+                    worker_id=worker_id,
+                )
+                if valid:
+                    with self.database.session() as session:
+                        result = session.execute(
+                            update(MediaProviderBinding)
+                            .where(
+                                MediaProviderBinding.id == ready_binding_id,
+                                MediaProviderBinding.status == "READY",
+                                MediaProviderBinding.provider_media_id == ready_media_id,
+                            )
+                            .values(last_validated_at=utcnow(), updated_at=utcnow())
+                        )
+                    if affected_rows(result) == 1:
+                        return ready_media_id, True
+                    continue
+
+                candidate_token = new_id()
+                invalidated_at = utcnow()
+                with self.database.session() as session:
+                    result = session.execute(
+                        update(MediaProviderBinding)
+                        .where(
+                            MediaProviderBinding.id == ready_binding_id,
+                            MediaProviderBinding.status == "READY",
+                            MediaProviderBinding.provider_media_id == ready_media_id,
+                        )
+                        .values(
+                            provider_media_id=None,
+                            status="UPLOAD_CLAIMED",
+                            upload_claim_token=candidate_token,
+                            upload_claim_expires_at=self._new_upload_expiry(invalidated_at),
+                            upload_started_at=None,
+                            updated_at=invalidated_at,
+                        )
+                    )
+                if affected_rows(result) == 1:
+                    binding_id = ready_binding_id
+                    claim_token = candidate_token
+                    break
+                continue
+
+            if should_wait:
+                if time.monotonic() >= wait_deadline:
+                    raise ProviderMediaUploadInProgress(
+                        "provider media upload is still owned by another worker"
+                    )
+                await asyncio.sleep(self.provider_upload_poll_seconds)
+
+        if binding_id is None or claim_token is None:  # pragma: no cover - loop invariant.
+            raise RuntimeError("provider media upload claim was not established")
+
+        try:
+            path = local_path or str(self.storage.path_for(storage_key))
+            upload_request = {
+                "asset_id": asset_id,
+                "local_path": path,
+                "mime_type": mime_type,
+                "_provider_project_id": provider_project_id,
+            }
+        except BaseException:
+            try:
+                self._expire_pre_boundary_claim(binding_id, claim_token)
+            except Exception:
+                pass
+            raise
+
+        boundary_at = utcnow()
+        with self.database.session() as session:
+            result = session.execute(
+                update(MediaProviderBinding)
+                .where(
+                    MediaProviderBinding.id == binding_id,
+                    MediaProviderBinding.status == "UPLOAD_CLAIMED",
+                    MediaProviderBinding.upload_claim_token == claim_token,
+                    MediaProviderBinding.upload_started_at.is_(None),
+                )
+                .values(
+                    status="UPLOADING",
+                    upload_started_at=boundary_at,
+                    upload_claim_expires_at=self._new_upload_expiry(boundary_at),
+                    updated_at=boundary_at,
+                )
+            )
+        if affected_rows(result) != 1:
+            raise ProviderMediaUploadInProgress("provider media upload claim was superseded")
+
+        try:
+            provider_media_id = await provider.upload_asset(
+                upload_request,
+                account_id=account_id,
+                worker_id=worker_id,
+            )
+            if not isinstance(provider_media_id, str) or not provider_media_id.strip():
+                raise ProviderMediaReconciliationRequired(
+                    "provider upload returned no durable media identifier"
+                )
+            completed_at = utcnow()
+            with self.database.session() as session:
+                result = session.execute(
+                    update(MediaProviderBinding)
+                    .where(
+                        MediaProviderBinding.id == binding_id,
+                        MediaProviderBinding.status == "UPLOADING",
+                        MediaProviderBinding.upload_claim_token == claim_token,
+                    )
+                    .values(
                         provider_media_id=provider_media_id,
-                        last_validated_at=utcnow(),
+                        status="READY",
+                        last_validated_at=completed_at,
+                        upload_claim_token=None,
+                        upload_claim_expires_at=None,
+                        updated_at=completed_at,
                     )
                 )
-            asset = session.get(MediaAsset, asset_id)
-            if asset:
-                asset.provider = provider.name
-                asset.provider_media_id = provider_media_id
+                if affected_rows(result) != 1:
+                    raise ProviderMediaReconciliationRequired(
+                        "provider upload completed after its fenced claim was superseded"
+                    )
+                current_asset = session.get(MediaAsset, asset_id)
+                if current_asset is None:
+                    raise ProviderMediaReconciliationRequired(
+                        "provider upload completed after its local asset disappeared"
+                    )
+                current_asset.provider = provider.name
+                current_asset.provider_media_id = provider_media_id
+        except BaseException:
+            try:
+                self._mark_upload_reconciliation(binding_id, claim_token)
+            except Exception:
+                # UPLOADING + upload_started_at remains fail-closed. A later observer
+                # will move the expired fenced claim to NEEDS_RECONCILIATION.
+                pass
+            raise
         return provider_media_id, False
 
     async def download_and_register(
@@ -179,21 +883,72 @@ class MediaRegistry:
         shot_id: str | None = None,
         generation_candidate_id: str | None = None,
     ) -> MediaAsset:
-        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            content = response.content
-            mime_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0]
-        asset, _ = self.register(
-            project_id,
-            asset_type,
-            io.BytesIO(content),
-            filename=filename,
-            mime_type=mime_type,
-            shot_id=shot_id,
-            generation_candidate_id=generation_candidate_id,
-            metadata={"source_url": url, "provider": provider},
-        )
+        current_url = url
+        source_parts = urlsplit(url)
+        source_url = urlunsplit((source_parts.scheme, source_parts.netloc, source_parts.path, "", ""))
+        mime_type = "application/octet-stream"
+        with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as content:
+            async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+                for redirect_count in range(6):
+                    await self._validate_remote_url(current_url, provider=provider)
+                    async with client.stream("GET", current_url) as response:
+                        self._validate_connected_peer(response)
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location or redirect_count == 5:
+                                raise RemoteMediaSecurityError(
+                                    "provider media redirect is missing or exceeds the redirect limit"
+                                )
+                            current_url = urljoin(current_url, location)
+                            continue
+                        response.raise_for_status()
+                        mime_type = response.headers.get("content-type", "application/octet-stream").split(
+                            ";", 1
+                        )[0]
+                        declared_size = response.headers.get("content-length")
+                        if declared_size:
+                            try:
+                                parsed_size = int(declared_size)
+                            except ValueError as exc:
+                                raise RemoteMediaSecurityError(
+                                    "provider media returned an invalid Content-Length"
+                                ) from exc
+                            if parsed_size > self.max_download_bytes:
+                                raise StorageLimitExceeded(self.max_download_bytes)
+                        downloaded = 0
+                        async for chunk in response.aiter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > self.max_download_bytes:
+                                raise StorageLimitExceeded(self.max_download_bytes)
+                            content.write(chunk)
+                        break
+                else:  # pragma: no cover - loop exits via redirect limit branch.
+                    raise RemoteMediaSecurityError("provider media redirect limit exceeded")
+
+            content.seek(0)
+            binary_content = cast(BinaryIO, content)
+            try:
+                validated = validate_user_media_upload(
+                    binary_content,
+                    filename=filename,
+                    declared_mime=mime_type,
+                    asset_type=asset_type,
+                    max_bytes=self.max_download_bytes,
+                    max_image_pixels=self.max_image_pixels,
+                )
+            except UnsafeMediaUpload as exc:
+                raise RemoteMediaSecurityError(str(exc)) from exc
+            binary_content.seek(0)
+            asset, _ = self.register(
+                project_id,
+                asset_type,
+                binary_content,
+                filename=filename,
+                mime_type=validated.mime_type,
+                shot_id=shot_id,
+                generation_candidate_id=generation_candidate_id,
+                metadata={"source_url": source_url, "provider": provider},
+            )
         with self.database.session() as session:
             current = session.get(MediaAsset, asset.id)
             current.provider = provider

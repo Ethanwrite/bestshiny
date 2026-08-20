@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import timedelta
 
 from platform_contracts import GenerationRequest
 from production_domain.models import (
@@ -12,6 +13,7 @@ from production_domain.models import (
     Scene,
     Shot,
     WorkerCommand,
+    utcnow,
 )
 
 
@@ -99,6 +101,52 @@ def test_restart_recovery_never_blindly_resubmits(container, project):
     uncertain = container.gateway.get(job.id)
     assert uncertain.status == JobStatus.WORKER_NEEDS_USER_ACTION.value
     assert uncertain.safe_to_retry is False
+
+
+def test_restart_recovery_does_not_steal_a_live_generation_claim(container, project):
+    job, _ = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="video",
+            prompt="One action",
+            idempotency_key="live-claim-restart",
+        )
+    )
+    claim_token = container.gateway._claim_for_submission(job.id)
+    assert claim_token
+    assert container.gateway.recover_after_restart() == 0
+    reserved = container.gateway.get(job.id)
+    assert reserved.status == JobStatus.RESERVED.value
+    assert reserved.claim_token == claim_token
+    assert reserved.safe_to_retry is True
+
+
+def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(container, project):
+    job, _ = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="video",
+            prompt="One action",
+            idempotency_key="expired-claim-restart",
+        )
+    )
+    claim_token = container.gateway._claim_for_submission(job.id)
+    assert claim_token
+    assert container.gateway._begin_provider_submission(
+        job.id,
+        claim_token,
+        {"prompt": "possibly sent"},
+        "google_flow",
+    )
+    with container.database.session() as session:
+        session.get(type(job), job.id).claim_expires_at = utcnow() - timedelta(seconds=1)
+
+    assert container.gateway.recover_after_restart() == 1
+    quarantined = container.gateway.get(job.id)
+    assert quarantined.status == JobStatus.WORKER_NEEDS_USER_ACTION.value
+    assert quarantined.submission_state == "SENT_UNCONFIRMED"
+    assert quarantined.safe_to_retry is False
+    assert quarantined.claim_token is None
 
 
 def test_late_browser_response_is_reconciled_without_resubmission(container, project):

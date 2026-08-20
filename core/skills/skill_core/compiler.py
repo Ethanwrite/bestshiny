@@ -1,36 +1,25 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any
 
 from platform_database import Database
 from production_domain.models import PromptCompilation, Shot, TimelineState
 
 
-@dataclass(frozen=True)
-class PromptRefinement:
-    original: str
-    refined: str
-    changes: list[dict[str, str]]
-    preserved_facts: list[str]
-
-
 class PromptCompilerService:
-    version = "prompt-compiler-v1"
+    version = "prompt-compiler-v2-compat"
 
     def __init__(self, database: Database, skills) -> None:  # type: ignore[no-untyped-def]
         self.database = database
         self.skills = skills
 
     @staticmethod
-    def refine(raw_prompt: str) -> PromptRefinement:
+    def _normalize_approved_action(raw_prompt: str) -> str:
+        """Normalize internal shot text without performing user-visible image correction."""
+
         compact = re.sub(r"\s+", " ", raw_prompt).strip()
-        compact = re.sub(r"[。.!！]{2,}", "。", compact)
-        changes = []
-        if compact != raw_prompt:
-            changes.append({"type": "NORMALIZE_WHITESPACE", "before": raw_prompt, "after": compact})
-        return PromptRefinement(raw_prompt, compact, changes, [compact])
+        return re.sub(r"[。.!！]{2,}", "。", compact)
 
     def compile_shot(
         self,
@@ -47,13 +36,16 @@ class PromptCompilerService:
         scene_bindings = scene_bindings or []
         camera = camera or {}
         lighting = lighting or {}
+        # Provider/model are retained in the compatibility signature only. The
+        # canonical video compiler and adapters now own provider-specific wording.
+        del provider, model
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
             if not shot:
                 raise LookupError("shot not found")
             state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             user_prompt = shot.user_prompt or shot.prompt
-            refined = self.refine(user_prompt)
+            approved_action = self._normalize_approved_action(user_prompt)
             state_json = state.state_json if state else {}
             identity_lines = [
                 f"Character identity {binding['identity_version_id']} must remain unchanged; "
@@ -75,23 +67,15 @@ class PromptCompilerService:
                 if lighting
                 else "Lighting: preserve the established direction, time of day, and contrast."
             )
-            provider_line = {
-                "google_flow": "Use explicit start/end positions and exactly one subject trajectory.",
-                "veo_official": "Use concise spatial language and one continuous physically possible action.",
-                "grok": "Do not let any character look into the camera at the end.",
-                "seedance": "Keep this as one highlight action; do not compress narrative beats.",
-                "omni": "Use short literal instructions and one movement only.",
-            }.get(provider, "Follow the approved action literally and preserve all bindings.")
             compiled = "\n".join(
                 [
                     *identity_lines,
                     scene_line,
                     camera_line,
                     lighting_line,
-                    f"Approved dominant action: {refined.refined}",
-                    f"Provider constraint ({provider}/{model}): {provider_line}",
+                    f"Approved dominant action: {approved_action}",
                     "End state must match the approved output state. No extra actions, people, props, cuts, "
-                    "identity changes, or direct gaze into the lens.",
+                    "identity changes, or unapproved direct gaze into the lens.",
                 ]
             )
             compilation = PromptCompilation(
@@ -101,15 +85,27 @@ class PromptCompilerService:
                 compiled_prompt=compiled,
                 compiler_version=self.version,
                 skill_versions={
-                    "director": "v1",
-                    "cinematography": "v1",
-                    "continuity": "v1",
-                    "prompt-compiler": "v1",
+                    "director": "v2",
+                    "cinematography": "v2",
+                    "continuity": "v2",
+                    "prompt-compiler": "v2",
                 },
-                diff_json={"changes": refined.changes, "preserved_facts": refined.preserved_facts},
+                diff_json={
+                    "changes": (
+                        [
+                            {
+                                "type": "NORMALIZE_INTERNAL_ACTION",
+                                "before": user_prompt,
+                                "after": approved_action,
+                            }
+                        ]
+                        if approved_action != user_prompt
+                        else []
+                    ),
+                    "preserved_facts": [approved_action],
+                },
             )
             session.add(compilation)
             shot.compiled_prompt = compiled
-            shot.prompt = compiled
             session.flush()
             return compilation

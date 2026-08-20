@@ -1,4 +1,4 @@
 from .gateway import GenerationGateway, IdempotencyConflict
-from .providers import ProviderRouter
+from .providers import GenerationTargetError, ProviderRouter
 
-__all__ = ["GenerationGateway", "IdempotencyConflict", "ProviderRouter"]
+__all__ = ["GenerationGateway", "GenerationTargetError", "IdempotencyConflict", "ProviderRouter"]

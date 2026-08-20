@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from platform_database import Database
+from platform_shared import affected_rows
 from production_domain.models import (
     BrowserWorker,
     ProviderAccount,
@@ -13,7 +14,7 @@ from production_domain.models import (
     WorkerStatus,
     utcnow,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 
 class WorkerDisconnected(RuntimeError):
@@ -154,12 +155,24 @@ class BrowserRuntime:
 
     def claim_commands(self, worker_id: str, connection_id: str, limit: int = 10) -> list[WorkerCommand]:
         with self.database.session() as session:
-            worker = session.get(BrowserWorker, worker_id)
-            if worker is None or worker.connection_id != connection_id:
+            claimed_at = utcnow()
+            worker_claim = session.execute(
+                update(BrowserWorker)
+                .where(
+                    BrowserWorker.id == worker_id,
+                    BrowserWorker.connection_id == connection_id,
+                )
+                .values(last_heartbeat=claimed_at)
+            )
+            if affected_rows(worker_claim) != 1:
                 raise WorkerDisconnected("worker registration is stale")
-            worker.last_heartbeat = utcnow()
-            commands = session.scalars(
-                select(WorkerCommand)
+
+            # Selecting IDs is deliberately separate from claiming them. Multiple
+            # pollers may observe the same pending ID, but only the conditional
+            # PENDING -> CLAIMED update below can win. This works on SQLite and
+            # PostgreSQL without relying on backend-specific SKIP LOCKED support.
+            command_ids = session.scalars(
+                select(WorkerCommand.id)
                 .where(
                     WorkerCommand.worker_id == worker_id,
                     WorkerCommand.status == "PENDING",
@@ -167,11 +180,26 @@ class BrowserRuntime:
                 .order_by(WorkerCommand.created_at)
                 .limit(max(1, min(limit, 50)))
             ).all()
-            for command in commands:
-                command.status = "CLAIMED"
-                command.claimed_at = utcnow()
-            session.flush()
-            return list(commands)
+            claimed: list[WorkerCommand] = []
+            for command_id in command_ids:
+                result = session.execute(
+                    update(WorkerCommand)
+                    .where(
+                        WorkerCommand.id == command_id,
+                        WorkerCommand.worker_id == worker_id,
+                        WorkerCommand.status == "PENDING",
+                    )
+                    .values(
+                        status="CLAIMED",
+                        claimed_at=claimed_at,
+                        claim_connection_id=connection_id,
+                    )
+                )
+                if affected_rows(result) == 1:
+                    command = session.get(WorkerCommand, command_id)
+                    if command is not None:
+                        claimed.append(command)
+            return claimed
 
     def complete_command(
         self,
@@ -183,21 +211,38 @@ class BrowserRuntime:
         error: str | None = None,
     ) -> WorkerCommand:
         with self.database.session() as session:
-            worker = session.get(BrowserWorker, worker_id)
+            completed_at = utcnow()
+            worker_completion = session.execute(
+                update(BrowserWorker)
+                .where(
+                    BrowserWorker.id == worker_id,
+                    BrowserWorker.connection_id == connection_id,
+                )
+                .values(last_heartbeat=completed_at)
+            )
+            if affected_rows(worker_completion) != 1:
+                raise WorkerDisconnected("worker registration is stale")
+
+            command_completion = session.execute(
+                update(WorkerCommand)
+                .where(
+                    WorkerCommand.id == command_id,
+                    WorkerCommand.worker_id == worker_id,
+                    WorkerCommand.status == "CLAIMED",
+                    WorkerCommand.claim_connection_id == connection_id,
+                )
+                .values(
+                    response=response,
+                    error=error,
+                    status="FAILED" if error else "COMPLETED",
+                    completed_at=completed_at,
+                )
+            )
+            if affected_rows(command_completion) != 1:
+                raise WorkerDisconnected("command is not claimed by this connection")
             command = session.get(WorkerCommand, command_id)
-            if (
-                worker is None
-                or worker.connection_id != connection_id
-                or command is None
-                or command.worker_id != worker_id
-            ):
-                raise WorkerDisconnected("worker or command is stale")
-            command.response = response
-            command.error = error
-            command.status = "FAILED" if error else "COMPLETED"
-            command.completed_at = utcnow()
-            worker.last_heartbeat = utcnow()
-            session.flush()
+            if command is None:  # Defensive: the conditional update just succeeded.
+                raise WorkerDisconnected("worker command disappeared")
             return command
 
     async def dispatch(

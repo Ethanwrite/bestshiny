@@ -1,3 +1,3 @@
-from .compiler import PromptCompilerService, PromptRefinement
+from .compiler import PromptCompilerService
 
-__all__ = ["PromptCompilerService", "PromptRefinement"]
+__all__ = ["PromptCompilerService"]

@@ -59,6 +59,9 @@ services:
       S3_ACCESS_KEY_ID: ai_director
       S3_SECRET_ACCESS_KEY: ai_director_dev_secret
       PUBLIC_BASE_URL: http://localhost:8080
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-production}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Generate and export a Fernet key before starting Compose}
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:?Generate and export a separate internal service key before starting Compose}
       SESSION_COOKIE_SECURE: "false"
     volumes:
       - media_data:/data/media
@@ -87,6 +90,9 @@ services:
       S3_ACCESS_KEY_ID: ai_director
       S3_SECRET_ACCESS_KEY: ai_director_dev_secret
       PUBLIC_BASE_URL: http://api:8080
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-production}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Generate and export a Fernet key before starting Compose}
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:?Generate and export a separate internal service key before starting Compose}
     volumes:
       - media_data:/data/media
     depends_on:

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
+from PIL import Image
+from production_domain.models import GenerationCandidate, GenerationIdempotency, GenerationJob
+from sqlalchemy import event, func, select
 from video_platform_api.main import create_app
+
+
+def _png_bytes(color: tuple[int, int, int]) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (2, 2), color).save(output, format="PNG")
+    return output.getvalue()
 
 
 def test_web_director_api_script_to_candidate_flow(container):
@@ -47,6 +58,71 @@ def test_web_director_api_script_to_candidate_flow(container):
         assert candidates[0]["generation_plan"]["provider"] == "google_flow"
 
 
+def test_concurrent_generate_requests_replay_one_candidate_and_job(container):
+    app = create_app(container)
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"title": "Concurrent Director"}).json()
+        episode = client.post(
+            f"/v1/projects/{project['id']}/episodes",
+            json={
+                "project_id": project["id"],
+                "title": "Pilot",
+                "episode_number": 1,
+                "script_source": "INT. STUDIO - NIGHT\nMina raises one hand.",
+            },
+        ).json()
+        shot_id = client.post(f"/v1/episodes/{episode['id']}/compile").json()["shot_ids"][0]
+
+    barrier = threading.Barrier(2)
+    seen = threading.local()
+
+    def synchronize_initial_lookup(execute_state) -> None:  # type: ignore[no-untyped-def]
+        if (
+            execute_state.is_select
+            and "generation_idempotency" in str(execute_state.statement)
+            and not getattr(seen, "initial_lookup", False)
+        ):
+            seen.initial_lookup = True
+            barrier.wait(timeout=5)
+
+    def submit(_index: int):  # type: ignore[no-untyped-def]
+        with TestClient(app) as client:
+            return client.post(
+                f"/v1/shots/{shot_id}/generate",
+                json={"idempotency_key": "same-shot-concurrent-request"},
+            )
+
+    event.listen(container.database.Session, "do_orm_execute", synchronize_initial_lookup)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(submit, range(2)))
+    finally:
+        event.remove(container.database.Session, "do_orm_execute", synchronize_initial_lookup)
+
+    assert [response.status_code for response in responses] == [202, 202]
+    bodies = [response.json() for response in responses]
+    assert bodies[0]["id"] == bodies[1]["id"]
+    assert sorted(body["replayed"] for body in bodies) == [False, True]
+    with container.database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count(GenerationCandidate.id)).where(GenerationCandidate.shot_id == shot_id)
+            )
+            == 1
+        )
+        assert (
+            session.scalar(select(func.count(GenerationJob.id)).where(GenerationJob.shot_id == shot_id)) == 1
+        )
+        assert (
+            session.scalar(
+                select(func.count(GenerationIdempotency.id)).where(
+                    GenerationIdempotency.project_id == project["id"]
+                )
+            )
+            == 1
+        )
+
+
 def test_prompt_refine_reports_diff_without_fact_mutation(container, project):
     with TestClient(create_app(container)) as client:
         result = client.post(
@@ -55,9 +131,9 @@ def test_prompt_refine_reports_diff_without_fact_mutation(container, project):
         )
         assert result.status_code == 200
         body = result.json()
-        assert body["refined"] == "LinJin raises the phone。"
-        assert body["preserved_facts"] == [body["refined"]]
-        assert body["changes"][0]["type"] == "NORMALIZE_WHITESPACE"
+        assert "LinJin raises the phone" in body["refined"]
+        assert body["preserved_facts"][0].startswith("subject, action")
+        assert body["changes"][0]["category"] == "visual_specificity"
 
 
 def test_character_creation_and_identity_confirmation_api(container, project):
@@ -74,7 +150,7 @@ def test_character_creation_and_identity_confirmation_api(container, project):
                 "asset_type": "CHARACTER_MASTER",
                 "character_id": character.json()["id"],
             },
-            files={"file": ("lin.png", io.BytesIO(b"canonical-image"), "image/png")},
+            files={"file": ("lin.png", io.BytesIO(_png_bytes((20, 80, 180))), "image/png")},
         )
         assert asset.status_code == 200
         confirmed = client.post(
@@ -94,7 +170,7 @@ def test_character_creation_and_identity_confirmation_api(container, project):
                 "asset_type": "CHARACTER_MASTER",
                 "character_id": character.json()["id"],
             },
-            files={"file": ("lin-v2.png", io.BytesIO(b"canonical-image-v2"), "image/png")},
+            files={"file": ("lin-v2.png", io.BytesIO(_png_bytes((30, 90, 190))), "image/png")},
         )
         confirmed_v2 = client.post(
             f"/v1/characters/{character.json()['id']}/confirm-identity",

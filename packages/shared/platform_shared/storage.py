@@ -18,6 +18,12 @@ class StoredObject:
     mime_type: str
 
 
+class StorageLimitExceeded(ValueError):
+    def __init__(self, limit_bytes: int):
+        super().__init__(f"upload exceeds the {limit_bytes}-byte object limit")
+        self.limit_bytes = limit_bytes
+
+
 class StorageProvider(Protocol):
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject: ...
     def open(self, key: str, mode: str = "rb") -> BinaryIO: ...
@@ -25,22 +31,43 @@ class StorageProvider(Protocol):
 
 
 class LocalStorage:
-    def __init__(self, root: Path, public_base_url: str = ""):
+    def __init__(
+        self,
+        root: Path,
+        public_base_url: str = "",
+        *,
+        max_object_bytes: int = 100 * 1024 * 1024,
+    ):
         self.root = root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.public_base_url = public_base_url.rstrip("/")
+        self.max_object_bytes = max(1, max_object_bytes)
 
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject:
         safe_name = Path(filename).name or "asset.bin"
         suffix = Path(safe_name).suffix.lower()
-        temporary = self.root / f".upload-{hashlib.sha256(safe_name.encode()).hexdigest()[:12]}.tmp"
         digest = hashlib.sha256()
         size = 0
-        with temporary.open("wb") as output:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-                output.write(chunk)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.root,
+                prefix=".upload-",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                while chunk := stream.read(1024 * 1024):
+                    if size + len(chunk) > self.max_object_bytes:
+                        raise StorageLimitExceeded(self.max_object_bytes)
+                    digest.update(chunk)
+                    size += len(chunk)
+                    output.write(chunk)
+        except BaseException:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            raise
+        assert temporary is not None
         sha = digest.hexdigest()
         key = f"{sha[:2]}/{sha}{suffix}"
         destination = self.path_for(key)
@@ -76,6 +103,7 @@ class S3CompatibleStorage:
         access_key_id: str = "",
         secret_access_key: str = "",
         public_base_url: str = "",
+        max_object_bytes: int = 100 * 1024 * 1024,
     ):
         import boto3
 
@@ -83,6 +111,7 @@ class S3CompatibleStorage:
         self.cache_root = cache_root.expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.public_base_url = public_base_url.rstrip("/")
+        self.max_object_bytes = max(1, max_object_bytes)
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint_url or None,
@@ -96,12 +125,21 @@ class S3CompatibleStorage:
         suffix = Path(safe_name).suffix.lower()
         digest = hashlib.sha256()
         size = 0
-        with tempfile.NamedTemporaryFile(dir=self.cache_root, delete=False) as output:
-            temporary = Path(output.name)
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
-                output.write(chunk)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.cache_root, delete=False) as output:
+                temporary = Path(output.name)
+                while chunk := stream.read(1024 * 1024):
+                    if size + len(chunk) > self.max_object_bytes:
+                        raise StorageLimitExceeded(self.max_object_bytes)
+                    digest.update(chunk)
+                    size += len(chunk)
+                    output.write(chunk)
+        except BaseException:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            raise
+        assert temporary is not None
         sha = digest.hexdigest()
         key = f"{sha[:2]}/{sha}{suffix}"
         destination = self.path_for(key, download=False)

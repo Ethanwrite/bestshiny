@@ -1,0 +1,4 @@
+interface:
+  display_name: "图片提示词专业矫正"
+  short_description: "保留人物、产品与场景事实的专业图片提示词矫正工具"
+  default_prompt: "Use $image-prompt-corrector to professionally refine this image prompt without redesigning its subject."

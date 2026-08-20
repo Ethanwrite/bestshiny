@@ -1,3 +1,3 @@
-from .service import CostEngine
+from .service import CostEngine, CreditEstimate, CreditPricingEngine
 
-__all__ = ["CostEngine"]
+__all__ = ["CostEngine", "CreditEstimate", "CreditPricingEngine"]

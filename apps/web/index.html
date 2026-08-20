@@ -8,39 +8,127 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
+      <div class="auth-card">
+        <div class="auth-brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>AI 视觉制作</strong><small>你的商业化智能导演工作台</small></div></div>
+        <span class="eyebrow">安全工作空间</span>
+        <h1 id="authTitle">登录工作空间</h1>
+        <p id="authDescription">登录后只会看到你所在工作空间的项目与素材。</p>
+        <form id="authForm">
+          <div id="registerFields" class="hidden">
+            <label>你的名称<input id="authDisplayName" maxlength="160" autocomplete="name" placeholder="例如：林导演" /></label>
+            <label>工作空间名称<input id="authWorkspaceName" maxlength="200" autocomplete="organization" placeholder="例如：星河视觉" /></label>
+          </div>
+          <label>邮箱<input id="authEmail" type="email" maxlength="320" autocomplete="email" required placeholder="name@company.com" /></label>
+          <label>密码<input id="authPassword" type="password" minlength="12" maxlength="1024" autocomplete="current-password" required placeholder="至少 12 个字符" /></label>
+          <div id="authError" class="auth-error" role="alert"></div>
+          <button id="authSubmitBtn" class="button primary full" type="submit">登录</button>
+        </form>
+        <button id="authModeBtn" class="text-button auth-mode" type="button">没有账号？免费注册</button>
+        <small class="auth-footnote">密码仅保存强哈希；登录会话可随时退出撤销。</small>
+      </div>
+    </section>
+    <div id="appShell" class="app-shell auth-locked">
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark"><span></span><span></span><span></span></div>
-          <div><strong>AI 智能导演</strong><small>短剧生成工作台</small></div>
+          <div><strong>AI 视觉制作</strong><small>自主创作与智能导演</small></div>
         </div>
         <div class="project-switcher">
           <span class="eyebrow">当前项目</span>
           <select id="projectSelect" aria-label="选择项目"></select>
         </div>
         <div class="top-actions">
+          <span id="accountName" class="account-name"></span>
           <span id="systemStatus" class="status-pill"><i></i>系统检查中</span>
           <button id="newProjectBtn" class="button secondary">新建项目</button>
-          <button id="generateBtn" class="button primary">生成当前镜头</button>
+          <button id="logoutBtn" class="button secondary logout-button">退出</button>
+          <button id="generateBtn" class="button primary hidden">生成 / 重做当前镜头</button>
         </div>
       </header>
 
-      <main class="workspace-grid">
+      <nav class="mode-switch" aria-label="工作模式">
+        <button class="mode-button active" data-mode="passenger">自主创作</button>
+        <button class="mode-button" data-mode="autopilot">智能导演</button>
+        <span id="modeDescription">描述画面、选择生成方式、开始创作</span>
+      </nav>
+
+      <section id="passengerWorkspace" class="passenger-workspace">
+        <div class="passenger-hero">
+          <div><span class="eyebrow">自主创作</span><h1>自主视觉创作</h1><p>你决定创意和生成方式。图片可以一键补全画面细节；视频会按你的原意提交。</p></div>
+          <div class="media-toggle" role="tablist"><button class="active" data-media="image">生成图片</button><button data-media="video">生成视频</button></div>
+        </div>
+        <div class="passenger-grid">
+          <article class="creation-card prompt-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">创作内容</span><h2 id="passengerPromptHeading">描述你想要的图片</h2></div><span id="promptTypeBadge" class="mini-badge">图片意图自动识别</span></div>
+            <textarea id="passengerPrompt" rows="11" placeholder="例如：一个女生拿着香水，高级一点"></textarea>
+            <div id="imagePromptActions" class="inline-actions">
+              <button id="correctImagePromptBtn" class="button secondary grow">优化画面描述</button>
+              <button id="undoImagePromptBtn" class="button ghost" disabled>恢复原文</button>
+            </div>
+            <div id="promptCorrectionSummary" class="decision-box">只会增强构图、灯光、材质和层次，不会擅自重设计。</div>
+          </article>
+          <article class="creation-card settings-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">生成设置</span><h2>选择生成方式</h2></div></div>
+            <label>生成模型<select id="passengerModel"><option value="">正在读取模型…</option></select></label>
+            <div class="field-grid">
+              <label>画面比例<select id="passengerAspect"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
+              <label>清晰度<select id="passengerResolution"><option>720p</option><option>1080p</option></select></label>
+            </div>
+            <label id="passengerDurationField" class="hidden">视频时长<input id="passengerDuration" type="number" min="1" max="30" value="8" /></label>
+            <label><span id="passengerReferenceLabel">参考图片（可选）</span><input id="passengerReference" type="file" accept="image/*" /></label>
+            <div class="cost-preview"><span>预计消耗</span><strong id="passengerCost">选择模型后显示</strong></div>
+            <small class="credit-note">根据生成方式、时长、清晰度和参考图计算，并预留 20% 波动；1 积分 = $0.01。</small>
+            <button id="passengerGenerateBtn" class="button primary full">开始生成图片</button>
+            <small>平台会自动选择可用生成线路，避免重复计费，并保存费用记录和素材。</small>
+          </article>
+          <article class="creation-card result-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">生成结果</span><h2>本次结果</h2></div><button id="passengerRefreshBtn" class="text-button">刷新 ↻</button></div>
+            <div id="passengerResult" class="passenger-result empty-state" aria-live="polite">提交生成后在这里查看状态</div>
+            <div id="passengerAssetFields" class="asset-confirm-fields">
+              <label>加入已有素材（可选）<select id="passengerExistingAsset"><option value="">新建一个素材</option></select></label>
+              <div class="field-grid">
+                <label>素材用途<select id="passengerAssetType"><option value="REFERENCE">普通参考</option><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option></select></label>
+                <label>素材名称<input id="passengerAssetName" placeholder="例如：女主角正式造型" /></label>
+              </div>
+              <label class="check-row"><input id="passengerPromoteCanonical" type="checkbox" /> 设为该素材的正式参考版本</label>
+            </div>
+            <button id="promotePassengerAssetBtn" class="button secondary full" disabled>确认用于当前项目</button>
+            <small class="result-help">确认后会保存一份可追溯的新版本；只有勾选“正式参考版本”才会替换项目当前使用的参考图。</small>
+          </article>
+          <article class="creation-card asset-manager-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">素材版本</span><h2>上传修改后的人物、场景或产品图</h2></div><span class="mini-badge">旧版本会保留</span></div>
+            <p class="asset-manager-copy">选择已有素材可新增一个版本；不选择则新建素材。只有你主动勾选时，新图才会成为项目当前的正式参考。</p>
+            <div class="asset-manager-fields">
+              <label>已有素材（可选）<select id="manualExistingAsset"><option value="">新建一个素材</option></select></label>
+              <label>素材用途<select id="manualAssetType"><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option><option value="REFERENCE">普通参考</option></select></label>
+              <label>素材名称<input id="manualAssetName" placeholder="例如：酒店大堂雨夜版" /></label>
+            </div>
+            <div class="asset-manager-upload">
+              <label>修改后的图片<input id="manualAssetFile" type="file" accept="image/*" /></label>
+              <label class="check-row"><input id="manualPromoteCanonical" type="checkbox" /> 设为当前正式参考</label>
+              <button id="manualAssetUploadBtn" class="button secondary">保存为新版本</button>
+            </div>
+            <div id="manualAssetStatus" class="decision-box">人物主参考图也可以在“智能导演 → 人物”中直接更新。</div>
+          </article>
+        </div>
+      </section>
+
+      <main id="autopilotWorkspace" class="workspace-grid hidden">
         <aside class="panel left-panel">
           <div class="panel-heading">
             <div><span class="eyebrow">故事输入</span><h2>剧本与场景</h2></div>
-            <span id="episodeStatus" class="mini-badge">未编译</span>
+            <span id="episodeStatus" class="mini-badge">尚未拆解</span>
           </div>
           <textarea id="scriptInput" class="script-editor" spellcheck="false" placeholder="输入剧本，例如：
 EXT. 酒店雨棚 - NIGHT
 赵凯：你看这部手机。
 林瑾转身，向雨棚边缘走两步。"></textarea>
           <div class="inline-actions">
-            <button id="compileBtn" class="button primary grow">编译剧本</button>
-            <button id="refineBtn" class="icon-button" title="整理提示词">✦</button>
+            <button id="compileBtn" class="button primary grow">拆解为镜头</button>
           </div>
           <div class="section-label"><span>场景结构</span><b id="sceneCount">0</b></div>
-          <div id="sceneList" class="scene-list empty-state">创建项目并编译剧本后显示场景</div>
+          <div id="sceneList" class="scene-list empty-state">创建项目并拆解剧本后显示场景</div>
         </aside>
 
         <section class="center-stage">
@@ -56,16 +144,16 @@ EXT. 酒店雨棚 - NIGHT
             <div class="shot-hero">
               <div class="shot-preview">
                 <div class="preview-grid"></div>
-                <div class="preview-content"><span id="shotNumber">镜头 —</span><strong id="shotAction">选择一个镜头</strong><small id="shotState">开始状态 → 单一动作 → 结束状态</small></div>
+                <div class="preview-content"><span id="shotNumber">镜头 —</span><strong id="shotAction">选择一个镜头</strong><small id="shotState">开始画面 → 一个主要动作 → 结束画面</small></div>
               </div>
               <div class="shot-summary">
                 <span class="eyebrow">当前镜头</span>
                 <h1 id="shotTitle">尚未选择镜头</h1>
-                <p id="shotPrompt">从左侧编译剧本，系统会生成结构化镜头与时间线状态。</p>
+                <p id="shotPrompt">从左侧拆解剧本，系统会按顺序生成可制作的镜头，并记住每个镜头前后的状态。</p>
                 <div class="metrics-row">
                   <div><span>时长</span><strong id="shotDuration">—</strong></div>
-                  <div><span>连续方式</span><strong id="shotContinuity">—</strong></div>
-                  <div><span>生成策略</span><strong id="shotPolicy">—</strong></div>
+                  <div><span>与上一镜衔接</span><strong id="shotContinuity">—</strong></div>
+                  <div><span>生成方法</span><strong id="shotPolicy">—</strong></div>
                   <div><span>模型</span><strong id="shotProvider">—</strong></div>
                 </div>
               </div>
@@ -82,42 +170,57 @@ EXT. 酒店雨棚 - NIGHT
         </section>
 
         <aside class="panel inspector-panel">
-          <div class="panel-heading"><div><span class="eyebrow">镜头设置</span><h2>导演参数</h2></div></div>
+          <div class="panel-heading"><div><span class="eyebrow">镜头设置</span><h2>画面设置</h2></div></div>
           <div class="inspector-tabs" role="tablist">
-            <button class="active" data-tab="character">人物</button><button data-tab="camera">摄影</button><button data-tab="prompt">提示词</button>
+            <button class="active" data-tab="character">人物</button><button data-tab="camera">画面</button><button data-tab="prompt">高级</button>
           </div>
           <div class="tab-panel active" id="tab-character">
             <label>角色名称<input id="characterName" placeholder="例如：林瑾" /></label>
             <label>角色设定<textarea id="characterDescription" rows="3" placeholder="外貌、发型、服装和不可改变的特征"></textarea></label>
             <button id="createCharacterBtn" class="button secondary full">建立角色档案</button>
             <label>角色主参考图<input id="characterAsset" type="file" accept="image/*" /></label>
-            <button id="confirmCharacterBtn" class="button primary full">上传并锁定新版本</button>
+            <button id="confirmCharacterBtn" class="button primary full">上传新的正式参考图</button>
             <div id="characterList" class="binding-list"><p>尚未建立角色</p></div>
           </div>
           <div class="tab-panel" id="tab-camera">
             <div class="field-grid">
-              <label>镜头景别<select id="cameraScale"><option>中景</option><option>近景</option><option>全景</option><option>特写</option></select></label>
-              <label>机位角度<select id="cameraAngle"><option>平视</option><option>低角度</option><option>高角度</option><option>侧面</option></select></label>
+              <label>画面远近<select id="cameraScale"><option>中景</option><option>近景</option><option>全景</option><option>特写</option></select></label>
+              <label>拍摄角度<select id="cameraAngle"><option>平视</option><option>低角度</option><option>高角度</option><option>侧面</option></select></label>
             </div>
-            <label>主要运镜<select id="cameraMove"><option>固定</option><option>缓慢推进</option><option>向左摇镜</option><option>跟随</option><option>环绕</option></select></label>
-            <label>灯光方向<select id="lighting"><option>雨夜冷色侧光</option><option>柔和正面光</option><option>暖色逆光</option><option>高反差轮廓光</option></select></label>
-            <button id="continuityBtn" class="button secondary full">计算连续性策略</button>
-            <div id="continuityResult" class="decision-box">选择镜头后可计算 HARD / HYBRID / RE-ANCHOR</div>
+            <label>镜头怎么移动<select id="cameraMove"><option>固定</option><option>缓慢推进</option><option>向左摇镜</option><option>跟随</option><option>环绕</option></select></label>
+            <label>主要光线<select id="lighting"><option>雨夜冷色侧光</option><option>柔和正面光</option><option>暖色逆光</option><option>高反差轮廓光</option></select></label>
+            <button id="continuityBtn" class="button secondary full">检查镜头衔接</button>
+            <div id="continuityResult" class="decision-box">选择镜头后，系统会给出更稳妥的衔接方式。</div>
           </div>
           <div class="tab-panel" id="tab-prompt">
-            <label>用户原始要求<textarea id="rawPrompt" rows="5" placeholder="保留你的核心意图，系统只整理表达"></textarea></label>
-            <button id="promptRefineBtn" class="button secondary full">专业整理（显示差异）</button>
-            <label>编译后提示词<textarea id="compiledPrompt" rows="9" readonly></textarea></label>
-            <div id="promptDiff" class="decision-box">不会偷偷修改角色身份或剧情事实</div>
+            <label>原始镜头要求<textarea id="rawPrompt" rows="5" readonly placeholder="选择镜头后显示原始要求"></textarea></label>
+            <div class="decision-box">智能导演只会把已确认的镜头要求转换成生成模型能理解的描述；不会套用图片优化规则，也不会改变剧情。</div>
+            <details class="advanced-details"><summary>查看生成模型收到的描述</summary><label>仅供排查<textarea id="compiledPrompt" rows="9" readonly></textarea></label></details>
           </div>
-          <div class="generation-settings">
-            <span class="section-label">生成设置</span>
-            <label>首选生成引擎<select id="providerSelect"><option value="google_flow">Google Flow</option><option value="seedance">Seedance</option><option value="veo_official">Veo Official</option><option value="grok">Grok</option></select></label>
-            <label>预计单次成本<input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
-            <small>实际调用会经过能力匹配、账号调度、幂等保护和成本记录。</small>
-          </div>
+          <details class="advanced-details generation-settings">
+            <summary>高级生成设置</summary>
+            <label>单镜头预算上限（美元）<input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
+            <small>系统会根据镜头要求、前后衔接和当前可用的生成方式自动选择。</small>
+          </details>
         </aside>
       </main>
+      <dialog id="newProjectDialog" class="project-dialog" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
+        <form id="newProjectForm" class="project-dialog-form" novalidate>
+          <div class="project-dialog-heading">
+            <span class="eyebrow">开始新计划</span>
+            <h2 id="newProjectTitle">新建项目</h2>
+            <p id="newProjectDescription">给项目起一个方便团队识别的名称，创建后会自动切换到新项目。</p>
+          </div>
+          <label for="newProjectName">项目名称</label>
+          <input id="newProjectName" name="projectName" maxlength="200" required autocomplete="off" aria-describedby="newProjectError" aria-invalid="false" value="竖屏短剧计划" />
+          <p id="newProjectStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
+          <p id="newProjectError" class="project-dialog-error" role="alert"></p>
+          <div class="project-dialog-actions">
+            <button id="cancelNewProjectBtn" class="button secondary" type="button">取消</button>
+            <button id="confirmNewProjectBtn" class="button primary" type="submit">创建项目</button>
+          </div>
+        </form>
+      </dialog>
       <div id="toast" class="toast" role="status"></div>
     </div>
     <script src="/app.js" defer></script>

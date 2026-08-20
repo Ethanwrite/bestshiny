@@ -7,6 +7,7 @@ from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    DDL,
     JSON,
     Boolean,
     DateTime,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -48,6 +50,27 @@ class AssetType(StrEnum):
     LOCATION_MASTER = "LOCATION_MASTER"
     PROP_MASTER = "PROP_MASTER"
     KEYFRAME = "KEYFRAME"
+
+
+class AssetKind(StrEnum):
+    """Logical production assets shared by manual and automated workflows."""
+
+    CHARACTER = "CHARACTER"
+    SCENE = "SCENE"
+    PRODUCT = "PRODUCT"
+    PROP = "PROP"
+    WARDROBE = "WARDROBE"
+    VEHICLE = "VEHICLE"
+    CREATURE = "CREATURE"
+    VOICE = "VOICE"
+    STYLE = "STYLE"
+    REFERENCE = "REFERENCE"
+
+
+class AssetVersionStatus(StrEnum):
+    DRAFT = "DRAFT"
+    READY = "READY"
+    REJECTED = "REJECTED"
 
 
 class JobStatus(StrEnum):
@@ -162,12 +185,61 @@ class User(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
 
 
+class WorkspaceMembership(Base, TimestampMixin):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership_user"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(40), default="VIEWER", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
+class AuthSession(Base, TimestampMixin):
+    __tablename__ = "auth_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+
+
 class Workspace(Base, TimestampMixin):
     __tablename__ = "workspaces"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+
+
+class LegacyWorkspaceClaim(Base, TimestampMixin):
+    """Append-only audit record for an explicit legacy-data ownership transfer."""
+
+    __tablename__ = "legacy_workspace_claims"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_legacy_workspace_claim_idempotency"),
+        UniqueConstraint("legacy_user_id", name="uq_legacy_workspace_claim_legacy_user"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    legacy_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    target_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    actor_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    project_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="COMPLETED", nullable=False)
 
 
 class Project(Base, TimestampMixin):
@@ -372,13 +444,20 @@ class GenerationCandidate(Base, TimestampMixin):
 class MediaAsset(Base, TimestampMixin):
     __tablename__ = "media_assets"
     __table_args__ = (
-        UniqueConstraint("project_id", "sha256", "asset_type", name="uq_asset_project_hash_type"),
+        UniqueConstraint(
+            "project_id",
+            "sha256",
+            "asset_type",
+            "lineage_key",
+            name="uq_media_asset_lineage_hash",
+        ),
         Index("ix_asset_provider_media", "provider", "provider_media_id"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     asset_type: Mapped[str] = mapped_column(String(50), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    lineage_key: Mapped[str] = mapped_column(String(500), default="shared", nullable=False)
     storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
     local_path: Mapped[str | None] = mapped_column(String(1000))
     public_url: Mapped[str | None] = mapped_column(String(2000))
@@ -396,6 +475,278 @@ class MediaAsset(Base, TimestampMixin):
         ForeignKey("generation_candidates.id"), index=True
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class Asset(Base, TimestampMixin):
+    """A logical, versioned production asset rather than a single media file."""
+
+    __tablename__ = "assets"
+    __table_args__ = (Index("ix_assets_project_kind_status", "project_id", "asset_type", "status"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    asset_type: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(240), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    canonical_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    canonical_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", index=True, nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class AssetVersion(Base, TimestampMixin):
+    """Immutable version payload; becoming canonical always requires an explicit promotion."""
+
+    __tablename__ = "asset_versions"
+    __table_args__ = (UniqueConstraint("asset_id", "version", name="uq_asset_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str] = mapped_column(String(240), default="", nullable=False)
+    primary_media_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
+    parent_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="SET NULL"), index=True
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    continuity_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    embedding_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    source: Mapped[str] = mapped_column(String(40), default="USER_UPLOAD", index=True, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=AssetVersionStatus.READY.value, index=True, nullable=False
+    )
+    created_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class AssetVersionMedia(Base, TimestampMixin):
+    """Role-labelled media belonging to a logical asset version."""
+
+    __tablename__ = "asset_version_media"
+    __table_args__ = (
+        UniqueConstraint("asset_version_id", "media_asset_id", "role", name="uq_asset_version_media_role"),
+        Index("ix_asset_version_media_version_role", "asset_version_id", "role"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="CASCADE"), index=True
+    )
+    media_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class AssetCanonicalPromotion(Base, TimestampMixin):
+    """Append-only audit record for an explicit canonical-version change."""
+
+    __tablename__ = "asset_canonical_promotions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    from_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="SET NULL"), index=True
+    )
+    to_version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True
+    )
+    promoted_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+def _install_asset_registry_integrity_ddl() -> None:
+    """Install DB-side immutability guards for both create_all and migrations.
+
+    Production databases receive equivalent DDL from migration 0008. These table
+    events keep ephemeral ``Base.metadata.create_all`` databases honest as well.
+    Physical deletion of a logical asset is intentionally rejected while it owns
+    versions or promotion history; callers must archive assets instead.
+    """
+
+    anchor = AssetCanonicalPromotion.__table__
+    sqlite_statements = (
+        """CREATE TRIGGER IF NOT EXISTS trg_assets_canonical_same_asset_insert
+        BEFORE INSERT ON assets WHEN NEW.canonical_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM asset_versions
+            WHERE id = NEW.canonical_version_id AND asset_id = NEW.id
+        ) BEGIN SELECT RAISE(ABORT, 'canonical version must belong to the same asset'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_assets_canonical_same_asset_update
+        BEFORE UPDATE OF id, canonical_version_id ON assets
+        WHEN NEW.canonical_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM asset_versions
+            WHERE id = NEW.canonical_version_id AND asset_id = NEW.id
+        ) BEGIN SELECT RAISE(ABORT, 'canonical version must belong to the same asset'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_assets_canonical_requires_promotion_update
+        BEFORE UPDATE OF canonical_version_id ON assets
+        WHEN NOT (NEW.canonical_version_id IS OLD.canonical_version_id) AND (
+            NEW.canonical_version_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM asset_canonical_promotions
+                WHERE asset_id = NEW.id
+                  AND to_version_id = NEW.canonical_version_id
+                  AND from_version_id IS OLD.canonical_version_id
+                  AND created_at >= OLD.updated_at
+            )
+        ) BEGIN SELECT RAISE(ABORT, 'canonical change requires a fresh promotion record'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_asset_versions_parent_same_asset_insert
+        BEFORE INSERT ON asset_versions WHEN NEW.parent_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM asset_versions
+            WHERE id = NEW.parent_version_id AND asset_id = NEW.asset_id
+        ) BEGIN SELECT RAISE(ABORT, 'parent version must belong to the same asset'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_asset_promotions_versions_same_asset_insert
+        BEFORE INSERT ON asset_canonical_promotions WHEN NOT EXISTS (
+            SELECT 1 FROM asset_versions WHERE id = NEW.to_version_id AND asset_id = NEW.asset_id
+        ) OR (NEW.from_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM asset_versions WHERE id = NEW.from_version_id AND asset_id = NEW.asset_id
+        )) BEGIN SELECT RAISE(ABORT, 'promotion versions must belong to the same asset'); END""",
+    )
+    for statement in sqlite_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="sqlite"))
+
+    protected_table_names = (
+        "asset_versions",
+        "asset_version_media",
+        "asset_canonical_promotions",
+    )
+    for table_name in protected_table_names:
+        for operation in ("UPDATE", "DELETE"):
+            trigger_name = f"trg_{table_name}_append_only_{operation.lower()}"
+            message = f"{table_name} is append-only"
+            statement = (
+                f"CREATE TRIGGER IF NOT EXISTS {trigger_name} BEFORE {operation} ON {table_name} "
+                f"BEGIN SELECT RAISE(ABORT, '{message}'); END"
+            )
+            event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="sqlite"))
+
+    postgres_statements = (
+        """CREATE OR REPLACE FUNCTION enforce_asset_registry_consistency()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_TABLE_NAME = 'assets' THEN
+                IF NEW.canonical_version_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM asset_versions
+                    WHERE id = NEW.canonical_version_id AND asset_id = NEW.id
+                ) THEN RAISE EXCEPTION 'canonical version must belong to the same asset'; END IF;
+                IF TG_OP = 'UPDATE'
+                   AND NEW.canonical_version_id IS DISTINCT FROM OLD.canonical_version_id AND (
+                    NEW.canonical_version_id IS NULL OR NOT EXISTS (
+                        SELECT 1 FROM asset_canonical_promotions
+                        WHERE asset_id = NEW.id
+                          AND to_version_id = NEW.canonical_version_id
+                          AND from_version_id IS NOT DISTINCT FROM OLD.canonical_version_id
+                          AND created_at >= OLD.updated_at
+                    )
+                ) THEN RAISE EXCEPTION 'canonical change requires a fresh promotion record'; END IF;
+            ELSIF TG_TABLE_NAME = 'asset_versions' THEN
+                IF NEW.parent_version_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM asset_versions
+                    WHERE id = NEW.parent_version_id AND asset_id = NEW.asset_id
+                ) THEN RAISE EXCEPTION 'parent version must belong to the same asset'; END IF;
+            ELSIF TG_TABLE_NAME = 'asset_canonical_promotions' THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM asset_versions
+                    WHERE id = NEW.to_version_id AND asset_id = NEW.asset_id
+                ) OR (NEW.from_version_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM asset_versions
+                    WHERE id = NEW.from_version_id AND asset_id = NEW.asset_id
+                )) THEN RAISE EXCEPTION 'promotion versions must belong to the same asset'; END IF;
+            END IF;
+            RETURN NEW;
+        END; $$""",
+        """CREATE OR REPLACE FUNCTION enforce_asset_registry_append_only()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION '% is append-only', TG_TABLE_NAME
+            USING ERRCODE = '23000';
+            RETURN OLD;
+        END; $$""",
+        """CREATE TRIGGER trg_assets_canonical_same_asset
+        BEFORE INSERT OR UPDATE OF id, canonical_version_id ON assets FOR EACH ROW
+        EXECUTE FUNCTION enforce_asset_registry_consistency()""",
+        """CREATE TRIGGER trg_asset_versions_parent_same_asset
+        BEFORE INSERT ON asset_versions FOR EACH ROW
+        EXECUTE FUNCTION enforce_asset_registry_consistency()""",
+        """CREATE TRIGGER trg_asset_promotions_versions_same_asset
+        BEFORE INSERT ON asset_canonical_promotions FOR EACH ROW
+        EXECUTE FUNCTION enforce_asset_registry_consistency()""",
+    )
+    for statement in postgres_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="postgresql"))
+    for table_name in protected_table_names:
+        statement = (
+            f"CREATE TRIGGER trg_{table_name}_append_only "
+            f"BEFORE UPDATE OR DELETE ON {table_name} FOR EACH ROW "
+            "EXECUTE FUNCTION enforce_asset_registry_append_only()"
+        )
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="postgresql"))
+
+
+_install_asset_registry_integrity_ddl()
+
+
+def _install_shot_lineage_ddl() -> None:
+    sqlite_check = """(
+        NEW.previous_shot_id = NEW.id OR NOT EXISTS (
+            SELECT 1
+            FROM shots AS previous
+            JOIN scenes AS previous_scene ON previous_scene.id = previous.scene_id
+            JOIN episodes AS previous_episode ON previous_episode.id = previous_scene.episode_id
+            JOIN scenes AS current_scene ON current_scene.id = NEW.scene_id
+            JOIN episodes AS current_episode ON current_episode.id = current_scene.episode_id
+            WHERE previous.id = NEW.previous_shot_id
+              AND previous_episode.project_id = current_episode.project_id
+        )
+    )"""
+    for operation, suffix in (("INSERT", "insert"), ("UPDATE OF scene_id, previous_shot_id", "update")):
+        event.listen(
+            Shot.__table__,
+            "after_create",
+            DDL(
+                f"""CREATE TRIGGER IF NOT EXISTS trg_shots_previous_same_project_{suffix}
+                BEFORE {operation} ON shots
+                WHEN NEW.previous_shot_id IS NOT NULL AND {sqlite_check}
+                BEGIN SELECT RAISE(ABORT, 'previous shot must belong to the same project'); END"""
+            ).execute_if(dialect="sqlite"),
+        )
+
+    event.listen(
+        Shot.__table__,
+        "after_create",
+        DDL(
+            """CREATE OR REPLACE FUNCTION enforce_shot_previous_same_project()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.previous_shot_id IS NOT NULL AND (
+                    NEW.previous_shot_id = NEW.id OR NOT EXISTS (
+                        SELECT 1
+                        FROM shots AS previous
+                        JOIN scenes AS previous_scene ON previous_scene.id = previous.scene_id
+                        JOIN episodes AS previous_episode ON previous_episode.id = previous_scene.episode_id
+                        JOIN scenes AS current_scene ON current_scene.id = NEW.scene_id
+                        JOIN episodes AS current_episode ON current_episode.id = current_scene.episode_id
+                        WHERE previous.id = NEW.previous_shot_id
+                          AND previous_episode.project_id = current_episode.project_id
+                    )
+                ) THEN
+                    RAISE EXCEPTION 'previous shot must belong to the same project'
+                    USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END; $$"""
+        ).execute_if(dialect="postgresql"),
+    )
+    event.listen(
+        Shot.__table__,
+        "after_create",
+        DDL(
+            """CREATE TRIGGER trg_shots_previous_same_project
+            BEFORE INSERT OR UPDATE OF scene_id, previous_shot_id ON shots
+            FOR EACH ROW EXECUTE FUNCTION enforce_shot_previous_same_project()"""
+        ).execute_if(dialect="postgresql"),
+    )
+
+
+_install_shot_lineage_ddl()
 
 
 class ProviderCredential(Base, TimestampMixin):
@@ -453,6 +804,38 @@ class BrowserWorker(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class WorkerAccessCredential(Base, TimestampMixin):
+    """Revocable, worker-scoped credential; only the token digest is persisted."""
+
+    __tablename__ = "worker_access_credentials"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_worker_access_credentials_token_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    worker_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkerSocketTicket(Base, TimestampMixin):
+    """Short-lived, one-use WebSocket bootstrap ticket derived from a worker credential."""
+
+    __tablename__ = "worker_socket_tickets"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_worker_socket_tickets_token_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    credential_id: Mapped[str] = mapped_column(
+        ForeignKey("worker_access_credentials.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    worker_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class GenerationJob(Base, TimestampMixin):
     __tablename__ = "generation_jobs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -481,6 +864,9 @@ class GenerationJob(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
     reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    reservation_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -490,8 +876,11 @@ class GenerationJob(Base, TimestampMixin):
 
 class GenerationIdempotency(Base, TimestampMixin):
     __tablename__ = "generation_idempotency"
-    __table_args__ = (UniqueConstraint("key", name="uq_generation_idempotency_key"),)
+    __table_args__ = (UniqueConstraint("project_id", "key", name="uq_generation_idempotency_project_key"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     key: Mapped[str] = mapped_column(String(250), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     generation_job_id: Mapped[str] = mapped_column(ForeignKey("generation_jobs.id"), nullable=False)
@@ -524,6 +913,7 @@ class WorkerCommand(Base, TimestampMixin):
     response: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_connection_id: Mapped[str | None] = mapped_column(String(100), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -536,9 +926,12 @@ class MediaProviderBinding(Base, TimestampMixin):
     asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="CASCADE"), index=True)
     provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     account_id: Mapped[str] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
-    provider_media_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    provider_media_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="READY", nullable=False)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    upload_claim_token: Mapped[str | None] = mapped_column(String(36), index=True)
+    upload_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    upload_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ProviderProjectBinding(Base, TimestampMixin):
@@ -607,11 +1000,12 @@ class QAResult(Base, TimestampMixin):
 
 class CostRecord(Base, TimestampMixin):
     __tablename__ = "cost_records"
+    __table_args__ = (Index("ix_cost_records_generation_job_id", "generation_job_id", unique=True),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("generation_candidates.id"), index=True)
-    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"))
     provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     model: Mapped[str] = mapped_column(String(120), nullable=False)
     duration: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -671,3 +1065,132 @@ class PromptCompilation(Base, TimestampMixin):
     compiler_version: Mapped[str] = mapped_column(String(80), default="v1", nullable=False)
     skill_versions: Mapped[dict[str, str]] = mapped_column(JSON, default=dict, nullable=False)
     diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class PromptRevision(Base, TimestampMixin):
+    __tablename__ = "prompt_revisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
+    mode: Mapped[str] = mapped_column(String(40), default="IMAGE", index=True, nullable=False)
+    original_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    corrected_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    detected_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    reference_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    preserved_constraints: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    editable_variables: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    changes_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    corrector_version: Mapped[str] = mapped_column(String(80), nullable=False)
+
+
+class FeatureFlag(Base, TimestampMixin):
+    __tablename__ = "feature_flags"
+    __table_args__ = (UniqueConstraint("name", "scope_key", name="uq_feature_flag_name_scope_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    scope_key: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ShotMemory(Base, TimestampMixin):
+    __tablename__ = "shot_memories"
+    __table_args__ = (Index("ix_shot_memories_scope", "project_id", "layer", "scene_id", "memory_type"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    layer: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    memory_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    text_content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    image_urls: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    video_urls: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    entity_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("scenes.id"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    asset_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    temporal_position: Mapped[float | None] = mapped_column(Float)
+    canonical: Mapped[bool] = mapped_column(Boolean, default=False, index=True, nullable=False)
+    # JSON keeps Matryoshka output dimension configurable. A production PostgreSQL
+    # deployment may add a matching pgvector expression/index without changing this contract.
+    embedding: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, default=512, nullable=False)
+    embedding_provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(120), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class EvaluationResult(Base, TimestampMixin):
+    __tablename__ = "evaluation_results"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    generated_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    decision: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    critical_failure: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    scores_json: Mapped[dict[str, float]] = mapped_column(JSON, default=dict, nullable=False)
+    checks_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    retry_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    retry_patch: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    evidence_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    evaluator_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    judge_provider: Mapped[str] = mapped_column(String(80), default="none", nullable=False)
+    judge_model: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), default="", index=True, nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), default="", index=True, nullable=False)
+
+
+class ModelMetric(Base, TimestampMixin):
+    __tablename__ = "model_metrics"
+    __table_args__ = (
+        UniqueConstraint("generation_job_id", "metric_name", name="uq_model_metric_job_name"),
+        Index("ix_model_metrics_model_name", "provider", "model_id", "metric_name"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    value: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ModelBenchmarkResult(Base, TimestampMixin):
+    __tablename__ = "model_benchmark_results"
+    __table_args__ = (Index("ix_benchmark_model_case", "provider", "model_id", "case_key", "suite_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    suite_version: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    case_key: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    scores_json: Mapped[dict[str, float]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+
+
+class ProductionTrace(Base, TimestampMixin):
+    __tablename__ = "production_traces"
+    __table_args__ = (Index("ix_production_traces_trace_id", "trace_id", unique=True),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    context_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    retrieved_memory_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    router_scores_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    generation_latency: Mapped[float | None] = mapped_column(Float)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    evaluation_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    retry_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

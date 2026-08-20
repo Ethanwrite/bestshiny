@@ -9,13 +9,28 @@ from statistics import mean
 from typing import Any
 
 from platform_database import Database
+from platform_shared import affected_rows
 from production_domain.models import (
     CandidateStatus,
+    DecisionRecord,
     GenerationCandidate,
     MediaAsset,
     QADecision,
     QAResult,
+    Shot,
+    User,
+    new_id,
 )
+from sqlalchemy import update
+
+TERMINAL_CANDIDATE_STATUSES = {
+    CandidateStatus.COMMITTED.value,
+    CandidateStatus.REJECTED.value,
+}
+
+
+class HumanReviewNotAllowed(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -27,28 +42,49 @@ class IdentityDriftMetrics:
     low_score_fraction: float
     recovery: float | None
     usable_samples: int
+    invalid_samples: int = 0
 
 
 def _frame_identity_score(sample: dict[str, Any]) -> float | None:
+    if not isinstance(sample, dict):
+        raise ValueError("identity samples must be objects")
+
+    def bounded_similarity(value: Any) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("identity similarity must be a JSON number")
+        score = float(value)
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            raise ValueError("identity similarity must be finite and between zero and one")
+        return score
+
     face = sample.get("face_similarity")
     if face is not None:
-        return float(face)
+        return bounded_similarity(face)
     fallbacks = [
         sample.get("body_similarity"),
         sample.get("hair_similarity"),
         sample.get("costume_similarity"),
         sample.get("tracking_continuity"),
     ]
-    values = [float(value) for value in fallbacks if value is not None]
+    values = [bounded_similarity(value) for value in fallbacks if value is not None]
     return mean(values) if values else None
 
 
 def analyze_identity_drift(
     samples: list[dict[str, Any]], low_threshold: float = 0.72
 ) -> IdentityDriftMetrics:
-    scores = [score for sample in samples if (score := _frame_identity_score(sample)) is not None]
+    scores: list[float] = []
+    invalid_samples = 0
+    for sample in samples:
+        try:
+            score = _frame_identity_score(sample)
+        except (TypeError, ValueError):
+            invalid_samples += 1
+            continue
+        if score is not None:
+            scores.append(score)
     if not scores:
-        return IdentityDriftMetrics(None, None, None, None, 0.0, None, 0)
+        return IdentityDriftMetrics(None, None, None, None, 0.0, None, 0, invalid_samples)
     ordered = sorted(scores)
     p10_index = max(0, math.ceil(len(ordered) * 0.1) - 1)
     x_mean = (len(scores) - 1) / 2
@@ -67,6 +103,7 @@ def analyze_identity_drift(
         round(sum(score < low_threshold for score in scores) / len(scores), 4),
         round(recovery, 4),
         len(scores),
+        invalid_samples,
     )
 
 
@@ -128,6 +165,111 @@ class QAPipeline:
     def adaptive_sample_positions() -> tuple[float, ...]:
         return (0.0, 0.2, 0.4, 0.6, 0.8, 0.98)
 
+    def approve_human_review(
+        self,
+        candidate_id: str,
+        *,
+        project_id: str,
+        reviewer_user_id: str,
+        reason: str,
+        explicit_confirmation: bool,
+    ) -> QAResult:
+        """Promote only a review-required candidate to PASS with an append-only audit trail."""
+
+        normalized_reason = reason.strip()
+        if not explicit_confirmation:
+            raise ValueError("explicit human confirmation is required")
+        if not normalized_reason:
+            raise ValueError("human review reason is required")
+        if len(normalized_reason) > 2000:
+            raise ValueError("human review reason is too long")
+        with self.database.session() as session:
+            reviewer = session.get(User, reviewer_user_id)
+            if reviewer is None or reviewer.status != "ACTIVE":
+                raise HumanReviewNotAllowed("human review requires an active authenticated user")
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("candidate not found")
+            shot = session.get(Shot, candidate.shot_id)
+            if shot is None or shot.scene.episode.project_id != project_id:
+                raise LookupError("candidate does not belong to the review project")
+            if candidate.status != CandidateStatus.USER_REVIEW_REQUIRED.value:
+                raise HumanReviewNotAllowed("only candidates waiting for human review can be approved")
+            previous = session.get(QAResult, candidate.qa_result_id) if candidate.qa_result_id else None
+            if (
+                previous is None
+                or previous.decision != QADecision.USER_REVIEW_REQUIRED.value
+                or previous.hard_failures
+            ):
+                raise HumanReviewNotAllowed("candidate does not have an eligible review result")
+
+            review = QAResult(
+                id=new_id(),
+                candidate_id=candidate.id,
+                profile="HUMAN_REVIEW",
+                level_reached=max(previous.level_reached + 1, 2),
+                decision=QADecision.PASS.value,
+                overall_score=previous.overall_score,
+                character_score=previous.character_score,
+                scene_score=previous.scene_score,
+                composition_score=previous.composition_score,
+                action_score=previous.action_score,
+                camera_score=previous.camera_score,
+                lighting_score=previous.lighting_score,
+                narrative_score=previous.narrative_score,
+                hard_failures=[],
+                metrics_json={
+                    "review_type": "HUMAN_REVIEW",
+                    "source": "USER_EXPLICIT_CONFIRMATION",
+                    "reviewer_user_id": reviewer_user_id,
+                    "reason": normalized_reason,
+                    "explicit_confirmation": True,
+                    "prior_qa_result_id": previous.id,
+                    "prior_decision": previous.decision,
+                    "prior_metrics": previous.metrics_json,
+                },
+                summary=f"人工确认通过：{normalized_reason}",
+            )
+            session.add(review)
+            session.flush()
+            approved = session.execute(
+                update(GenerationCandidate)
+                .where(
+                    GenerationCandidate.id == candidate.id,
+                    GenerationCandidate.status == CandidateStatus.USER_REVIEW_REQUIRED.value,
+                    GenerationCandidate.qa_result_id == previous.id,
+                )
+                .values(
+                    qa_result_id=review.id,
+                    status=CandidateStatus.PASSED.value,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if affected_rows(approved) != 1:
+                raise HumanReviewNotAllowed("candidate review state changed before approval")
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=shot.id,
+                    decision_type="HUMAN_REVIEW",
+                    input_features={
+                        "candidate_id": candidate.id,
+                        "reviewer_user_id": reviewer_user_id,
+                        "reason": normalized_reason,
+                        "source": "USER_EXPLICIT_CONFIRMATION",
+                        "explicit_confirmation": True,
+                        "prior_qa_result_id": previous.id,
+                        "prior_decision": previous.decision,
+                    },
+                    selected_action="APPROVE_FOR_COMMIT",
+                    reason_codes=["EXPLICIT_HUMAN_CONFIRMATION"],
+                    model_version="human-review-v1",
+                    policy_version="human-review-v1",
+                )
+            )
+            session.flush()
+            return review
+
     @staticmethod
     def _file_metrics(asset: MediaAsset) -> tuple[dict[str, Any], list[str]]:
         failures: list[str] = []
@@ -168,12 +310,15 @@ class QAPipeline:
         evidence: dict[str, Any] | None = None,
         *,
         profile: str = "DIALOGUE",
+        defer_pass: bool = False,
     ) -> QAResult:
         evidence = evidence or {}
         with self.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate or not candidate.output_asset_id:
                 raise LookupError("candidate output is not available")
+            if candidate.status in TERMINAL_CANDIDATE_STATUSES:
+                raise LookupError("committed or rejected candidates cannot be revalidated")
             asset = session.get(MediaAsset, candidate.output_asset_id)
             file_metrics, hard_failures = self._file_metrics(asset)
             for gate in [
@@ -186,6 +331,8 @@ class QAPipeline:
                 if evidence.get(gate):
                     hard_failures.append(gate.upper())
             identity = analyze_identity_drift(evidence.get("identity_samples", []))
+            if identity.invalid_samples:
+                hard_failures.append("INVALID_IDENTITY_EVIDENCE")
             if identity.minimum_similarity is not None and identity.minimum_similarity < 0.62:
                 hard_failures.append("IDENTITY_MINIMUM_TOO_LOW")
             if (
@@ -200,14 +347,38 @@ class QAPipeline:
                 for key in ["character", "scene", "composition", "action", "camera", "lighting", "narrative"]
             }
             weights = self.profile_weights.get(profile, self.profile_weights["DIALOGUE"])
-            available = {key: float(value) for key, value in dimensions.items() if value is not None}
+            available: dict[str, float] = {}
+            invalid_dimensions: list[str] = []
+            for key, value in dimensions.items():
+                if value is None:
+                    continue
+                try:
+                    score = float(value)
+                except (TypeError, ValueError):
+                    invalid_dimensions.append(key)
+                    continue
+                if not math.isfinite(score) or not 0 <= score <= 1:
+                    invalid_dimensions.append(key)
+                    continue
+                available[key] = score
+            if invalid_dimensions:
+                hard_failures.append("INVALID_QA_SCORE")
+            required_dimensions = {key for key, weight in weights.items() if weight > 0}
+            missing_dimensions = sorted(required_dimensions - available.keys())
+            identity_not_applicable = bool(
+                evidence.get("identity_not_applicable") and evidence.get("_trusted_source") == "INTERNAL_QC"
+            )
+            identity_complete = identity_not_applicable or identity.usable_samples >= len(
+                self.adaptive_sample_positions()
+            )
+            evidence_complete = not missing_dimensions and identity_complete
             weight_sum = sum(weights[key] for key in available)
             overall = (
                 sum(available[key] * weights[key] for key in available) / weight_sum if weight_sum else 0.0
             )
             if hard_failures:
                 decision = QADecision.HARD_FAIL.value
-            elif not available and identity.usable_samples == 0:
+            elif not evidence_complete:
                 decision = QADecision.USER_REVIEW_REQUIRED.value
             elif overall >= 0.78 and (identity.minimum_similarity or 1.0) >= 0.72:
                 decision = QADecision.PASS.value
@@ -222,30 +393,54 @@ class QAPipeline:
                 QADecision.USER_REVIEW_REQUIRED.value: CandidateStatus.USER_REVIEW_REQUIRED.value,
             }
             result = QAResult(
+                id=new_id(),
                 candidate_id=candidate.id,
                 profile=profile,
                 level_reached=1,
                 decision=decision,
                 overall_score=round(overall, 4),
-                character_score=dimensions["character"],
-                scene_score=dimensions["scene"],
-                composition_score=dimensions["composition"],
-                action_score=dimensions["action"],
-                camera_score=dimensions["camera"],
-                lighting_score=dimensions["lighting"],
-                narrative_score=dimensions["narrative"],
+                character_score=available.get("character"),
+                scene_score=available.get("scene"),
+                composition_score=available.get("composition"),
+                action_score=available.get("action"),
+                camera_score=available.get("camera"),
+                lighting_score=available.get("lighting"),
+                narrative_score=available.get("narrative"),
                 hard_failures=sorted(set(hard_failures)),
                 metrics_json={
                     "level0": file_metrics,
                     "identity": asdict(identity),
                     "adaptive_samples": self.adaptive_sample_positions(),
+                    "evidence_source": evidence.get("_trusted_source", "UNTRUSTED_OR_NONE"),
+                    "evidence_complete": evidence_complete,
+                    "missing_dimensions": missing_dimensions,
+                    "identity_not_applicable": identity_not_applicable,
+                    "minimum_identity_samples": len(self.adaptive_sample_positions()),
                 },
-                summary=f"{decision}: {', '.join(sorted(set(hard_failures))) or 'weighted profile decision'}",
+                summary=(
+                    f"{decision}: {', '.join(sorted(set(hard_failures))) or 'weighted profile decision'}"
+                    if evidence_complete or hard_failures
+                    else f"{decision}: incomplete QA evidence"
+                ),
             )
             session.add(result)
-            session.flush()
-            candidate.qa_result_id = result.id
-            candidate.status = status_map[decision]
+            next_status = (
+                CandidateStatus.VALIDATING.value
+                if defer_pass and decision == QADecision.PASS.value
+                else status_map[decision]
+            )
+            updated = session.execute(
+                update(GenerationCandidate)
+                .where(
+                    GenerationCandidate.id == candidate.id,
+                    GenerationCandidate.status.not_in(TERMINAL_CANDIDATE_STATUSES),
+                )
+                .values(qa_result_id=result.id, status=next_status)
+                .execution_options(synchronize_session=False)
+            )
+            if affected_rows(updated) != 1:
+                raise LookupError("candidate became terminal before QA could be saved")
+            session.refresh(candidate)
             candidate.metadata_json = {**candidate.metadata_json, "qa_decision": decision}
             session.flush()
             return result

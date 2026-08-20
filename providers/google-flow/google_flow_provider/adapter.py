@@ -167,7 +167,7 @@ class GoogleFlowProvider(GenerationProvider):
         return ProviderSubmission(media_ids[0], data)
 
     async def upload_asset(self, asset: dict[str, Any], *, account_id: str, worker_id: str) -> str:
-        project_id = self._project_id(account_id)
+        project_id = str(asset.get("_provider_project_id") or self._project_id(account_id))
         if not project_id:
             raise ProviderError(
                 "Google Flow project ID is not configured",

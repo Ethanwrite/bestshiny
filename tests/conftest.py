@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import os
+
+os.environ.setdefault("DEPLOYMENT_ENVIRONMENT", "test")
 
 import pytest
 from platform_shared import Settings
@@ -18,6 +21,9 @@ def container(tmp_path):
         flow_project_id="flow-project-test",
         worker_heartbeat_timeout_seconds=1,
         browser_command_timeout_seconds=2,
+        auth_required=False,
+        platform_api_key="test-platform-key",
+        deployment_environment="test",
     )
     return build_container(settings)
 

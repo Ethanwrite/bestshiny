@@ -1,6 +1,6 @@
 ---
 name: prompt-compiler
-description: Convert an approved shot specification into concise provider-specific image or video generation prompts. Use after story, action, cinematography, asset references, and continuity are approved for Google Flow/Veo, Seedance, Wan, Grok, Omni, or similar generation models.
+description: Convert an approved video shot specification into concise internal video-generation instructions. Use only in Autopilot after story, action, cinematography, asset references, and continuity are approved; do not use for user-visible image prompt correction.
 ---
 
 # Prompt Compiler

@@ -1,8 +1,77 @@
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
+from model_registry_core import ModelCapabilityRegistry
 from platform_database import Database
-from production_domain.models import CostRecord, GenerationCandidate, GenerationJob, Shot
+from production_domain.models import CostRecord, GenerationCandidate, GenerationJob, Shot, new_id
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+
+@dataclass(frozen=True)
+class CreditEstimate:
+    provider_cost_usd: float
+    resolution_multiplier: float
+    reference_multiplier: float
+    service_multiplier: float
+    estimated_total_usd: float
+    credits: int
+    usd_per_credit: float
+
+
+class CreditPricingEngine:
+    """Transparent estimate: provider cost plus a bounded service/retry reserve."""
+
+    version = "credit-pricing-v1"
+
+    def __init__(
+        self,
+        registry: ModelCapabilityRegistry,
+        *,
+        usd_per_credit: float = 0.01,
+        service_multiplier: float = 1.20,
+    ):
+        self.registry = registry
+        self.usd_per_credit = usd_per_credit
+        self.service_multiplier = service_multiplier
+
+    def estimate(
+        self,
+        *,
+        provider: str,
+        model: str,
+        media_type: str,
+        duration: float = 1.0,
+        resolution: str = "720p",
+        reference_count: int = 0,
+    ) -> CreditEstimate:
+        profile = self.registry.get(model, provider) if media_type == "video" else None
+        if media_type == "video" and profile is None:
+            raise ValueError("selected video model is not registered for this provider")
+        if profile:
+            provider_cost = profile.cost.get("estimated_per_second", 0.0) * max(1.0, duration)
+        else:
+            # Provisional image rate is intentionally visible in the breakdown
+            # until an image model capability registry supplies a live rate.
+            provider_cost = 0.04
+        resolution_multiplier = {"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}.get(
+            resolution.lower(), 1.0
+        )
+        reference_multiplier = min(1.25, 1.0 + max(0, reference_count) * 0.04)
+        total = provider_cost * resolution_multiplier * reference_multiplier * self.service_multiplier
+        credits = max(1, math.ceil(total / self.usd_per_credit))
+        return CreditEstimate(
+            provider_cost_usd=round(provider_cost, 4),
+            resolution_multiplier=resolution_multiplier,
+            reference_multiplier=round(reference_multiplier, 4),
+            service_multiplier=self.service_multiplier,
+            estimated_total_usd=round(total, 4),
+            credits=credits,
+            usd_per_credit=self.usd_per_credit,
+        )
 
 
 class CostEngine:
@@ -24,18 +93,46 @@ class CostEngine:
             if not job:
                 raise LookupError("generation job not found")
             existing = session.scalar(select(CostRecord).where(CostRecord.generation_job_id == job.id))
-            record = existing or CostRecord(
-                project_id=job.project_id,
-                shot_id=job.shot_id,
-                candidate_id=job.candidate_id,
-                generation_job_id=job.id,
-                provider=job.provider,
-                model=job.model,
-                duration=float(job.request_json.get("duration") or 0),
-                resolution=resolution,
-            )
-            if not existing:
-                session.add(record)
+            if existing is None:
+                values = {
+                    "id": new_id(),
+                    "project_id": job.project_id,
+                    "shot_id": job.shot_id,
+                    "candidate_id": job.candidate_id,
+                    "generation_job_id": job.id,
+                    "provider": job.provider,
+                    "model": job.model,
+                    "duration": float(job.request_json.get("duration") or 0),
+                    "resolution": resolution,
+                    "credits": credits,
+                    "estimated_cost": estimated_cost,
+                    "actual_cost": actual_cost,
+                    "retry_cost": retry_cost,
+                    "accepted": False,
+                    "wasted": False,
+                }
+                dialect = session.get_bind().dialect.name
+                if dialect == "postgresql":
+                    postgres_statement = postgresql_insert(CostRecord).values(**values)
+                    postgres_statement = postgres_statement.on_conflict_do_nothing(
+                        index_elements=["generation_job_id"]
+                    )
+                    session.execute(postgres_statement)
+                elif dialect == "sqlite":
+                    sqlite_statement = sqlite_insert(CostRecord).values(**values)
+                    sqlite_statement = sqlite_statement.on_conflict_do_nothing(
+                        index_elements=["generation_job_id"]
+                    )
+                    session.execute(sqlite_statement)
+                else:
+                    session.add(CostRecord(**values))
+                    session.flush()
+                existing = session.scalar(select(CostRecord).where(CostRecord.generation_job_id == job.id))
+            record = existing
+            if record is None:
+                raise RuntimeError("cost record insert did not produce a durable row")
+            if record.project_id != job.project_id:
+                raise RuntimeError("cost record project does not match its generation job")
             record.credits = credits
             record.estimated_cost = estimated_cost
             record.actual_cost = actual_cost

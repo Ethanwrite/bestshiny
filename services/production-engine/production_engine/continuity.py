@@ -7,7 +7,8 @@ from typing import Protocol
 
 from media_service import MediaRegistry
 from platform_database import Database
-from production_domain.models import AssetType, ContinuityMode, MediaAsset, Shot
+from production_domain.models import AssetType, ContinuityMode, Episode, MediaAsset, Scene, Shot
+from sqlalchemy import select
 
 
 class FrameQualityDetector(Protocol):
@@ -84,6 +85,14 @@ class ShotContinuityService:
         self.media = media
         self.extractor = extractor or EndFrameExtractor()
 
+    @staticmethod
+    def _project_id(session, shot: Shot) -> str:  # type: ignore[no-untyped-def]
+        scene = session.get(Scene, shot.scene_id)
+        episode = session.get(Episode, scene.episode_id) if scene else None
+        if not episode:
+            raise LookupError("shot project could not be resolved")
+        return episode.project_id
+
     def attach_previous_end_frame(self, shot_id: str) -> str | None:
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
@@ -96,16 +105,26 @@ class ShotContinuityService:
             previous = session.get(Shot, shot.previous_shot_id)
             if not previous or not previous.end_frame_asset_id:
                 return None
+            project_id = self._project_id(session, shot)
+            if self._project_id(session, previous) != project_id:
+                raise LookupError("previous shot must belong to the same project")
+            end_frame = session.get(MediaAsset, previous.end_frame_asset_id)
+            if not end_frame or end_frame.project_id != project_id:
+                raise LookupError("previous end frame must belong to the shot project")
             shot.start_frame_asset_id = previous.end_frame_asset_id
             return shot.start_frame_asset_id
 
-    def extract_and_chain(self, shot_id: str, video_asset_id: str) -> MediaAsset:
+    def extract_end_frame(self, shot_id: str, video_asset_id: str) -> MediaAsset:
+        """Extract/register an end frame without mutating canonical shot state."""
+
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
             video = session.get(MediaAsset, video_asset_id)
             if not shot or not video or not video.local_path:
                 raise LookupError("shot or local output video is missing")
-            project_id = video.project_id
+            project_id = self._project_id(session, shot)
+            if video.project_id != project_id:
+                raise LookupError("output video must belong to the shot project")
             video_path = Path(video.local_path)
         with tempfile.TemporaryDirectory(prefix="end-frame-") as temp_dir:
             frame_path = self.extractor.extract(video_path, Path(temp_dir) / "end-frame.jpg")
@@ -124,17 +143,47 @@ class ShotContinuityService:
                         "safe_offset_seconds": self.extractor.safe_offset_seconds,
                     },
                 )
+        return end_frame
+
+    def chain_existing_end_frame(
+        self,
+        session,  # type: ignore[no-untyped-def]
+        shot: Shot,
+        video: MediaAsset,
+        end_frame: MediaAsset,
+    ) -> None:
+        """Apply continuity links inside the caller's canonical commit transaction."""
+
+        project_id = self._project_id(session, shot)
+        if video.project_id != project_id or end_frame.project_id != project_id:
+            raise LookupError("output video and end frame must belong to the shot project")
+        if end_frame.parent_asset_id != video.id or end_frame.shot_id != shot.id:
+            raise LookupError("end frame lineage does not match the committed shot output")
+        shot.output_video_asset_id = video.id
+        shot.end_frame_asset_id = end_frame.id
+        next_shot = session.scalar(
+            select(Shot)
+            .join(Scene, Shot.scene_id == Scene.id)
+            .join(Episode, Scene.episode_id == Episode.id)
+            .where(Shot.previous_shot_id == shot.id, Episode.project_id == project_id)
+            .order_by(Scene.sequence, Shot.sequence)
+        )
+        if next_shot and next_shot.continuity_mode in {
+            ContinuityMode.PREVIOUS_END_FRAME.value,
+            ContinuityMode.HARD_CONTINUITY.value,
+        }:
+            next_shot.start_frame_asset_id = end_frame.id
+
+    def extract_and_chain(self, shot_id: str, video_asset_id: str) -> MediaAsset:
+        """Compatibility helper for explicit continuity recovery outside candidate commit."""
+
+        end_frame = self.extract_end_frame(shot_id, video_asset_id)
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
-            shot.output_video_asset_id = video_asset_id
-            shot.end_frame_asset_id = end_frame.id
-            next_shot = (
-                session.query(Shot).filter(Shot.previous_shot_id == shot.id).order_by(Shot.sequence).first()
-            )
-            if next_shot and next_shot.continuity_mode in {
-                ContinuityMode.PREVIOUS_END_FRAME.value,
-                ContinuityMode.HARD_CONTINUITY.value,
-            }:
-                next_shot.start_frame_asset_id = end_frame.id
+            video = session.get(MediaAsset, video_asset_id)
+            current_end_frame = session.get(MediaAsset, end_frame.id)
+            if not shot or not video or not current_end_frame:
+                raise LookupError("shot output disappeared before continuity could be chained")
+            self.chain_existing_end_frame(session, shot, video, current_end_frame)
             session.flush()
             return session.get(MediaAsset, end_frame.id)

@@ -4,8 +4,10 @@ import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
+from asset_registry_core import VersionMediaInput
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
 from fastapi import (
@@ -16,15 +18,34 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from generation_gateway import IdempotencyConflict
+from generation_gateway import GenerationTargetError, IdempotencyConflict
 from generation_gateway.gateway import UnsafeRetry
-from platform_contracts import EpisodeCreate, GenerationRequest, ProjectCreate, SceneCreate, ShotCreate
+from image_prompt_core import ImagePromptCorrectRequest
+from media_service import ProviderMediaReconciliationConflict, ProviderMediaValidationFailed
+from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
+from model_registry_core import ShotRequirements
+from platform_contracts import (
+    EpisodeCreate,
+    GenerationRequest,
+    ProjectCreate,
+    ProviderMediaReconcileRequest,
+    ProviderMediaReconcileView,
+    SceneCreate,
+    ShotCreate,
+)
+from platform_shared import (
+    SAFE_INLINE_MEDIA_TYPES,
+    StorageLimitExceeded,
+    UnsafeMediaUpload,
+    validate_user_media_upload,
+)
 from production_domain.models import (
     BrowserWorker,
     Character,
@@ -33,8 +54,11 @@ from production_domain.models import (
     DecisionRecord,
     Episode,
     GenerationCandidate,
+    MediaAsset,
+    MediaProviderBinding,
     Project,
     PromptCompilation,
+    PromptRevision,
     ProviderAccount,
     ProviderCredential,
     ProviderProjectBinding,
@@ -46,10 +70,15 @@ from production_domain.models import (
     WorkerStatus,
     Workspace,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
 
+from .auth import AuthPrincipal, AuthService
 from .container import Container, build_container
+from .request_limits import UploadSizeLimitMiddleware
+from .runtime_routes import register_runtime_routes
+from .worker_auth import WorkerAuthenticationError, WorkerCredentialService, WorkerPrincipal
 
 
 class AccountCreate(BaseModel):
@@ -59,7 +88,7 @@ class AccountCreate(BaseModel):
     credits: int = Field(default=100, ge=0)
     image_capacity: int = Field(default=1, ge=0)
     video_capacity: int = Field(default=1, ge=0)
-    supported_models: list[str] = Field(default_factory=lambda: ["veo"])
+    supported_models: list[str] = Field(default_factory=lambda: ["flow-veo-3.1", "veo", "NARWHAL"])
     provider_project_id: str = ""
     credential: str = ""
 
@@ -89,6 +118,13 @@ class WorkerResponse(BaseModel):
     error: str | None = None
 
 
+class WorkerCredentialIssue(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=100)
+    provider: str = Field(min_length=1, max_length=80)
+    account_id: str = Field(min_length=1, max_length=36)
+    expires_in_seconds: int | None = Field(default=None, ge=60, le=30 * 24 * 60 * 60)
+
+
 class CharacterCreate(BaseModel):
     project_id: str
     name: str = Field(min_length=1, max_length=160)
@@ -105,7 +141,9 @@ class CharacterConfirm(BaseModel):
 
 class CandidateGenerate(BaseModel):
     idempotency_key: str = Field(min_length=3, max_length=250)
-    fallback_providers: list[str] = Field(default_factory=lambda: ["google_flow", "seedance", "veo_official"])
+    fallback_providers: list[str] = Field(
+        default_factory=lambda: ["google_flow", "seedance", "veo_official", "kling", "grok"]
+    )
     character_ids: list[str] = Field(default_factory=list)
     reference_asset_ids: list[str] = Field(default_factory=list)
     estimated_cost: float = Field(default=0.0, ge=0)
@@ -113,6 +151,13 @@ class CandidateGenerate(BaseModel):
 
 class CandidateValidate(BaseModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanReviewApprove(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=2000)
+    explicit_confirmation: bool = Field(default=False, strict=True)
 
 
 class PromptRefine(BaseModel):
@@ -160,6 +205,7 @@ def _candidate_view(candidate, qa=None, costs: list | None = None) -> dict[str, 
         "qa": (
             {
                 "id": qa.id,
+                "profile": qa.profile,
                 "decision": qa.decision,
                 "overall_score": qa.overall_score,
                 "character_score": qa.character_score,
@@ -167,6 +213,15 @@ def _candidate_view(candidate, qa=None, costs: list | None = None) -> dict[str, 
                 "action_score": qa.action_score,
                 "summary": qa.summary,
                 "hard_failures": qa.hard_failures,
+                "human_review": (
+                    {
+                        "reviewer_user_id": qa.metrics_json.get("reviewer_user_id"),
+                        "reason": qa.metrics_json.get("reason"),
+                        "source": qa.metrics_json.get("source"),
+                    }
+                    if qa.profile == "HUMAN_REVIEW"
+                    else None
+                ),
             }
             if qa
             else None
@@ -177,6 +232,16 @@ def _candidate_view(candidate, qa=None, costs: list | None = None) -> dict[str, 
 
 def create_app(container: Container | None = None) -> FastAPI:
     container = container or build_container()
+    auth = AuthService(
+        container.database,
+        session_ttl_days=container.settings.auth_session_ttl_days,
+        auth_required=container.settings.auth_required,
+    )
+    worker_credentials = WorkerCredentialService(
+        container.database,
+        default_ttl_seconds=container.settings.worker_credential_ttl_seconds,
+        socket_ticket_ttl_seconds=container.settings.worker_socket_ticket_ttl_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -194,20 +259,60 @@ def create_app(container: Container | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(
+        UploadSizeLimitMiddleware,
+        max_file_bytes=container.settings.max_upload_bytes,
+        multipart_overhead_bytes=container.settings.max_upload_request_overhead_bytes,
+    )
 
     def verify_api_key(authorization: str | None = Header(default=None)) -> None:
         expected = container.settings.platform_api_key
-        if expected:
-            token = authorization.removeprefix("Bearer ").strip() if authorization else ""
-            if not secrets.compare_digest(token, expected):
-                raise HTTPException(401, "invalid API key")
+        if not expected:
+            raise HTTPException(503, "PLATFORM_API_KEY is required for internal/admin routes")
+        token = authorization.removeprefix("Bearer ").strip() if authorization else ""
+        if not secrets.compare_digest(token, expected):
+            raise HTTPException(401, "invalid API key")
 
-    def ensure_workspace(session, requested_id: str | None = None):  # type: ignore[no-untyped-def]
+    def require_worker_credential(
+        authorization: str | None = Header(default=None),
+    ) -> WorkerPrincipal:
+        try:
+            return worker_credentials.authenticate_authorization(authorization)
+        except WorkerAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+
+    def require_worker_binding(
+        principal: WorkerPrincipal,
+        *,
+        worker_id: str,
+        provider: str | None = None,
+        account_id: str | None = None,
+    ) -> None:
+        if principal.worker_id != worker_id:
+            raise HTTPException(403, "worker credential is bound to another worker")
+        if provider is not None and principal.provider != provider:
+            raise HTTPException(403, "worker credential is bound to another provider")
+        if account_id is not None and principal.account_id != account_id:
+            raise HTTPException(403, "worker credential is bound to another account")
+
+    def ensure_workspace(
+        session,
+        principal: AuthPrincipal,
+        requested_id: str | None = None,
+    ):  # type: ignore[no-untyped-def]
         if requested_id:
             workspace = session.get(Workspace, requested_id)
             if not workspace:
                 raise HTTPException(404, "workspace not found")
+            auth.require_workspace(principal, workspace.id, write=True)
             return workspace
+        authorized_workspace_id = auth.first_workspace_id(principal, write=True)
+        if authorized_workspace_id:
+            workspace = session.get(Workspace, authorized_workspace_id)
+            if workspace:
+                return workspace
+        if not principal.development_bypass:
+            raise HTTPException(403, "账号尚未加入可用的工作空间")
         workspace = session.scalar(select(Workspace).order_by(Workspace.created_at))
         if workspace:
             return workspace
@@ -225,10 +330,13 @@ def create_app(container: Container | None = None) -> FastAPI:
     async def health() -> dict[str, Any]:
         return {"ok": True, "service": "ai-video-platform", "providers": container.providers.list()}
 
-    @app.post("/v1/projects", dependencies=[Depends(verify_api_key)])
-    def create_project(body: ProjectCreate):
+    @app.post("/v1/projects")
+    def create_project(
+        body: ProjectCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
-            workspace = ensure_workspace(session, body.workspace_id)
+            workspace = ensure_workspace(session, principal, body.workspace_id)
             item = Project(
                 workspace_id=workspace.id,
                 name=body.title,
@@ -242,9 +350,12 @@ def create_app(container: Container | None = None) -> FastAPI:
             session.flush()
             return {"id": item.id, "title": item.title, "status": item.status}
 
-    @app.get("/v1/projects", dependencies=[Depends(verify_api_key)])
-    def list_projects():
+    @app.get("/v1/projects")
+    def list_projects(principal: AuthPrincipal = Depends(auth.current_user)):
         with container.database.session() as session:
+            query = select(Project).order_by(Project.updated_at.desc())
+            if not principal.development_bypass:
+                query = query.where(Project.workspace_id.in_(principal.workspace_roles))
             return [
                 {
                     "id": project.id,
@@ -255,11 +366,15 @@ def create_app(container: Container | None = None) -> FastAPI:
                     "default_provider": project.default_provider,
                     "default_aspect_ratio": project.default_aspect_ratio,
                 }
-                for project in session.scalars(select(Project).order_by(Project.updated_at.desc()))
+                for project in session.scalars(query)
             ]
 
-    @app.get("/v1/projects/{project_id}", dependencies=[Depends(verify_api_key)])
-    def get_project(project_id: str):
+    @app.get("/v1/projects/{project_id}")
+    def get_project(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
         with container.database.session() as session:
             project = session.get(Project, project_id)
             if not project:
@@ -291,8 +406,12 @@ def create_app(container: Container | None = None) -> FastAPI:
                 ],
             }
 
-    @app.post("/v1/episodes", dependencies=[Depends(verify_api_key)])
-    def create_episode(body: EpisodeCreate):
+    @app.post("/v1/episodes")
+    def create_episode(
+        body: EpisodeCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.project_id, write=True)
         with container.database.session() as session:
             if not session.get(Project, body.project_id):
                 raise HTTPException(404, "project not found")
@@ -301,14 +420,26 @@ def create_app(container: Container | None = None) -> FastAPI:
             session.flush()
             return {"id": item.id, "project_id": item.project_id, "episode_number": item.episode_number}
 
-    @app.post("/v1/projects/{project_id}/episodes", dependencies=[Depends(verify_api_key)])
-    def create_project_episode(project_id: str, body: EpisodeCreate):
+    @app.post("/v1/projects/{project_id}/episodes")
+    def create_project_episode(
+        project_id: str,
+        body: EpisodeCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         if body.project_id != project_id:
             raise HTTPException(409, "project ID in path and body differ")
-        return create_episode(body)
+        return create_episode(body, principal)
 
-    @app.post("/v1/episodes/{episode_id}/compile", dependencies=[Depends(verify_api_key)])
-    def compile_episode(episode_id: str):
+    @app.post("/v1/episodes/{episode_id}/compile")
+    def compile_episode(
+        episode_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            episode = session.get(Episode, episode_id)
+            if not episode:
+                raise HTTPException(404, "episode not found")
+            auth.require_project(principal, episode.project_id, write=True)
         try:
             result = container.orchestrator.compile_episode(episode_id)
         except LookupError as exc:
@@ -317,12 +448,16 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         return {"episode_id": episode_id, "stage": result.stage, **result.detail}
 
-    @app.get("/v1/episodes/{episode_id}", dependencies=[Depends(verify_api_key)])
-    def get_episode(episode_id: str):
+    @app.get("/v1/episodes/{episode_id}")
+    def get_episode(
+        episode_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
             episode = session.get(Episode, episode_id)
             if not episode:
                 raise HTTPException(404, "episode not found")
+            auth.require_project(principal, episode.project_id)
             scenes = list(
                 session.scalars(select(Scene).where(Scene.episode_id == episode.id).order_by(Scene.sequence))
             )
@@ -361,11 +496,16 @@ def create_app(container: Container | None = None) -> FastAPI:
                 ],
             }
 
-    @app.post("/v1/scenes", dependencies=[Depends(verify_api_key)])
-    def create_scene(body: SceneCreate):
+    @app.post("/v1/scenes")
+    def create_scene(
+        body: SceneCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
-            if not session.get(Episode, body.episode_id):
+            episode = session.get(Episode, body.episode_id)
+            if not episode:
                 raise HTTPException(404, "episode not found")
+            auth.require_project(principal, episode.project_id, write=True)
             values = body.model_dump()
             values["scene_description"] = body.description
             item = Scene(**values)
@@ -373,11 +513,25 @@ def create_app(container: Container | None = None) -> FastAPI:
             session.flush()
             return {"id": item.id, "episode_id": item.episode_id, "sequence": item.sequence}
 
-    @app.post("/v1/shots", dependencies=[Depends(verify_api_key)])
-    def create_shot(body: ShotCreate):
+    @app.post("/v1/shots")
+    def create_shot(
+        body: ShotCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
-            if not session.get(Scene, body.scene_id):
+            scene = session.get(Scene, body.scene_id)
+            if not scene:
                 raise HTTPException(404, "scene not found")
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+            if body.previous_shot_id:
+                previous = session.get(Shot, body.previous_shot_id)
+                if not previous:
+                    raise HTTPException(404, "previous shot not found")
+                previous_scene = session.get(Scene, previous.scene_id)
+                previous_episode = session.get(Episode, previous_scene.episode_id) if previous_scene else None
+                if not previous_episode or previous_episode.project_id != episode.project_id:
+                    raise HTTPException(422, "previous shot must belong to the same project")
             values = body.model_dump()
             values["user_prompt"] = body.prompt
             values["compiled_prompt"] = body.prompt
@@ -394,12 +548,18 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "continuity_mode": item.continuity_mode,
             }
 
-    @app.get("/v1/shots/{shot_id}", dependencies=[Depends(verify_api_key)])
-    def get_shot(shot_id: str):
+    @app.get("/v1/shots/{shot_id}")
+    def get_shot(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
             shot = session.get(Shot, shot_id)
             if not shot:
                 raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id)
             input_state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             output_state = session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
             return {
@@ -420,8 +580,30 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "committed_candidate_id": shot.committed_candidate_id,
             }
 
-    @app.post("/v1/shots/{shot_id}/generate", dependencies=[Depends(verify_api_key)], status_code=202)
-    def generate_shot(shot_id: str, body: CandidateGenerate):
+    @app.post("/v1/shots/{shot_id}/generate", status_code=202)
+    def generate_shot(
+        shot_id: str,
+        body: CandidateGenerate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+            if body.character_ids:
+                owned_character_ids = set(
+                    session.scalars(
+                        select(Character.id).where(
+                            Character.id.in_(body.character_ids),
+                            Character.project_id == episode.project_id,
+                        )
+                    )
+                )
+                if owned_character_ids != set(body.character_ids):
+                    raise HTTPException(404, "character not found in shot project")
         try:
             bindings = [container.characters.binding(character_id) for character_id in body.character_ids]
             candidate, replayed = container.candidates.create_candidate(
@@ -438,11 +620,18 @@ def create_app(container: Container | None = None) -> FastAPI:
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.get("/v1/shots/{shot_id}/candidates", dependencies=[Depends(verify_api_key)])
-    def list_candidates(shot_id: str):
+    @app.get("/v1/shots/{shot_id}/candidates")
+    def list_candidates(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
-            if not session.get(Shot, shot_id):
+            shot = session.get(Shot, shot_id)
+            if not shot:
                 raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id)
             candidates = list(
                 session.scalars(
                     select(GenerationCandidate)
@@ -459,33 +648,117 @@ def create_app(container: Container | None = None) -> FastAPI:
                 for candidate in candidates
             ]
 
-    @app.post(
-        "/v1/shots/{shot_id}/candidates/{candidate_id}/validate", dependencies=[Depends(verify_api_key)]
-    )
-    def validate_candidate(shot_id: str, candidate_id: str, body: CandidateValidate):
+    @app.post("/v1/shots/{shot_id}/candidates/{candidate_id}/validate")
+    def validate_candidate(
+        shot_id: str,
+        candidate_id: str,
+        body: CandidateValidate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate or candidate.shot_id != shot_id:
                 raise HTTPException(404, "candidate not found for shot")
+            shot = session.get(Shot, shot_id)
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+        if body.evidence:
+            raise HTTPException(403, "质量评分只能由受信任的内部评审服务写入")
         try:
-            result = container.candidates.sync_candidate(candidate_id, body.evidence)
+            result = container.candidates.sync_candidate(candidate_id)
             return _candidate_view(result)
         except LookupError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.post("/v1/shots/{shot_id}/candidates/{candidate_id}/commit", dependencies=[Depends(verify_api_key)])
-    def commit_candidate(shot_id: str, candidate_id: str):
+    @app.post(
+        "/internal/shots/{shot_id}/candidates/{candidate_id}/validate",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def internal_validate_candidate(
+        shot_id: str,
+        candidate_id: str,
+        body: CandidateValidate,
+    ):
         with container.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate or candidate.shot_id != shot_id:
                 raise HTTPException(404, "candidate not found for shot")
         try:
-            return _candidate_view(container.candidates.commit(candidate_id))
+            trusted_evidence = {**body.evidence, "_trusted_source": "INTERNAL_QC"}
+            result = container.candidates.sync_candidate(candidate_id, trusted_evidence)
+            return _candidate_view(result)
+        except LookupError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/v1/shots/{shot_id}/candidates/{candidate_id}/human-review")
+    def approve_candidate_after_human_review(
+        shot_id: str,
+        candidate_id: str,
+        body: HumanReviewApprove,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        if principal.development_bypass:
+            raise HTTPException(403, "人工复核必须由真实登录用户完成")
+        with container.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if not candidate or candidate.shot_id != shot_id:
+                raise HTTPException(404, "candidate not found for shot")
+            shot = session.get(Shot, shot_id)
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            project_id = episode.project_id
+            auth.require_project(principal, project_id, write=True)
+        try:
+            review = container.qa.approve_human_review(
+                candidate_id,
+                project_id=project_id,
+                reviewer_user_id=principal.user_id,
+                reason=body.reason,
+                explicit_confirmation=body.explicit_confirmation,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except HumanReviewNotAllowed as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        with container.database.session() as session:
+            approved = session.get(GenerationCandidate, candidate_id)
+            if approved is None:
+                raise HTTPException(404, "candidate not found")
+            return _candidate_view(approved, session.get(QAResult, review.id))
+
+    @app.post("/v1/shots/{shot_id}/candidates/{candidate_id}/commit")
+    def commit_candidate(
+        shot_id: str,
+        candidate_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if not candidate or candidate.shot_id != shot_id:
+                raise HTTPException(404, "candidate not found for shot")
+            shot = session.get(Shot, shot_id)
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+        try:
+            return _candidate_view(
+                container.candidates.commit(
+                    candidate_id,
+                    accepted_by=(None if principal.development_bypass else principal.user_id),
+                )
+            )
         except CandidateNotCommittable as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.post("/v1/characters", dependencies=[Depends(verify_api_key)])
-    def create_character(body: CharacterCreate):
+    @app.post("/v1/characters")
+    def create_character(
+        body: CharacterCreate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.project_id, write=True)
         with container.database.session() as session:
             if not session.get(Project, body.project_id):
                 raise HTTPException(404, "project not found")
@@ -494,8 +767,12 @@ def create_app(container: Container | None = None) -> FastAPI:
         )
         return {"id": character.id, "name": character.name, "status": character.status}
 
-    @app.get("/v1/projects/{project_id}/characters", dependencies=[Depends(verify_api_key)])
-    def list_characters(project_id: str):
+    @app.get("/v1/projects/{project_id}/characters")
+    def list_characters(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
         with container.database.session() as session:
             if not session.get(Project, project_id):
                 raise HTTPException(404, "project not found")
@@ -533,8 +810,17 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
             return result
 
-    @app.post("/v1/characters/{character_id}/confirm-identity", dependencies=[Depends(verify_api_key)])
-    def confirm_character_identity(character_id: str, body: CharacterConfirm):
+    @app.post("/v1/characters/{character_id}/confirm-identity")
+    def confirm_character_identity(
+        character_id: str,
+        body: CharacterConfirm,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            character = session.get(Character, character_id)
+            if not character:
+                raise HTTPException(404, "character not found")
+            auth.require_project(principal, character.project_id, write=True)
         try:
             identity = container.characters.confirm_identity(
                 character_id,
@@ -543,45 +829,174 @@ def create_app(container: Container | None = None) -> FastAPI:
                 hair_signature=body.hair_signature,
                 costume_signature=body.costume_signature,
             )
+            with container.database.session() as session:
+                character = session.get(Character, character_id)
+                master = session.get(MediaAsset, body.master_asset_id)
+                project_id = character.project_id
+                character_name = character.name
+            logical = next(
+                (
+                    item
+                    for item in container.asset_registry.list(project_id, asset_type="CHARACTER")
+                    if item.canonical_metadata.get("character_id") == character_id
+                ),
+                None,
+            )
+            if logical is None:
+                logical = container.asset_registry.create(
+                    project_id,
+                    "CHARACTER",
+                    character_name,
+                    canonical_metadata={"character_id": character_id},
+                    created_by_user_id=(None if principal.development_bypass else principal.user_id),
+                )
+            asset_version = container.asset_registry.add_version(
+                logical.id,
+                primary_media_asset_id=body.master_asset_id,
+                references=[
+                    VersionMediaInput(media_asset_id=media_id, role=role)
+                    for role, media_id in body.references.items()
+                    if media_id
+                ],
+                label=f"Identity v{identity.version}",
+                source="CHARACTER_IDENTITY_CONFIRMATION",
+                metadata={
+                    "character_identity_version_id": identity.id,
+                    "hair_signature": body.hair_signature,
+                    "costume_signature": body.costume_signature,
+                },
+                created_by_user_id=(None if principal.development_bypass else principal.user_id),
+            )
+            container.asset_registry.promote(
+                logical.id,
+                asset_version.id,
+                promoted_by_user_id=(None if principal.development_bypass else principal.user_id),
+                reason="explicit character identity confirmation",
+            )
+            memory_id = None
+            if container.feature_flags.enabled("voyage_memory", project_id=project_id):
+                memory = container.memory.index(
+                    ShotMemoryInput(
+                        project_id=project_id,
+                        layer=MemoryLayer.CANONICAL,
+                        memory_type="CHARACTER_ASSET",
+                        content=MultimodalContent(
+                            text=(
+                                f"Canonical character {character_name}; hair {body.hair_signature}; "
+                                f"wardrobe {body.costume_signature}"
+                            ),
+                            image_urls=(
+                                [master.public_url]
+                                if master and master.public_url and master.public_url.startswith("https://")
+                                else []
+                            ),
+                        ),
+                        entity_ids=[logical.id, character_id],
+                        asset_version_ids=[asset_version.id],
+                        canonical=True,
+                    )
+                )
+                memory_id = memory.id
             return {
                 "id": identity.id,
                 "character_id": identity.character_id,
                 "version": identity.version,
                 "status": identity.status,
                 "master_asset_id": identity.master_asset_id,
+                "logical_asset_id": logical.id,
+                "logical_asset_version_id": asset_version.id,
+                "memory_id": memory_id,
             }
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.post("/v1/prompts/refine", dependencies=[Depends(verify_api_key)])
-    def refine_prompt(body: PromptRefine):
+    @app.post("/v1/prompts/refine")
+    def refine_prompt(
+        body: PromptRefine,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.project_id, write=True)
         with container.database.session() as session:
             if not session.get(Project, body.project_id):
                 raise HTTPException(404, "project not found")
-        result = container.prompts.refine(body.prompt)
+        result = container.image_prompts.correct(ImagePromptCorrectRequest(prompt=body.prompt))
         with container.database.session() as session:
             compilation = PromptCompilation(
                 project_id=body.project_id,
-                user_prompt=result.original,
-                compiled_prompt=result.refined,
-                compiler_version=container.prompts.version,
-                skill_versions={"prompt-compiler": "v1"},
-                diff_json={"changes": result.changes, "preserved_facts": result.preserved_facts},
+                user_prompt=result.original_prompt,
+                compiled_prompt=result.corrected_prompt,
+                compiler_version=result.corrector_version,
+                skill_versions={"image-prompt-corrector": "v1"},
+                diff_json={
+                    "changes": [change.model_dump() for change in result.changes],
+                    "preserved_facts": result.preserved_constraints,
+                },
             )
             session.add(compilation)
             session.flush()
             return {
                 "id": compilation.id,
-                "original": result.original,
-                "refined": result.refined,
-                "changes": result.changes,
-                "preserved_facts": result.preserved_facts,
+                "original": result.original_prompt,
+                "refined": result.corrected_prompt,
+                "changes": [change.model_dump() for change in result.changes],
+                "preserved_facts": result.preserved_constraints,
             }
 
-    @app.post("/v1/shots/{shot_id}/continuity", dependencies=[Depends(verify_api_key)])
-    def evaluate_continuity(shot_id: str, body: ContinuityEvaluate):
+    @app.post("/api/prompt/correct")
+    def correct_image_prompt(
+        body: ImagePromptCorrectRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),
+        project_id: str | None = None,
+    ):
+        if project_id:
+            auth.require_project(principal, project_id, write=True)
+        if body.reference_assets:
+            with container.database.session() as session:
+                references = list(
+                    session.scalars(select(MediaAsset).where(MediaAsset.id.in_(body.reference_assets)))
+                )
+                if len({item.id for item in references}) != len(set(body.reference_assets)):
+                    raise HTTPException(404, "reference asset not found")
+                for reference in references:
+                    if project_id and reference.project_id != project_id:
+                        raise HTTPException(409, "reference asset does not belong to project")
+                    auth.require_project(principal, reference.project_id)
+        result = container.image_prompts.correct(body)
+        with container.database.session() as session:
+            revision = PromptRevision(
+                project_id=project_id,
+                user_id=None if principal.development_bypass else principal.user_id,
+                mode="IMAGE",
+                original_prompt=result.original_prompt,
+                corrected_prompt=result.corrected_prompt,
+                detected_type=result.detected_type,
+                reference_asset_ids=body.reference_assets,
+                preserved_constraints=result.preserved_constraints,
+                editable_variables=result.editable_variables,
+                changes_json=[change.model_dump() for change in result.changes],
+                corrector_version=result.corrector_version,
+            )
+            session.add(revision)
+            session.flush()
+            return {"revision_id": revision.id, **result.model_dump()}
+
+    @app.post("/v1/shots/{shot_id}/continuity")
+    def evaluate_continuity(
+        shot_id: str,
+        body: ContinuityEvaluate,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.project_id, write=True)
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            if episode.project_id != body.project_id:
+                raise HTTPException(409, "shot does not belong to project")
         try:
             risk = ContinuityRiskVector(**body.risk)
             decision = container.continuity_decision.decide(risk, project_id=body.project_id, shot_id=shot_id)
@@ -595,11 +1010,18 @@ def create_app(container: Container | None = None) -> FastAPI:
         except TypeError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.get("/v1/shots/{shot_id}/decisions", dependencies=[Depends(verify_api_key)])
-    def shot_decisions(shot_id: str):
+    @app.get("/v1/shots/{shot_id}/decisions")
+    def shot_decisions(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         with container.database.session() as session:
-            if not session.get(Shot, shot_id):
+            shot = session.get(Shot, shot_id)
+            if not shot:
                 raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id)
             return [
                 {
                     "decision_type": record.decision_type,
@@ -617,8 +1039,18 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
             ]
 
-    @app.get("/v1/shots/{shot_id}/cost", dependencies=[Depends(verify_api_key)])
-    def shot_cost(shot_id: str):
+    @app.get("/v1/shots/{shot_id}/cost")
+    def shot_cost(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id)
         try:
             return container.cost.shot_cost(shot_id)
         except LookupError as exc:
@@ -710,14 +1142,49 @@ def create_app(container: Container | None = None) -> FastAPI:
                 for item in session.scalars(select(ProviderAccount).order_by(ProviderAccount.created_at))
             ]
 
-    @app.post("/v1/assets", dependencies=[Depends(verify_api_key)])
+    @app.post(
+        "/internal/provider-media-bindings/{binding_id}/reconcile",
+        dependencies=[Depends(verify_api_key)],
+        response_model=ProviderMediaReconcileView,
+    )
+    async def reconcile_provider_media_binding(
+        binding_id: str,
+        body: ProviderMediaReconcileRequest,
+    ) -> ProviderMediaReconcileView:
+        with container.database.session() as session:
+            binding = session.get(MediaProviderBinding, binding_id)
+            if binding is None:
+                raise HTTPException(404, "provider media binding not found")
+            provider_name = binding.provider
+        try:
+            provider = container.providers.get(provider_name)
+            result = await container.media.reconcile_provider_media(
+                binding_id,
+                provider,
+                action=body.action,
+                provider_media_id=body.provider_media_id,
+                reason=body.reason,
+                explicit_confirmation=body.explicit_confirmation,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (ProviderMediaReconciliationConflict, ProviderMediaValidationFailed) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return ProviderMediaReconcileView(**asdict(result))
+
+    @app.post("/v1/assets")
     async def upload_asset(
+        principal: AuthPrincipal = Depends(auth.current_user),
         project_id: str = Form(...),
         asset_type: str = Form(...),
         file: UploadFile = File(...),
         shot_id: str | None = Form(default=None),
         character_id: str | None = Form(default=None),
     ):
+        asset_type = asset_type.strip().upper()
+        auth.require_project(principal, project_id, write=True)
         with container.database.session() as session:
             if not session.get(Project, project_id):
                 raise HTTPException(404, "project not found")
@@ -725,15 +1192,40 @@ def create_app(container: Container | None = None) -> FastAPI:
                 character = session.get(Character, character_id)
                 if not character or character.project_id != project_id:
                     raise HTTPException(404, "character not found in project")
-        asset, reused = container.media.register(
-            project_id,
-            asset_type,
-            file.file,
-            filename=file.filename or "asset.bin",
-            mime_type=file.content_type,
-            shot_id=shot_id,
-            character_id=character_id,
-        )
+            if shot_id:
+                shot = session.get(Shot, shot_id)
+                if not shot:
+                    raise HTTPException(404, "shot not found")
+                scene = session.get(Scene, shot.scene_id)
+                episode = session.get(Episode, scene.episode_id)
+                if episode.project_id != project_id:
+                    raise HTTPException(409, "shot does not belong to project")
+        try:
+            validated = validate_user_media_upload(
+                file.file,
+                filename=file.filename or "asset.bin",
+                declared_mime=file.content_type,
+                asset_type=asset_type,
+                max_bytes=getattr(
+                    container.storage,
+                    "max_object_bytes",
+                    container.settings.max_upload_bytes,
+                ),
+                max_image_pixels=container.settings.max_image_pixels,
+            )
+            asset, reused = container.media.register(
+                project_id,
+                asset_type,
+                file.file,
+                filename=file.filename or "asset.bin",
+                mime_type=validated.mime_type,
+                shot_id=shot_id,
+                character_id=character_id,
+            )
+        except StorageLimitExceeded as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except UnsafeMediaUpload as exc:
+            raise HTTPException(415, str(exc)) from exc
         return {
             "id": asset.id,
             "sha256": asset.sha256,
@@ -743,16 +1235,21 @@ def create_app(container: Container | None = None) -> FastAPI:
             "reused": reused,
         }
 
-    @app.get("/v1/assets/{asset_id}", dependencies=[Depends(verify_api_key)])
-    def get_asset(asset_id: str):
+    @app.get("/v1/assets/{asset_id}")
+    def get_asset(
+        asset_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         asset = container.media.get(asset_id)
         if not asset:
             raise HTTPException(404, "asset not found")
+        auth.require_project(principal, asset.project_id)
         return {
             "id": asset.id,
             "project_id": asset.project_id,
             "asset_type": asset.asset_type,
             "sha256": asset.sha256,
+            "storage_key": asset.storage_key,
             "mime_type": asset.mime_type,
             "width": asset.width,
             "height": asset.height,
@@ -763,30 +1260,82 @@ def create_app(container: Container | None = None) -> FastAPI:
         }
 
     @app.get("/v1/storage/{storage_key:path}")
-    def serve_storage(storage_key: str):
+    def serve_storage(
+        storage_key: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        authorized_asset: MediaAsset | None = None
+        with container.database.session() as session:
+            assets = list(session.scalars(select(MediaAsset).where(MediaAsset.storage_key == storage_key)))
+            if not assets:
+                raise HTTPException(404, "stored object not found")
+            authorized = principal.development_bypass
+            for asset in assets:
+                try:
+                    auth.require_project(principal, asset.project_id)
+                except HTTPException as exc:
+                    if exc.status_code not in {403, 404}:
+                        raise
+                else:
+                    authorized = True
+                    authorized_asset = asset
+                    break
+            if not authorized:
+                raise HTTPException(403, "你无权访问该素材")
         try:
             path = container.storage.path_for(storage_key)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if not path.is_file():
             raise HTTPException(404, "stored object not found")
-        return FileResponse(path)
+        assert authorized_asset is not None
+        media_type = (authorized_asset.mime_type or "application/octet-stream").lower()
+        disposition = "inline" if media_type in SAFE_INLINE_MEDIA_TYPES else "attachment"
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=Path(storage_key).name,
+            content_disposition_type=disposition,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cross-Origin-Resource-Policy": "same-origin",
+            },
+        )
 
-    @app.post("/v1/generations", dependencies=[Depends(verify_api_key)], status_code=202)
-    def create_generation(body: GenerationRequest):
+    @app.post("/v1/generations", status_code=202)
+    def create_generation(
+        body: GenerationRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.project_id, write=True)
         try:
-            job, replayed = container.gateway.create(body)
+            mode = str(
+                body.metadata.get("mode") or ("AUTOPILOT_COMPAT" if body.shot_id else "PASSENGER_SEAT")
+            )
+            job, replayed = container.visual_runtime.submit(
+                body,
+                mode=mode,
+                prompt_version="user-authored-v1" if not body.shot_id else "legacy-shot-v1",
+            )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except GenerationTargetError as exc:
+            raise HTTPException(400, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {**_job_view(job), "replayed": replayed}
 
-    @app.get("/v1/generations/{job_id}", dependencies=[Depends(verify_api_key)])
-    def get_generation(job_id: str):
+    @app.get("/v1/generations/{job_id}")
+    def get_generation(
+        job_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         job = container.gateway.get(job_id)
         if not job:
             raise HTTPException(404, "generation not found")
+        auth.require_project(principal, job.project_id)
         return {
             **_job_view(job),
             "events": [
@@ -795,8 +1344,15 @@ def create_app(container: Container | None = None) -> FastAPI:
             ],
         }
 
-    @app.post("/v1/generations/{job_id}/retry", dependencies=[Depends(verify_api_key)])
-    def retry_generation(job_id: str):
+    @app.post("/v1/generations/{job_id}/retry")
+    def retry_generation(
+        job_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        job = container.gateway.get(job_id)
+        if not job:
+            raise HTTPException(404, "generation not found")
+        auth.require_project(principal, job.project_id, write=True)
         try:
             return _job_view(container.gateway.retry(job_id))
         except LookupError as exc:
@@ -804,22 +1360,36 @@ def create_app(container: Container | None = None) -> FastAPI:
         except UnsafeRetry as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    @app.post("/v1/generations/{job_id}/cancel", dependencies=[Depends(verify_api_key)])
-    def cancel_generation(job_id: str):
+    @app.post("/v1/generations/{job_id}/cancel")
+    async def cancel_generation(
+        job_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        job = container.gateway.get(job_id)
+        if not job:
+            raise HTTPException(404, "generation not found")
+        auth.require_project(principal, job.project_id, write=True)
         try:
-            return _job_view(container.gateway.cancel(job_id))
+            return _job_view(await container.gateway.cancel(job_id))
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    @app.post("/v1/generations/{job_id}/reconcile", dependencies=[Depends(verify_api_key)])
-    def reconcile_generation(job_id: str):
+    @app.post("/v1/generations/{job_id}/reconcile")
+    def reconcile_generation(
+        job_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        job = container.gateway.get(job_id)
+        if not job:
+            raise HTTPException(404, "generation not found")
+        auth.require_project(principal, job.project_id, write=True)
         try:
             return _job_view(container.gateway.reconcile(job_id))
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    @app.get("/v1/providers", dependencies=[Depends(verify_api_key)])
-    async def list_providers():
+    @app.get("/v1/providers")
+    async def list_providers(_principal: AuthPrincipal = Depends(auth.current_user)):
         result = []
         for name in container.providers.list():
             health = await container.providers.get(name).health()
@@ -827,28 +1397,51 @@ def create_app(container: Container | None = None) -> FastAPI:
             result.append(
                 {
                     "name": name,
+                    "configured": container.providers.is_configured(name),
                     "healthy": health.ok,
                     "detail": health.detail,
                     "capabilities": asdict(capabilities) if capabilities else {},
-                    "performance": container.cost.provider_metrics(name),
+                    "models": [
+                        {
+                            "model_id": profile.model_id,
+                            "version": profile.version,
+                            "status": profile.status,
+                            "confidence_level": profile.confidence_level,
+                            "cost": profile.cost,
+                            "latency": profile.latency,
+                        }
+                        for profile in container.model_registry.by_provider(name)
+                    ],
                 }
             )
         return result
 
-    @app.get("/v1/skills", dependencies=[Depends(verify_api_key)])
-    def list_skills():
-        return [
-            {"name": skill.name, "category": skill.category, "path": skill.path}
-            for skill in container.skills.list_skills()
-        ]
+    @app.post("/internal/router/video", dependencies=[Depends(verify_api_key)])
+    def route_video_model(body: ShotRequirements):
+        """Explainable internal ranking; it does not submit a generation request."""
 
-    @app.get("/v1/providers/{provider}/health", dependencies=[Depends(verify_api_key)])
-    async def provider_health(provider: str):
+        excluded = {
+            profile.key
+            for profile in container.model_registry.all()
+            if not container.providers.is_configured(profile.provider)
+            or (profile.adapter == "wan" and not container.feature_flags.enabled("wan3"))
+        }
+        return container.video_router.rank(body, excluded_models=excluded).model_dump()
+
+    @app.get("/v1/skills")
+    def list_skills(_principal: AuthPrincipal = Depends(auth.current_user)):
+        return [{"name": skill.name, "category": skill.category} for skill in container.skills.list_skills()]
+
+    @app.get("/v1/providers/{provider}/health")
+    async def provider_health(
+        provider: str,
+        _principal: AuthPrincipal = Depends(auth.current_user),
+    ):
         try:
             result = await container.providers.get(provider).health()
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
-        return {"ok": result.ok, "detail": result.detail, "metadata": result.metadata}
+        return {"ok": result.ok, "detail": result.detail}
 
     @app.get("/v1/workers", dependencies=[Depends(verify_api_key)])
     def list_workers():
@@ -869,13 +1462,54 @@ def create_app(container: Container | None = None) -> FastAPI:
                 for item in session.scalars(select(BrowserWorker).order_by(BrowserWorker.id))
             ]
 
-    @app.post("/v1/workers/register", dependencies=[Depends(verify_api_key)])
-    def register_worker(body: WorkerRegister):
-        if body.account_id:
-            with container.database.session() as session:
-                account = session.get(ProviderAccount, body.account_id)
-                if not account or account.provider != body.provider:
-                    raise HTTPException(400, "worker account is invalid for provider")
+    @app.post("/internal/workers/credentials", dependencies=[Depends(verify_api_key)], status_code=201)
+    def issue_worker_credential(body: WorkerCredentialIssue, response: Response):
+        try:
+            issued = worker_credentials.issue(
+                worker_id=body.worker_id,
+                provider=body.provider,
+                account_id=body.account_id,
+                ttl_seconds=body.expires_in_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "id": issued.id,
+            "worker_id": body.worker_id,
+            "provider": body.provider,
+            "account_id": body.account_id,
+            "access_token": issued.token,
+            "token_type": "Bearer",
+            "expires_at": issued.expires_at,
+        }
+
+    @app.post(
+        "/internal/workers/credentials/{credential_id}/revoke",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def revoke_worker_credential(credential_id: str):
+        if not worker_credentials.revoke(credential_id):
+            raise HTTPException(404, "worker credential not found")
+        return {"ok": True}
+
+    @app.post("/v1/workers/register")
+    def register_worker(
+        body: WorkerRegister,
+        principal: WorkerPrincipal = Depends(require_worker_credential),
+    ):
+        require_worker_binding(
+            principal,
+            worker_id=body.worker_id,
+            provider=body.provider,
+            account_id=body.account_id,
+        )
+        if body.account_id is None:
+            raise HTTPException(400, "worker registration requires its bound account")
+        with container.database.session() as session:
+            account = session.get(ProviderAccount, body.account_id)
+            if not account or account.provider != body.provider:
+                raise HTTPException(400, "worker account is invalid for provider")
         worker = container.runtime.register(
             body.worker_id,
             body.provider,
@@ -887,8 +1521,13 @@ def create_app(container: Container | None = None) -> FastAPI:
         )
         return {"worker_id": worker.id, "connection_id": worker.connection_id, "status": worker.status}
 
-    @app.post("/v1/workers/{worker_id}/heartbeat", dependencies=[Depends(verify_api_key)])
-    def heartbeat(worker_id: str, body: WorkerHeartbeat):
+    @app.post("/v1/workers/{worker_id}/heartbeat")
+    def heartbeat(
+        worker_id: str,
+        body: WorkerHeartbeat,
+        principal: WorkerPrincipal = Depends(require_worker_credential),
+    ):
+        require_worker_binding(principal, worker_id=worker_id)
         try:
             worker = container.runtime.heartbeat(
                 worker_id,
@@ -902,8 +1541,13 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         return {"ok": True, "status": worker.status}
 
-    @app.get("/v1/workers/{worker_id}/commands", dependencies=[Depends(verify_api_key)])
-    def poll_commands(worker_id: str, connection_id: str):
+    @app.get("/v1/workers/{worker_id}/commands")
+    def poll_commands(
+        worker_id: str,
+        connection_id: str,
+        principal: WorkerPrincipal = Depends(require_worker_credential),
+    ):
+        require_worker_binding(principal, worker_id=worker_id)
         try:
             commands = container.runtime.claim_commands(worker_id, connection_id)
         except RuntimeError as exc:
@@ -912,8 +1556,13 @@ def create_app(container: Container | None = None) -> FastAPI:
             "commands": [{"id": cmd.id, "type": cmd.message_type, "payload": cmd.payload} for cmd in commands]
         }
 
-    @app.post("/v1/workers/{worker_id}/responses", dependencies=[Depends(verify_api_key)])
-    def command_response(worker_id: str, body: WorkerResponse):
+    @app.post("/v1/workers/{worker_id}/responses")
+    def command_response(
+        worker_id: str,
+        body: WorkerResponse,
+        principal: WorkerPrincipal = Depends(require_worker_credential),
+    ):
+        require_worker_binding(principal, worker_id=worker_id)
         try:
             command = container.runtime.complete_command(
                 worker_id, body.connection_id, body.command_id, response=body.response, error=body.error
@@ -922,15 +1571,53 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         return {"ok": True, "status": command.status}
 
+    @app.post("/v1/workers/{worker_id}/socket-ticket", status_code=201)
+    def issue_worker_socket_ticket(
+        worker_id: str,
+        response: Response,
+        principal: WorkerPrincipal = Depends(require_worker_credential),
+    ):
+        require_worker_binding(principal, worker_id=worker_id)
+        try:
+            issued = worker_credentials.issue_socket_ticket(principal)
+        except WorkerAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        ticket_protocol = f"worker-ticket.{issued.token}"
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "ticket": issued.token,
+            "expires_at": issued.expires_at,
+            "websocket_protocols": ["ai-director.worker.v1", ticket_protocol],
+        }
+
     @app.websocket("/v1/workers/ws/{worker_id}")
     async def worker_socket(websocket: WebSocket, worker_id: str):
-        token = websocket.query_params.get("token", "")
-        if container.settings.platform_api_key and not secrets.compare_digest(
-            token, container.settings.platform_api_key
-        ):
+        authorization = websocket.headers.get("authorization")
+        offered_protocols = [
+            item.strip()
+            for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            if item.strip()
+        ]
+        ticket_protocol = next(
+            (item for item in offered_protocols if item.startswith("worker-ticket.")),
+            None,
+        )
+        try:
+            if authorization:
+                principal = worker_credentials.authenticate_authorization(authorization)
+            elif ticket_protocol:
+                principal = worker_credentials.consume_socket_ticket(
+                    ticket_protocol.removeprefix("worker-ticket."),
+                    worker_id=worker_id,
+                )
+            else:
+                raise WorkerAuthenticationError("worker credential or WebSocket ticket is required")
+            require_worker_binding(principal, worker_id=worker_id)
+        except (WorkerAuthenticationError, HTTPException):
             await websocket.close(code=4401)
             return
-        await websocket.accept()
+        accepted_protocol = "ai-director.worker.v1" if "ai-director.worker.v1" in offered_protocols else None
+        await websocket.accept(subprotocol=accepted_protocol)
         connection_id = ""
         try:
             first = await asyncio.wait_for(websocket.receive_json(), timeout=10)
@@ -938,6 +1625,19 @@ def create_app(container: Container | None = None) -> FastAPI:
                 await websocket.close(code=4400)
                 return
             payload = WorkerRegister.model_validate({**first.get("payload", {}), "worker_id": worker_id})
+            try:
+                require_worker_binding(
+                    principal,
+                    worker_id=worker_id,
+                    provider=payload.provider,
+                    account_id=payload.account_id,
+                )
+            except HTTPException:
+                await websocket.close(code=4403)
+                return
+            if payload.account_id is None:
+                await websocket.close(code=4403)
+                return
             worker = container.runtime.register(
                 worker_id,
                 payload.provider,
@@ -950,6 +1650,11 @@ def create_app(container: Container | None = None) -> FastAPI:
             connection_id = worker.connection_id
             await websocket.send_json({"type": "worker.registered", "connection_id": connection_id})
             while True:
+                try:
+                    principal = worker_credentials.validate_principal(principal)
+                except WorkerAuthenticationError:
+                    await websocket.close(code=4401)
+                    break
                 for command in container.runtime.claim_commands(worker_id, connection_id):
                     await websocket.send_json(
                         {"id": command.id, "type": command.message_type, "payload": command.payload}
@@ -959,6 +1664,11 @@ def create_app(container: Container | None = None) -> FastAPI:
                 except TimeoutError:
                     container.runtime.heartbeat(worker_id, connection_id)
                     continue
+                try:
+                    principal = worker_credentials.validate_principal(principal)
+                except WorkerAuthenticationError:
+                    await websocket.close(code=4401)
+                    break
                 if message.get("type") == "worker.heartbeat":
                     container.runtime.heartbeat(
                         worker_id,
@@ -977,10 +1687,18 @@ def create_app(container: Container | None = None) -> FastAPI:
                         error=message.get("error"),
                     )
         except (WebSocketDisconnect, RuntimeError):
-            container.runtime.mark_offline(worker_id, connection_id or None)
+            pass
+        finally:
+            if connection_id:
+                container.runtime.mark_offline(worker_id, connection_id)
 
-    @app.post("/v1/images/generations", dependencies=[Depends(verify_api_key)], status_code=202)
-    def openai_image_adapter(request: Request, body: dict[str, Any]):
+    @app.post("/v1/images/generations", status_code=202)
+    def openai_image_adapter(
+        request: Request,
+        body: dict[str, Any],
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.get("project_id", ""), write=True)
         key = request.headers.get("Idempotency-Key") or body.get("idempotency_key")
         if not key:
             raise HTTPException(400, "Idempotency-Key is required")
@@ -995,13 +1713,28 @@ def create_app(container: Container | None = None) -> FastAPI:
             idempotency_key=key,
         )
         try:
-            job, replayed = container.gateway.create(generation)
+            job, replayed = container.visual_runtime.submit(
+                generation,
+                mode="PASSENGER_SEAT",
+                prompt_version="openai-image-adapter-v1",
+            )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except GenerationTargetError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {"id": job.id, "object": "image.generation", "status": job.status, "replayed": replayed}
 
-    @app.post("/v1/videos/generations", dependencies=[Depends(verify_api_key)], status_code=202)
-    def openai_video_adapter(request: Request, body: dict[str, Any]):
+    @app.post("/v1/videos/generations", status_code=202)
+    def openai_video_adapter(
+        request: Request,
+        body: dict[str, Any],
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, body.get("project_id", ""), write=True)
         key = request.headers.get("Idempotency-Key") or body.get("idempotency_key")
         if not key:
             raise HTTPException(400, "Idempotency-Key is required")
@@ -1009,7 +1742,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             project_id=body["project_id"],
             type="video",
             provider=body.get("provider", "google_flow"),
-            model=body.get("model", "veo"),
+            model=body.get("model", "flow-veo-3.1"),
             prompt=body["prompt"],
             duration=body.get("duration", 8),
             aspect_ratio=body.get("aspect_ratio", "9:16"),
@@ -1019,11 +1752,23 @@ def create_app(container: Container | None = None) -> FastAPI:
             idempotency_key=key,
         )
         try:
-            job, replayed = container.gateway.create(generation)
+            job, replayed = container.visual_runtime.submit(
+                generation,
+                mode="PASSENGER_SEAT",
+                prompt_version="openai-video-adapter-v1",
+            )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except GenerationTargetError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {"id": job.id, "object": "video.generation", "status": job.status, "replayed": replayed}
 
+    auth.register_routes(app, verify_api_key)
+    register_runtime_routes(app, container, verify_api_key, auth)
     return app
 
 

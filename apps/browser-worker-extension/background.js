@@ -4,7 +4,7 @@
  * interactive verification. A user must explicitly authorize each captcha-backed request.
  */
 const DEFAULTS = {
-  serverBase: 'http://127.0.0.1:8080', apiKey: '', workerId: '', accountId: '',
+  serverBase: 'http://127.0.0.1:8080', workerToken: '', workerId: '', accountId: '',
   provider: 'google_flow', maxJobs: 1,
 };
 
@@ -30,7 +30,7 @@ async function loadSettings() {
 
 function headers() {
   const result = {'Content-Type': 'application/json'};
-  if (settings.apiKey) result.Authorization = `Bearer ${settings.apiKey}`;
+  if (settings.workerToken) result.Authorization = `Bearer ${settings.workerToken}`;
   return result;
 }
 
@@ -207,4 +207,3 @@ async function authorizeNextGeneration() {
 }
 
 initialize().catch(() => {});
-

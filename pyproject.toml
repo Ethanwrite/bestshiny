@@ -62,6 +62,15 @@ packages = [
   "core/cost/cost_core",
   "core/skills/skill_core",
   "core/production/director_production",
+  "core/model-registry/model_registry_core",
+  "core/adapters/video_adapter_core",
+  "core/image-prompt/image_prompt_core",
+  "core/asset-registry/asset_registry_core",
+  "core/memory/memory_core",
+  "core/runtime-control/runtime_control_core",
+  "core/video-prompt/video_prompt_core",
+  "core/evaluation/evaluation_core",
+  "core/model-metrics/model_metrics_core",
 ]
 
 [tool.pytest.ini_options]
@@ -74,6 +83,11 @@ pythonpath = [
   "providers/google-flow", "providers/seedance", "providers/veo", "providers/grok", "providers/omni",
   "providers/kling", "providers/runway", "core/narrative", "core/character", "core/continuity",
   "core/generation-policy", "core/qa", "core/cost", "core/skills", "core/production",
+  "core/model-registry", "core/adapters",
+  "core/image-prompt",
+  "core/asset-registry",
+  "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
+  "core/model-metrics",
 ]
 
 [tool.ruff]
@@ -85,6 +99,8 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "apps/api/video_platform_api/main.py" = ["B008"]
+"apps/api/video_platform_api/auth.py" = ["B008"]
+"apps/api/video_platform_api/runtime_routes.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -100,4 +116,9 @@ files = [
   "agents/runtime",
   "core/narrative", "core/character", "core/continuity", "core/generation-policy",
   "core/qa", "core/cost", "core/skills", "core/production",
+  "core/model-registry", "core/adapters",
+  "core/image-prompt",
+  "core/asset-registry",
+  "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
+  "core/model-metrics",
 ]

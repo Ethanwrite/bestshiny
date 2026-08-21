@@ -1,16 +1,90 @@
 # AI Director Platform — 开发交接文档
 
-快照日期：2026-08-20
+快照日期：2026-08-21（文件名保留初始交接日期）
 仓库：`ai-director-platform`
-当前结论：**Phase II 尚未完成，当前工作树不可发布、不可打 tag、不可开启真实付费 Provider。**
+当前结论：**Phase III Production Evidence Core 已完成离线、PostgreSQL 与 Docker 门禁并形成可恢复检查点，但没有真实 Provider/生产视觉 QA/账单证据，因此不可发布或开启商用 live。**
 
-## 2026-08-21 继续开发更新（优先于下文的 2026-08-20 冻结快照）
+## 2026-08-21 Phase III 当前交接（优先于下文所有 Phase II 历史段落）
+
+### 当前冻结、门禁与真实执行状态
+
+- Phase II 离线算法核心已冻结为 commit `0a74d31`、tag
+  `v0.2.0-algorithm-core-offline`；冻结前历史套件为 `348 passed, 39 warnings`。
+- Phase III 实现提交为 `99f9c60`，离线证据快照 tag 为
+  `v0.3.0-production-evidence-core-offline`；该 tag 不代表生产就绪。
+- Phase III 最终合并后全仓复跑：`406 passed, 57 warnings in 71.58s (0:01:11)`。
+  Ruff lint 通过，Ruff format 报告 226 files already formatted，Mypy 121 source files 通过，Node
+  syntax 和 `git diff --check` 通过。57 个 warning 主要是已知的 Alembic/SQLite/Starlette
+  弃用警告与 SQLAlchemy FK cycle warning。
+- Alembic 为单 head `0027_production_evidence_core`。PostgreSQL 17.10 + pgvector 0.8.6 在临时
+  数据库通过 fresh/populated/supported round-trip、`vector(16)`、索引/唯一性/外键、积分预占
+  事务与生成 enqueue 事务验证。
+- Docker Desktop 29.5.3 上 `docker compose config -q`、API/worker/Web 三镜像 build、Compose
+  up、PostgreSQL/MinIO/API health、Web/Worker Up、MinIO init/bucket、宿主 API/Web/MinIO HTTP 200 以及
+  容器内 Alembic current/check 通过；pgvector 为 0.8.6。使用 development + 纯假 smoke 凭据，
+  没有 Provider key，结束后已 `compose down` 且未删除 volume。
+- 本轮 RunAPI/OpenRouter/Voyage/Flow/Seedance/Wan 及其他 Provider 真实调用数为 **0**，
+  已知 Provider 支出为 **USD 0**；五个 live canary 全部 **NOT EXECUTED**，其中单个付费
+  视频明确 **NOT EXECUTED**。
+
+### Phase III 已落地
+
+1. **Flow automatic affinity**：`0025` 引入状态机、sticky account/project、本地项目 active 唯一与远端
+   project 跨全部历史状态永久 owner 索引、显式 `FlowMigrationPlan` 与 local job/account/project/provider job
+   四元 poll 标识。默认 project provisioner fail closed；没有执行真实 Flow。
+2. **单一 Capability 真相**：`0026` 持久 `ModelCapabilityProfile`，UI/Policy/Router/Cost/Adapter
+   统一读取，旧 `config/video-models/*.json` 多头事实源已移除，Wan 统一为 2.7。
+3. **ModelRoleRuntime 收口**：当前产品中真正执行外部 chat/embedding/refinement 的
+   调用方 100% 经 runtime；确定性 Narrative/Continuity/Policy 仍可保持本地，这不表示所有
+   算法都必须用 LLM。Narrative Memory 不再直连 Voyage，而是请求
+   `MULTIMODAL_EMBEDDING`；失败时记 `MEMORY_VECTOR_DEGRADED` 并保留 SQL Timeline。
+4. **生产证据 schema**：`0027` 增加 `ModelExecutionRecord`、`EmbeddingEvidence`、
+   `ProviderBillingEvidence`、`DecisionOutcomeRecord`、`RunAPIBenchmark`、`LiveCanaryPermit/Usage`、
+   Auth/reset/throttle 与 storage reservation。向量/prompt/raw Provider response/secret 不进审计记录。
+5. **CharacterEvidenceProducer V1**：真实 FFmpeg 读取自生成非用户 MP4，经可注入
+   detector/tracker/face/appearance encoder、视角感知参考、置信加权、时序聚合与版本阈值进
+   QAPipeline。当前具体推理为确定性测试替身，生产检测/跟踪/encoder 没有部署；
+   tracking uncertain 要求 VLM review，hair/costume 是 `UNAVAILABLE`。
+6. **Timeline v3**：关系表显式表达九类 transition、branch/reconciliation/reset；编辑前镜
+   只标记下游 `RECOMPUTE_REQUIRED`，planning recompute 不改写 committed media。
+7. **真实/估算成本分离**：Provider 没有可信金额时 `actual_cost = null`；accepted-shot 统计
+   包含失败、接受与 repair attempts。Router 按 prior 0.80 / observation 0.20、minimum 20 样本混合。
+8. **Live Canary**：持久 Permit 按 provider/model/expiry/request/cost 硬限制，已接到 ModelRole 和
+   media generation 最终 live 边界。内部 create/list API 需平台 key、显式确认和幂等键；
+   创建 Permit 不会自动调 Provider。
+9. **Commercial Auth/storage**：HttpOnly + production Secure + SameSite=Lax Cookie、double-submit CSRF、
+   持久登录限流、一次性找回密码、工作空间真实字节原子 reserve/settle/release 已落地。
+10. **Starter credits 决策**：用户未显式给 Passenger video duration 时默认 4 秒，约 44
+    credits，50 starter credits 可预占一次；显式 8 秒仍约 87 credits 并 fail closed。
+11. **开发观测 API**：`GET /internal/production-evidence` 按 project/job/shot 返回脱敏的 model
+    execution、Provider job/billing、Flow binding、QA、DecisionOutcome、Cost 与 Timeline。
+
+### Secret 决策
+
+[`security/secret-audit.md`](security/secret-audit.md) 未在 tracked repo 或 practical Git history 发现用户的
+Provider key。用户已明确决定“当前 Provider Key 不需要轮换”；该决定优先于 Phase III
+草案的 blanket `ROTATION_REQUIRED`。仍不得把 key 写入源码/测试/文档/日志/提交，也不会
+因为 key 存在就自动打开 live gate。
+
+### 当前剩余阻断
+
+1. 具体生产 character detector/tracker/face/appearance 推理模型、校准和不确定证据 VLM
+   运营路径未部署。
+2. 真实 RunAPI/OpenRouter/Voyage/Flow/单视频 canary 与真实 Provider billing/credits 证据未执行。
+3. 邮箱验证、MFA、成员邀请/移除、设备会话、生产 HTTPS/secret manager、备份恢复、
+   监控告警与运营策略仍未完成。
+4. 充值/购买、周期 grant、expiry 和管理员调账未实现。
+
+当前证据索引：[`PRODUCTION_EVIDENCE.md`](PRODUCTION_EVIDENCE.md) 与
+[`PRODUCTION_READINESS_CHECKLIST.md`](PRODUCTION_READINESS_CHECKLIST.md)。
+
+## Phase II 历史更新（仅保留冻结证据；已被上文 Phase III 现状取代）
 
 下文保留了接手时的原始失败证据和实施计划；本节记录其后已完成的变化，防止把历史状态误读为当前状态。
 
 - 完整套件：`348 passed, 39 warnings`。
 - Ruff format/lint（209 files）、Mypy（117 source files）、Node syntax、`git diff --check` 已通过。
-- 当前仍是未提交的混合 WIP：`git status --short` 为 92 个路径（57 tracked modified + 35 untracked）；本轮没有替用户自动 commit/tag。下文的 75 路径 manifest 只是 2026-08-20 历史冻结。
+- 2026-08-20 当时仍是未提交的混合 WIP：`git status --short` 为 92 个路径（57 tracked modified + 35 untracked）；当时没有替用户自动 commit/tag。下文的 75 路径 manifest 也只是 2026-08-20 历史冻结。
 - fresh SQLite `upgrade head` + `alembic check` 已通过；两种 historical recovery snapshot 与带数据的 `0023 → 0024 → 0023 → 0024` 往返回归已通过；Alembic 为单 head `0024_workspace_credit_lifecycle`。
 - `0023` 已在无 `workspaces` 的受支持 recovery snapshot 上安全跳过，对存在 workspace 但缺少 project/job 依赖的部分 schema fail closed。
 - Seedance 未完成部署验证时的目录信任收紧为 `STANDARD`；完整 Ark key/base/model 运行配置才会恢复 `PRODUCTION` 和 Hero/Canonical 可用范围。

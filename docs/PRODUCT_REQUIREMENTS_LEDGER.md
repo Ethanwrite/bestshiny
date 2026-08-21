@@ -2,7 +2,7 @@
 
 Snapshot date: 2026-08-21
 
-This file preserves the product decisions expressed across the project conversation and the four engineering
+This file preserves the product decisions expressed across the project conversation and the five engineering
 briefs used to build the repository. It is a requirements ledger, not a claim that every item is implemented.
 Implementation truth is maintained in [`../CURRENT_ARCHITECTURE.md`](../CURRENT_ARCHITECTURE.md) and
 [`DEVELOPMENT_HANDOFF_2026-08-20.md`](DEVELOPMENT_HANDOFF_2026-08-20.md).
@@ -18,9 +18,28 @@ so a future engineer can verify the exact source if those files are still availa
 | AI Director Web Platform V1 | `/Users/a1-6/.codex/attachments/534a5db9-2e82-4991-bcd7-bd234a9c47e2/pasted-text.txt` | `e6a45419524e5f645ced089b8d73fbcef94a48a84c6214a9cbf8b402cad6be02` | Full Web product, narrative/state/identity/continuity/policy/QA/cost/agents |
 | Passenger + Autopilot Visual Runtime | `/Users/a1-6/.codex/attachments/f13f3b22-d2e2-4a11-b583-7b3fae40536e/pasted-text.txt` | `6264341c74ac2c2b68c5ac9f32cf092c8eb955e7a28d42817244932b5c351695` | Shared runtime, prompt separation, asset registry, memory, evaluation, routing, credits and benchmarks |
 | Phase II Production Intelligence Core | `/Users/a1-6/.codex/attachments/3f2d3504-cde4-463f-be95-d3d0b5e1b954/pasted-text.txt` | `82c49659b83334adb51dd0c1fb29f3d5a5915d7c6e7a9ccd0b44f0c3fae6c71d` | Unified model/provider infrastructure and deterministic algorithm moat |
+| Phase III Production Evidence Core | `/Users/a1-6/.codex/attachments/980cdcab-9579-4351-8c79-ea4e51bf5513/pasted-text.txt` | `c232a8b400b703aad1d3f36bd937afb86fe2818e0c73e05fc5b6b0f69559553f` | Real-input/evidence schemas, Flow affinity, single capability truth, model runtime, character evidence, billing/outcomes, timeline v3, live canary, auth/quota and production validation |
 
 The attachment paths are machine-local. This ledger contains the durable decisions required to continue even if
 the attachment store is unavailable.
+
+## Phase III decisions and resolved conflicts
+
+- Phase III prioritizes production truth over adding Providers, Skills, agents, UI themes or a credit shop.
+- The offline algorithm baseline is frozen at commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`.
+- The Phase III implementation is committed at `99f9c60`; its offline evidence snapshot is tagged
+  `v0.3.0-production-evidence-core-offline`. This is not a production-release claim.
+- Persistent `ModelCapabilityProfile` is the only authoritative model capability/quality-prior source. Wan is 2.7.
+- Current external chat/embedding/refinement callers use `ModelRoleRuntime`; deterministic algorithms remain local
+  when no model call is needed. Narrative Memory may degrade to structured SQL timeline.
+- Actual Provider cost is nullable and can never be synthesized from an estimate. Accepted-shot economics include
+  failed and repair attempts, and `DecisionOutcomeRecord` is durable future learning evidence.
+- Live execution requires the existing three environment gates plus a bounded `LiveCanaryPermit`; creating a
+  permit does not initiate a call. The Phase III real-canary count is zero and known Provider spend is USD 0.
+- The 50-vs-87 starter conflict is resolved by using a 4-second omitted-duration Passenger default (about 44
+  credits). An explicitly requested 8-second video remains about 87 credits and fails closed when unaffordable.
+- The operator explicitly decided that current Provider keys do not require rotation. Keys still stay outside Git,
+  logs, fixtures and documentation and do not implicitly authorize live execution.
 
 ## Highest-level product decision
 
@@ -83,10 +102,9 @@ The user explicitly requested:
 - product terminology that ordinary creators can understand;
 - commercialization and multi-user operation rather than a one-off production tool.
 
-Current status: the baseline implements auth, RBAC, a responsive workbench, prompt correction, asset versions,
-the ability to create another candidate for a selected shot, and estimated credits. The Phase II working tree also
-connects server-priced workspace-credit reserve/settle/refund/reconcile to every authenticated public generation
-entry point and covers supported historical SQLite recovery paths. This is still not a complete automatic
+Current status: the platform implements auth/RBAC, HttpOnly cookie + CSRF, password reset/login throttling, a
+responsive workbench, prompt correction, asset versions, workspace storage quota, selected-shot regeneration and
+server-priced workspace-credit reserve/settle/refund/reconcile across authenticated generation paths. This is still not a complete automatic
 asset-regeneration or commercial-wallet system: automatic character-candidate image generation is not connected
 to an image provider, and purchases, recurring grants, expiry and administrator adjustments are not implemented.
 
@@ -130,8 +148,9 @@ evaluation, cost/credit records, jobs and storage. A second gateway or second me
 - Skills own creative/production reasoning. Providers are execution infrastructure.
 - Prompt correction never silently replaces the user's original prompt.
 
-The current Prompt Compiler is a project-authored deterministic implementation, not a live Qwen, Claude or
-OpenRouter Prompt Agent. The Skill bodies are also project-authored. Research methods and license decisions are
+The canonical Video Prompt Compiler remains a project-authored deterministic implementation. The product prompt
+refinement path can call fact-locked `ModelRoleRuntime` with a safe local fallback, but Phase III made no live call.
+The Skill bodies are also project-authored. Research methods and license decisions are
 recorded in `docs/skill-research.md`; upstream Skill bodies were not vendored or added as runtime dependencies.
 
 ## Original model/team preferences
@@ -215,8 +234,9 @@ but tenancy, plan, trust, criticality and budget still remain server-owned.
 
 Frozen target provider policies:
 
-- Google Flow should use the platform Flow Gateway, account scheduler/pool and browser worker. It does not use
-  OpenRouter. The adapter exists, but complete deployment and project affinity/migration are not finished.
+- Google Flow uses the platform Flow Gateway, account scheduler/pool and browser worker. It does not use
+  OpenRouter. Automatic sticky project affinity, uniqueness and explicit migration plans are implemented offline;
+  no real Flow account/project canary has been run.
 - OpenRouter is the intended unified path for GPT, Claude, Kling and Voyage Multimodal roles.
 - Seedance, Veo and Grok prefer official adapters.
 - Missing credentials yield `NOT_CONFIGURED` without taking down the platform.
@@ -247,8 +267,8 @@ server-owned task ID/role, estimated cost, actual cost and remaining balance. Th
 derives a deterministic task ID and fixed pricing snapshot from server-owned workspace/project/prompt/fact inputs,
 passes a typed internal `EdgeTask`, and validates the structured echo, candidate literals/locked spans,
 character-count evidence and bounded English/Chinese negation polarity. This is deliberately a deterministic lexical
-guard rather than a claim of general semantic entailment, and it is not yet connected to the user-facing prompt
-workflow.
+guard rather than a claim of general semantic entailment. It is connected to the product refinement path with a
+safe fallback, but has not been called live.
 
 RunAPI starts with a product-policy budget of approximately USD 10. It requires the independent
 `ALLOW_RUNAPI_EDGE_CALLS` gate in addition to the normal three-part live gate. When remaining budget reaches zero,
@@ -261,8 +281,9 @@ operator-facing workflow are still missing. This Provider USD ledger remains sep
 
 ## Provider project affinity and memory boundaries
 
-- A Google Flow project should be pinned to a selected account/provider project and reused across shots rather
-  than choosing a random account for every shot.
+- A Google Flow project is pinned to a selected account/provider project and reused across shots rather than
+  choosing a random account for every shot. A local project has at most one active binding, while a remote Flow
+  project ID keeps one permanent local owner even after a binding becomes disabled or failed.
 - Migration is allowed only when the binding is unusable or an authorized operator explicitly requests it. The
   audit must record source/destination account and provider project, reason, actor, time, and affected assets/jobs.
 - Login, CAPTCHA, provider risk controls and user authorization are never bypassed. Human action must surface as
@@ -319,12 +340,11 @@ Implemented on 2026-08-21 for generation usage:
 - Wallet lifecycle events and manual `DecisionRecord` rows are audit facts. Provider USD/invoice costs,
   `CostRecord`, Flow account credits and RunAPI budget remain separate accounting domains.
 
-Current inconsistency: with the current static estimate (`$0.09/s`, eight seconds, service multiplier `1.20`,
-`$0.01/credit`), a default Seedance request estimates about 87 credits. A 50-credit starter grant cannot buy one
-default video. Product pricing or grant size must still be decided before offering the starter experience as
-usable, even though the generation wallet lifecycle is now wired and fails before Job/Provider creation when the
-balance is insufficient. Purchases, recurring grants, expiry and administrator adjustments are not part of this
-generation-lifecycle milestone.
+Resolved starter experience: with the current static estimate (`$0.09/s`, service multiplier `1.20`,
+`$0.01/credit`), an omitted Passenger video duration defaults to four seconds and estimates about 44 credits, so a
+50-credit starter workspace can reserve one request. An explicit eight-second request still estimates about 87
+credits and fails before Job/Provider creation when the balance is insufficient. Purchases, recurring grants,
+expiry and administrator adjustments are not part of this milestone.
 
 Keep four accounting concepts separate:
 
@@ -413,15 +433,17 @@ When earlier and later briefs appear to conflict, use these resolutions:
 - SQL timeline state outranks vector memory and model recollection.
 - A reference image is evidence, not a guarantee of identity consistency.
 - A compiled provider payload is not proof that the real provider transport is deployed.
-- A ModelRole interface existing is not proof that a director/assistant/QC product workflow calls it.
+- A ModelRole interface existing is not live proof. Current product model-execution callers are routed through the
+  runtime, while deterministic local algorithms intentionally do not invent unnecessary model calls.
 - UI styling must not take priority over Phase II correctness, but nonfunctional visible controls must either be
   wired or removed.
 
 ## Credential handling decision
 
 Real credentials for Ark/Seedance, Wan/Alibaba, OpenRouter, RunAPI and DeepSeek were pasted into the conversation.
-Their values are intentionally absent from this repository and from this ledger. They must be considered exposed
-and revoked/rotated before any future live test.
+Their values are intentionally absent from this repository and from this ledger. On 2026-08-21 the operator
+explicitly decided that these keys do not require rotation; that decision overrides the Phase III draft's blanket
+rotation rule. The repository does not independently verify external credential state.
 
 Only these environment variable names may be documented:
 

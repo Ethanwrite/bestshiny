@@ -10,6 +10,11 @@ from typing import Any
 from asset_registry_core import VersionMediaInput
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
+from entitlement_core import (
+    InsufficientWorkspaceCredits,
+    PlanEntitlementDenied,
+    WorkspaceCreditConflict,
+)
 from fastapi import (
     Depends,
     FastAPI,
@@ -167,7 +172,7 @@ class PromptRefine(BaseModel):
 
 class ContinuityEvaluate(BaseModel):
     project_id: str
-    risk: dict[str, float] = Field(default_factory=dict)
+    risk: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProviderProjectBind(BaseModel):
@@ -176,13 +181,15 @@ class ProviderProjectBind(BaseModel):
     provider_project_id: str = Field(min_length=1, max_length=500)
 
 
-def _job_view(job) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _job_view(job, *, credit_status: str | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     return {
         "id": job.id,
         "status": job.status,
         "provider": job.provider,
         "model": job.model,
         "provider_job_id": job.provider_job_id,
+        "submission_state": job.submission_state,
+        "credit_status": credit_status,
         "output_asset_id": job.output_asset_id,
         "safe_to_retry": job.safe_to_retry,
         "attempt_count": job.attempt_count,
@@ -321,7 +328,14 @@ def create_app(container: Container | None = None) -> FastAPI:
             user = User(email="local@ai-director.invalid", display_name="Local Director")
             session.add(user)
             session.flush()
-        workspace = Workspace(owner_user_id=user.id, name="Director Workspace")
+        workspace = Workspace(
+            owner_user_id=user.id,
+            name="Director Workspace",
+            # Authentication-disabled local development is the explicit legacy
+            # bypass surface; it still receives server pricing/CostRecords but
+            # must not consume a real Free-plan wallet.
+            plan_tier="ALL",
+        )
         session.add(workspace)
         session.flush()
         return workspace
@@ -609,15 +623,20 @@ def create_app(container: Container | None = None) -> FastAPI:
             candidate, replayed = container.candidates.create_candidate(
                 shot_id,
                 idempotency_key=body.idempotency_key,
-                fallback_providers=body.fallback_providers,
+                fallback_providers=(body.fallback_providers if principal.development_bypass else None),
                 character_bindings=bindings,
                 reference_asset_ids=body.reference_asset_ids,
                 estimated_cost=body.estimated_cost,
+                enforce_entitlements=not principal.development_bypass,
             )
             return {**_candidate_view(candidate), "replayed": replayed}
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/v1/shots/{shot_id}/candidates")
@@ -999,14 +1018,10 @@ def create_app(container: Container | None = None) -> FastAPI:
                 raise HTTPException(409, "shot does not belong to project")
         try:
             risk = ContinuityRiskVector(**body.risk)
-            decision = container.continuity_decision.decide(risk, project_id=body.project_id, shot_id=shot_id)
-            return {
-                "mode": decision.mode,
-                "risk_score": decision.risk_score,
-                "reasons": decision.reasons,
-                "use_previous_end_frame": decision.use_previous_end_frame,
-                "require_new_keyframe": decision.require_new_keyframe,
-            }
+            result = container.orchestrator.plan_continuity(shot_id, body.project_id, risk)
+            return result.detail
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
         except TypeError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -1309,23 +1324,36 @@ def create_app(container: Container | None = None) -> FastAPI:
     ):
         auth.require_project(principal, body.project_id, write=True)
         try:
-            mode = str(
-                body.metadata.get("mode") or ("AUTOPILOT_COMPAT" if body.shot_id else "PASSENGER_SEAT")
-            )
-            job, replayed = container.visual_runtime.submit(
+            requested_role = body.metadata.get("model_role")
+            admitted = container.generation_admission.admit_passenger(
                 body,
+                requested_role=requested_role if isinstance(requested_role, str) else None,
+                enforce_plan=not principal.development_bypass,
+            )
+            mode = str(admitted.request.metadata.get("mode") or "PASSENGER_SEAT")
+            job, replayed = container.visual_runtime.submit(
+                admitted.request,
                 mode=mode,
-                prompt_version="user-authored-v1" if not body.shot_id else "legacy-shot-v1",
+                prompt_version="user-authored-v1",
+                estimated_credits=admitted.estimate.credits,
+                pricing_version=container.credit_pricing.version,
             )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {**_job_view(job), "replayed": replayed}
+        return {
+            **_job_view(job, credit_status=container.gateway.credit_status(job.id)),
+            "replayed": replayed,
+        }
 
     @app.get("/v1/generations/{job_id}")
     def get_generation(
@@ -1337,7 +1365,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, "generation not found")
         auth.require_project(principal, job.project_id)
         return {
-            **_job_view(job),
+            **_job_view(job, credit_status=container.gateway.credit_status(job.id)),
             "events": [
                 {"type": event.event_type, "detail": event.detail, "created_at": event.created_at}
                 for event in container.gateway.events(job_id)
@@ -1354,7 +1382,11 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, "generation not found")
         auth.require_project(principal, job.project_id, write=True)
         try:
-            return _job_view(container.gateway.retry(job_id))
+            retried = container.gateway.retry(job_id)
+            return _job_view(
+                retried,
+                credit_status=container.gateway.credit_status(retried.id),
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except UnsafeRetry as exc:
@@ -1370,7 +1402,16 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, "generation not found")
         auth.require_project(principal, job.project_id, write=True)
         try:
-            return _job_view(await container.gateway.cancel(job_id))
+            cancelled = await container.gateway.cancel(job_id)
+            if cancelled.status != "CANCELLED" and cancelled.submission_state == "SENT_UNCONFIRMED":
+                raise HTTPException(
+                    409,
+                    "provider submission is unconfirmed; credits are frozen pending reconciliation",
+                )
+            return _job_view(
+                cancelled,
+                credit_status=container.gateway.credit_status(cancelled.id),
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -1384,7 +1425,11 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, "generation not found")
         auth.require_project(principal, job.project_id, write=True)
         try:
-            return _job_view(container.gateway.reconcile(job_id))
+            reconciled = container.gateway.reconcile(job_id)
+            return _job_view(
+                reconciled,
+                credit_status=container.gateway.credit_status(reconciled.id),
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -1713,15 +1758,25 @@ def create_app(container: Container | None = None) -> FastAPI:
             idempotency_key=key,
         )
         try:
-            job, replayed = container.visual_runtime.submit(
+            admitted = container.generation_admission.admit_passenger(
                 generation,
+                enforce_plan=not principal.development_bypass,
+            )
+            job, replayed = container.visual_runtime.submit(
+                admitted.request,
                 mode="PASSENGER_SEAT",
                 prompt_version="openai-image-adapter-v1",
+                estimated_credits=admitted.estimate.credits,
+                pricing_version=container.credit_pricing.version,
             )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
@@ -1752,15 +1807,25 @@ def create_app(container: Container | None = None) -> FastAPI:
             idempotency_key=key,
         )
         try:
-            job, replayed = container.visual_runtime.submit(
+            admitted = container.generation_admission.admit_passenger(
                 generation,
+                enforce_plan=not principal.development_bypass,
+            )
+            job, replayed = container.visual_runtime.submit(
+                admitted.request,
                 mode="PASSENGER_SEAT",
                 prompt_version="openai-video-adapter-v1",
+                estimated_credits=admitted.estimate.credits,
+                pricing_version=container.credit_pricing.version,
             )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:

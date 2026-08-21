@@ -1,3 +1,14 @@
 from .compiler import CompileResult, NarrativeCompiler
+from .timeline import (
+    AuthoritativeTimelineStateEngine,
+    TimelinePropagationError,
+    TimelinePropagationResult,
+)
 
-__all__ = ["CompileResult", "NarrativeCompiler"]
+__all__ = [
+    "AuthoritativeTimelineStateEngine",
+    "CompileResult",
+    "NarrativeCompiler",
+    "TimelinePropagationError",
+    "TimelinePropagationResult",
+]

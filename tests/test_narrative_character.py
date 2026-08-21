@@ -8,6 +8,7 @@ from production_domain.models import (
     Character,
     CharacterIdentityVersion,
     Episode,
+    MediaAsset,
     Project,
     Scene,
     Shot,
@@ -119,6 +120,65 @@ def test_character_identity_rejects_cross_project_reference_assets(container, pr
         )
 
     with container.database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count(CharacterIdentityVersion.id)).where(
+                    CharacterIdentityVersion.character_id == character.id
+                )
+            )
+            == 0
+        )
+
+
+@pytest.mark.parametrize(
+    "reference_role",
+    [
+        "front_asset_id",
+        "left_profile_asset_id",
+        "right_profile_asset_id",
+        "three_quarter_left_asset_id",
+        "three_quarter_right_asset_id",
+        "full_body_asset_id",
+    ],
+)
+def test_character_identity_rejects_low_trust_origin_in_every_reference_slot(
+    container,
+    project,
+    reference_role: str,
+) -> None:  # type: ignore[no-untyped-def]
+    master, _ = container.media.register(
+        project.id,
+        "CHARACTER_MASTER",
+        io.BytesIO(b"trusted-user-master"),
+        filename="master.png",
+        mime_type="image/png",
+    )
+    edge_reference, _ = container.media.register(
+        project.id,
+        "CHARACTER_REFERENCE",
+        io.BytesIO(f"runapi-{reference_role}".encode()),
+        filename=f"{reference_role}.png",
+        mime_type="image/png",
+    )
+    with container.database.session() as session:
+        stored_reference = session.get(MediaAsset, edge_reference.id)
+        stored_reference.provider = "runapi"
+        stored_reference.provider_media_id = f"runapi-{reference_role}"
+    character = container.characters.create_character(project.id, f"Edge ref {reference_role}")
+
+    with pytest.raises(ValueError, match="low-trust generated media"):
+        container.characters.confirm_identity(
+            character.id,
+            master.id,
+            references={reference_role: edge_reference.id},
+        )
+
+    with container.database.session() as session:
+        persisted = session.get(Character, character.id)
+        persisted_master = session.get(MediaAsset, master.id)
+        assert persisted.status == "DRAFT"
+        assert persisted.current_identity_version_id is None
+        assert persisted_master.character_id is None
         assert (
             session.scalar(
                 select(func.count(CharacterIdentityVersion.id)).where(

@@ -1,25 +1,295 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import production_engine.runtime as runtime_module
 import pytest
 from fastapi.testclient import TestClient
+from generation_gateway import TimelineGenerationPlanStale
 from memory_core import GenerationContext
-from platform_contracts import CanonicalShotSpec, CanonicalSubjectSpec, GenerationRequest
+from narrative_core import AuthoritativeTimelineStateEngine, TimelinePropagationError
+from platform_contracts import (
+    TIMELINE_FENCE_METADATA_KEY,
+    CanonicalShotSpec,
+    CanonicalSubjectSpec,
+    GenerationRequest,
+)
 from production_domain.models import (
     Asset,
     AssetVersion,
+    CostRecord,
+    DecisionRecord,
     Episode,
+    GenerationCandidate,
     GenerationIdempotency,
     GenerationJob,
     ProductionTrace,
     Scene,
     Shot,
+    ShotStatus,
     TimelineState,
+    User,
+    Workspace,
+    WorkspaceCreditEntry,
 )
 from production_engine.runtime import VisualProductionRuntime
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from video_platform_api.main import create_app
+
+
+def _linked_timeline_shots(container, project) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        user = User(email="timeline-fence@example.com", display_name="Timeline Fence")
+        session.add(user)
+        session.flush()
+        workspace = Workspace(
+            owner_user_id=user.id,
+            name="Timeline Fence Workspace",
+            plan_tier="FREE",
+            credit_balance=50,
+        )
+        session.add(workspace)
+        session.flush()
+        stored_project = session.get(type(project), project.id)
+        assert stored_project is not None
+        stored_project.workspace_id = workspace.id
+
+        episode = Episode(project_id=project.id, title="Fence", episode_number=1)
+        session.add(episode)
+        session.flush()
+        scene = Scene(episode_id=episode.id, sequence=1, description="Control room")
+        session.add(scene)
+        session.flush()
+        first_input = TimelineState(
+            project_id=project.id,
+            episode_id=episode.id,
+            scene_id=scene.id,
+            state_kind="SHOT_INPUT",
+            state_json={"characters": {"Lin": {"position": "left"}}},
+        )
+        first_output = TimelineState(
+            project_id=project.id,
+            episode_id=episode.id,
+            scene_id=scene.id,
+            state_kind="SHOT_OUTPUT",
+            state_json={"characters": {"Lin": {"position": "center"}}},
+        )
+        second_input = TimelineState(
+            project_id=project.id,
+            episode_id=episode.id,
+            scene_id=scene.id,
+            state_kind="SHOT_INPUT",
+            state_json={"characters": {"Lin": {"position": "center"}}},
+        )
+        second_output = TimelineState(
+            project_id=project.id,
+            episode_id=episode.id,
+            scene_id=scene.id,
+            state_kind="SHOT_OUTPUT",
+            state_json={"characters": {"Lin": {"position": "right"}}},
+        )
+        session.add_all([first_input, first_output, second_input, second_output])
+        session.flush()
+        second_input.previous_state_id = first_output.id
+        first = Shot(
+            scene_id=scene.id,
+            sequence=1,
+            prompt="Lin crosses to center.",
+            user_prompt="Lin crosses to center.",
+            input_state_id=first_input.id,
+            output_state_id=first_output.id,
+        )
+        session.add(first)
+        session.flush()
+        second = Shot(
+            scene_id=scene.id,
+            sequence=2,
+            prompt="Lin crosses to the right.",
+            user_prompt="Lin crosses to the right.",
+            previous_shot_id=first.id,
+            input_state_id=second_input.id,
+            output_state_id=second_output.id,
+        )
+        session.add(second)
+        session.flush()
+        first.next_shot_id = second.id
+        first_input.shot_id = first.id
+        first_output.shot_id = first.id
+        second_input.shot_id = second.id
+        second_output.shot_id = second.id
+        return first.id, second.id
+
+
+def _assert_no_fenced_generation_side_effects(container, project_id: str) -> None:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        workspace = session.scalar(select(Workspace).where(Workspace.name == "Timeline Fence Workspace"))
+        assert workspace is not None
+        assert workspace.credit_balance == 50
+        assert session.scalar(select(func.count(GenerationJob.id))) == 0
+        assert session.scalar(select(func.count(GenerationCandidate.id))) == 0
+        assert session.scalar(select(func.count(CostRecord.id))) == 0
+        assert session.scalar(select(func.count(WorkspaceCreditEntry.id))) == 0
+        assert (
+            session.scalar(
+                select(func.count(ProductionTrace.id)).where(ProductionTrace.project_id == project_id)
+            )
+            == 0
+        )
+
+
+def test_autopilot_timeline_fence_rejects_propagation_race_without_charge(
+    container,
+    project,
+):  # type: ignore[no-untyped-def]
+    first_id, second_id = _linked_timeline_shots(container, project)
+    prepared = container.visual_runtime.prepare_autopilot(
+        second_id,
+        idempotency_key="timeline-fence-propagation",
+        allowed_providers=["google_flow"],
+    )
+
+    with container.database.session() as session:
+        first = session.get(Shot, first_id)
+        assert first is not None
+        first.status = ShotStatus.COMMITTED.value
+        first_output = session.get(TimelineState, first.output_state_id)
+        assert first_output is not None
+        first_output.state_json = {
+            "characters": {"Lin": {"position": "center", "holding": "phone"}},
+            "narrative_facts": ["Lin now holds the phone"],
+        }
+    propagation = AuthoritativeTimelineStateEngine(container.database).propagate_shot(first_id)
+    assert propagation.propagated is True
+
+    with pytest.raises(TimelineGenerationPlanStale, match="plan the shot again"):
+        container.visual_runtime.submit_autopilot(prepared, estimated_credits=7)
+
+    with container.database.session() as session:
+        second = session.get(Shot, second_id)
+        assert second is not None
+        assert second.status in {
+            ShotStatus.DRAFT.value,
+            ShotStatus.PLANNED.value,
+            ShotStatus.READY.value,
+        }
+        assert TIMELINE_FENCE_METADATA_KEY not in prepared.request.metadata
+    _assert_no_fenced_generation_side_effects(container, project.id)
+
+
+def test_autopilot_timeline_fence_accepts_unchanged_state_and_persists_server_snapshot(
+    container,
+    project,
+):  # type: ignore[no-untyped-def]
+    _, second_id = _linked_timeline_shots(container, project)
+    prepared = container.visual_runtime.prepare_autopilot(
+        second_id,
+        idempotency_key="timeline-fence-current",
+        allowed_providers=["google_flow"],
+    )
+
+    job, replayed = container.visual_runtime.submit_autopilot(prepared, estimated_credits=7)
+
+    assert replayed is False
+    replay_prepared = container.visual_runtime.prepare_autopilot(
+        second_id,
+        idempotency_key="timeline-fence-current",
+        allowed_providers=["google_flow"],
+    )
+    assert replay_prepared.timeline_fence.shot_status == ShotStatus.QUEUED.value
+    replay_job, replayed = container.visual_runtime.submit_autopilot(
+        replay_prepared,
+        estimated_credits=7,
+    )
+    assert replayed is True
+    assert replay_job.id == job.id
+    with container.database.session() as session:
+        stored_job = session.get(GenerationJob, job.id)
+        second = session.get(Shot, second_id)
+        workspace = session.scalar(select(Workspace).where(Workspace.name == "Timeline Fence Workspace"))
+        credit = session.scalar(
+            select(WorkspaceCreditEntry).where(WorkspaceCreditEntry.generation_job_id == job.id)
+        )
+        assert stored_job is not None and second is not None and workspace is not None
+        assert stored_job.request_json["metadata"][TIMELINE_FENCE_METADATA_KEY] == (
+            prepared.timeline_fence.model_dump(mode="json")
+        )
+        assert second.status == ShotStatus.QUEUED.value
+        assert second.generation_job_id == job.id
+        assert workspace.credit_balance == 43
+        assert credit is not None
+        assert credit.status == "RESERVED"
+        assert session.scalar(select(func.count(GenerationJob.id))) == 1
+        assert session.scalar(select(func.count(WorkspaceCreditEntry.id))) == 1
+
+
+def test_autopilot_timeline_fence_rejects_shot_status_change_without_charge(
+    container,
+    project,
+):  # type: ignore[no-untyped-def]
+    _, second_id = _linked_timeline_shots(container, project)
+    prepared = container.visual_runtime.prepare_autopilot(
+        second_id,
+        idempotency_key="timeline-fence-status",
+        allowed_providers=["google_flow"],
+    )
+    with container.database.session() as session:
+        second = session.get(Shot, second_id)
+        assert second is not None
+        second.status = ShotStatus.READY.value
+
+    with pytest.raises(TimelineGenerationPlanStale, match="plan the shot again"):
+        container.visual_runtime.submit_autopilot(prepared, estimated_credits=7)
+
+    with container.database.session() as session:
+        second = session.get(Shot, second_id)
+        assert second is not None
+        assert second.status == ShotStatus.READY.value
+    _assert_no_fenced_generation_side_effects(container, project.id)
+
+
+def test_timeline_propagation_rejects_misbound_next_input_before_writes(
+    container,
+    project,
+):  # type: ignore[no-untyped-def]
+    first_id, second_id = _linked_timeline_shots(container, project)
+    with container.database.session() as session:
+        first = session.get(Shot, first_id)
+        second = session.get(Shot, second_id)
+        assert first is not None and second is not None
+        first.status = ShotStatus.COMMITTED.value
+        second_input = session.get(TimelineState, second.input_state_id)
+        second_output = session.get(TimelineState, second.output_state_id)
+        assert second_input is not None and second_output is not None
+        second_input.shot_id = first_id
+        original_input = deepcopy(second_input.state_json)
+        original_previous_state_id = second_input.previous_state_id
+        original_output = deepcopy(second_output.state_json)
+
+    with pytest.raises(
+        TimelinePropagationError,
+        match="next shot input state has invalid ownership or kind",
+    ):
+        AuthoritativeTimelineStateEngine(container.database).propagate_shot(first_id)
+
+    with container.database.session() as session:
+        second = session.get(Shot, second_id)
+        assert second is not None
+        second_input = session.get(TimelineState, second.input_state_id)
+        second_output = session.get(TimelineState, second.output_state_id)
+        assert second_input is not None and second_output is not None
+        assert second_input.state_json == original_input
+        assert second_input.previous_state_id == original_previous_state_id
+        assert second_output.state_json == original_output
+        assert (
+            session.scalar(
+                select(func.count(DecisionRecord.id)).where(
+                    DecisionRecord.shot_id == first_id,
+                    DecisionRecord.decision_type == "TIMELINE_PROPAGATION",
+                )
+            )
+            == 0
+        )
 
 
 def test_passenger_uses_selected_model_and_shared_runtime_trace(container, project):

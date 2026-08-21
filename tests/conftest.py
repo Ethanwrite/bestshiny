@@ -10,6 +10,62 @@ from platform_shared import Settings
 from production_domain.models import BrowserWorker, Project, ProviderAccount
 from video_platform_api.container import build_container
 
+_PROVIDER_GATE_ENVIRONMENT = (
+    "PROVIDER_MODE",
+    "ALLOW_LIVE_PROVIDER_CALLS",
+    "LIVE_PROVIDER_CONFIRMATION",
+    "ALLOW_RUNAPI_EDGE_CALLS",
+)
+_ORIGINAL_PROVIDER_GATE_ENVIRONMENT = {name: os.environ.get(name) for name in _PROVIDER_GATE_ENVIRONMENT}
+_SAFE_PROVIDER_GATE_ENVIRONMENT = {
+    "PROVIDER_MODE": "mock",
+    "ALLOW_LIVE_PROVIDER_CALLS": "false",
+    "LIVE_PROVIDER_CONFIRMATION": "",
+    "ALLOW_RUNAPI_EDGE_CALLS": "false",
+}
+
+# Test modules may create Settings while they are imported, before fixtures run.
+# Make collection offline too; explicitly enabled live tests restore the invoking
+# process values in their own fixture scope below.
+os.environ.update(_SAFE_PROVIDER_GATE_ENVIRONMENT)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-live-provider",
+        action="store_true",
+        default=False,
+        help="run tests marked live_provider; provider live gates are still required",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--run-live-provider"):
+        return
+    skipped = pytest.mark.skip(reason="live provider test requires the explicit --run-live-provider switch")
+    for item in items:
+        if item.get_closest_marker("live_provider") is not None:
+            item.add_marker(skipped)
+
+
+@pytest.fixture(autouse=True)
+def isolate_provider_gate_environment(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    is_enabled_live_test = request.node.get_closest_marker(
+        "live_provider"
+    ) is not None and request.config.getoption("--run-live-provider")
+    if is_enabled_live_test:
+        for name, value in _ORIGINAL_PROVIDER_GATE_ENVIRONMENT.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        return
+    for name, value in _SAFE_PROVIDER_GATE_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+
 
 @pytest.fixture
 def container(tmp_path):

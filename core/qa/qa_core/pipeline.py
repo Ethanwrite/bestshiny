@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Protocol
 
 from platform_database import Database
 from platform_shared import affected_rows
@@ -43,31 +43,67 @@ class IdentityDriftMetrics:
     recovery: float | None
     usable_samples: int
     invalid_samples: int = 0
+    average_identity: float | None = None
+    minimum_identity: float | None = None
+    identity_p10: float | None = None
+    appearance_similarity: float | None = None
+    costume_similarity: float | None = None
+    hair_similarity: float | None = None
+    reacquisition_score: float | None = None
+
+
+class DynamicIdentityQA(Protocol):
+    """Interface for adaptive sampling/tracking implementations.
+
+    A production tracker/VLM may implement this protocol later. The current
+    rules implementation consumes already tracked, view-aware frame evidence.
+    """
+
+    def sample_positions(
+        self,
+        *,
+        duration_seconds: float | None = None,
+        motion_spikes: tuple[float, ...] = (),
+    ) -> tuple[float, ...]: ...
+
+    def evaluate(self, samples: list[dict[str, Any]]) -> IdentityDriftMetrics: ...
+
+
+def _bounded_similarity(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("identity similarity must be a JSON number")
+    score = float(value)
+    if not math.isfinite(score) or not 0 <= score <= 1:
+        raise ValueError("identity similarity must be finite and between zero and one")
+    return score
 
 
 def _frame_identity_score(sample: dict[str, Any]) -> float | None:
     if not isinstance(sample, dict):
         raise ValueError("identity samples must be objects")
 
-    def bounded_similarity(value: Any) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("identity similarity must be a JSON number")
-        score = float(value)
-        if not math.isfinite(score) or not 0 <= score <= 1:
-            raise ValueError("identity similarity must be finite and between zero and one")
-        return score
-
     face = sample.get("face_similarity")
     if face is not None:
-        return bounded_similarity(face)
+        return _bounded_similarity(face)
     fallbacks = [
         sample.get("body_similarity"),
         sample.get("hair_similarity"),
         sample.get("costume_similarity"),
         sample.get("tracking_continuity"),
     ]
-    values = [bounded_similarity(value) for value in fallbacks if value is not None]
+    values = [_bounded_similarity(value) for value in fallbacks if value is not None]
     return mean(values) if values else None
+
+
+def _mean_component(samples: list[dict[str, Any]], names: tuple[str, ...]) -> float | None:
+    values: list[float] = []
+    for sample in samples:
+        for name in names:
+            raw_value = sample.get(name)
+            if raw_value is not None:
+                values.append(_bounded_similarity(raw_value))
+                break
+    return round(mean(values), 4) if values else None
 
 
 def analyze_identity_drift(
@@ -95,16 +131,54 @@ def analyze_identity_drift(
         else 0.0
     )
     recovery = scores[-1] - min(scores) if scores.index(min(scores)) < len(scores) - 1 else 0.0
+    minimum = round(min(scores), 4)
+    average = round(mean(scores), 4)
+    p10 = round(ordered[p10_index], 4)
+    minimum_index = scores.index(min(scores))
+    reacquired = scores[minimum_index + 1 :]
+    reacquisition_score = round(mean(reacquired), 4) if reacquired else round(scores[-1], 4)
+    try:
+        appearance = _mean_component(samples, ("appearance_similarity", "body_similarity"))
+        costume = _mean_component(samples, ("costume_similarity",))
+        hair = _mean_component(samples, ("hair_similarity",))
+    except (TypeError, ValueError):
+        invalid_samples += 1
+        appearance = costume = hair = None
     return IdentityDriftMetrics(
-        round(min(scores), 4),
-        round(mean(scores), 4),
-        round(ordered[p10_index], 4),
+        minimum,
+        average,
+        p10,
         round(slope, 4),
         round(sum(score < low_threshold for score in scores) / len(scores), 4),
         round(recovery, 4),
         len(scores),
         invalid_samples,
+        average_identity=average,
+        minimum_identity=minimum,
+        identity_p10=p10,
+        appearance_similarity=appearance,
+        costume_similarity=costume,
+        hair_similarity=hair,
+        reacquisition_score=reacquisition_score,
     )
+
+
+class RuleBasedDynamicIdentityQA:
+    version = "dynamic-identity-qa-v1"
+
+    def sample_positions(
+        self,
+        *,
+        duration_seconds: float | None = None,
+        motion_spikes: tuple[float, ...] = (),
+    ) -> tuple[float, ...]:
+        del duration_seconds
+        base = {0.0, 0.2, 0.4, 0.6, 0.8, 0.98}
+        base.update(max(0.0, min(0.98, float(value))) for value in motion_spikes)
+        return tuple(sorted(base))
+
+    def evaluate(self, samples: list[dict[str, Any]]) -> IdentityDriftMetrics:
+        return analyze_identity_drift(samples)
 
 
 class QAPipeline:
@@ -158,12 +232,18 @@ class QAPipeline:
         },
     }
 
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, identity_qa: DynamicIdentityQA | None = None):
         self.database = database
+        self.identity_qa = identity_qa or RuleBasedDynamicIdentityQA()
 
     @staticmethod
     def adaptive_sample_positions() -> tuple[float, ...]:
-        return (0.0, 0.2, 0.4, 0.6, 0.8, 0.98)
+        """Backward-compatible default V1 sampling positions."""
+
+        return RuleBasedDynamicIdentityQA().sample_positions()
+
+    def identity_sample_positions(self) -> tuple[float, ...]:
+        return self.identity_qa.sample_positions()
 
     def approve_human_review(
         self,
@@ -321,20 +401,28 @@ class QAPipeline:
                 raise LookupError("committed or rejected candidates cannot be revalidated")
             asset = session.get(MediaAsset, candidate.output_asset_id)
             file_metrics, hard_failures = self._file_metrics(asset)
-            for gate in [
-                "wrong_main_character",
-                "critical_identity_failure",
-                "wrong_scene",
-                "missing_required_character",
-                "severe_anatomy_failure",
-            ]:
+            reviewer_reason_codes = {
+                "wrong_main_character": "WRONG_CHARACTER",
+                "critical_identity_failure": "IDENTITY_DRIFT",
+                "wrong_scene": "SCENE_DRIFT",
+                "missing_required_character": "WRONG_CHARACTER",
+                "severe_anatomy_failure": "ANATOMY_FAILURE",
+                "camera_direction_mismatch": "CAMERA_DIRECTION_MISMATCH",
+                "action_not_completed": "ACTION_NOT_COMPLETED",
+                "wrong_prop": "WRONG_PROP",
+                "low_end_frame_quality": "LOW_END_FRAME_QUALITY",
+                "hair_drift": "HAIR_DRIFT",
+                "costume_drift": "COSTUME_DRIFT",
+            }
+            for gate, reason_code in reviewer_reason_codes.items():
                 if evidence.get(gate):
-                    hard_failures.append(gate.upper())
-            identity = analyze_identity_drift(evidence.get("identity_samples", []))
+                    hard_failures.append(reason_code)
+            identity = self.identity_qa.evaluate(evidence.get("identity_samples", []))
             if identity.invalid_samples:
                 hard_failures.append("INVALID_IDENTITY_EVIDENCE")
             if identity.minimum_similarity is not None and identity.minimum_similarity < 0.62:
                 hard_failures.append("IDENTITY_MINIMUM_TOO_LOW")
+                hard_failures.append("IDENTITY_DRIFT")
             if (
                 identity.drift_slope is not None
                 and identity.drift_slope <= -0.045
@@ -342,6 +430,13 @@ class QAPipeline:
                 and identity.minimum_similarity < 0.72
             ):
                 hard_failures.append("SUSTAINED_IDENTITY_DRIFT")
+                hard_failures.append("IDENTITY_DRIFT")
+            if identity.average_identity is not None and identity.average_identity < 0.5:
+                hard_failures.append("WRONG_CHARACTER")
+            if identity.hair_similarity is not None and identity.hair_similarity < 0.65:
+                hard_failures.append("HAIR_DRIFT")
+            if identity.costume_similarity is not None and identity.costume_similarity < 0.65:
+                hard_failures.append("COSTUME_DRIFT")
             dimensions = {
                 key: evidence.get(f"{key}_score")
                 for key in ["character", "scene", "composition", "action", "camera", "lighting", "narrative"]
@@ -368,9 +463,8 @@ class QAPipeline:
             identity_not_applicable = bool(
                 evidence.get("identity_not_applicable") and evidence.get("_trusted_source") == "INTERNAL_QC"
             )
-            identity_complete = identity_not_applicable or identity.usable_samples >= len(
-                self.adaptive_sample_positions()
-            )
+            sample_positions = self.identity_sample_positions()
+            identity_complete = identity_not_applicable or identity.usable_samples >= len(sample_positions)
             evidence_complete = not missing_dimensions and identity_complete
             weight_sum = sum(weights[key] for key in available)
             overall = (
@@ -410,12 +504,12 @@ class QAPipeline:
                 metrics_json={
                     "level0": file_metrics,
                     "identity": asdict(identity),
-                    "adaptive_samples": self.adaptive_sample_positions(),
+                    "adaptive_samples": sample_positions,
                     "evidence_source": evidence.get("_trusted_source", "UNTRUSTED_OR_NONE"),
                     "evidence_complete": evidence_complete,
                     "missing_dimensions": missing_dimensions,
                     "identity_not_applicable": identity_not_applicable,
-                    "minimum_identity_samples": len(self.adaptive_sample_positions()),
+                    "minimum_identity_samples": len(sample_positions),
                 },
                 summary=(
                     f"{decision}: {', '.join(sorted(set(hard_failures))) or 'weighted profile decision'}"

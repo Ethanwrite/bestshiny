@@ -277,6 +277,11 @@ async function loadPassengerModels() {
 
 function renderPassengerModels() {
   state.passengerModels = state.passengerMedia === "image" ? state.imageModelProfiles : state.modelProfiles;
+  const freeVideo = state.passengerMedia === "video"
+    && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
+  if (freeVideo) {
+    state.passengerModels = state.passengerModels.filter((model) => model.provider === "seedance");
+  }
   $("passengerModel").innerHTML = state.passengerModels.length
     ? state.passengerModels.map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(model.model_id)}</option>`).join("")
     : '<option value="">尚未配置生成模型</option>';
@@ -414,8 +419,11 @@ async function renderPassengerJob(job) {
       preview = `<video class="result-preview" src="${escapeHTML(mediaUrl)}" controls playsinline></video>`;
     }
   }
+  const displayedStatus = job.credit_status === "RECONCILIATION_REQUIRED"
+    ? "对账中 · 积分暂时冻结"
+    : simpleLabel(job.status);
   $("passengerResult").classList.remove("empty-state");
-  $("passengerResult").innerHTML = `${preview}<span class="result-status">${simpleLabel(job.status)}</span><div class="result-meta">
+  $("passengerResult").innerHTML = `${preview}<span class="result-status">${displayedStatus}</span><div class="result-meta">
     <div>生成模型<strong>${simpleLabel(job.provider)} · ${escapeHTML(job.model)}</strong></div>
     <div>任务编号<strong>${escapeHTML(job.id)}</strong></div>
     <div>结果素材<strong>${escapeHTML(output)}</strong></div>
@@ -436,9 +444,12 @@ async function generatePassenger() {
   const resolution = $("passengerResolution").value;
   const duration = mediaType === "video" ? Number($("passengerDuration").value || 8) : null;
   const estimatedCost = passengerEstimatedCost();
+  const freeVideo = mediaType === "video"
+    && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
   const file = $("passengerReference").files[0];
   const fingerprint = JSON.stringify({
     projectId, mediaType, provider: selection.provider, model: selection.model_id,
+    modelRole: freeVideo ? "VIDEO_SEEDANCE" : null,
     prompt, aspectRatio, resolution, duration, estimatedCost,
     file: file ? [file.name, file.size, file.lastModified] : null,
   });
@@ -457,6 +468,7 @@ async function generatePassenger() {
       media_type: mediaType,
       provider: selection.provider,
       model: selection.model_id,
+      ...(freeVideo ? { model_role: "VIDEO_SEEDANCE" } : {}),
       prompt,
       aspect_ratio: aspectRatio,
       resolution,
@@ -469,7 +481,9 @@ async function generatePassenger() {
     state.passengerJobs[mediaType] = job;
     await renderPassengerJob(job);
     succeeded = true;
-    toast("生成任务已提交；你选择的模型不会被系统自动替换");
+    toast(freeVideo
+      ? "生成任务已提交；免费套餐使用 Seedance"
+      : "生成任务已提交；你选择的模型不会被系统自动替换");
   } finally {
     finishSubmission("passenger", idempotencyKey, succeeded);
     button.disabled = false;

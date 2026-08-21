@@ -1,29 +1,49 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Annotated, Any, Literal
 
 from asset_registry_core import (
     AssetVersionNotPromotable,
     CanonicalVersionNotSet,
     VersionMediaInput,
 )
+from entitlement_core import (
+    InsufficientWorkspaceCredits,
+    PlanEntitlementDenied,
+    WorkspaceCreditConflict,
+)
 from evaluation_core import (
     EvaluationEvidence,
     EvaluationExpectation,
     EvaluationResult,
 )
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from generation_gateway import IdempotencyConflict
 from memory_core import MemoryLayer, MemoryQuery, MultimodalContent, ShotMemoryInput
-from platform_contracts import PassengerGenerationCommand
+from model_registry_core import ModelRole
+from platform_contracts import GenerationRequest, PassengerGenerationCommand
 from production_domain.models import (
     Asset,
     AssetVersion,
     GenerationJob,
     MediaAsset,
     ProductionTrace,
+    Workspace,
 )
-from pydantic import BaseModel, Field
+from provider_budget_core import (
+    DatabaseProviderBudgetRepository,
+    reservation_dict,
+    snapshot_dict,
+)
+from provider_sdk import (
+    AssetCriticality,
+    ProviderBudgetConflict,
+    ProviderTrustLevel,
+    ProviderTrustViolation,
+    assert_provider_can_handle,
+)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
 from .auth import AuthPrincipal, AuthService
@@ -123,6 +143,38 @@ class PricingEstimateRequest(BaseModel):
     reference_count: int = Field(default=0, ge=0, le=20)
 
 
+class CreditReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["CONFIRM_PROVIDER_ACCEPTED", "CONFIRM_PROVIDER_NOT_CREATED"]
+    reason: str = Field(min_length=3, max_length=240)
+    explicit_confirmation: Literal[True]
+    evidence_reference: str | None = Field(default=None, max_length=500)
+
+
+class ProviderBudgetReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["SETTLE_ACTUAL_COST", "RELEASE_NO_REMOTE_CHARGE"]
+    actual_cost_usd: Decimal | None = Field(
+        default=None,
+        ge=0,
+        max_digits=14,
+        decimal_places=6,
+    )
+    reason: str = Field(min_length=3, max_length=240)
+    evidence_reference: str = Field(min_length=3, max_length=500)
+    explicit_confirmation: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_action_cost(self) -> ProviderBudgetReconcileRequest:
+        if self.action == "SETTLE_ACTUAL_COST" and self.actual_cost_usd is None:
+            raise ValueError("SETTLE_ACTUAL_COST requires actual_cost_usd")
+        if self.action == "RELEASE_NO_REMOTE_CHARGE" and self.actual_cost_usd is not None:
+            raise ValueError("RELEASE_NO_REMOTE_CHARGE forbids actual_cost_usd")
+        return self
+
+
 def _asset_view(asset: Asset) -> dict[str, Any]:
     return {
         "id": asset.id,
@@ -167,17 +219,49 @@ def register_runtime_routes(
     ):
         auth.require_project(principal, body.project_id, write=True)
         try:
-            estimate = container.credit_pricing.estimate(
-                provider=body.provider,
-                model=body.model,
-                media_type=body.media_type,
-                duration=body.duration or 1,
+            admitted = container.generation_admission.admit_passenger(
+                GenerationRequest(
+                    project_id=body.project_id,
+                    type=body.media_type,
+                    provider=body.provider or "google_flow",
+                    model=body.model or ("veo" if body.media_type == "video" else "NARWHAL"),
+                    prompt=body.prompt,
+                    negative_prompt=body.negative_prompt,
+                    duration=body.duration,
+                    aspect_ratio=body.aspect_ratio,
+                    start_frame_asset_id=body.start_frame_asset_id,
+                    end_frame_asset_id=body.end_frame_asset_id,
+                    reference_asset_ids=body.reference_asset_ids,
+                    idempotency_key=body.idempotency_key,
+                    asset_criticality=body.asset_criticality,
+                ),
+                requested_role=body.model_role,
                 resolution=body.resolution,
-                reference_count=len(body.reference_asset_ids),
+                enforce_plan=not principal.development_bypass,
             )
-            body = body.model_copy(update={"estimated_cost": estimate.estimated_total_usd})
-            job, replayed = container.visual_runtime.submit_passenger(body)
+            estimate = admitted.estimate
+            body = body.model_copy(
+                update={
+                    "provider": admitted.request.provider,
+                    "model": admitted.request.model,
+                    "model_role": admitted.model_role,
+                    "asset_criticality": admitted.request.asset_criticality,
+                    "duration": admitted.request.duration,
+                    "estimated_cost": estimate.estimated_total_usd,
+                    "estimated_credits": estimate.credits,
+                    "pricing_version": container.credit_pricing.version,
+                }
+            )
+            job, replayed = container.visual_runtime.submit_passenger(
+                body,
+                estimated_credits=estimate.credits,
+                pricing_version=container.credit_pricing.version,
+            )
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except (LookupError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -187,11 +271,99 @@ def register_runtime_routes(
             "provider": job.provider,
             "model": job.model,
             "output_asset_id": job.output_asset_id,
+            "submission_state": getattr(job, "submission_state", None),
+            "credit_status": container.gateway.credit_status(job.id),
             "estimated_cost": job.cost_estimate,
             "estimated_credits": estimate.credits,
             "credit_pricing_version": container.credit_pricing.version,
             "replayed": replayed,
         }
+
+    @user_router.get("/api/projects/{project_id}/model-roles")
+    def available_model_roles(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
+        resolver = container.workspace_models
+        context = resolver.context_for_project(project_id)
+        roles: list[dict[str, Any]] = []
+        for role in ModelRole:
+            try:
+                selected, _capability, _implementation = container.model_roles.resolve(
+                    project_id,
+                    role,
+                    require_live=container.settings.provider_mode == "live",
+                )
+            except (LookupError, PlanEntitlementDenied):
+                continue
+            roles.append(
+                {
+                    "role": role.value,
+                    "label": role.value.replace("_", " ").title(),
+                    "modality": selected.modality,
+                }
+            )
+        return {"plan_tier": context.plan_tier.value, "roles": roles}
+
+    @user_router.get("/api/workspaces/{workspace_id}/credits")
+    def workspace_credits(
+        workspace_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_workspace(principal, workspace_id)
+        with container.database.session() as session:
+            workspace = session.get(Workspace, workspace_id)
+            if workspace is None:
+                raise HTTPException(404, "workspace not found")
+            entries = container.workspace_credits.entries_in_session(session, workspace_id)
+            events = container.workspace_credits.events_in_session(session, workspace_id)
+            return {
+                "workspace_id": workspace.id,
+                "plan_tier": workspace.plan_tier,
+                "balance": workspace.credit_balance,
+                "starter_grant": container.workspace_credits.starter_grant,
+                "pricing_version": container.credit_pricing.version,
+                "reserved_credits": sum(
+                    item.credits for item in entries if item.status in {"RESERVED", "RECONCILIATION_REQUIRED"}
+                ),
+                "entries": [
+                    {
+                        "id": item.id,
+                        "project_id": item.project_id,
+                        "generation_job_id": item.generation_job_id,
+                        "credits": item.credits,
+                        "settled_credits": item.settled_credits,
+                        "refunded_credits": item.refunded_credits,
+                        "balance_after": item.balance_after,
+                        "status": item.status,
+                        "reason": item.reason,
+                        "reserved_at": item.reserved_at,
+                        "settled_at": item.settled_at,
+                        "refunded_at": item.refunded_at,
+                        "reconciliation_required_at": item.reconciliation_required_at,
+                        "reconciled_at": item.reconciled_at,
+                        "reconciliation_reason": item.reconciliation_reason,
+                        "created_at": item.created_at,
+                    }
+                    for item in entries[-100:]
+                ],
+                "events": [
+                    {
+                        "id": event.id,
+                        "credit_entry_id": event.credit_entry_id,
+                        "generation_job_id": event.generation_job_id,
+                        "event_type": event.event_type,
+                        "credits": event.credits,
+                        "balance_delta": event.balance_delta,
+                        "balance_after": event.balance_after,
+                        "reason": event.reason,
+                        "actor_type": event.actor_type,
+                        "created_at": event.created_at,
+                    }
+                    for event in events[-200:]
+                ],
+            }
 
     @user_router.post("/api/pricing/estimate")
     def estimate_pricing(
@@ -345,6 +517,18 @@ def register_runtime_routes(
                 raise HTTPException(404, "generated media asset not found")
             project_id = job.project_id
         try:
+            provider = container.providers.get(job.provider)
+            provider_trust = ProviderTrustLevel(
+                getattr(provider, "trust_level", ProviderTrustLevel.PRODUCTION)
+            )
+            if body.promote_to_canonical:
+                assert_provider_can_handle(provider_trust, AssetCriticality.CANONICAL)
+        except (LookupError, ValueError, ProviderTrustViolation) as exc:
+            raise HTTPException(
+                409,
+                "this generated result is not eligible to become a canonical asset",
+            ) from exc
+        try:
             logical = (
                 container.asset_registry.create(
                     project_id,
@@ -362,7 +546,13 @@ def register_runtime_routes(
                 primary_media_asset_id=media.id,
                 label=body.label or f"Generation {job_id[:8]}",
                 source="PASSENGER_GENERATION",
-                metadata={"generation_job_id": job_id},
+                metadata={
+                    "generation_job_id": job_id,
+                    "provider_trust_level": provider_trust.value,
+                    "source_asset_criticality": str(
+                        job.request_json.get("asset_criticality") or AssetCriticality.STANDARD.value
+                    ),
+                },
                 created_by_user_id=(None if principal.development_bypass else principal.user_id),
             )
             asset = None
@@ -482,6 +672,46 @@ def register_runtime_routes(
             "retry_job_id": retry_job.id if retry_job else None,
         }
 
+    @internal_router.post("/internal/generations/{job_id}/credit-reconcile")
+    def reconcile_generation_credit(
+        job_id: str,
+        body: CreditReconcileRequest,
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key"),
+        ] = None,
+    ):
+        if not idempotency_key:
+            raise HTTPException(400, "Idempotency-Key is required")
+        ledger_action = "SETTLE_RESERVED" if body.action == "CONFIRM_PROVIDER_ACCEPTED" else "REFUND_RESERVED"
+        try:
+            transition = container.gateway.reconcile_credits(
+                job_id,
+                action=ledger_action,
+                idempotency_key=idempotency_key,
+                reason=body.reason,
+                evidence_reference=body.evidence_reference,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except WorkspaceCreditConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        job = container.gateway.get(job_id)
+        return {
+            "generation_job_id": job_id,
+            "job_status": job.status if job else None,
+            "credit_entry_id": transition.entry_id,
+            "previous_credit_status": transition.previous_status,
+            "credit_status": transition.status,
+            "reserved_credits": transition.reserved_credits,
+            "settled_credits": transition.settled_credits,
+            "refunded_credits": transition.refunded_credits,
+            "balance_after": transition.balance_after,
+            "replayed": transition.replayed,
+        }
+
     @internal_router.post("/internal/retry/plan")
     def plan_retry(body: RetryPlanRequestBody):
         return container.retry_engine.plan(
@@ -500,6 +730,55 @@ def register_runtime_routes(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"id": metric.id, "metric": metric.metric_name, "value": metric.value}
+
+    @internal_router.get("/internal/provider-budgets/{provider}")
+    def provider_budget(provider: str):
+        repository = DatabaseProviderBudgetRepository(container.database)
+        try:
+            return snapshot_dict(repository.get(provider))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @internal_router.get("/internal/provider-budgets/{provider}/records")
+    def provider_budget_records(provider: str):
+        repository = DatabaseProviderBudgetRepository(container.database)
+        return [reservation_dict(item) for item in repository.records(provider)]
+
+    @internal_router.post("/internal/provider-budget-reservations/{reservation_id}/reconcile")
+    def reconcile_provider_budget(
+        reservation_id: str,
+        body: ProviderBudgetReconcileRequest,
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key"),
+        ] = None,
+    ):
+        if not idempotency_key:
+            raise HTTPException(400, "Idempotency-Key is required")
+        repository = DatabaseProviderBudgetRepository(container.database)
+        try:
+            result = repository.reconcile_uncertain(
+                reservation_id,
+                action=body.action,
+                actual_cost_usd=body.actual_cost_usd,
+                idempotency_key=idempotency_key,
+                reason=body.reason,
+                evidence_reference=body.evidence_reference,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ProviderBudgetConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "reservation": reservation_dict(result.reservation),
+            "provider_budget": snapshot_dict(result.budget),
+            "previous_status": result.previous_status,
+            "action": result.action,
+            "audit_decision_id": result.audit_decision_id,
+            "replayed": result.replayed,
+        }
 
     @internal_router.get("/internal/benchmarks")
     def benchmark_manifest():

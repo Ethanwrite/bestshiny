@@ -4,13 +4,13 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from generation_gateway.scheduler import AccountScheduler
 from pgvector.sqlalchemy import Vector
 from platform_database import Database
-from production_domain.models import CostRecord, GenerationJob, JobStatus, Project
 from sqlalchemy.dialects import postgresql, sqlite
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,41 +188,74 @@ def test_cost_record_migration_deduplicates_exact_legacy_job_rows(tmp_path, monk
     config.set_main_option("script_location", str(ROOT / "migrations"))
     command.upgrade(config, "0014_worker_scoped_credentials")
 
-    database = Database(database_url)
-    with database.session() as session:
-        project = Project(id="cost-project", title="Cost migration")
-        session.add(project)
-        session.flush()
-        job = GenerationJob(
-            id="cost-job",
-            project_id=project.id,
-            generation_type="video",
-            provider="google_flow",
-            model="flow-veo-3.1",
-            status=JobStatus.COMPLETED.value,
-            request_json={"duration": 5},
-            request_hash="f" * 64,
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["projects", "generation_jobs", "cost_records"])
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "cost-project",
+                "name": "Cost migration",
+                "title": "Cost migration",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "google_flow",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
         )
-        session.add(job)
-        session.flush()
+        connection.execute(
+            metadata.tables["generation_jobs"].insert(),
+            {
+                "id": "cost-job",
+                "project_id": "cost-project",
+                "generation_type": "video",
+                "provider": "google_flow",
+                "model": "flow-veo-3.1",
+                "status": "COMPLETED",
+                "priority": 0,
+                "request_json": {"duration": 5},
+                "provider_request_json": {},
+                "request_hash": "f" * 64,
+                "policy": "TEXT_TO_VIDEO",
+                "attempt_count": 0,
+                "max_attempts": 3,
+                "submission_state": "NOT_SENT",
+                "safe_to_retry": True,
+                "cost_estimate": 0.0,
+                "actual_cost": 0.0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
         common = {
-            "project_id": project.id,
-            "generation_job_id": job.id,
-            "provider": job.provider,
-            "model": job.model,
+            "project_id": "cost-project",
+            "generation_job_id": "cost-job",
+            "provider": "google_flow",
+            "model": "flow-veo-3.1",
             "duration": 5.0,
             "resolution": "1080p",
             "credits": 120.0,
             "estimated_cost": 1.2,
             "actual_cost": 1.1,
             "retry_cost": 0.0,
+            "accepted": False,
+            "wasted": False,
+            "created_at": now,
+            "updated_at": now,
         }
-        session.add_all(
+        connection.execute(
+            metadata.tables["cost_records"].insert(),
             [
-                CostRecord(id="duplicate-cost-a", **common),
-                CostRecord(id="duplicate-cost-b", **common),
-            ]
+                {"id": "duplicate-cost-a", **common},
+                {"id": "duplicate-cost-b", **common},
+            ],
         )
+    engine.dispose()
 
     command.upgrade(config, "head")
     engine = sa.create_engine(database_url)
@@ -238,6 +271,290 @@ def test_cost_record_migration_deduplicates_exact_legacy_job_rows(tmp_path, monk
     engine.dispose()
     assert count == 1
     assert index["unique"] == 1
+
+
+def test_workspace_credit_lifecycle_migrates_populated_wallet_and_round_trips(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "populated-workspace-credit-wallet.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0023_workspace_credit_wallet")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(
+        engine,
+        only=[
+            "users",
+            "workspaces",
+            "projects",
+            "generation_jobs",
+            "workspace_credit_entries",
+        ],
+    )
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["users"].insert(),
+            {
+                "id": "credit-lifecycle-user",
+                "email": "credit-lifecycle@example.com",
+                "display_name": "Credit lifecycle",
+                "password_hash": "not-used-by-migration",
+                "status": "ACTIVE",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["workspaces"].insert(),
+            {
+                "id": "credit-lifecycle-workspace",
+                "owner_user_id": "credit-lifecycle-user",
+                "name": "Credit lifecycle",
+                "status": "ACTIVE",
+                "plan_tier": "FREE",
+                "credit_balance": 38,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "credit-lifecycle-project",
+                "workspace_id": "credit-lifecycle-workspace",
+                "name": "Credit migration",
+                "title": "Credit migration",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "seedance",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["generation_jobs"].insert(),
+            {
+                "id": "credit-lifecycle-job",
+                "project_id": "credit-lifecycle-project",
+                "generation_type": "video",
+                "provider": "seedance",
+                "model": "seedance-1.5-pro",
+                "status": "COMPLETED",
+                "priority": 0,
+                "request_json": {"duration": 5},
+                "provider_request_json": {},
+                "request_hash": "c" * 64,
+                "policy": "TEXT_TO_VIDEO",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "submission_state": "CONFIRMED",
+                "safe_to_retry": False,
+                "cost_estimate": 0.12,
+                "actual_cost": 0.12,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["workspace_credit_entries"].insert(),
+            {
+                "id": "credit-lifecycle-entry",
+                "workspace_id": "credit-lifecycle-workspace",
+                "project_id": "credit-lifecycle-project",
+                "generation_job_id": "credit-lifecycle-job",
+                "idempotency_key": "credit-lifecycle-key",
+                "credits": 12,
+                "balance_after": 38,
+                "status": "CHARGED",
+                "reason": "GENERATION_SUBMISSION",
+                "metadata_json": {"pricing_version": "legacy-v1"},
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        entry = connection.execute(
+            sa.text(
+                "SELECT status, credits, settled_credits, refunded_credits, reason "
+                "FROM workspace_credit_entries WHERE id = 'credit-lifecycle-entry'"
+            )
+        ).one()
+        event = connection.execute(
+            sa.text(
+                "SELECT event_type, credits, balance_delta, balance_after, actor_type, "
+                "generation_job_id FROM workspace_credit_events "
+                "WHERE credit_entry_id = 'credit-lifecycle-entry'"
+            )
+        ).one()
+        job = connection.execute(
+            sa.text(
+                "SELECT workspace_credit_required, quoted_credits FROM generation_jobs "
+                "WHERE id = 'credit-lifecycle-job'"
+            )
+        ).one()
+        foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    engine.dispose()
+
+    assert entry == ("SETTLED", 12, 12, 0, "LEGACY_CHARGE_MIGRATED")
+    assert event == ("LEGACY_SETTLED", 12, -12, 38, "MIGRATION", "credit-lifecycle-job")
+    assert job == (True, 12)
+    assert foreign_key_violations == []
+
+    command.downgrade(config, "0023_workspace_credit_wallet")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        downgraded_entry = connection.execute(
+            sa.text("SELECT status, reason FROM workspace_credit_entries WHERE id = 'credit-lifecycle-entry'")
+        ).one()
+        downgraded_foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    assert "workspace_credit_events" not in inspector.get_table_names()
+    assert "settled_credits" not in {
+        str(column["name"]) for column in inspector.get_columns("workspace_credit_entries")
+    }
+    assert "workspace_credit_required" not in {
+        str(column["name"]) for column in inspector.get_columns("generation_jobs")
+    }
+    engine.dispose()
+    assert downgraded_entry == ("CHARGED", "GENERATION_SUBMISSION")
+    assert downgraded_foreign_key_violations == []
+
+    command.upgrade(config, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        remigrated_entry = connection.execute(
+            sa.text(
+                "SELECT status, settled_credits FROM workspace_credit_entries "
+                "WHERE id = 'credit-lifecycle-entry'"
+            )
+        ).one()
+        remigrated_event_count = connection.scalar(
+            sa.text(
+                "SELECT COUNT(*) FROM workspace_credit_events "
+                "WHERE credit_entry_id = 'credit-lifecycle-entry' "
+                "AND event_type = 'LEGACY_SETTLED'"
+            )
+        )
+        remigrated_foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    engine.dispose()
+    assert remigrated_entry == ("SETTLED", 12)
+    assert remigrated_event_count == 1
+    assert remigrated_foreign_key_violations == []
+
+
+def test_workspace_credit_lifecycle_rejects_active_free_job_without_reservation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "unreserved-active-free-job.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0023_workspace_credit_wallet")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["users", "workspaces", "projects", "generation_jobs"])
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["users"].insert(),
+            {
+                "id": "unreserved-free-user",
+                "email": "unreserved-free@example.com",
+                "display_name": "Unreserved Free",
+                "password_hash": "not-used-by-migration",
+                "status": "ACTIVE",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["workspaces"].insert(),
+            {
+                "id": "unreserved-free-workspace",
+                "owner_user_id": "unreserved-free-user",
+                "name": "Unreserved Free",
+                "status": "ACTIVE",
+                "plan_tier": "FREE",
+                "credit_balance": 50,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "unreserved-free-project",
+                "workspace_id": "unreserved-free-workspace",
+                "name": "Unreserved Free",
+                "title": "Unreserved Free",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "seedance",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["generation_jobs"].insert(),
+            {
+                "id": "unreserved-free-job",
+                "project_id": "unreserved-free-project",
+                "generation_type": "video",
+                "provider": "seedance",
+                "model": "seedance-1.5-pro",
+                "status": "NEW",
+                "priority": 0,
+                "request_json": {"duration": 5},
+                "provider_request_json": {},
+                "request_hash": "u" * 64,
+                "policy": "TEXT_TO_VIDEO",
+                "attempt_count": 0,
+                "max_attempts": 3,
+                "submission_state": "NOT_SENT",
+                "safe_to_retry": True,
+                "cost_estimate": 0.12,
+                "actual_cost": 0.0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="active FREE generation without a reservation"):
+        command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        job = connection.execute(
+            sa.text("SELECT status, submission_state FROM generation_jobs WHERE id = 'unreserved-free-job'")
+        ).one()
+    assert revision == "0023_workspace_credit_wallet"
+    assert "workspace_credit_required" not in {
+        str(column["name"]) for column in inspector.get_columns("generation_jobs")
+    }
+    assert job == ("NEW", "NOT_SENT")
+    engine.dispose()
 
 
 def test_reservation_ownership_migration_repairs_legacy_cancelled_capacity(

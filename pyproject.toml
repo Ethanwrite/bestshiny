@@ -54,6 +54,10 @@ packages = [
   "providers/omni/omni_provider",
   "providers/kling/kling_provider",
   "providers/runway/runway_provider",
+  "providers/openrouter/openrouter_provider",
+  "providers/runapi/runapi_provider",
+  "providers/wan/wan_provider",
+  "providers/deepseek/deepseek_provider",
   "core/narrative/narrative_core",
   "core/character/character_core",
   "core/continuity/continuity_core",
@@ -71,23 +75,31 @@ packages = [
   "core/video-prompt/video_prompt_core",
   "core/evaluation/evaluation_core",
   "core/model-metrics/model_metrics_core",
+  "core/provider-budget/provider_budget_core",
+  "core/entitlements/entitlement_core",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "live_provider: opt-in tests that may contact a paid external provider; requires --run-live-provider and provider live gates",
+]
 pythonpath = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
   "providers/google-flow", "providers/seedance", "providers/veo", "providers/grok", "providers/omni",
-  "providers/kling", "providers/runway", "core/narrative", "core/character", "core/continuity",
+  "providers/kling", "providers/runway", "providers/openrouter", "providers/runapi", "providers/wan",
+  "providers/deepseek", "core/narrative", "core/character", "core/continuity",
   "core/generation-policy", "core/qa", "core/cost", "core/skills", "core/production",
   "core/model-registry", "core/adapters",
   "core/image-prompt",
   "core/asset-registry",
   "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
   "core/model-metrics",
+  "core/provider-budget",
+  "core/entitlements",
 ]
 
 [tool.ruff]
@@ -112,7 +124,8 @@ files = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
-  "providers/google-flow",
+  "providers/google-flow", "providers/seedance", "providers/openrouter", "providers/runapi",
+  "providers/wan", "providers/deepseek",
   "agents/runtime",
   "core/narrative", "core/character", "core/continuity", "core/generation-policy",
   "core/qa", "core/cost", "core/skills", "core/production",
@@ -121,4 +134,6 @@ files = [
   "core/asset-registry",
   "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
   "core/model-metrics",
+  "core/provider-budget",
+  "core/entitlements",
 ]

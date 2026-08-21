@@ -523,12 +523,30 @@ class AuthService:
         return None
 
     def user_view(self, principal: AuthPrincipal) -> dict[str, Any]:
+        workspace_details: dict[str, Workspace] = {}
+        if principal.workspace_roles:
+            with self.database.session() as session:
+                workspace_details = {
+                    item.id: item
+                    for item in session.scalars(
+                        select(Workspace).where(Workspace.id.in_(principal.workspace_roles))
+                    )
+                }
         return {
             "id": principal.user_id,
             "email": principal.email,
             "display_name": principal.display_name,
             "workspaces": [
-                {"id": workspace_id, "role": role} for workspace_id, role in principal.workspace_roles.items()
+                {
+                    "id": workspace_id,
+                    "role": role,
+                    "plan_tier": (
+                        workspace_details[workspace_id].plan_tier
+                        if workspace_id in workspace_details
+                        else "FREE"
+                    ),
+                }
+                for workspace_id, role in principal.workspace_roles.items()
             ],
         }
 

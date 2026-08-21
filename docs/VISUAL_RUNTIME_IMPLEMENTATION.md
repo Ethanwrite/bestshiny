@@ -77,6 +77,8 @@ Flag 支持环境默认、数据库全局 override 与项目 override，项目�
 ### Changes
 
 - 新增 JSON 配置的 `ModelCapabilityRegistry`，记录 provider/model/version、能力、成本、延迟、adapter、静态质量先验与已知失败先验。
+- 新增持久化 `ModelDefinition`、`ModelRoleBinding` 与 `ModelInfrastructureService`：业务角色只绑定逻辑模型；`ALL/FREE/PRO/ENTERPRISE` 等套餐作用域可配置，套餐专属绑定存在时不会静默继承通用付费模型。
+- 新增无数据库依赖的 `ProviderTrustLevel`、`AssetCriticality` 与硬兼容性检查；`EDGE` provider 无论成本分多低都不能进入 canonical、hero 或 important 任务。
 - 新增确定性 `VideoModelRouter`：先做硬能力过滤，再输出排序、总分、能力得分、成本/延迟/失败扣分、缺失能力与可解释原因。
 - 新增 typed `VideoModelAdapter` 接口和 registry；实现 Kling、Veo、Seedance、Grok、Wan 的模型专用 prompt/payload 映射。
 - Adapter 映射参考图、起始帧、结束帧、时长、清晰度、音频等字段；Grok 只在镜头未批准直视摄影机时加强结尾视线约束，显式批准的正面直视镜头不会被适配器擅自改写或被评估器惩罚。
@@ -84,7 +86,9 @@ Flag 支持环境默认、数据库全局 override 与项目 override，项目�
 
 ### Files Changed
 
-- `core/model-registry/model_registry_core/{schemas.py,registry.py,router.py,__init__.py}`
+- `core/model-registry/model_registry_core/{schemas.py,registry.py,router.py,infrastructure.py,__init__.py}`
+- `packages/provider-sdk/provider_sdk/trust.py`
+- `config/model-registry/defaults.json`
 - `config/video-models/{google-flow,grok,kling,seedance,veo,wan}.json`
 - `core/adapters/video_adapter_core/{base.py,adapters.py,registry.py,__init__.py}`
 - `skills/model-prompting/SKILL.md`
@@ -93,7 +97,8 @@ Flag 支持环境默认、数据库全局 override 与项目 override，项目�
 
 ### Migration Notes
 
-- 模型定义以版本控制的 JSON 配置为 source of truth，本阶段不把静态 capability 写入数据库。
+- 视频质量/失败先验继续使用版本控制 JSON；业务角色、provider model ID、信任等级与套餐绑定由版本化默认配置首次写入数据库，之后不会在启动时覆盖管理员修改。
+- `0021_unified_model_registry` 新增模型定义与套餐可选角色绑定；默认全部 `live_enabled=false`，配置 API key 本身不会打开真实付费调用。
 - 生产指标与 benchmark 的持久化由 Phase 8 的 `0005_visual_runtime` 提供。
 - 自定义部署如移动 `MODEL_CONFIG_ROOT`，必须保证全部 JSON profile 一起发布。
 
@@ -104,7 +109,8 @@ Flag 支持环境默认、数据库全局 override 与项目 override，项目�
 
 ### Tests
 
-- `tests/test_model_router.py`：能力硬过滤、确定性排序、已知失败扣分、Grok 后视/正视镜头风险、自适应样本门槛。
+- `tests/test_model_router.py`：能力/信任等级硬过滤、确定性排序、已知失败扣分、Grok 后视/正视镜头风险、自适应样本门槛。
+- `tests/test_model_infrastructure.py`：默认配置、幂等持久化、管理员覆盖保护、套餐作用域、FREE 未配置时 fail-closed，以及 canonical/hero 禁止 EDGE。
 - `tests/test_video_adapters.py`：五类 Adapter 注册、模型专用 prompt、不共享通用 payload、参考/首尾帧/时长/清晰度/音频字段、Grok gaze 约束。
 
 ### Risks / Next

@@ -241,6 +241,46 @@ def test_cost_recording_is_exactly_once_under_concurrency(container, project, tm
         assert records[0].credits == 125
 
 
+def test_low_trust_generation_can_never_enter_committed_timeline(container, project, tmp_path):
+    shot_id, candidate_id = _candidate_video(container, project, tmp_path)
+    with container.database.session() as session:
+        candidate = session.get(GenerationCandidate, candidate_id)
+        output = session.get(MediaAsset, candidate.output_asset_id)
+        job = GenerationJob(
+            project_id=project.id,
+            shot_id=shot_id,
+            candidate_id=candidate.id,
+            generation_type="video",
+            provider="runapi",
+            model="edge-test-model",
+            status=JobStatus.COMPLETED.value,
+            request_json={"asset_criticality": "TEMPORARY"},
+            request_hash="0" * 64,
+            output_asset_id=output.id,
+        )
+        session.add(job)
+        session.flush()
+        qa = QAResult(
+            candidate_id=candidate.id,
+            decision=QADecision.PASS.value,
+            overall_score=1.0,
+            summary="fixture PASS",
+        )
+        session.add(qa)
+        session.flush()
+        candidate.qa_result_id = qa.id
+        candidate.status = CandidateStatus.PASSED.value
+        candidate.generation_job_id = job.id
+        output.provider = "runapi"
+
+    with pytest.raises(CandidateNotCommittable, match="low-trust generation output"):
+        container.candidates.commit(candidate_id)
+    with container.database.session() as session:
+        candidate = session.get(GenerationCandidate, candidate_id)
+        assert candidate.status == CandidateStatus.PASSED.value
+        assert candidate.accepted_by is None
+
+
 def test_qa_hard_fails_sustained_identity_drift(container, project, tmp_path):
     _, candidate_id = _candidate_video(container, project, tmp_path)
     result = container.qa.validate_candidate(

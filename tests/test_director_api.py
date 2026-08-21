@@ -6,7 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 from PIL import Image
-from production_domain.models import GenerationCandidate, GenerationIdempotency, GenerationJob
+from production_domain.models import (
+    ContinuityMode,
+    GenerationCandidate,
+    GenerationIdempotency,
+    GenerationJob,
+    Shot,
+)
 from sqlalchemy import event, func, select
 from video_platform_api.main import create_app
 
@@ -201,6 +207,10 @@ def test_continuity_and_observability_endpoints(container, project):
         )
         assert decision.status_code == 200
         assert decision.json()["mode"] == "RE_ANCHOR"
+        assert decision.json()["require_new_keyframe"] is True
+        with container.database.session() as session:
+            stored_shot = session.get(Shot, shot["id"])
+            assert stored_shot.continuity_mode == ContinuityMode.RE_ANCHOR.value
         records = client.get(f"/v1/shots/{shot['id']}/decisions")
         assert records.status_code == 200
         assert records.json()[0]["reason_codes"] == ["CAMERA_AXIS_CHANGE"]

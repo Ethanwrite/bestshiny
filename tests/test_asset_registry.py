@@ -22,6 +22,7 @@ from production_domain.models import (
     AssetVersion,
     AssetVersionMedia,
     AssetVersionStatus,
+    MediaAsset,
     Project,
 )
 from sqlalchemy import delete, func, select, update
@@ -101,6 +102,43 @@ def test_rejected_version_cannot_be_promoted(container, project):
         registry.promote(asset.id, version.id)
     with container.database.session() as session:
         assert session.get(Asset, asset.id).canonical_version_id is None
+
+
+def test_low_trust_generated_media_cannot_be_laundered_through_user_upload(
+    container,
+    project,
+):
+    registry = AssetRegistry(container.database)
+    generated = _media(container, project.id, b"runapi-temporary-result", "temporary.png")
+    with container.database.session() as session:
+        session.get(MediaAsset, generated.id).provider = "runapi"
+    character = registry.create(project.id, "CHARACTER", "Temporary edge draft")
+    # The browser is allowed to retain a non-canonical draft, but changing the
+    # version source to USER_UPLOAD cannot erase immutable media provenance.
+    version = registry.add_version(
+        character.id,
+        primary_media_asset_id=generated.id,
+        source="USER_UPLOAD",
+    )
+
+    with pytest.raises(AssetVersionNotPromotable, match="low-trust generated media"):
+        registry.promote(character.id, version.id, reason="must remain temporary")
+    with container.database.session() as session:
+        assert session.get(Asset, character.id).canonical_version_id is None
+
+
+def test_incomplete_generated_media_provenance_fails_closed(container, project):
+    registry = AssetRegistry(container.database)
+    generated = _media(container, project.id, b"incomplete-provider-origin", "incomplete.png")
+    with container.database.session() as session:
+        session.get(MediaAsset, generated.id).provider_media_id = "orphaned-provider-media-id"
+    character = registry.create(project.id, "CHARACTER", "Incomplete provenance draft")
+    version = registry.add_version(character.id, primary_media_asset_id=generated.id)
+
+    with pytest.raises(AssetVersionNotPromotable, match="incomplete provider provenance"):
+        registry.promote(character.id, version.id)
+    with container.database.session() as session:
+        assert session.get(Asset, character.id).canonical_version_id is None
 
 
 def test_registry_rejects_cross_project_media_and_filters_logical_assets(container, project):

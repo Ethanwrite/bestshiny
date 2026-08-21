@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from provider_sdk import AssetCriticality
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
@@ -76,8 +77,10 @@ class CanonicalShotSpec(BaseModel):
 class PassengerGenerationCommand(BaseModel):
     project_id: str
     media_type: Literal["image", "video"]
-    provider: str
-    model: str
+    provider: str = ""
+    model: str = ""
+    model_role: str | None = Field(default=None, max_length=80)
+    asset_criticality: AssetCriticality = AssetCriticality.STANDARD
     prompt: str = Field(min_length=1, max_length=30_000)
     negative_prompt: str = ""
     duration: float | None = Field(default=None, ge=1, le=60)
@@ -88,3 +91,5 @@ class PassengerGenerationCommand(BaseModel):
     end_frame_asset_id: str | None = None
     idempotency_key: str = Field(min_length=3, max_length=250)
     estimated_cost: float = Field(default=0, ge=0)
+    estimated_credits: int | None = Field(default=None, ge=1, exclude=True)
+    pricing_version: str = Field(default="", max_length=80, exclude=True)

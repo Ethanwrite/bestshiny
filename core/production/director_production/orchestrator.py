@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 from character_core import CharacterIdentityService
 from continuity_core import ContinuityDecisionEngine, ContinuityRiskVector
+from generation_policy_core import AvailableGenerationAssets
 from narrative_core import NarrativeCompiler
+from production_domain.models import ContinuityMode, Episode, Scene, Shot
 from skill_core import PromptCompilerService
 
 from .pipeline import CandidatePipeline
@@ -60,9 +62,76 @@ class AgentOrchestrator:
     def plan_continuity(
         self, shot_id: str, project_id: str, risk: ContinuityRiskVector
     ) -> OrchestrationResult:
+        with self.candidates.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            scene = session.get(Scene, shot.scene_id) if shot else None
+            episode = session.get(Episode, scene.episode_id) if scene else None
+            if shot is None or episode is None or episode.project_id != project_id:
+                raise LookupError("shot does not belong to the continuity project")
         decision = self.continuity.decide(risk, project_id=project_id, shot_id=shot_id)
+        with self.candidates.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                raise LookupError("shot disappeared during continuity planning")
+            shot.continuity_mode = decision.mode
+            if decision.require_new_keyframe:
+                shot.start_frame_asset_id = None
+            elif decision.mode == ContinuityMode.HARD_CONTINUITY.value and shot.previous_shot_id:
+                previous = session.get(Shot, shot.previous_shot_id)
+                if previous and previous.end_frame_asset_id:
+                    shot.start_frame_asset_id = previous.end_frame_asset_id
+            elif decision.mode == ContinuityMode.HYBRID.value:
+                # HYBRID may use the previous end frame as soft reference
+                # context, but it must never inherit it as a strong first frame.
+                shot.start_frame_asset_id = None
         return OrchestrationResult(
             "CONTINUITY_DECIDED",
             shot_id,
-            {"mode": decision.mode, "risk_score": decision.risk_score, "reasons": decision.reasons},
+            {
+                "mode": decision.mode,
+                "risk_score": decision.risk_score,
+                "reasons": decision.reasons,
+                "required_context": list(decision.required_context),
+                "use_previous_end_frame": decision.use_previous_end_frame,
+                "require_new_keyframe": decision.require_new_keyframe,
+            },
+        )
+
+    def plan_generation(
+        self,
+        shot_id: str,
+        project_id: str,
+        assets: AvailableGenerationAssets,
+    ) -> OrchestrationResult:
+        with self.candidates.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            scene = session.get(Scene, shot.scene_id) if shot else None
+            episode = session.get(Episode, scene.episode_id) if scene else None
+            if shot is None or episode is None or episode.project_id != project_id:
+                raise LookupError("shot does not belong to the generation project")
+            continuity_mode = shot.continuity_mode
+        decision = self.candidates.policy.decide(
+            continuity_mode,
+            assets,
+            project_id=project_id,
+            shot_id=shot_id,
+        )
+        with self.candidates.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                raise LookupError("shot disappeared during generation planning")
+            shot.generation_policy = decision.policy
+            if decision.use_previous_end_frame_as_start:
+                shot.start_frame_asset_id = assets.previous_end_frame_asset_id
+            elif decision.require_new_keyframe:
+                shot.start_frame_asset_id = None
+        return OrchestrationResult(
+            "GENERATION_POLICY_DECIDED",
+            shot_id,
+            {
+                "policy": decision.policy,
+                "required_inputs": list(decision.required_inputs),
+                "reasons": list(decision.reason_codes),
+                "require_new_keyframe": decision.require_new_keyframe,
+            },
         )

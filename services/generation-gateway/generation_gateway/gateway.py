@@ -8,33 +8,50 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from entitlement_core import (
+    WorkspaceCreditConflict,
+    WorkspaceCreditService,
+    WorkspaceCreditTransition,
+)
 from media_service import MediaRegistry
-from platform_contracts import GenerationRequest
+from model_registry_core import ModelInfrastructureService, RuntimeModelState
+from platform_contracts import (
+    TIMELINE_FENCE_METADATA_KEY,
+    AuthoritativeTimelineFence,
+    GenerationRequest,
+    authoritative_timeline_state_hash,
+)
 from platform_database import Database
 from production_domain.models import (
     AssetType,
     BrowserWorker,
     CandidateStatus,
+    CostRecord,
+    DecisionRecord,
     GenerationCandidate,
     GenerationEvent,
     GenerationIdempotency,
     GenerationJob,
     JobStatus,
     MediaAsset,
+    ModelDefinition,
     Project,
     ProviderAccount,
     ProviderProjectBinding,
     RetryCategory,
     Shot,
     ShotStatus,
+    TimelineState,
     WorkerCommand,
     WorkerStatus,
+    WorkspaceCreditEntry,
     utcnow,
 )
 from production_engine import ShotContinuityService
-from provider_sdk import GenerationProvider, ProviderError
-from sqlalchemy import and_, or_, select, update
+from provider_sdk import GenerationProvider, ProviderError, ProviderMode
+from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session
 
 from .providers import GenerationTargetError, ProviderRouter
 from .retry import RetryPolicy
@@ -47,6 +64,19 @@ class IdempotencyConflict(RuntimeError):
 
 class UnsafeRetry(RuntimeError):
     pass
+
+
+class TimelineGenerationPlanStale(IdempotencyConflict):
+    """A 409 conflict: SQL timeline changed after Autopilot prepared a request."""
+
+
+_TIMELINE_PREQUEUE_STATUSES = frozenset(
+    {
+        ShotStatus.DRAFT.value,
+        ShotStatus.PLANNED.value,
+        ShotStatus.READY.value,
+    }
+)
 
 
 def canonical_hash(payload: dict[str, Any]) -> str:
@@ -71,6 +101,9 @@ class GenerationGateway:
         retry_policy: RetryPolicy | None = None,
         claim_lease_seconds: int = 300,
         poll_interval_seconds: float = 2.0,
+        workspace_credits: WorkspaceCreditService | None = None,
+        model_infrastructure: ModelInfrastructureService | None = None,
+        provider_mode: ProviderMode | str = ProviderMode.MOCK,
     ):
         if claim_lease_seconds < 30:
             raise ValueError("claim_lease_seconds must be at least 30")
@@ -84,6 +117,70 @@ class GenerationGateway:
         self.retry_policy = retry_policy or RetryPolicy()
         self.claim_lease_seconds = claim_lease_seconds
         self.poll_interval_seconds = poll_interval_seconds
+        self.workspace_credits = workspace_credits
+        self.model_infrastructure = model_infrastructure
+        try:
+            self.provider_mode = ProviderMode(provider_mode)
+        except ValueError as exc:
+            raise ValueError("provider_mode must be mock, recorded, or live") from exc
+
+    def _validate_persisted_generation_target(
+        self,
+        provider: str,
+        model: str,
+        media_type: str,
+        *,
+        workspace_scoped: bool,
+        session: Any | None = None,
+        lock_for_update: bool = False,
+    ) -> RuntimeModelState | None:
+        """Apply the server-owned model switch immediately before execution.
+
+        A live transport never receives a legacy bypass.  Non-live, unscoped
+        projects retain compatibility only when the execution target has not
+        yet been migrated into the persistent registry; an explicitly disabled
+        definition remains authoritative in every mode.
+        """
+
+        definition = None
+        if self.model_infrastructure is not None:
+            if session is None:
+                definition = self.model_infrastructure.runtime_model_for_target(
+                    provider,
+                    model,
+                    media_type,
+                )
+            else:
+                definition = self.model_infrastructure.runtime_model_for_target_in_session(
+                    session,
+                    provider,
+                    model,
+                    media_type,
+                    for_update=lock_for_update,
+                )
+        if definition is None:
+            if self.provider_mode is not ProviderMode.LIVE and not workspace_scoped:
+                return None
+            code = (
+                "MODEL_DEFINITION_NOT_FOUND"
+                if self.model_infrastructure is not None
+                else "MODEL_REGISTRY_REQUIRED"
+            )
+            raise GenerationTargetError(
+                code,
+                f"server model definition is required for {media_type} target: {provider}:{model}",
+            )
+        if not definition.enabled:
+            raise GenerationTargetError(
+                "MODEL_DISABLED",
+                f"server model definition is disabled: {provider}:{model}",
+            )
+        if self.provider_mode is ProviderMode.LIVE and not definition.live_enabled:
+            raise GenerationTargetError(
+                "MODEL_LIVE_DISABLED",
+                f"live generation is disabled for server model definition: {provider}:{model}",
+            )
+        return definition
 
     def _next_poll_at(self) -> datetime:
         return utcnow() + timedelta(seconds=self.poll_interval_seconds)
@@ -96,16 +193,84 @@ class GenerationGateway:
     def _updated_one_row(result: Any) -> bool:
         return int(getattr(result, "rowcount", 0)) == 1
 
+    @staticmethod
+    def _timeline_state_for_update(session: Any, state_id: str) -> TimelineState | None:
+        return session.scalar(
+            select(TimelineState)
+            .where(TimelineState.id == state_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def _validate_timeline_fence_in_session(
+        self,
+        session: Any,
+        request: GenerationRequest,
+        shot: Shot,
+        fence: AuthoritativeTimelineFence,
+    ) -> None:
+        """Lock and compare the exact SQL state used to prepare Autopilot."""
+
+        if request.shot_id != fence.shot_id or shot.id != fence.shot_id:
+            raise TimelineGenerationPlanStale(
+                "generation timeline fence belongs to a different shot; plan the shot again"
+            )
+        if (
+            shot.status != fence.shot_status
+            or shot.status not in _TIMELINE_PREQUEUE_STATUSES
+            or shot.input_state_id != fence.input_state_id
+            or shot.output_state_id != fence.output_state_id
+        ):
+            raise TimelineGenerationPlanStale(
+                "shot or authoritative timeline binding changed; plan the shot again"
+            )
+        input_state = self._timeline_state_for_update(session, fence.input_state_id)
+        output_state = self._timeline_state_for_update(session, fence.output_state_id)
+        if input_state is None or output_state is None:
+            raise TimelineGenerationPlanStale("authoritative timeline state disappeared; plan the shot again")
+        if (
+            input_state.project_id != request.project_id
+            or input_state.state_kind != "SHOT_INPUT"
+            or input_state.shot_id not in {None, shot.id}
+            or output_state.project_id != request.project_id
+            or output_state.state_kind != "SHOT_OUTPUT"
+            or output_state.shot_id not in {None, shot.id}
+        ):
+            raise TimelineGenerationPlanStale("authoritative timeline ownership changed; plan the shot again")
+        input_hash = authoritative_timeline_state_hash(
+            input_state.state_json,
+            previous_state_id=input_state.previous_state_id,
+        )
+        output_hash = authoritative_timeline_state_hash(
+            output_state.state_json,
+            previous_state_id=output_state.previous_state_id,
+        )
+        if input_hash != fence.input_state_hash or output_hash != fence.output_state_hash:
+            raise TimelineGenerationPlanStale(
+                "authoritative timeline changed after generation planning; plan the shot again"
+            )
+
     def create(
         self,
         request: GenerationRequest,
         *,
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
+        estimated_credits: int | None = None,
+        pricing_version: str = "",
+        resolution: str = "720p",
+        timeline_fence: AuthoritativeTimelineFence | None = None,
     ) -> tuple[GenerationJob, bool]:
         attempts = 6 if self.database.engine.dialect.name == "sqlite" else 1
         for attempt in range(attempts):
             try:
-                return self._create_once(request, on_create=on_create)
+                return self._create_once(
+                    request,
+                    on_create=on_create,
+                    estimated_credits=estimated_credits,
+                    pricing_version=pricing_version,
+                    resolution=resolution,
+                    timeline_fence=timeline_fence,
+                )
             except OperationalError as exc:
                 locked = "database is locked" in str(exc).lower()
                 if not locked or attempt == attempts - 1:
@@ -118,10 +283,33 @@ class GenerationGateway:
         request: GenerationRequest,
         *,
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
+        estimated_credits: int | None = None,
+        pricing_version: str = "",
+        resolution: str = "720p",
+        timeline_fence: AuthoritativeTimelineFence | None = None,
     ) -> tuple[GenerationJob, bool]:
-        self.providers.validate_target(request.provider, request.model, request.type)
+        self.providers.validate_target(
+            request.provider,
+            request.model,
+            request.type,
+            asset_criticality=request.asset_criticality,
+        )
         payload = request.model_dump(mode="json", exclude={"idempotency_key", "candidate_id"})
+        metadata = dict(payload.get("metadata") or {})
+        # This namespace is exclusively server-owned. Public request metadata
+        # cannot forge or suppress the authoritative timeline fence.
+        metadata.pop(TIMELINE_FENCE_METADATA_KEY, None)
+        payload["metadata"] = metadata
+        # Idempotency describes the caller-visible generation request. The
+        # server fence is execution metadata: persisting it is required for
+        # audit, but including it here would turn a normal post-QUEUE replay
+        # into a false conflict merely because the Shot status advanced.
         request_hash = canonical_hash(payload)
+        if timeline_fence is not None:
+            payload["metadata"] = {
+                **metadata,
+                TIMELINE_FENCE_METADATA_KEY: timeline_fence.model_dump(mode="json"),
+            }
         with self.database.session() as session:
 
             def replay(existing: GenerationIdempotency) -> tuple[GenerationJob, bool]:
@@ -135,8 +323,19 @@ class GenerationGateway:
                 session.flush()
                 return replayed_job, True
 
-            if session.get(Project, request.project_id) is None:
+            project = session.get(Project, request.project_id)
+            if project is None:
                 raise LookupError(f"project not found: {request.project_id}")
+            workspace_credit_required = False
+            if self.workspace_credits is not None:
+                credit_context = self.workspace_credits.balance_in_session(session, request.project_id)
+                workspace_credit_required = (
+                    credit_context.workspace_id is not None and credit_context.plan_tier == "FREE"
+                )
+                if workspace_credit_required and estimated_credits is None:
+                    raise WorkspaceCreditConflict(
+                        "FREE workspace generation requires a server-owned credit quote"
+                    )
             requested_asset_ids = list(
                 dict.fromkeys(
                     asset_id
@@ -177,12 +376,26 @@ class GenerationGateway:
                         request_hash=request_hash,
                         policy=request.generation_policy,
                         cost_estimate=request.cost_estimate,
+                        workspace_credit_required=workspace_credit_required,
+                        quoted_credits=estimated_credits or 0,
                     )
                     shot = None
                     if request.shot_id:
-                        shot = session.get(Shot, request.shot_id)
+                        shot = session.scalar(
+                            select(Shot)
+                            .where(Shot.id == request.shot_id)
+                            .with_for_update()
+                            .execution_options(populate_existing=True)
+                        )
                         if not shot or shot.scene.episode.project_id != request.project_id:
                             raise LookupError("shot does not belong to project")
+                        if timeline_fence is not None:
+                            self._validate_timeline_fence_in_session(
+                                session,
+                                request,
+                                shot,
+                                timeline_fence,
+                            )
                     if on_create:
                         on_create(session, job, False)
                     candidate = None
@@ -193,6 +406,36 @@ class GenerationGateway:
                             raise LookupError("candidate does not belong to shot")
                     session.add(job)
                     session.flush([job])
+                    if estimated_credits is not None and self.workspace_credits is not None:
+                        credit_reservation = self.workspace_credits.reserve_generation(
+                            session,
+                            job,
+                            idempotency_key=request.idempotency_key,
+                            credits=estimated_credits,
+                            metadata={"pricing_version": pricing_version},
+                        )
+                        if credit_reservation.applied and not credit_reservation.replayed:
+                            self._event(
+                                session,
+                                job.id,
+                                "CREDIT_RESERVED",
+                                credits=credit_reservation.credits,
+                                balance_after=credit_reservation.balance_after,
+                            )
+                    session.add(
+                        CostRecord(
+                            project_id=job.project_id,
+                            shot_id=job.shot_id,
+                            candidate_id=job.candidate_id,
+                            generation_job_id=job.id,
+                            provider=job.provider,
+                            model=job.model,
+                            duration=float(request.duration or 0),
+                            resolution=resolution,
+                            credits=float(estimated_credits or 0),
+                            estimated_cost=request.cost_estimate,
+                        )
+                    )
                     session.add(
                         GenerationIdempotency(
                             project_id=request.project_id,
@@ -241,6 +484,13 @@ class GenerationGateway:
                 )
             )
 
+    def credit_status(self, job_id: str) -> str | None:
+        if self.workspace_credits is None:
+            return None
+        with self.database.session() as session:
+            entry = self.workspace_credits.entry_for_job_in_session(session, job_id)
+            return entry.status if entry is not None else None
+
     def retry(self, job_id: str) -> GenerationJob:
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
@@ -248,17 +498,67 @@ class GenerationGateway:
                 raise LookupError("generation job not found")
             if job.status == JobStatus.COMPLETED.value:
                 return job
+            if job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+                raise UnsafeRetry(
+                    "terminal generation jobs cannot be reused; submit a new idempotent generation"
+                )
+            if self.workspace_credits is not None:
+                credit = self.workspace_credits.entry_for_job_in_session(session, job.id)
+                if credit and credit.status in {"REFUNDED", "SETTLED", "RECONCILIATION_REQUIRED"}:
+                    raise UnsafeRetry(
+                        f"credit reservation is {credit.status}; submit a new generation or reconcile it"
+                    )
             if not job.safe_to_retry or job.submission_state == "SENT_UNCONFIRMED":
                 raise UnsafeRetry(
                     "provider submission may already have consumed credits; reconcile it before retrying"
                 )
-            job.status = JobStatus.RETRY_WAIT.value
-            job.next_retry_at = utcnow()
-            job.error_code = None
-            job.error_message = None
-            job.claim_token = None
-            job.claim_expires_at = None
-            job.submission_state = "NOT_SENT"
+            if job.provider_job_id or job.submission_state != "NOT_SENT":
+                raise UnsafeRetry("only a generation that has not reached the provider may be retried")
+            observed_status = job.status
+            conditions: list[Any] = [
+                GenerationJob.id == job.id,
+                GenerationJob.status == observed_status,
+                GenerationJob.safe_to_retry.is_(True),
+                GenerationJob.submission_state == "NOT_SENT",
+                GenerationJob.provider_job_id.is_(None),
+                GenerationJob.output_asset_id.is_(None),
+            ]
+            if self.workspace_credits is not None and credit is not None:
+                conditions.append(
+                    select(WorkspaceCreditEntry.id)
+                    .where(
+                        WorkspaceCreditEntry.id == credit.id,
+                        WorkspaceCreditEntry.status == "RESERVED",
+                    )
+                    .exists()
+                )
+            retried = session.execute(
+                update(GenerationJob)
+                .where(*conditions)
+                .values(
+                    status=JobStatus.RETRY_WAIT.value,
+                    next_retry_at=utcnow(),
+                    error_code=None,
+                    error_message=None,
+                    claim_token=None,
+                    claim_expires_at=None,
+                    submission_state="NOT_SENT",
+                )
+            )
+            if not self._updated_one_row(retried):
+                session.expire_all()
+                current = session.get(GenerationJob, job_id)
+                if current is None:  # pragma: no cover - deleted by an administrator.
+                    raise LookupError("generation job not found")
+                if current.status == JobStatus.COMPLETED.value:
+                    return current
+                if current.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+                    raise UnsafeRetry(
+                        "terminal generation jobs cannot be reused; submit a new idempotent generation"
+                    )
+                raise UnsafeRetry("generation state changed while retry was being requested")
+            session.expire(job)
+            session.refresh(job)
             self._event(session, job.id, "JOB_RETRY_REQUESTED")
             session.flush()
             return job
@@ -281,20 +581,90 @@ class GenerationGateway:
                 if job.submission_state == "SENT_UNCONFIRMED":
                     # The provider may have consumed credits even though its job id was lost.
                     # Reconciliation is required before cancellation can be confirmed safely.
+                    if self.workspace_credits is not None:
+                        credit_transition = self.workspace_credits.require_reconciliation(
+                            session,
+                            job,
+                            reason="CANCEL_REQUEST_DURING_UNCONFIRMED_SUBMISSION",
+                        )
+                        if credit_transition.applied and not credit_transition.replayed:
+                            self._event(session, job.id, "CREDIT_RECONCILIATION_REQUIRED")
                     return job
-                job.status = JobStatus.CANCELLED.value
-                job.next_retry_at = None
-                job.claim_token = None
-                job.claim_expires_at = None
-                self.scheduler.release_job_in_session(
-                    session,
-                    job.id,
-                    success=None,
-                    clear_routing=True,
+                local_cancelled = session.execute(
+                    update(GenerationJob)
+                    .where(
+                        GenerationJob.id == job.id,
+                        ~GenerationJob.status.in_(
+                            [
+                                JobStatus.COMPLETED.value,
+                                JobStatus.FAILED.value,
+                                JobStatus.CANCELLED.value,
+                            ]
+                        ),
+                        GenerationJob.provider_job_id.is_(None),
+                        GenerationJob.submission_state == "NOT_SENT",
+                        GenerationJob.output_asset_id.is_(None),
+                    )
+                    .values(
+                        status=JobStatus.CANCELLED.value,
+                        safe_to_retry=False,
+                        next_retry_at=None,
+                        claim_token=None,
+                        claim_expires_at=None,
+                    )
                 )
-                self._event(session, job.id, "JOB_CANCELLED", remote_job=False)
-                session.flush()
-                return job
+                if self._updated_one_row(local_cancelled):
+                    session.expire(job)
+                    session.refresh(job)
+                    if self.workspace_credits is not None:
+                        credit_refund = self.workspace_credits.refund_generation(
+                            session,
+                            job,
+                            reason="GENERATION_CANCELLED_BEFORE_SUBMISSION",
+                        )
+                        if credit_refund.applied and not credit_refund.replayed:
+                            self._event(
+                                session,
+                                job.id,
+                                "CREDIT_REFUNDED",
+                                credits=credit_refund.refunded_credits,
+                                reason="GENERATION_CANCELLED_BEFORE_SUBMISSION",
+                            )
+                    self.scheduler.release_job_in_session(
+                        session,
+                        job.id,
+                        success=None,
+                        clear_routing=True,
+                    )
+                    self._event(session, job.id, "JOB_CANCELLED", remote_job=False)
+                    session.flush()
+                    return job
+
+                # A submit/complete transaction won the race. Re-read its
+                # durable facts before deciding whether cancellation is local,
+                # remote, or financially ambiguous.
+                session.expire_all()
+                job = session.get(GenerationJob, job_id)
+                if job is None:  # pragma: no cover - deleted by an administrator.
+                    raise LookupError("generation job not found")
+                if job.status in {
+                    JobStatus.COMPLETED.value,
+                    JobStatus.FAILED.value,
+                    JobStatus.CANCELLED.value,
+                }:
+                    return job
+                if job.submission_state == "SENT_UNCONFIRMED":
+                    if self.workspace_credits is not None:
+                        credit_transition = self.workspace_credits.require_reconciliation(
+                            session,
+                            job,
+                            reason="CANCEL_RACED_WITH_PROVIDER_SUBMISSION",
+                        )
+                        if credit_transition.applied and not credit_transition.replayed:
+                            self._event(session, job.id, "CREDIT_RECONCILIATION_REQUIRED")
+                    return job
+                if not (job.provider_job_id and job.submission_state == "CONFIRMED"):
+                    return job
 
         claim_token = self._claim_for_cancellation(job_id)
         if claim_token is None:
@@ -349,22 +719,46 @@ class GenerationGateway:
             )
 
         with self.database.session() as session:
-            job = session.scalar(
-                select(GenerationJob).where(
+            terminalized = session.execute(
+                update(GenerationJob)
+                .where(
                     GenerationJob.id == job_id,
                     GenerationJob.status == JobStatus.RESERVED.value,
                     GenerationJob.claim_token == claim_token,
+                    GenerationJob.provider_job_id == provider_job_id,
+                    GenerationJob.submission_state == "CONFIRMED",
+                    GenerationJob.output_asset_id.is_(None),
+                )
+                .values(
+                    status=JobStatus.CANCELLED.value,
+                    safe_to_retry=False,
+                    next_retry_at=None,
+                    claim_token=None,
+                    claim_expires_at=None,
+                    error_code=None,
+                    error_message=None,
                 )
             )
-            if job is None:
+            if not self._updated_one_row(terminalized):
                 current = None
             else:
-                job.status = JobStatus.CANCELLED.value
-                job.next_retry_at = None
-                job.claim_token = None
-                job.claim_expires_at = None
-                job.error_code = None
-                job.error_message = None
+                job = session.get(GenerationJob, job_id)
+                if job is None:  # pragma: no cover - guarded by the conditional update.
+                    raise LookupError("generation job not found")
+                session.refresh(job)
+                if self.workspace_credits is not None:
+                    credit_transition = self.workspace_credits.require_reconciliation(
+                        session,
+                        job,
+                        reason="PROVIDER_CANCELLED_WITH_BILLING_UNKNOWN",
+                    )
+                    if credit_transition.applied and not credit_transition.replayed:
+                        self._event(
+                            session,
+                            job.id,
+                            "CREDIT_RECONCILIATION_REQUIRED",
+                            reason="PROVIDER_CANCELLED_WITH_BILLING_UNKNOWN",
+                        )
                 self.scheduler.release_job_in_session(session, job.id, success=None)
                 self._event(
                     session,
@@ -455,6 +849,13 @@ class GenerationGateway:
                 )
             )
             if self._updated_one_row(result):
+                job = session.get(GenerationJob, job_id)
+                if job is not None and self.workspace_credits is not None:
+                    self.workspace_credits.require_reconciliation(
+                        session,
+                        job,
+                        reason="PROVIDER_CANCEL_UNCONFIRMED",
+                    )
                 self._event(session, job_id, "PROVIDER_CANCEL_UNCONFIRMED", error=error)
         current = self.get(job_id)
         if current is None:  # pragma: no cover - deleted concurrently by an administrator.
@@ -473,51 +874,208 @@ class GenerationGateway:
                 and job.output_asset_id is None
             ):
                 return job
-            if job.provider_job_id:
-                job.status = JobStatus.SUBMITTED.value
-                job.submission_state = "CONFIRMED"
-                job.safe_to_retry = False
-                job.next_retry_at = self._next_poll_at()
-                job.claim_token = None
-                job.claim_expires_at = None
-                return job
-            command = session.scalar(
-                select(WorkerCommand)
-                .where(
-                    WorkerCommand.generation_job_id == job.id,
-                    WorkerCommand.message_type == "provider.request",
-                    WorkerCommand.status == "COMPLETED",
+            provider_job_id = job.provider_job_id
+            if not provider_job_id:
+                command = session.scalar(
+                    select(WorkerCommand)
+                    .where(
+                        WorkerCommand.generation_job_id == job.id,
+                        WorkerCommand.message_type == "provider.request",
+                        WorkerCommand.status == "COMPLETED",
+                    )
+                    .order_by(WorkerCommand.completed_at.desc())
                 )
-                .order_by(WorkerCommand.completed_at.desc())
-            )
-            response = command.response if command else None
-            data = response.get("data", {}) if isinstance(response, dict) else {}
-            media = data.get("media", []) if isinstance(data, dict) else []
-            provider_job_id = next(
-                (
-                    str(item.get("name") or item.get("mediaId"))
-                    for item in media
-                    if item.get("name") or item.get("mediaId")
-                ),
-                None,
-            )
+                if command and job.worker_id and command.worker_id != job.worker_id:
+                    return job
+                response = command.response if command else None
+                response_status = response.get("status") if isinstance(response, dict) else None
+                if not isinstance(response_status, int) or not 200 <= response_status < 300:
+                    return job
+                data = response.get("data", {}) if isinstance(response, dict) else {}
+                media = data.get("media", []) if isinstance(data, dict) else []
+                provider_job_id = next(
+                    (
+                        str(item.get("name") or item.get("mediaId"))
+                        for item in media
+                        if item.get("name") or item.get("mediaId")
+                    ),
+                    None,
+                )
             if not provider_job_id:
                 return job
-            job.provider_job_id = provider_job_id
-            job.submission_state = "CONFIRMED"
-            job.status = JobStatus.SUBMITTED.value
-            job.safe_to_retry = False
-            job.next_retry_at = self._next_poll_at()
-            job.claim_token = None
-            job.claim_expires_at = None
+            recovered = session.execute(
+                update(GenerationJob)
+                .where(
+                    GenerationJob.id == job.id,
+                    GenerationJob.status == JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                    GenerationJob.submission_state == "SENT_UNCONFIRMED",
+                    GenerationJob.output_asset_id.is_(None),
+                    or_(
+                        GenerationJob.provider_job_id.is_(None),
+                        GenerationJob.provider_job_id == provider_job_id,
+                    ),
+                )
+                .values(
+                    provider_job_id=provider_job_id,
+                    submission_state="CONFIRMED",
+                    status=JobStatus.SUBMITTED.value,
+                    safe_to_retry=False,
+                    next_retry_at=self._next_poll_at(),
+                    claim_token=None,
+                    claim_expires_at=None,
+                )
+            )
+            if not self._updated_one_row(recovered):
+                session.expire_all()
+                current = session.get(GenerationJob, job_id)
+                if current is None:  # pragma: no cover - deleted by an administrator.
+                    raise LookupError("generation job not found")
+                return current
+            session.expire(job)
+            session.refresh(job)
             idem = session.scalar(
                 select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
             )
             if idem:
                 idem.provider_job_id = provider_job_id
+            if self.workspace_credits is not None:
+                self.workspace_credits.record_submission_confirmed(
+                    session,
+                    job,
+                    attempt=max(job.attempt_count, 1),
+                    provider_job_id=provider_job_id,
+                )
             self._event(session, job.id, "ORPHAN_RESPONSE_RECOVERED", provider_job_id=provider_job_id)
             session.flush()
             return job
+
+    def reconcile_credits(
+        self,
+        job_id: str,
+        *,
+        action: str,
+        idempotency_key: str,
+        reason: str,
+        evidence_reference: str | None = None,
+    ) -> WorkspaceCreditTransition:
+        """Resolve one ambiguous reservation through the internal service boundary."""
+
+        if self.workspace_credits is None:
+            raise RuntimeError("workspace credit service is not configured")
+        with self.database.session() as session:
+            job = session.get(GenerationJob, job_id)
+            if not job:
+                raise LookupError("generation job not found")
+            if action == "REFUND_RESERVED":
+                terminalized = session.execute(
+                    update(GenerationJob)
+                    .where(
+                        GenerationJob.id == job.id,
+                        GenerationJob.status.in_(
+                            [
+                                JobStatus.FAILED.value,
+                                JobStatus.CANCELLED.value,
+                                JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                            ]
+                        ),
+                        GenerationJob.claim_token.is_(None),
+                        GenerationJob.output_asset_id.is_(None),
+                    )
+                    .values(
+                        status=case(
+                            (
+                                GenerationJob.status == JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                                JobStatus.FAILED.value,
+                            ),
+                            else_=GenerationJob.status,
+                        ),
+                        safe_to_retry=False,
+                        next_retry_at=None,
+                        claim_token=None,
+                        claim_expires_at=None,
+                    )
+                )
+                if not self._updated_one_row(terminalized):
+                    raise WorkspaceCreditConflict(
+                        "refund reconciliation requires an inactive terminal or isolated generation"
+                    )
+                session.expire(job)
+                session.refresh(job)
+                if not job.provider_job_id:
+                    job.submission_state = "NOT_SENT"
+                self.scheduler.release_job_in_session(
+                    session,
+                    job.id,
+                    success=False,
+                    error="credit reconciliation confirmed provider job was not billable",
+                    clear_routing=True,
+                )
+            elif action == "SETTLE_RESERVED":
+                settlement_fenced = session.execute(
+                    update(GenerationJob)
+                    .where(
+                        GenerationJob.id == job.id,
+                        GenerationJob.status.in_(
+                            [
+                                JobStatus.SUBMITTED.value,
+                                JobStatus.RUNNING.value,
+                                JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                                JobStatus.FAILED.value,
+                                JobStatus.CANCELLED.value,
+                                JobStatus.COMPLETED.value,
+                            ]
+                        ),
+                        GenerationJob.submission_state.in_(["SENT_UNCONFIRMED", "CONFIRMED"]),
+                        GenerationJob.claim_token.is_(None),
+                    )
+                    .values(safe_to_retry=False)
+                )
+                if not self._updated_one_row(settlement_fenced):
+                    raise WorkspaceCreditConflict(
+                        "settlement reconciliation requires an inactive submitted or terminal generation"
+                    )
+                session.expire(job)
+                session.refresh(job)
+            transition = self.workspace_credits.reconcile_generation(
+                session,
+                job,
+                action=action,  # type: ignore[arg-type]
+                idempotency_key=idempotency_key,
+                reason=reason,
+                evidence_reference=evidence_reference,
+            )
+            if transition.applied and not transition.replayed:
+                job.safe_to_retry = False
+                session.add(
+                    DecisionRecord(
+                        project_id=job.project_id,
+                        shot_id=job.shot_id,
+                        decision_type="WORKSPACE_CREDIT_RECONCILIATION",
+                        input_features={
+                            "generation_job_id": job.id,
+                            "previous_credit_status": transition.previous_status,
+                            "reserved_credits": transition.reserved_credits,
+                            "evidence_reference": evidence_reference,
+                            "server_actor": "PLATFORM_API_KEY",
+                            "idempotency_key": idempotency_key,
+                        },
+                        selected_action=action,
+                        reason_codes=[reason[:240]],
+                        model_version="manual-credit-reconcile-v1",
+                        policy_version=self.workspace_credits.pricing_version,
+                    )
+                )
+                self._event(
+                    session,
+                    job.id,
+                    "CREDIT_RECONCILED",
+                    action=action,
+                    previous_status=transition.previous_status,
+                    status=transition.status,
+                    reserved_credits=transition.reserved_credits,
+                )
+            session.flush()
+            return transition
 
     async def _resolve_assets(
         self,
@@ -528,6 +1086,17 @@ class GenerationGateway:
         provider_project_id: str | None,
     ) -> dict[str, Any]:
         result = dict(request)
+
+        def on_paid_boundary(session: Session, binding_id: str, asset_id: str) -> None:
+            self._begin_asset_upload_boundary(
+                session,
+                job_id=job.id,
+                claim_token=job.claim_token,
+                binding_id=binding_id,
+                asset_id=asset_id,
+                provider=provider.name,
+            )
+
         pairs = [
             ("start_frame_asset_id", "start_frame_provider_media_id"),
             ("end_frame_asset_id", "end_frame_provider_media_id"),
@@ -541,6 +1110,7 @@ class GenerationGateway:
                     account_id=job.account_id,
                     worker_id=job.worker_id,
                     provider_project_id=provider_project_id,
+                    on_paid_boundary=on_paid_boundary,
                 )
                 result[target] = media_id
                 with self.database.session() as session:
@@ -561,6 +1131,7 @@ class GenerationGateway:
                 account_id=job.account_id,
                 worker_id=job.worker_id,
                 provider_project_id=provider_project_id,
+                on_paid_boundary=on_paid_boundary,
             )
             provider_references.append(media_id)
             with self.database.session() as session:
@@ -575,6 +1146,58 @@ class GenerationGateway:
         result["reference_provider_media_ids"] = provider_references
         result["_generation_job_id"] = job.id
         return result
+
+    def _begin_asset_upload_boundary(
+        self,
+        session: Session,
+        *,
+        job_id: str,
+        claim_token: str | None,
+        binding_id: str,
+        asset_id: str,
+        provider: str,
+    ) -> None:
+        """Atomically fence wallet retry/refund before a provider asset upload."""
+
+        now = utcnow()
+        job = session.scalar(
+            select(GenerationJob)
+            .where(
+                GenerationJob.id == job_id,
+                GenerationJob.status == JobStatus.RESERVED.value,
+                GenerationJob.claim_token == claim_token,
+                GenerationJob.claim_expires_at > now,
+                GenerationJob.submission_state.in_(["NOT_SENT", "SENT_UNCONFIRMED"]),
+                GenerationJob.provider_job_id.is_(None),
+            )
+            .with_for_update()
+        )
+        if job is None:
+            raise ProviderError(
+                "generation claim expired before provider asset upload",
+                RetryCategory.PERMANENT_ERROR,
+                code="ASSET_UPLOAD_CLAIM_LOST",
+            )
+        first_boundary = job.submission_state == "NOT_SENT"
+        if first_boundary:
+            job.submission_state = "SENT_UNCONFIRMED"
+            job.safe_to_retry = False
+            if self.workspace_credits is not None:
+                self.workspace_credits.record_submission_boundary(
+                    session,
+                    job,
+                    attempt=max(job.attempt_count, 1),
+                )
+        self._event(
+            session,
+            job.id,
+            "ASSET_UPLOAD_SUBMISSION_STARTED",
+            provider=provider,
+            asset_id=asset_id,
+            binding_id=binding_id,
+            first_paid_boundary=first_boundary,
+        )
+        session.flush()
 
     async def process(self, job_id: str) -> GenerationJob:
         with self.database.session() as session:
@@ -689,6 +1312,13 @@ class GenerationGateway:
             )
             if not self._updated_one_row(result):
                 return None
+            job = session.get(GenerationJob, job_id)
+            if job is not None and self.workspace_credits is not None:
+                self.workspace_credits.require_reconciliation(
+                    session,
+                    job,
+                    reason="SUBMISSION_CLAIM_EXPIRED",
+                )
             self._event(session, job_id, "SUBMISSION_CLAIM_EXPIRED", submitted=True)
         return self.get(job_id)
 
@@ -768,28 +1398,92 @@ class GenerationGateway:
         """Close the retry window durably before invoking a paid provider API."""
 
         now = utcnow()
+        target_fence_lost = False
         with self.database.session() as session:
+            boundary_conditions = [
+                GenerationJob.id == job_id,
+                GenerationJob.status == JobStatus.RESERVED.value,
+                GenerationJob.claim_token == claim_token,
+                GenerationJob.claim_expires_at > now,
+                GenerationJob.submission_state.in_(["NOT_SENT", "SENT_UNCONFIRMED"]),
+            ]
+            boundary_job = session.scalar(select(GenerationJob).where(*boundary_conditions).with_for_update())
+            if boundary_job is None:
+                return False
+            project = session.get(Project, boundary_job.project_id)
+            workspace_scoped = bool(project and project.workspace_id)
+            provider_name = boundary_job.provider
+            model = boundary_job.model
+            media_type = boundary_job.generation_type
+            # Validate and lock the persistent model switch in the same
+            # transaction that closes the durable paid-call boundary. The
+            # EXISTS predicate also fences databases where row locks are not
+            # available (notably SQLite tests).
+            definition = self._validate_persisted_generation_target(
+                provider_name,
+                model,
+                media_type,
+                workspace_scoped=workspace_scoped,
+                session=session,
+                lock_for_update=True,
+            )
+            update_conditions: list[Any] = list(boundary_conditions)
+            if definition is not None:
+                eligible_definition = select(ModelDefinition.id).where(
+                    ModelDefinition.id == definition.definition_id,
+                    ModelDefinition.provider == definition.provider,
+                    ModelDefinition.provider_model_id == definition.provider_model_id,
+                    ModelDefinition.modality == definition.modality,
+                    ModelDefinition.enabled.is_(True),
+                )
+                if self.provider_mode is ProviderMode.LIVE:
+                    eligible_definition = eligible_definition.where(ModelDefinition.live_enabled.is_(True))
+                update_conditions.append(eligible_definition.exists())
             result = session.execute(
                 update(GenerationJob)
-                .where(
-                    GenerationJob.id == job_id,
-                    GenerationJob.status == JobStatus.RESERVED.value,
-                    GenerationJob.claim_token == claim_token,
-                    GenerationJob.claim_expires_at > now,
-                    GenerationJob.submission_state == "NOT_SENT",
-                )
+                .where(*update_conditions)
                 .values(
                     provider_request_json=provider_request,
                     submission_state="SENT_UNCONFIRMED",
                     safe_to_retry=False,
                 )
+                .execution_options(synchronize_session=False)
             )
             if not self._updated_one_row(result):
-                return False
-            self._event(session, job_id, "REQUEST_SUBMITTED", provider=provider)
+                target_fence_lost = (
+                    definition is not None
+                    and session.scalar(select(GenerationJob.id).where(*boundary_conditions)) is not None
+                )
+            else:
+                session.expire(boundary_job)
+                session.refresh(boundary_job)
+                job = boundary_job
+                if self.workspace_credits is not None:
+                    self.workspace_credits.record_submission_boundary(
+                        session,
+                        job,
+                        attempt=max(job.attempt_count, 1),
+                    )
+                self._event(session, job_id, "REQUEST_SUBMITTED", provider=provider)
+        if target_fence_lost:
+            # Resolve again after the failed atomic predicate so callers receive
+            # the authoritative MODEL_DISABLED / MODEL_LIVE_DISABLED failure.
+            self._validate_persisted_generation_target(
+                provider_name,
+                model,
+                media_type,
+                workspace_scoped=workspace_scoped,
+            )
+            raise GenerationTargetError(
+                "MODEL_TARGET_CHANGED",
+                f"server model definition changed at the submission boundary: {provider_name}:{model}",
+            )
+        if not self._updated_one_row(result):
+            return False
         return True
 
     async def _submit(self, job_id: str, claim_token: str) -> GenerationJob:
+        attempts_exhausted = False
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
             if not job or job.status != JobStatus.RESERVED.value or job.claim_token != claim_token:
@@ -801,16 +1495,34 @@ class GenerationGateway:
             if job.status == JobStatus.RETRY_WAIT.value and next_retry_at and next_retry_at > utcnow():
                 return job
             if job.attempt_count >= job.max_attempts:
-                job.status = JobStatus.FAILED.value
-                job.claim_token = None
-                job.claim_expires_at = None
-                return job
-            request = dict(job.request_json)
-            capability = job.generation_type
-            provider_name = job.provider
-            model = job.model
+                attempts_exhausted = True
+            else:
+                request = dict(job.request_json)
+                request_metadata = dict(request.get("metadata") or {})
+                request_metadata.pop(TIMELINE_FENCE_METADATA_KEY, None)
+                request["metadata"] = request_metadata
+                capability = job.generation_type
+                provider_name = job.provider
+                model = job.model
+                project = session.get(Project, job.project_id)
+                workspace_scoped = bool(project and project.workspace_id)
+        if attempts_exhausted:
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "MAX_ATTEMPTS_EXHAUSTED",
+                "generation exhausted its maximum pre-submit attempts",
+                submitted=False,
+                claim_token=claim_token,
+            )
         try:
             provider = self.providers.validate_target(provider_name, model, capability)
+            self._validate_persisted_generation_target(
+                provider_name,
+                model,
+                capability,
+                workspace_scoped=workspace_scoped,
+            )
         except GenerationTargetError as exc:
             return self._schedule_error(
                 job_id,
@@ -903,15 +1615,24 @@ class GenerationGateway:
                 provider_project_id=provider_project_id,
             )
             if not self._begin_provider_submission(job_id, claim_token, request, provider.name):
+                current = self.get(job_id)
+                if current is None:  # pragma: no cover - deleted concurrently by an administrator.
+                    raise LookupError("generation job not found")
+                if current.submission_state != "NOT_SENT":
+                    return self._schedule_error(
+                        job_id,
+                        RetryCategory.PERMANENT_ERROR,
+                        "ASSET_UPLOAD_BOUNDARY_CLAIM_LOST",
+                        "generation claim expired after a provider asset upload boundary",
+                        submitted=True,
+                        claim_token=claim_token,
+                    )
                 self.scheduler.release_job(
                     job_id,
                     success=False,
                     error="submission claim expired or was superseded",
                     clear_routing=True,
                 )
-                current = self.get(job_id)
-                if current is None:  # pragma: no cover - deleted concurrently by an administrator.
-                    raise LookupError("generation job not found")
                 return current
             submission_boundary_crossed = True
             if capability == "image":
@@ -923,14 +1644,53 @@ class GenerationGateway:
                     request, account_id=account.id, worker_id=worker.id
                 )
             with self.database.session() as session:
+                confirmed = session.execute(
+                    update(GenerationJob)
+                    .where(
+                        GenerationJob.id == job_id,
+                        GenerationJob.provider_job_id.is_(None),
+                        GenerationJob.output_asset_id.is_(None),
+                        GenerationJob.submission_state == "SENT_UNCONFIRMED",
+                        or_(
+                            and_(
+                                GenerationJob.status == JobStatus.RESERVED.value,
+                                GenerationJob.claim_token == claim_token,
+                            ),
+                            and_(
+                                GenerationJob.status == JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                                GenerationJob.claim_token.is_(None),
+                            ),
+                        ),
+                    )
+                    .values(
+                        provider_job_id=submission.provider_job_id,
+                        submission_state="CONFIRMED",
+                        status=JobStatus.SUBMITTED.value,
+                        safe_to_retry=False,
+                        next_retry_at=self._next_poll_at(),
+                        claim_token=None,
+                        claim_expires_at=None,
+                        submitted_at=utcnow(),
+                    )
+                )
+                if not self._updated_one_row(confirmed):
+                    session.expire_all()
+                    current = session.get(GenerationJob, job_id)
+                    if current is None:
+                        raise LookupError("generation job not found after provider submission")
+                    if current.provider_job_id != submission.provider_job_id:
+                        self._event(
+                            session,
+                            job_id,
+                            "LATE_PROVIDER_RESPONSE_AFTER_TERMINAL",
+                            provider_job_id=submission.provider_job_id,
+                            status=current.status,
+                            submission_state=current.submission_state,
+                        )
+                    return current
                 job = session.get(GenerationJob, job_id)
-                job.provider_job_id = submission.provider_job_id
-                job.submission_state = "CONFIRMED"
-                job.status = JobStatus.SUBMITTED.value
-                job.next_retry_at = self._next_poll_at()
-                job.claim_token = None
-                job.claim_expires_at = None
-                job.submitted_at = utcnow()
+                if job is None:  # pragma: no cover - guarded by conditional update.
+                    raise LookupError("generation job not found after provider submission")
                 remaining_credits = submission.raw.get("remainingCredits")
                 if remaining_credits is not None:
                     provider_account = session.get(ProviderAccount, account.id)
@@ -939,23 +1699,48 @@ class GenerationGateway:
                 idem = session.scalar(
                     select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
                 )
-                idem.provider_job_id = submission.provider_job_id
+                if idem:
+                    idem.provider_job_id = submission.provider_job_id
+                if self.workspace_credits is not None:
+                    self.workspace_credits.record_submission_confirmed(
+                        session,
+                        job,
+                        attempt=max(job.attempt_count, 1),
+                        provider_job_id=submission.provider_job_id,
+                    )
                 self._event(
                     session, job.id, "PROVIDER_JOB_STARTED", provider_job_id=submission.provider_job_id
                 )
                 session.flush()
                 return job
+        except GenerationTargetError as exc:
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                exc.code,
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+                release_reservation=True,
+                release_error=str(exc),
+                clear_routing=True,
+            )
         except ProviderError as exc:
+            # Once the durable paid-call fence has been crossed, an adapter's
+            # local error classification may only make the outcome *more*
+            # conservative. It must never move the job back to NOT_SENT or
+            # authorize a refund/re-submit after provider execution began.
+            effective_submitted = submission_boundary_crossed or exc.submitted
             return self._schedule_error(
                 job_id,
                 exc.category,
                 exc.code,
                 str(exc),
-                submitted=exc.submitted,
+                submitted=effective_submitted,
                 claim_token=claim_token,
-                release_reservation=not exc.submitted,
+                release_reservation=not effective_submitted,
                 release_error=str(exc),
-                clear_routing=not exc.submitted,
+                clear_routing=not effective_submitted,
             )
         except Exception as exc:
             return self._schedule_error(
@@ -1021,6 +1806,63 @@ class GenerationGateway:
                 self._event(
                     session, job_id, "PROVIDER_JOB_POLL", status=result.status, progress=result.progress
                 )
+            if result.status in {"CANCELLED", "CANCELED"}:
+                with self.database.session() as session:
+                    cancelled = session.execute(
+                        update(GenerationJob)
+                        .where(
+                            GenerationJob.id == job_id,
+                            GenerationJob.status == JobStatus.RESERVED.value,
+                            GenerationJob.claim_token == claim_token,
+                            GenerationJob.provider_job_id == provider_job_id,
+                            GenerationJob.submission_state == "CONFIRMED",
+                            GenerationJob.output_asset_id.is_(None),
+                        )
+                        .values(
+                            status=JobStatus.CANCELLED.value,
+                            safe_to_retry=False,
+                            next_retry_at=None,
+                            claim_token=None,
+                            claim_expires_at=None,
+                            error_code="PROVIDER_JOB_CANCELLED",
+                            error_message=(result.error or "provider job was cancelled"),
+                        )
+                    )
+                    if self._updated_one_row(cancelled):
+                        job = session.get(GenerationJob, job_id)
+                        if job is None:  # pragma: no cover - guarded by the conditional update.
+                            raise LookupError("generation job not found")
+                        session.refresh(job)
+                        if self.workspace_credits is not None:
+                            self.workspace_credits.require_reconciliation(
+                                session,
+                                job,
+                                reason="PROVIDER_REPORTED_CANCELLED_WITH_BILLING_UNKNOWN",
+                            )
+                        idem = session.scalar(
+                            select(GenerationIdempotency).where(
+                                GenerationIdempotency.generation_job_id == job.id
+                            )
+                        )
+                        if idem:
+                            idem.status = "FAILED"
+                        self.scheduler.release_job_in_session(
+                            session,
+                            job.id,
+                            success=None,
+                        )
+                        self._event(
+                            session,
+                            job.id,
+                            "PROVIDER_JOB_CANCELLED",
+                            provider_job_id=provider_job_id,
+                        )
+                        session.flush()
+                        return job
+                current = self.get(job_id)
+                if current is None:  # pragma: no cover - deleted by an administrator.
+                    raise LookupError("generation job not found")
+                return current
             if result.status == "FAILED":
                 return self._schedule_error(
                     job_id,
@@ -1034,19 +1876,28 @@ class GenerationGateway:
                 )
             if result.status != "COMPLETED":
                 with self.database.session() as session:
-                    job = session.scalar(
-                        select(GenerationJob).where(
+                    advanced = session.execute(
+                        update(GenerationJob)
+                        .where(
                             GenerationJob.id == job_id,
                             GenerationJob.status == JobStatus.RESERVED.value,
                             GenerationJob.claim_token == claim_token,
+                            GenerationJob.provider_job_id == provider_job_id,
+                            GenerationJob.submission_state == "CONFIRMED",
+                            GenerationJob.output_asset_id.is_(None),
+                        )
+                        .values(
+                            status=JobStatus.RUNNING.value,
+                            next_retry_at=self._next_poll_at(),
+                            claim_token=None,
+                            claim_expires_at=None,
                         )
                     )
-                    if job:
-                        job.status = JobStatus.RUNNING.value
-                        job.next_retry_at = self._next_poll_at()
-                        job.claim_token = None
-                        job.claim_expires_at = None
-                        session.flush()
+                    if self._updated_one_row(advanced):
+                        job = session.get(GenerationJob, job_id)
+                        if job is None:  # pragma: no cover - guarded by the conditional update.
+                            raise LookupError("generation job not found")
+                        session.refresh(job)
                         return job
                 current = self.get(job_id)
                 if current is None:  # pragma: no cover - deleted concurrently by an administrator.
@@ -1100,21 +1951,45 @@ class GenerationGateway:
             )
             finalized = False
             with self.database.session() as session:
-                job = session.scalar(
-                    select(GenerationJob).where(
+                completed = session.execute(
+                    update(GenerationJob)
+                    .where(
                         GenerationJob.id == job_id,
                         GenerationJob.status == JobStatus.RESERVED.value,
                         GenerationJob.claim_token == claim_token,
+                        GenerationJob.provider_job_id == provider_job_id,
+                        GenerationJob.submission_state == "CONFIRMED",
+                        GenerationJob.output_asset_id.is_(None),
+                    )
+                    .values(
+                        output_asset_id=asset.id,
+                        status=JobStatus.COMPLETED.value,
+                        safe_to_retry=False,
+                        next_retry_at=None,
+                        claim_token=None,
+                        claim_expires_at=None,
+                        completed_at=utcnow(),
                     )
                 )
-                if job:
+                if self._updated_one_row(completed):
+                    job = session.get(GenerationJob, job_id)
+                    if job is None:  # pragma: no cover - guarded by the conditional update.
+                        raise LookupError("generation job not found")
+                    session.refresh(job)
                     finalized = True
-                    job.output_asset_id = asset.id
-                    job.status = JobStatus.COMPLETED.value
-                    job.next_retry_at = None
-                    job.claim_token = None
-                    job.claim_expires_at = None
-                    job.completed_at = utcnow()
+                    if self.workspace_credits is not None:
+                        credit_settlement = self.workspace_credits.settle_generation(
+                            session,
+                            job,
+                            reason="GENERATION_COMPLETED",
+                        )
+                        if credit_settlement.applied and not credit_settlement.replayed:
+                            self._event(
+                                session,
+                                job.id,
+                                "CREDIT_SETTLED",
+                                credits=credit_settlement.settled_credits,
+                            )
                     if candidate_id:
                         candidate = session.get(GenerationCandidate, candidate_id)
                         if candidate:
@@ -1199,37 +2074,147 @@ class GenerationGateway:
     ) -> GenerationJob:
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
-            if claim_token is not None and (
-                not job or job.claim_token != claim_token or job.status != JobStatus.RESERVED.value
-            ):
-                if job is None:
-                    raise LookupError("generation job not found")
+            if job is None:
+                raise LookupError("generation job not found")
+            if job.status in {
+                JobStatus.COMPLETED.value,
+                JobStatus.CANCELLED.value,
+                JobStatus.FAILED.value,
+            }:
                 return job
+            if claim_token is not None and (
+                job.claim_token != claim_token or job.status != JobStatus.RESERVED.value
+            ):
+                return job
+            # Durable submission facts are monotonic. A caller may have read
+            # NOT_SENT just before another transaction crossed the paid-call
+            # boundary; no stale argument may downgrade that committed fact.
+            submitted = submitted or bool(job.provider_job_id) or job.submission_state != "NOT_SENT"
             uncertain_paid_submission = submitted and not job.provider_job_id
+            if uncertain_paid_submission:
+                release_reservation = False
+                clear_routing = False
             decision = self.retry_policy.decide(
                 category,
                 job.attempt_count,
                 job.max_attempts,
                 submitted=uncertain_paid_submission,
             )
-            job.retry_category = category.value
-            job.error_code = code
-            job.error_message = message[:4000]
-            job.safe_to_retry = not submitted
-            job.claim_token = None
-            job.claim_expires_at = None
-            if not submitted:
-                job.submission_state = "NOT_SENT"
             if force_user_action or decision.requires_user_action:
-                job.status = JobStatus.WORKER_NEEDS_USER_ACTION.value
+                target_status = JobStatus.WORKER_NEEDS_USER_ACTION.value
+                next_retry_at = None
+            elif decision.retry:
+                target_status = JobStatus.RETRY_WAIT.value
+                next_retry_at = utcnow() + timedelta(seconds=decision.delay_seconds)
+            else:
+                target_status = JobStatus.FAILED.value
+                next_retry_at = None
+
+            # Cancellation, completion and manual reconciliation all use
+            # conditional updates. Error handling must participate in the
+            # same fence; a stale ORM flush by the worker must never revive a
+            # terminal/refunded job after another transaction wins.
+            observed_status = job.status
+            observed_submission_state = job.submission_state
+            observed_provider_job_id = job.provider_job_id
+            observed_claim_token = job.claim_token
+            conditions: list[Any] = [
+                GenerationJob.id == job.id,
+                GenerationJob.status == observed_status,
+                GenerationJob.submission_state == observed_submission_state,
+                GenerationJob.output_asset_id.is_(None),
+            ]
+            if observed_provider_job_id is None:
+                conditions.append(GenerationJob.provider_job_id.is_(None))
+            else:
+                conditions.append(GenerationJob.provider_job_id == observed_provider_job_id)
+            if claim_token is not None:
+                conditions.extend(
+                    [
+                        GenerationJob.status == JobStatus.RESERVED.value,
+                        GenerationJob.claim_token == claim_token,
+                    ]
+                )
+            elif observed_claim_token is None:
+                conditions.append(GenerationJob.claim_token.is_(None))
+            else:
+                conditions.append(GenerationJob.claim_token == observed_claim_token)
+            if self.workspace_credits is not None and job.workspace_credit_required:
+                credit = self.workspace_credits.entry_for_job_in_session(session, job.id)
+                if credit is None:
+                    raise WorkspaceCreditConflict(
+                        "generation requires a server-owned workspace credit reservation"
+                    )
+                conditions.append(
+                    select(WorkspaceCreditEntry.id)
+                    .where(
+                        WorkspaceCreditEntry.id == credit.id,
+                        WorkspaceCreditEntry.status == credit.status,
+                        WorkspaceCreditEntry.version == credit.version,
+                    )
+                    .exists()
+                )
+            transitioned = session.execute(
+                update(GenerationJob)
+                .where(*conditions)
+                .values(
+                    status=target_status,
+                    retry_category=category.value,
+                    error_code=code,
+                    error_message=message[:4000],
+                    safe_to_retry=not submitted,
+                    next_retry_at=next_retry_at,
+                    claim_token=None,
+                    claim_expires_at=None,
+                    submission_state=("NOT_SENT" if not submitted else observed_submission_state),
+                )
+            )
+            if not self._updated_one_row(transitioned):
+                session.expire_all()
+                current = session.get(GenerationJob, job_id)
+                if current is None:  # pragma: no cover - deleted by an administrator.
+                    raise LookupError("generation job not found")
+                return current
+            session.expire(job)
+            session.refresh(job)
+            if target_status == JobStatus.WORKER_NEEDS_USER_ACTION.value:
                 worker = session.get(BrowserWorker, job.worker_id) if job.worker_id else None
                 if worker:
                     worker.status = WorkerStatus.NEEDS_USER_ACTION.value
-            elif decision.retry:
-                job.status = JobStatus.RETRY_WAIT.value
-                job.next_retry_at = utcnow() + timedelta(seconds=decision.delay_seconds)
-            else:
-                job.status = JobStatus.FAILED.value
+            if self.workspace_credits is not None:
+                if submitted and job.status in {
+                    JobStatus.FAILED.value,
+                    JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                }:
+                    credit_transition = self.workspace_credits.require_reconciliation(
+                        session,
+                        job,
+                        reason=code,
+                    )
+                    if credit_transition.applied and not credit_transition.replayed:
+                        self._event(
+                            session,
+                            job.id,
+                            "CREDIT_RECONCILIATION_REQUIRED",
+                            reason=code,
+                        )
+                elif not submitted and job.status == JobStatus.FAILED.value:
+                    credit_refund = self.workspace_credits.refund_generation(
+                        session,
+                        job,
+                        reason=f"PRE_SUBMIT_FAILURE:{code}",
+                    )
+                    if credit_refund.applied and not credit_refund.replayed:
+                        self._event(
+                            session,
+                            job.id,
+                            "CREDIT_REFUNDED",
+                            credits=credit_refund.refunded_credits,
+                            reason=code,
+                        )
+                    # A refunded terminal job is immutable. A new attempt must
+                    # use a new job/idempotency key and reserve again.
+                    job.safe_to_retry = False
             self._event(
                 session,
                 job.id,
@@ -1303,13 +2288,118 @@ class GenerationGateway:
                 )
             ).all()
             for job in jobs:
+                observed_status = job.status
+                observed_submission_state = job.submission_state
+                observed_provider_job_id = job.provider_job_id
+                observed_claim_token = job.claim_token
+                conditions: list[Any] = [
+                    GenerationJob.id == job.id,
+                    GenerationJob.status == observed_status,
+                    GenerationJob.submission_state == observed_submission_state,
+                ]
+                if observed_provider_job_id is None:
+                    conditions.append(GenerationJob.provider_job_id.is_(None))
+                else:
+                    conditions.append(GenerationJob.provider_job_id == observed_provider_job_id)
+                if observed_claim_token is None:
+                    conditions.append(GenerationJob.claim_token.is_(None))
+                else:
+                    conditions.append(GenerationJob.claim_token == observed_claim_token)
+                if job.output_asset_id is None:
+                    conditions.append(GenerationJob.output_asset_id.is_(None))
+                else:
+                    conditions.append(GenerationJob.output_asset_id == job.output_asset_id)
+                if observed_status == JobStatus.RESERVED.value:
+                    conditions.append(
+                        or_(
+                            GenerationJob.claim_expires_at.is_(None),
+                            GenerationJob.claim_expires_at <= now,
+                        )
+                    )
+
+                credit = None
+                if self.workspace_credits is not None and job.workspace_credit_required:
+                    credit = self.workspace_credits.entry_for_job_in_session(session, job.id)
+                    if credit is None:
+                        raise WorkspaceCreditConflict(
+                            "generation requires a server-owned workspace credit reservation"
+                        )
+                    if credit.status == "REFUNDED":
+                        continue
+                    if (
+                        not observed_provider_job_id
+                        and observed_submission_state == "NOT_SENT"
+                        and (credit.status != "RESERVED")
+                    ):
+                        continue
+                    conditions.append(
+                        select(WorkspaceCreditEntry.id)
+                        .where(
+                            WorkspaceCreditEntry.id == credit.id,
+                            WorkspaceCreditEntry.status == credit.status,
+                            WorkspaceCreditEntry.version == credit.version,
+                        )
+                        .exists()
+                    )
+
                 if job.provider_job_id:
-                    job.status = JobStatus.SUBMITTED.value
-                    job.safe_to_retry = False
-                    job.next_retry_at = now
+                    values: dict[str, Any] = {
+                        "status": JobStatus.SUBMITTED.value,
+                        "submission_state": "CONFIRMED",
+                        "safe_to_retry": False,
+                        "next_retry_at": now,
+                        "claim_token": None,
+                        "claim_expires_at": None,
+                    }
                 elif job.submission_state == "SENT_UNCONFIRMED":
-                    job.status = JobStatus.WORKER_NEEDS_USER_ACTION.value
-                    job.safe_to_retry = False
+                    values = {
+                        "status": JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                        "safe_to_retry": False,
+                        "next_retry_at": None,
+                        "claim_token": None,
+                        "claim_expires_at": None,
+                    }
+                else:
+                    values = {
+                        "status": JobStatus.RETRY_WAIT.value,
+                        "safe_to_retry": True,
+                        "next_retry_at": now,
+                        "submission_state": "NOT_SENT",
+                        "claim_token": None,
+                        "claim_expires_at": None,
+                    }
+                resumed = session.execute(
+                    update(GenerationJob)
+                    .where(*conditions)
+                    .values(**values)
+                    .execution_options(synchronize_session=False)
+                )
+                if not self._updated_one_row(resumed):
+                    session.expire(job)
+                    continue
+                session.expire(job)
+                session.refresh(job)
+
+                if observed_provider_job_id:
+                    idem = session.scalar(
+                        select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
+                    )
+                    if idem:
+                        idem.provider_job_id = observed_provider_job_id
+                    if self.workspace_credits is not None:
+                        self.workspace_credits.record_submission_confirmed(
+                            session,
+                            job,
+                            attempt=max(job.attempt_count, 1),
+                            provider_job_id=observed_provider_job_id,
+                        )
+                elif observed_submission_state == "SENT_UNCONFIRMED":
+                    if self.workspace_credits is not None:
+                        self.workspace_credits.require_reconciliation(
+                            session,
+                            job,
+                            reason="RESTART_FOUND_UNCONFIRMED_SUBMISSION",
+                        )
                 else:
                     self.scheduler.release_job_in_session(
                         session,
@@ -1317,12 +2407,66 @@ class GenerationGateway:
                         success=None,
                         clear_routing=True,
                     )
-                    job.status = JobStatus.RETRY_WAIT.value
-                    job.safe_to_retry = True
-                    job.next_retry_at = utcnow()
-                    job.submission_state = "NOT_SENT"
-                job.claim_token = None
-                job.claim_expires_at = None
                 self._event(session, job.id, "JOB_RESUMED", status=job.status)
                 recovered += 1
+        self.reconcile_credit_lifecycle()
         return recovered
+
+    def reconcile_credit_lifecycle(self) -> int:
+        """Repair deterministic crash gaps; ambiguous provider outcomes stay held."""
+
+        if self.workspace_credits is None:
+            return 0
+        repaired = 0
+        with self.database.session() as session:
+            rows = session.execute(
+                select(GenerationJob, WorkspaceCreditEntry)
+                .join(
+                    WorkspaceCreditEntry,
+                    WorkspaceCreditEntry.generation_job_id == GenerationJob.id,
+                )
+                .where(WorkspaceCreditEntry.status.in_(["RESERVED", "RECONCILIATION_REQUIRED"]))
+            ).all()
+            for job, entry in rows:
+                if job.status == JobStatus.COMPLETED.value:
+                    transition = self.workspace_credits.settle_generation(
+                        session,
+                        job,
+                        reason="RECOVERY_COMPLETED_JOB",
+                    )
+                elif (
+                    entry.status == "RESERVED"
+                    and job.status in {JobStatus.CANCELLED.value, JobStatus.FAILED.value}
+                    and job.submission_state == "NOT_SENT"
+                    and not job.provider_job_id
+                ):
+                    transition = self.workspace_credits.refund_generation(
+                        session,
+                        job,
+                        reason="RECOVERY_PRE_SUBMIT_TERMINAL",
+                    )
+                    job.safe_to_retry = False
+                elif entry.status == "RESERVED" and (
+                    job.submission_state == "SENT_UNCONFIRMED"
+                    or (
+                        job.status in {JobStatus.CANCELLED.value, JobStatus.FAILED.value}
+                        and bool(job.provider_job_id)
+                    )
+                ):
+                    transition = self.workspace_credits.require_reconciliation(
+                        session,
+                        job,
+                        reason="RECOVERY_AMBIGUOUS_PROVIDER_OUTCOME",
+                    )
+                else:
+                    continue
+                if transition.applied and not transition.replayed:
+                    repaired += 1
+                    self._event(
+                        session,
+                        job.id,
+                        "CREDIT_LIFECYCLE_RECOVERED",
+                        previous_status=transition.previous_status,
+                        status=transition.status,
+                    )
+        return repaired

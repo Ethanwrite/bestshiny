@@ -37,5 +37,7 @@
   "cost": {"normalized": 0.90, "estimated_per_second": 0.22},
   "latency": {"normalized": 0.72, "expected_seconds": 240},
   "adapter": "veo",
+  "provider_trust_level": "PRODUCTION",
+  "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
   "source": "initial_product_prior"
 }

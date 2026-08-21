@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from asset_registry_core import assert_canonical_media_provenance
 from platform_database import Database
 from production_domain.models import Character, CharacterIdentityVersion, MediaAsset
 from sqlalchemy import func, select
@@ -46,6 +47,7 @@ class CharacterIdentityService:
                 raise LookupError("character or master asset not found")
             if asset.project_id != character.project_id:
                 raise ValueError("master asset belongs to a different project")
+            identity_assets = [asset]
             for role, reference_asset_id in references.items():
                 if not reference_asset_id:
                     continue
@@ -54,6 +56,12 @@ class CharacterIdentityService:
                     raise LookupError(f"character reference asset not found: {role}")
                 if reference_asset.project_id != character.project_id:
                     raise ValueError(f"character reference asset belongs to a different project: {role}")
+                identity_assets.append(reference_asset)
+            # Canonical identity is itself a canonical write. Validate immutable
+            # origin provenance before creating a version or mutating any pointer,
+            # status, or media ownership field. A later logical-asset promotion is
+            # defense in depth, not the first trust boundary.
+            assert_canonical_media_provenance(session, identity_assets)
             version = (
                 int(
                     session.scalar(

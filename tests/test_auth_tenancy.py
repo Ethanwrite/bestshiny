@@ -70,6 +70,7 @@ def test_register_login_logout_store_only_password_and_token_hashes(container):
 
         issued = _register(client, "Owner@Example.com")
         token = issued["access_token"]
+        assert issued["user"]["workspaces"][0]["plan_tier"] == "FREE"
         assert client.get("/api/auth/me", headers=_headers(issued)).status_code == 200
 
         duplicate = client.post(

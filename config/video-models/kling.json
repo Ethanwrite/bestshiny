@@ -37,5 +37,7 @@
   "cost": {"normalized": 0.58, "estimated_per_second": 0.10},
   "latency": {"normalized": 0.55, "expected_seconds": 150},
   "adapter": "kling",
+  "provider_trust_level": "PRODUCTION",
+  "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
   "source": "initial_product_prior"
 }

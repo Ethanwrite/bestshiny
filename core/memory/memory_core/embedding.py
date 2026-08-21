@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 import httpx
+from provider_sdk import LiveProviderGate, LiveProviderSettings
 
 from .schemas import EmbeddingProvenance, MultimodalContent
 
@@ -60,6 +61,7 @@ class VoyageMultimodalEmbeddingProvider:
         model: str = "voyage-multimodal-3.5",
         dimension: int = 512,
         timeout_seconds: float = 30.0,
+        transport_settings: LiveProviderSettings | None = None,
     ):
         if not api_key:
             raise ValueError("Voyage API key is required")
@@ -69,6 +71,7 @@ class VoyageMultimodalEmbeddingProvider:
         self.model = model
         self.dimension = dimension
         self.timeout_seconds = timeout_seconds
+        self.live_gate = LiveProviderGate(transport_settings or LiveProviderSettings())
 
     @property
     def provenance(self) -> EmbeddingProvenance:
@@ -80,6 +83,8 @@ class VoyageMultimodalEmbeddingProvider:
         )
 
     def embed(self, content: MultimodalContent, *, input_type: str) -> list[float]:
+        # A configured key alone is never authority to make a paid HTTP call.
+        self.live_gate.assert_live_allowed()
         pieces: list[dict[str, str]] = []
         if content.text:
             pieces.append({"type": "text", "text": content.text})

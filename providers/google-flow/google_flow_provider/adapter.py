@@ -7,8 +7,18 @@ from typing import Any
 from browser_runtime import BrowserCommandTimeout, BrowserRuntime, WorkerDisconnected
 from platform_database import Database
 from platform_shared import Settings
-from production_domain.models import ProviderAccount, RetryCategory
-from provider_sdk import GenerationProvider, ProviderError, ProviderHealth, ProviderJob, ProviderSubmission
+from production_domain.models import GenerationJob, ProviderAccount, RetryCategory
+from provider_sdk import (
+    GenerationProvider,
+    LiveProviderCallDenied,
+    LiveProviderGate,
+    LiveProviderSettings,
+    ProviderError,
+    ProviderHealth,
+    ProviderJob,
+    ProviderSubmission,
+)
+from sqlalchemy import select
 
 from .mapper import image_payload, video_payload
 
@@ -20,10 +30,54 @@ class GoogleFlowProvider(GenerationProvider):
         self.runtime = runtime
         self.settings = settings
         self.database = database
+        self.live_gate = LiveProviderGate(
+            LiveProviderSettings(
+                provider_mode=settings.provider_mode,
+                allow_live_provider_calls=settings.allow_live_provider_calls,
+                live_provider_confirmation=settings.live_provider_confirmation,
+            )
+        )
 
-    def _project_id(self, account_id: str) -> str:
+    @property
+    def capability_configured(self) -> bool:
+        """Deployment availability for business role advertisement/execution."""
+
+        try:
+            self.live_gate.assert_live_allowed()
+        except LiveProviderCallDenied:
+            return False
+        return bool(self.runtime.available_workers(self.name))
+
+    def _assert_browser_dispatch_allowed(self) -> None:
+        """Treat browser-proxied provider traffic as a live provider call."""
+
+        try:
+            self.live_gate.assert_live_allowed()
+        except LiveProviderCallDenied as exc:
+            raise ProviderError(
+                str(exc),
+                RetryCategory.PERMANENT_ERROR,
+                code="LIVE_PROVIDER_CALL_DENIED",
+                submitted=False,
+            ) from exc
+
+    def _project_id(self, account_id: str, *, provider_job_id: str | None = None) -> str:
         if self.database:
             with self.database.session() as session:
+                if provider_job_id:
+                    job = session.scalar(
+                        select(GenerationJob)
+                        .where(
+                            GenerationJob.provider == self.name,
+                            GenerationJob.account_id == account_id,
+                            GenerationJob.provider_job_id == provider_job_id,
+                        )
+                        .order_by(GenerationJob.created_at.desc())
+                    )
+                    if job:
+                        bound_project_id = (job.provider_request_json or {}).get("_provider_project_id")
+                        if bound_project_id:
+                            return str(bound_project_id)
                 account = session.get(ProviderAccount, account_id)
                 if account and account.metadata_json.get("project_id"):
                     return str(account.metadata_json["project_id"])
@@ -45,6 +99,7 @@ class GoogleFlowProvider(GenerationProvider):
         generation_job_id: str | None = None,
         submitted: bool = False,
     ) -> dict[str, Any]:
+        self._assert_browser_dispatch_allowed()
         try:
             result = await self.runtime.dispatch(
                 worker_id,
@@ -217,6 +272,7 @@ class GoogleFlowProvider(GenerationProvider):
         if generation_type == "image":
             if not await self.validate_asset(provider_job_id, account_id=account_id, worker_id=worker_id):
                 return ProviderJob(provider_job_id, "RUNNING")
+            self._assert_browser_dispatch_allowed()
             response = await self.runtime.dispatch(
                 worker_id,
                 "provider.media_url",
@@ -230,7 +286,7 @@ class GoogleFlowProvider(GenerationProvider):
                 output_url=response.get("url"),
                 output_mime_type="image/png",
             )
-        project_id = self._project_id(account_id)
+        project_id = self._project_id(account_id, provider_job_id=provider_job_id)
         data = await self._request(
             worker_id,
             "/v1/video:batchCheckAsyncVideoGenerationStatus",
@@ -245,6 +301,7 @@ class GoogleFlowProvider(GenerationProvider):
             "mediaGenerationStatus", ""
         )
         if "SUCCESSFUL" in state:
+            self._assert_browser_dispatch_allowed()
             response = await self.runtime.dispatch(
                 worker_id,
                 "provider.media_url",
@@ -277,6 +334,12 @@ class GoogleFlowProvider(GenerationProvider):
         return int(value) if value is not None else None
 
     async def health(self) -> ProviderHealth:
+        if not self.capability_configured:
+            return ProviderHealth(
+                False,
+                "NOT_CONFIGURED",
+                {"status": "NOT_CONFIGURED", "live_gate": False},
+            )
         workers = self.runtime.available_workers(self.name)
         if not workers:
             return ProviderHealth(False, "No connected Google Flow browser worker")

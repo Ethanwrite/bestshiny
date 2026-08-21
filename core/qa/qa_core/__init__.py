@@ -1,3 +1,17 @@
-from .pipeline import HumanReviewNotAllowed, IdentityDriftMetrics, QAPipeline, analyze_identity_drift
+from .pipeline import (
+    DynamicIdentityQA,
+    HumanReviewNotAllowed,
+    IdentityDriftMetrics,
+    QAPipeline,
+    RuleBasedDynamicIdentityQA,
+    analyze_identity_drift,
+)
 
-__all__ = ["HumanReviewNotAllowed", "IdentityDriftMetrics", "QAPipeline", "analyze_identity_drift"]
+__all__ = [
+    "DynamicIdentityQA",
+    "HumanReviewNotAllowed",
+    "IdentityDriftMetrics",
+    "QAPipeline",
+    "RuleBasedDynamicIdentityQA",
+    "analyze_identity_drift",
+]

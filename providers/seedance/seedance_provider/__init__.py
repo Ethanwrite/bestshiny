@@ -1,6 +1,3 @@
-from provider_sdk import NotConfiguredProvider
+from .adapter import ArkProvider, SeedanceProvider
 
-
-class SeedanceProvider(NotConfiguredProvider):
-    def __init__(self):
-        super().__init__("seedance")
+__all__ = ["ArkProvider", "SeedanceProvider"]

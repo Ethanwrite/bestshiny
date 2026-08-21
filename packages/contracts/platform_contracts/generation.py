@@ -1,8 +1,46 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from provider_sdk import AssetCriticality
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+TIMELINE_FENCE_METADATA_KEY = "_server_authoritative_timeline_fence"
+
+
+def authoritative_timeline_state_hash(
+    state_json: dict[str, Any],
+    *,
+    previous_state_id: str | None,
+) -> str:
+    """Hash the SQL-authoritative state and its relational predecessor deterministically."""
+
+    encoded = json.dumps(
+        {
+            "previous_state_id": previous_state_id,
+            "state_json": state_json,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class AuthoritativeTimelineFence(BaseModel):
+    """Server-created snapshot that fences an Autopilot generation plan."""
+
+    model_config = ConfigDict(frozen=True)
+
+    version: Literal["authoritative-timeline-fence-v1"] = "authoritative-timeline-fence-v1"
+    shot_id: str = Field(min_length=1)
+    shot_status: str = Field(min_length=1)
+    input_state_id: str = Field(min_length=1)
+    input_state_hash: str = Field(min_length=64, max_length=64)
+    output_state_id: str = Field(min_length=1)
+    output_state_hash: str = Field(min_length=64, max_length=64)
 
 
 class GenerationRequest(BaseModel):
@@ -22,6 +60,7 @@ class GenerationRequest(BaseModel):
     idempotency_key: str = Field(min_length=3, max_length=250)
     priority: int = Field(default=0, ge=-100, le=100)
     generation_policy: str = "TEXT_TO_VIDEO"
+    asset_criticality: AssetCriticality = AssetCriticality.STANDARD
     cost_estimate: float = Field(default=0.0, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

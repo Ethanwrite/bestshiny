@@ -37,5 +37,7 @@
   "cost": {"normalized": 0.42, "estimated_per_second": 0.07},
   "latency": {"normalized": 0.58, "expected_seconds": 170},
   "adapter": "wan",
+  "provider_trust_level": "PRODUCTION",
+  "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
   "source": "initial_product_prior"
 }

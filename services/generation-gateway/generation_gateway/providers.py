@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import builtins
 
-from provider_sdk import GenerationProvider, NotConfiguredProvider
+from provider_sdk import (
+    AssetCriticality,
+    GenerationProvider,
+    NotConfiguredProvider,
+    ProviderTrustLevel,
+    ProviderTrustViolation,
+    assert_provider_can_handle,
+)
 
 
 class GenerationTargetError(LookupError):
@@ -47,14 +54,24 @@ class ProviderRouter:
             raise ValueError(f"generation model availability already registered: {provider}:{model}")
         self._models[key] = available
 
-    def validate_target(self, provider: str, model: str, media_type: str) -> GenerationProvider:
+    def validate_target(
+        self,
+        provider: str,
+        model: str,
+        media_type: str,
+        *,
+        asset_criticality: AssetCriticality | str | None = None,
+    ) -> GenerationProvider:
         implementation = self._providers.get(provider)
         if implementation is None:
             raise GenerationTargetError(
                 "PROVIDER_NOT_REGISTERED",
                 f"selected provider is not registered: {provider}",
             )
-        if isinstance(implementation, NotConfiguredProvider):
+        if (
+            isinstance(implementation, NotConfiguredProvider)
+            or getattr(implementation, "configured", True) is False
+        ):
             raise GenerationTargetError(
                 "PROVIDER_NOT_CONFIGURED",
                 f"selected provider has no configured generation transport: {provider}",
@@ -70,6 +87,14 @@ class ProviderRouter:
                 "MODEL_NOT_AVAILABLE",
                 f"selected {media_type} model is not available: {provider}:{model}",
             )
+        if asset_criticality is not None:
+            try:
+                assert_provider_can_handle(
+                    getattr(implementation, "trust_level", ProviderTrustLevel.PRODUCTION),
+                    asset_criticality,
+                )
+            except ProviderTrustViolation as exc:
+                raise GenerationTargetError("PROVIDER_TRUST_DENIED", str(exc)) from exc
         return implementation
 
     def list(self) -> list[str]:
@@ -77,7 +102,11 @@ class ProviderRouter:
 
     def is_configured(self, name: str) -> bool:
         provider = self._providers.get(name)
-        return provider is not None and not isinstance(provider, NotConfiguredProvider)
+        return (
+            provider is not None
+            and not isinstance(provider, NotConfiguredProvider)
+            and getattr(provider, "configured", True) is not False
+        )
 
     def configured(self) -> builtins.list[str]:
         return sorted(name for name in self._providers if self.is_configured(name))

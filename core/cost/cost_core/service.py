@@ -84,7 +84,7 @@ class CostEngine:
         *,
         estimated_cost: float = 0.0,
         actual_cost: float = 0.0,
-        credits: float = 0.0,
+        credits: float | None = None,
         retry_cost: float = 0.0,
         resolution: str = "720p",
     ) -> CostRecord:
@@ -104,7 +104,7 @@ class CostEngine:
                     "model": job.model,
                     "duration": float(job.request_json.get("duration") or 0),
                     "resolution": resolution,
-                    "credits": credits,
+                    "credits": credits if credits is not None else 0.0,
                     "estimated_cost": estimated_cost,
                     "actual_cost": actual_cost,
                     "retry_cost": retry_cost,
@@ -133,7 +133,8 @@ class CostEngine:
                 raise RuntimeError("cost record insert did not produce a durable row")
             if record.project_id != job.project_id:
                 raise RuntimeError("cost record project does not match its generation job")
-            record.credits = credits
+            if credits is not None:
+                record.credits = credits
             record.estimated_cost = estimated_cost
             record.actual_cost = actual_cost
             record.retry_cost = retry_cost

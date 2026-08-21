@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from provider_sdk import provider_can_handle
+
 from .registry import ModelCapabilityRegistry
 from .schemas import ModelCandidate, RouterDecision, ShotRequirements
 
@@ -108,6 +110,15 @@ class VideoModelRouter:
             failures.append(f"duration exceeds {profile.max_duration:g}s")
         if profile.supported_resolutions and requirements.resolution not in profile.supported_resolutions:
             failures.append(f"resolution {requirements.resolution} unsupported")
+        if not provider_can_handle(profile.provider_trust_level, requirements.asset_criticality):
+            failures.append(
+                f"provider trust {profile.provider_trust_level.value} is below "
+                f"{requirements.asset_criticality.value} criticality"
+            )
+        if requirements.asset_criticality not in profile.criticality_allowed:
+            failures.append(
+                f"asset criticality {requirements.asset_criticality.value} not explicitly allowed"
+            )
         for requirement, capability in self.hard_capabilities.items():
             if getattr(requirements, requirement) and not getattr(profile, capability):
                 failures.append(f"{capability} required")

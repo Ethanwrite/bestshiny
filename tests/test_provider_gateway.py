@@ -1063,9 +1063,12 @@ def test_provider_router_has_future_slots(container):
         "grok",
         "kling",
         "omni",
+        "openrouter",
+        "runapi",
         "runway",
         "seedance",
         "veo_official",
+        "wan",
     }
     assert container.providers.configured() == ["google_flow"]
 

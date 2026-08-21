@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -38,8 +39,37 @@ class Settings(BaseSettings):
     flow_api_base: str = "https://aisandbox-pa.googleapis.com"
     flow_api_key: str = ""
     flow_project_id: str = ""
+    provider_mode: Literal["mock", "recorded", "live"] = "mock"
+    allow_live_provider_calls: bool = False
+    live_provider_confirmation: str = ""
+    provider_http_timeout_seconds: float = 120
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    ark_api_key: str = ""
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    doubao_model_id: str = ""
+    seedance_model_id: str = ""
+    wan_api_key: str = ""
+    wan_openai_base_url: str = ""
+    wan_dashscope_base_url: str = ""
+    wan_chat_model_id: str = ""
+    wan2_7_t2v_model_id: str = ""
+    wan2_7_i2v_model_id: str = ""
+    wan2_7_r2v_model_id: str = ""
+    runapi_api_key: str = ""
+    runapi_base_url: str = ""
+    runapi_model_id: str = ""
+    runapi_chat_path: str = "/v1/chat/completions"
+    runapi_image_path: str = "/v1/images/generations"
+    runapi_video_path: str = "/v1/videos"
+    runapi_budget_usd: Decimal = Decimal("10")
+    allow_runapi_edge_calls: bool = False
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model_id: str = ""
     skills_root: Path = Path("./skills")
     model_config_root: Path = Path("./config/video-models")
+    model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     feature_voyage_memory: bool = False
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False

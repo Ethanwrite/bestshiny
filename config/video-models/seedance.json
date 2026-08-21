@@ -37,5 +37,7 @@
   "cost": {"normalized": 0.50, "estimated_per_second": 0.09},
   "latency": {"normalized": 0.48, "expected_seconds": 130},
   "adapter": "seedance",
+  "provider_trust_level": "PRODUCTION",
+  "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
   "source": "initial_product_prior"
 }

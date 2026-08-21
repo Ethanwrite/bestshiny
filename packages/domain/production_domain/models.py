@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -10,15 +11,18 @@ from sqlalchemy import (
     DDL,
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
     event,
+    false,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -214,10 +218,109 @@ class AuthSession(Base, TimestampMixin):
 
 class Workspace(Base, TimestampMixin):
     __tablename__ = "workspaces"
+    __table_args__ = (CheckConstraint("credit_balance >= 0", name="ck_workspace_credit_balance"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+    plan_tier: Mapped[str] = mapped_column(String(40), default="FREE", nullable=False)
+    credit_balance: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+
+
+class WorkspaceCreditEntry(Base, TimestampMixin):
+    """Current state of one server-priced generation credit reservation."""
+
+    __tablename__ = "workspace_credit_entries"
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_credit_entry_project_key"),
+        UniqueConstraint("generation_job_id", name="uq_credit_entry_generation_job"),
+        CheckConstraint("credits > 0", name="ck_workspace_credit_entry_positive"),
+        CheckConstraint("balance_after >= 0", name="ck_workspace_credit_entry_balance"),
+        CheckConstraint("settled_credits >= 0", name="ck_credit_entry_settled_nonnegative"),
+        CheckConstraint("refunded_credits >= 0", name="ck_credit_entry_refunded_nonnegative"),
+        CheckConstraint(
+            "settled_credits + refunded_credits <= credits",
+            name="ck_credit_entry_allocation",
+        ),
+        CheckConstraint("version > 0", name="ck_credit_entry_version_positive"),
+        CheckConstraint(
+            "status IN ('RESERVED', 'SETTLED', 'REFUNDED', 'RECONCILIATION_REQUIRED')",
+            name="ck_credit_entry_status",
+        ),
+        CheckConstraint(
+            "(status = 'RESERVED' AND settled_credits = 0 AND refunded_credits = 0 "
+            "AND settled_at IS NULL AND refunded_at IS NULL "
+            "AND reconciliation_required_at IS NULL) OR "
+            "(status = 'RECONCILIATION_REQUIRED' AND settled_credits = 0 "
+            "AND refunded_credits = 0 AND settled_at IS NULL AND refunded_at IS NULL "
+            "AND reconciliation_required_at IS NOT NULL "
+            "AND reconciliation_reason IS NOT NULL) OR "
+            "(status = 'SETTLED' AND settled_credits = credits AND refunded_credits = 0 "
+            "AND settled_at IS NOT NULL AND refunded_at IS NULL) OR "
+            "(status = 'REFUNDED' AND settled_credits = 0 AND refunded_credits = credits "
+            "AND refunded_at IS NOT NULL AND settled_at IS NULL)",
+            name="ck_credit_entry_state_allocation",
+        ),
+        Index("ix_workspace_credit_entries_status", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(250), nullable=False)
+    credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    settled_credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    refunded_credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="RESERVED", nullable=False)
+    reason: Mapped[str] = mapped_column(String(120), default="GENERATION_RESERVED", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciliation_required_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciliation_reason: Mapped[str | None] = mapped_column(String(240))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class WorkspaceCreditEvent(Base):
+    """Append-only audit fact emitted for every wallet lifecycle transition."""
+
+    __tablename__ = "workspace_credit_events"
+    __table_args__ = (
+        UniqueConstraint("credit_entry_id", "event_key", name="uq_credit_event_entry_key"),
+        CheckConstraint("credits >= 0", name="ck_credit_event_credits_nonnegative"),
+        CheckConstraint("balance_after >= 0", name="ck_credit_event_balance_nonnegative"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    credit_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_credit_entries.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    event_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    balance_delta: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(240), nullable=False)
+    actor_type: Mapped[str] = mapped_column(
+        String(80), default="SYSTEM", server_default="SYSTEM", nullable=False
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
 
 
 class LegacyWorkspaceClaim(Base, TimestampMixin):
@@ -838,6 +941,7 @@ class WorkerSocketTicket(Base, TimestampMixin):
 
 class GenerationJob(Base, TimestampMixin):
     __tablename__ = "generation_jobs"
+    __table_args__ = (CheckConstraint("quoted_credits >= 0", name="ck_generation_job_quoted_credits"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
@@ -872,6 +976,10 @@ class GenerationJob(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    workspace_credit_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    quoted_credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
 
 class GenerationIdempotency(Base, TimestampMixin):
@@ -1140,6 +1248,102 @@ class EvaluationResult(Base, TimestampMixin):
     attempt_number: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     provider: Mapped[str] = mapped_column(String(80), default="", index=True, nullable=False)
     model_id: Mapped[str] = mapped_column(String(120), default="", index=True, nullable=False)
+
+
+class ModelDefinition(Base, TimestampMixin):
+    """Provider-neutral model catalogue entry used by business-layer roles."""
+
+    __tablename__ = "model_definitions"
+    __table_args__ = (
+        UniqueConstraint("logical_name", name="uq_model_definitions_logical_name"),
+        UniqueConstraint(
+            "provider",
+            "provider_model_id",
+            "modality",
+            name="uq_model_definitions_provider_model_modality",
+        ),
+        Index("ix_model_definitions_provider_enabled", "provider", "enabled"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    logical_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    modality: Mapped[str] = mapped_column(String(50), nullable=False)
+    capabilities: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    quality_tier: Mapped[str] = mapped_column(String(40), default="STANDARD", nullable=False)
+    cost_class: Mapped[str] = mapped_column(String(40), default="STANDARD", nullable=False)
+    provider_trust_level: Mapped[str] = mapped_column(String(40), default="STANDARD", nullable=False)
+    criticality_allowed: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    live_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    context_window: Mapped[int | None] = mapped_column(Integer)
+    max_duration: Mapped[float | None] = mapped_column(Float)
+    supported_aspect_ratios: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ModelRoleBinding(Base, TimestampMixin):
+    """Configurable role-to-model binding, optionally scoped to a plan tier."""
+
+    __tablename__ = "model_role_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "role",
+            "plan_tier",
+            "model_definition_id",
+            name="uq_model_role_binding_scope_model",
+        ),
+        Index(
+            "ix_model_role_binding_lookup",
+            "role",
+            "plan_tier",
+            "enabled",
+            "priority",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    role: Mapped[str] = mapped_column(String(80), nullable=False)
+    plan_tier: Mapped[str] = mapped_column(String(40), default="ALL", nullable=False)
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="CASCADE"), nullable=False
+    )
+    binding_kind: Mapped[str] = mapped_column(String(40), default="PRIMARY", nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ProviderBudget(Base, TimestampMixin):
+    """Durable provider-level spend ceiling used by low-trust edge routing."""
+
+    __tablename__ = "provider_budgets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(80), unique=True, index=True, nullable=False)
+    credit_budget_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    actual_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    routing_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ProviderBudgetUsage(Base, TimestampMixin):
+    """Exactly-once reserve/settle audit for a provider task."""
+
+    __tablename__ = "provider_budget_usages"
+    __table_args__ = (
+        UniqueConstraint("provider", "task_id", name="uq_provider_budget_usage_task"),
+        Index("ix_provider_budget_usage_lookup", "provider", "status", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    budget_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_budgets.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    task_role: Mapped[str] = mapped_column(String(100), nullable=False)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    remaining_budget_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="RESERVED", nullable=False)
 
 
 class ModelMetric(Base, TimestampMixin):

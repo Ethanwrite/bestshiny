@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import BinaryIO, cast
@@ -32,6 +33,7 @@ from production_domain.models import (
 from provider_sdk import GenerationProvider
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 
 class RemoteMediaSecurityError(ValueError):
@@ -273,7 +275,11 @@ class MediaRegistry:
         parent_asset_id: str | None = None,
         generation_candidate_id: str | None = None,
         metadata: dict | None = None,
+        provider: str | None = None,
+        provider_media_id: str | None = None,
     ) -> tuple[MediaAsset, bool]:
+        if bool(provider) != bool(provider_media_id):
+            raise ValueError("provider origin requires both provider and provider_media_id")
         stored = self.storage.put(stream, filename=filename, mime_type=mime_type)
         lineage_key = self._lineage_key(
             character_id=character_id,
@@ -301,6 +307,8 @@ class MediaRegistry:
                 shot_id=shot_id,
                 parent_asset_id=parent_asset_id,
                 generation_candidate_id=generation_candidate_id,
+                provider=provider,
+                provider_media_id=provider_media_id,
                 metadata_json=metadata or {},
             )
             try:
@@ -506,8 +514,6 @@ class MediaRegistry:
                         raise ProviderMediaReconciliationConflict(
                             "media asset changed during provider reconciliation"
                         )
-                    asset.provider = context.provider
-                    asset.provider_media_id = normalized_media_id
                     session.add(
                         self._reconciliation_audit(
                             context,
@@ -591,6 +597,7 @@ class MediaRegistry:
         account_id: str,
         worker_id: str,
         provider_project_id: str | None = None,
+        on_paid_boundary: Callable[[Session, str, str], None] | None = None,
     ) -> tuple[str, bool]:
         """Resolve one durable provider upload for an asset/provider/account tuple.
 
@@ -803,22 +810,34 @@ class MediaRegistry:
             raise
 
         boundary_at = utcnow()
-        with self.database.session() as session:
-            result = session.execute(
-                update(MediaProviderBinding)
-                .where(
-                    MediaProviderBinding.id == binding_id,
-                    MediaProviderBinding.status == "UPLOAD_CLAIMED",
-                    MediaProviderBinding.upload_claim_token == claim_token,
-                    MediaProviderBinding.upload_started_at.is_(None),
+        try:
+            with self.database.session() as session:
+                result = session.execute(
+                    update(MediaProviderBinding)
+                    .where(
+                        MediaProviderBinding.id == binding_id,
+                        MediaProviderBinding.status == "UPLOAD_CLAIMED",
+                        MediaProviderBinding.upload_claim_token == claim_token,
+                        MediaProviderBinding.upload_started_at.is_(None),
+                    )
+                    .values(
+                        status="UPLOADING",
+                        upload_started_at=boundary_at,
+                        upload_claim_expires_at=self._new_upload_expiry(boundary_at),
+                        updated_at=boundary_at,
+                    )
                 )
-                .values(
-                    status="UPLOADING",
-                    upload_started_at=boundary_at,
-                    upload_claim_expires_at=self._new_upload_expiry(boundary_at),
-                    updated_at=boundary_at,
-                )
-            )
+                if affected_rows(result) == 1 and on_paid_boundary is not None:
+                    # The binding and its owning generation job must cross the
+                    # paid boundary in one commit. If the hook rejects a stale
+                    # job claim, this transaction rolls back before upload.
+                    on_paid_boundary(session, binding_id, asset_id)
+        except BaseException:
+            try:
+                self._expire_pre_boundary_claim(binding_id, claim_token)
+            except Exception:
+                pass
+            raise
         if affected_rows(result) != 1:
             raise ProviderMediaUploadInProgress("provider media upload claim was superseded")
 
@@ -859,8 +878,6 @@ class MediaRegistry:
                     raise ProviderMediaReconciliationRequired(
                         "provider upload completed after its local asset disappeared"
                     )
-                current_asset.provider = provider.name
-                current_asset.provider_media_id = provider_media_id
         except BaseException:
             try:
                 self._mark_upload_reconciliation(binding_id, claim_token)
@@ -939,7 +956,7 @@ class MediaRegistry:
             except UnsafeMediaUpload as exc:
                 raise RemoteMediaSecurityError(str(exc)) from exc
             binary_content.seek(0)
-            asset, _ = self.register(
+            asset, _reused = self.register(
                 project_id,
                 asset_type,
                 binary_content,
@@ -948,10 +965,10 @@ class MediaRegistry:
                 shot_id=shot_id,
                 generation_candidate_id=generation_candidate_id,
                 metadata={"source_url": source_url, "provider": provider},
+                provider=provider,
+                provider_media_id=provider_media_id,
             )
-        with self.database.session() as session:
-            current = session.get(MediaAsset, asset.id)
-            current.provider = provider
-            current.provider_media_id = provider_media_id
-            session.flush()
-            return current
+        # Provider origin is part of the insert itself.  A deduplicated result
+        # returns the existing row unchanged, so neither a user upload nor a
+        # prior generation origin can be relabelled by identical bytes.
+        return asset

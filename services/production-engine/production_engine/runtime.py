@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from asset_registry_core import AssetRegistry, CanonicalVersionNotSet
+from entitlement_core import GenerationAdmissionService
 from evaluation_core import (
     EvaluationDecision,
     EvaluationEvidence,
@@ -16,11 +17,17 @@ from evaluation_core import (
     RetryEngine,
     RetryPlan,
 )
-from generation_gateway import GenerationGateway
+from generation_gateway import GenerationGateway, TimelineGenerationPlanStale
 from memory_core import ContextAssembler, GenerationContext, MemoryQuery, MultimodalMemoryEngine
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
 from model_registry_core import RouterDecision, ShotRequirements, VideoModelRouter
-from platform_contracts import CanonicalShotSpec, GenerationRequest, PassengerGenerationCommand
+from platform_contracts import (
+    AuthoritativeTimelineFence,
+    CanonicalShotSpec,
+    GenerationRequest,
+    PassengerGenerationCommand,
+    authoritative_timeline_state_hash,
+)
 from platform_database import Database
 from production_domain.models import (
     DecisionRecord,
@@ -46,6 +53,7 @@ class PreparedAutopilotGeneration:
     router: RouterDecision
     model_request: ModelGenerationRequest
     prompt_record_id: str
+    timeline_fence: AuthoritativeTimelineFence
 
 
 def _new_trace_id() -> str:
@@ -72,6 +80,7 @@ class VisualProductionRuntime:
         metrics: ModelMetricsService,
         benchmarks: ModelBenchmarkSuite,
         flags: FeatureFlagService,
+        generation_admission: GenerationAdmissionService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -86,8 +95,15 @@ class VisualProductionRuntime:
         self.metrics = metrics
         self.benchmarks = benchmarks
         self.flags = flags
+        self.generation_admission = generation_admission
 
-    def submit_passenger(self, command: PassengerGenerationCommand):  # type: ignore[no-untyped-def]
+    def submit_passenger(
+        self,
+        command: PassengerGenerationCommand,
+        *,
+        estimated_credits: int | None = None,
+        pricing_version: str = "",
+    ):  # type: ignore[no-untyped-def]
         request = GenerationRequest(
             project_id=command.project_id,
             type=command.media_type,
@@ -97,6 +113,7 @@ class VisualProductionRuntime:
             negative_prompt=command.negative_prompt,
             duration=command.duration,
             aspect_ratio=command.aspect_ratio,
+            asset_criticality=command.asset_criticality,
             start_frame_asset_id=command.start_frame_asset_id,
             end_frame_asset_id=command.end_frame_asset_id,
             reference_asset_ids=command.reference_asset_ids,
@@ -104,7 +121,16 @@ class VisualProductionRuntime:
             cost_estimate=command.estimated_cost,
             metadata={"mode": "PASSENGER_SEAT", "resolution": command.resolution},
         )
-        return self.submit(request, mode="PASSENGER_SEAT", prompt_version="user-authored-v1")
+        return self.submit(
+            request,
+            mode="PASSENGER_SEAT",
+            prompt_version="user-authored-v1",
+            # Public command models are never a billing authority. Only the
+            # server Admission result supplied by the caller may price a job.
+            estimated_credits=estimated_credits,
+            pricing_version=pricing_version,
+            resolution=command.resolution,
+        )
 
     def submit(
         self,
@@ -116,6 +142,10 @@ class VisualProductionRuntime:
         retrieved_memory_ids: list[str] | None = None,
         router_scores: list[dict[str, Any]] | None = None,
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
+        estimated_credits: int | None = None,
+        pricing_version: str = "",
+        resolution: str = "720p",
+        timeline_fence: AuthoritativeTimelineFence | None = None,
     ):  # type: ignore[no-untyped-def]
         trace_id = _new_trace_id()
 
@@ -143,8 +173,62 @@ class VisualProductionRuntime:
             if on_create:
                 on_create(session, job, _replayed)
 
-        job, replayed = self.gateway.create(request, on_create=add_trace)
+        job, replayed = self.gateway.create(
+            request,
+            on_create=add_trace,
+            estimated_credits=estimated_credits,
+            pricing_version=pricing_version,
+            resolution=resolution,
+            timeline_fence=timeline_fence,
+        )
         return job, replayed
+
+    @staticmethod
+    def _timeline_fence(
+        session: Any,
+        shot: Shot,
+        project_id: str,
+    ) -> AuthoritativeTimelineFence:
+        if not shot.input_state_id or not shot.output_state_id:
+            raise TimelineGenerationPlanStale(
+                "shot has no complete authoritative timeline; plan the shot again"
+            )
+        input_state = session.get(TimelineState, shot.input_state_id)
+        output_state = session.get(TimelineState, shot.output_state_id)
+        if input_state is None or output_state is None:
+            raise TimelineGenerationPlanStale("shot authoritative timeline disappeared; plan the shot again")
+        if (
+            input_state.project_id != project_id
+            or input_state.state_kind != "SHOT_INPUT"
+            or input_state.shot_id not in {None, shot.id}
+            or output_state.project_id != project_id
+            or output_state.state_kind != "SHOT_OUTPUT"
+            or output_state.shot_id not in {None, shot.id}
+        ):
+            raise TimelineGenerationPlanStale(
+                "shot authoritative timeline ownership changed; plan the shot again"
+            )
+        return AuthoritativeTimelineFence(
+            shot_id=shot.id,
+            shot_status=shot.status,
+            input_state_id=input_state.id,
+            input_state_hash=authoritative_timeline_state_hash(
+                input_state.state_json,
+                previous_state_id=input_state.previous_state_id,
+            ),
+            output_state_id=output_state.id,
+            output_state_hash=authoritative_timeline_state_hash(
+                output_state.state_json,
+                previous_state_id=output_state.previous_state_id,
+            ),
+        )
+
+    def _current_timeline_fence(self, shot_id: str) -> AuthoritativeTimelineFence:
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                raise TimelineGenerationPlanStale("shot disappeared; plan the shot again")
+            return self._timeline_fence(session, shot, shot.scene.episode.project_id)
 
     def prepare_autopilot(
         self,
@@ -168,6 +252,7 @@ class VisualProductionRuntime:
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             preferred_provider = shot.preferred_provider or shot.provider
+            timeline_fence = self._timeline_fence(session, shot, project_id)
 
         canonical_assets, canonical_media_ids = self._canonical_assets(project_id)
         entity_ids = [str(item["id"]) for item in canonical_assets]
@@ -257,6 +342,10 @@ class VisualProductionRuntime:
                 "router": decision.model_dump(mode="json"),
             },
         )
+        if self._current_timeline_fence(shot_id) != timeline_fence:
+            raise TimelineGenerationPlanStale(
+                "authoritative timeline changed while preparing generation; plan the shot again"
+            )
         return PreparedAutopilotGeneration(
             request=request,
             shot_spec=compiled.spec,
@@ -264,6 +353,7 @@ class VisualProductionRuntime:
             router=decision,
             model_request=model_request,
             prompt_record_id=compiled.record_id,
+            timeline_fence=timeline_fence,
         )
 
     def submit_autopilot(
@@ -271,6 +361,9 @@ class VisualProductionRuntime:
         prepared: PreparedAutopilotGeneration,
         *,
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
+        estimated_credits: int | None = None,
+        pricing_version: str = "",
+        resolution: str = "720p",
     ):  # type: ignore[no-untyped-def]
         candidates = [candidate.model_dump(mode="json") for candidate in prepared.router.candidates]
 
@@ -303,6 +396,10 @@ class VisualProductionRuntime:
             retrieved_memory_ids=[item.id for item in prepared.context.episodic_memories],
             router_scores=candidates,
             on_create=add_autopilot_records,
+            estimated_credits=estimated_credits,
+            pricing_version=pricing_version,
+            resolution=resolution,
+            timeline_fence=prepared.timeline_fence,
         )
         return job, replayed
 
@@ -508,12 +605,21 @@ class VisualProductionRuntime:
             }
         )
         try:
+            estimated_credits: int | None = None
+            pricing_version = ""
+            if self.generation_admission is not None:
+                admitted_retry = self.generation_admission.admit_autopilot(retry_request)
+                retry_request = admitted_retry.request
+                estimated_credits = admitted_retry.estimate.credits
+                pricing_version = self.generation_admission.pricing.version
             job, replayed = self.submit(
                 retry_request,
                 mode="AUTOPILOT_RETRY",
                 prompt_version="retry-patch-v1",
                 context_asset_ids=reference_asset_ids,
                 router_scores=(metadata.get("router") or {}).get("candidates", []),
+                estimated_credits=estimated_credits,
+                pricing_version=pricing_version,
             )
             if replayed and candidate_id and job.candidate_id != candidate_id:
                 with self.database.session() as session:

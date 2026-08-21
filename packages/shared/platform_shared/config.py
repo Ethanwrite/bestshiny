@@ -68,12 +68,10 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model_id: str = ""
     skills_root: Path = Path("./skills")
-    model_config_root: Path = Path("./config/video-models")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     feature_voyage_memory: bool = False
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False
-    feature_wan3: bool = False
     feature_auto_retry: bool = False
     voyage_api_key: str = ""
     voyage_multimodal_model: str = "voyage-multimodal-3.5"

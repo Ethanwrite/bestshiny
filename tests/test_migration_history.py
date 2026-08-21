@@ -75,7 +75,7 @@ def _seed_legacy_capacity(
                 "pending_jobs": inflight,
                 "worker_id": "legacy-worker",
                 "supported_models": ["veo"],
-                "metadata_json": {},
+                "metadata_json": {"project_id": "legacy-flow-project"},
                 "success_count": 0,
                 "error_count": 0,
                 "created_at": now,
@@ -456,6 +456,327 @@ def test_workspace_credit_lifecycle_migrates_populated_wallet_and_round_trips(
     assert remigrated_foreign_key_violations == []
 
 
+def test_flow_project_affinity_migrates_populated_identity_and_round_trips(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "populated-flow-project-affinity.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0024_workspace_credit_lifecycle")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(
+        engine,
+        only=["projects", "provider_accounts", "provider_projects", "generation_jobs"],
+    )
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "flow-affinity-project",
+                "name": "Flow affinity",
+                "title": "Flow affinity",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "google_flow",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["provider_accounts"].insert(),
+            {
+                "id": "flow-affinity-account",
+                "provider": "google_flow",
+                "account_identifier": "flow-affinity@example.com",
+                "tier": "PRO",
+                "credits": 100,
+                "status": "READY",
+                "image_capacity": 1,
+                "video_capacity": 1,
+                "image_inflight": 0,
+                "video_inflight": 1,
+                "pending_jobs": 1,
+                "supported_models": ["veo"],
+                "metadata_json": {},
+                "success_count": 0,
+                "error_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["provider_projects"].insert(),
+            {
+                "id": "flow-affinity-binding",
+                "local_project_id": "flow-affinity-project",
+                "provider": "google_flow",
+                "provider_account_id": "flow-affinity-account",
+                "provider_project_id": "flow-affinity-remote-project",
+                "status": "READY",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["generation_jobs"].insert(),
+            {
+                "id": "flow-affinity-job",
+                "project_id": "flow-affinity-project",
+                "generation_type": "video",
+                "provider": "google_flow",
+                "model": "veo",
+                "status": "SUBMITTED",
+                "priority": 0,
+                "request_json": {"prompt": "one action"},
+                "provider_request_json": {},
+                "request_hash": "a" * 64,
+                "provider_job_id": "flow-affinity-remote-job",
+                "account_id": "flow-affinity-account",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "submission_state": "CONFIRMED",
+                "safe_to_retry": False,
+                "cost_estimate": 0.1,
+                "actual_cost": 0.0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "0025_flow_project_affinity")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        binding = connection.execute(
+            sa.text(
+                "SELECT status, provider_project_id, version, ready_at "
+                "FROM provider_projects WHERE id = 'flow-affinity-binding'"
+            )
+        ).one()
+        job = connection.execute(
+            sa.text(
+                "SELECT account_id, provider_project_id, provider_job_id "
+                "FROM generation_jobs WHERE id = 'flow-affinity-job'"
+            )
+        ).one()
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    affinity_indexes = {str(index["name"]) for index in inspector.get_indexes("provider_projects")}
+    assert binding[:3] == ("READY", "flow-affinity-remote-project", 1)
+    assert binding.ready_at is not None
+    assert job == (
+        "flow-affinity-account",
+        "flow-affinity-remote-project",
+        "flow-affinity-remote-job",
+    )
+    assert revision == "0025_flow_project_affinity"
+    assert "flow_migration_plans" in inspector.get_table_names()
+    assert {
+        "uq_flow_active_local_project",
+        "uq_flow_remote_project_owner",
+        "uq_non_flow_provider_project_account",
+    }.issubset(affinity_indexes)
+    assert foreign_key_violations == []
+    engine.dispose()
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["projects", "provider_projects"])
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "flow-affinity-other-project",
+                "name": "Other Flow affinity",
+                "title": "Other Flow affinity",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "google_flow",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    with pytest.raises(sa.exc.IntegrityError):
+        with engine.begin() as connection:
+            connection.execute(
+                metadata.tables["provider_projects"].insert(),
+                {
+                    "id": "flow-affinity-stolen-historical-binding",
+                    "local_project_id": "flow-affinity-other-project",
+                    "provider": "google_flow",
+                    "provider_account_id": "flow-affinity-account",
+                    "provider_project_id": "flow-affinity-remote-project",
+                    "status": "DISABLED",
+                    "version": 1,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+    engine.dispose()
+
+    command.downgrade(config, "0024_workspace_credit_lifecycle")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    binding_columns = {str(column["name"]) for column in inspector.get_columns("provider_projects")}
+    job_columns = {str(column["name"]) for column in inspector.get_columns("generation_jobs")}
+    legacy_unique_constraints = {
+        str(constraint["name"]) for constraint in inspector.get_unique_constraints("provider_projects")
+    }
+    with engine.connect() as connection:
+        downgraded_binding = connection.execute(
+            sa.text(
+                "SELECT status, provider_project_id FROM provider_projects WHERE id = 'flow-affinity-binding'"
+            )
+        ).one()
+        downgraded_job = connection.execute(
+            sa.text("SELECT account_id, provider_job_id FROM generation_jobs WHERE id = 'flow-affinity-job'")
+        ).one()
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    assert "flow_migration_plans" not in inspector.get_table_names()
+    assert "version" not in binding_columns
+    assert "provisioning_token" not in binding_columns
+    assert "provider_project_id" not in job_columns
+    assert "uq_provider_project" in legacy_unique_constraints
+    assert downgraded_binding == ("READY", "flow-affinity-remote-project")
+    assert downgraded_job == ("flow-affinity-account", "flow-affinity-remote-job")
+    assert revision == "0024_workspace_credit_lifecycle"
+    assert foreign_key_violations == []
+    engine.dispose()
+
+    command.upgrade(config, "0025_flow_project_affinity")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        remigrated_job = connection.execute(
+            sa.text("SELECT provider_project_id FROM generation_jobs WHERE id = 'flow-affinity-job'")
+        ).one()
+        remigrated_foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    engine.dispose()
+    assert remigrated_job == ("flow-affinity-remote-project",)
+    assert remigrated_foreign_key_violations == []
+
+
+def test_flow_affinity_upgrade_rejects_historical_remote_owner_duplicates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "duplicate-historical-flow-owner.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0024_workspace_credit_lifecycle")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["projects", "provider_accounts", "provider_projects"])
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            [
+                {
+                    "id": "historical-flow-owner-a",
+                    "name": "Historical owner A",
+                    "title": "Historical owner A",
+                    "description": "",
+                    "status": "ACTIVE",
+                    "default_aspect_ratio": "9:16",
+                    "default_provider": "google_flow",
+                    "default_language": "zh-CN",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": "historical-flow-owner-b",
+                    "name": "Historical owner B",
+                    "title": "Historical owner B",
+                    "description": "",
+                    "status": "ACTIVE",
+                    "default_aspect_ratio": "9:16",
+                    "default_provider": "google_flow",
+                    "default_language": "zh-CN",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        connection.execute(
+            metadata.tables["provider_accounts"].insert(),
+            {
+                "id": "historical-flow-owner-account",
+                "provider": "google_flow",
+                "account_identifier": "historical-flow-owner@example.com",
+                "tier": "PRO",
+                "credits": 100,
+                "status": "READY",
+                "image_capacity": 1,
+                "video_capacity": 1,
+                "image_inflight": 0,
+                "video_inflight": 0,
+                "pending_jobs": 0,
+                "supported_models": ["veo"],
+                "metadata_json": {},
+                "success_count": 0,
+                "error_count": 0,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["provider_projects"].insert(),
+            [
+                {
+                    "id": "historical-flow-binding-a",
+                    "local_project_id": "historical-flow-owner-a",
+                    "provider": "google_flow",
+                    "provider_account_id": "historical-flow-owner-account",
+                    "provider_project_id": "historical-shared-remote-project",
+                    "status": "DISABLED",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": "historical-flow-binding-b",
+                    "local_project_id": "historical-flow-owner-b",
+                    "provider": "google_flow",
+                    "provider_account_id": "historical-flow-owner-account",
+                    "provider_project_id": "historical-shared-remote-project",
+                    "status": "FAILED",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="one permanent ownership row"):
+        command.upgrade(config, "0025_flow_project_affinity")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        binding_count = connection.scalar(sa.text("SELECT COUNT(*) FROM provider_projects"))
+    engine.dispose()
+    assert revision == "0024_workspace_credit_lifecycle"
+    assert "version" not in {column["name"] for column in inspector.get_columns("provider_projects")}
+    assert binding_count == 2
+
+
 def test_workspace_credit_lifecycle_rejects_active_free_job_without_reservation(
     tmp_path,
     monkeypatch,
@@ -653,3 +974,286 @@ def test_reservation_ownership_migration_does_not_release_legacy_retry_twice(
     assert ownership[0] == ("active-submitted-job", None)
     assert ownership[1][0] == "already-released-retry"
     assert ownership[1][1] is not None
+
+
+def test_production_evidence_unknown_actual_cost_has_no_database_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "production-evidence-actual-cost-default.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    for table_name in ("generation_jobs", "cost_records", "production_traces"):
+        actual_cost = next(
+            column for column in inspector.get_columns(table_name) if column["name"] == "actual_cost"
+        )
+        assert actual_cost["nullable"] is True
+        assert actual_cost["default"] is None
+    engine.dispose()
+
+
+def test_production_evidence_downgrade_rejects_populated_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "production-evidence-downgrade-guard.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["live_canary_permits"])
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["live_canary_permits"].insert(),
+            {
+                "id": "migration-canary-permit",
+                "provider": "offline-test",
+                "model": "offline-test-model",
+                "max_requests": 1,
+                "max_cost_usd": 0.01,
+                "used_requests": 0,
+                "reserved_cost_usd": 0,
+                "actual_cost_usd": 0,
+                "expires_at": now,
+                "purpose": "migration downgrade data-loss guard",
+                "status": "ACTIVE",
+                "version": 1,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="would discard Phase III records"):
+        command.downgrade(config, "0026_model_capability_registry")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        permit_count = connection.scalar(sa.text("SELECT COUNT(*) FROM live_canary_permits"))
+    engine.dispose()
+    assert revision == "0027_production_evidence_core"
+    assert permit_count == 1
+
+
+def test_production_evidence_populated_legacy_costs_round_trip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "production-evidence-populated-round-trip.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0024_workspace_credit_lifecycle")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(
+        engine,
+        only=["projects", "generation_jobs", "cost_records", "production_traces"],
+    )
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "production-evidence-round-trip-project",
+                "name": "Production evidence round trip",
+                "title": "Production evidence round trip",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "seedance",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["generation_jobs"].insert(),
+            {
+                "id": "production-evidence-round-trip-job",
+                "project_id": "production-evidence-round-trip-project",
+                "generation_type": "video",
+                "provider": "seedance",
+                "model": "seedance-test",
+                "status": "COMPLETED",
+                "priority": 0,
+                "request_json": {"prompt": "round trip"},
+                "provider_request_json": {},
+                "request_hash": "p" * 64,
+                "policy": "TEXT_TO_VIDEO",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "submission_state": "CONFIRMED",
+                "safe_to_retry": False,
+                "cost_estimate": 0.25,
+                "actual_cost": 0.20,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["cost_records"].insert(),
+            {
+                "id": "production-evidence-round-trip-cost",
+                "project_id": "production-evidence-round-trip-project",
+                "generation_job_id": "production-evidence-round-trip-job",
+                "provider": "seedance",
+                "model": "seedance-test",
+                "duration": 5,
+                "resolution": "1080p",
+                "credits": 20,
+                "estimated_cost": 0.25,
+                "actual_cost": 0.20,
+                "retry_cost": 0,
+                "accepted": False,
+                "wasted": False,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["production_traces"].insert(),
+            {
+                "id": "production-evidence-round-trip-trace",
+                "trace_id": "production-evidence-round-trip-trace-id",
+                "mode": "PRODUCTION",
+                "project_id": "production-evidence-round-trip-project",
+                "generation_job_id": "production-evidence-round-trip-job",
+                "provider": "seedance",
+                "model_id": "seedance-test",
+                "prompt_version": "v1",
+                "context_asset_ids": [],
+                "retrieved_memory_ids": [],
+                "router_scores_json": {},
+                "generation_latency": 1.0,
+                "estimated_cost": 0.25,
+                "actual_cost": 0.20,
+                "evaluation_json": {},
+                "retry_json": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        upgraded_costs = connection.execute(
+            sa.text(
+                "SELECT j.actual_cost, c.actual_cost, t.actual_cost "
+                "FROM generation_jobs j "
+                "JOIN cost_records c ON c.generation_job_id = j.id "
+                "JOIN production_traces t ON t.generation_job_id = j.id "
+                "WHERE j.id = 'production-evidence-round-trip-job'"
+            )
+        ).one()
+    engine.dispose()
+    assert upgraded_costs == (0.20, 0.20, 0.20)
+
+    command.downgrade(config, "0024_workspace_credit_lifecycle")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        downgraded_costs = connection.execute(
+            sa.text(
+                "SELECT j.actual_cost, c.actual_cost, t.actual_cost "
+                "FROM generation_jobs j "
+                "JOIN cost_records c ON c.generation_job_id = j.id "
+                "JOIN production_traces t ON t.generation_job_id = j.id "
+                "WHERE j.id = 'production-evidence-round-trip-job'"
+            )
+        ).one()
+        foreign_key_violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    engine.dispose()
+    assert revision == "0024_workspace_credit_lifecycle"
+    assert downgraded_costs == (0.20, 0.20, 0.20)
+    assert foreign_key_violations == []
+
+    command.upgrade(config, "head")
+
+
+def test_model_capability_downgrade_only_drops_deterministic_backfill(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "model-capability-lossless-downgrade.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0025_flow_project_affinity")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["model_definitions"])
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["model_definitions"].insert(),
+            {
+                "id": "capability-downgrade-model",
+                "logical_name": "kling-3-standard-openrouter",
+                "provider": "openrouter",
+                "provider_model_id": "kling-test",
+                "modality": "video",
+                "capabilities": ["video_generation"],
+                "quality_tier": "standard",
+                "cost_class": "medium",
+                "provider_trust_level": "official",
+                "criticality_allowed": ["low", "medium"],
+                "enabled": True,
+                "live_enabled": False,
+                "max_duration": 10,
+                "supported_aspect_ratios": ["9:16"],
+                "metadata_json": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "0026_model_capability_registry")
+    command.downgrade(config, "0025_flow_project_affinity")
+    command.upgrade(config, "0026_model_capability_registry")
+
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "UPDATE model_capability_profiles SET physics_prior = 0.123 "
+                "WHERE model_definition_id = 'capability-downgrade-model'"
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="operator-edited profile"):
+        command.downgrade(config, "0025_flow_project_affinity")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        physics_prior = connection.scalar(
+            sa.text(
+                "SELECT physics_prior FROM model_capability_profiles "
+                "WHERE model_definition_id = 'capability-downgrade-model'"
+            )
+        )
+    engine.dispose()
+    assert revision == "0026_model_capability_registry"
+    assert physics_prior == pytest.approx(0.123)

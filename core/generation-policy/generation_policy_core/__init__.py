@@ -5,8 +5,6 @@ from .engine import (
     GenerationPolicyDecision,
     GenerationPolicyEngine,
     GenerationPolicyInputError,
-    ProviderCapabilities,
-    ProviderCapabilityRegistry,
 )
 
 __all__ = [
@@ -16,6 +14,4 @@ __all__ = [
     "GenerationPolicyDecision",
     "GenerationPolicyEngine",
     "GenerationPolicyInputError",
-    "ProviderCapabilities",
-    "ProviderCapabilityRegistry",
 ]

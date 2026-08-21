@@ -62,7 +62,6 @@ services:
       DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-production}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Generate and export a Fernet key before starting Compose}
       PLATFORM_API_KEY: ${PLATFORM_API_KEY:?Generate and export a separate internal service key before starting Compose}
-      SESSION_COOKIE_SECURE: "false"
     volumes:
       - media_data:/data/media
     ports:

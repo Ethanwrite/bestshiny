@@ -13,6 +13,7 @@ from provider_sdk import (
     ProviderError,
     ProviderHealth,
     ProviderJob,
+    ProviderPollIdentity,
     ProviderSubmission,
     ProviderTrustLevel,
 )
@@ -319,8 +320,9 @@ class RunAPIEdgeProvider(GenerationProvider, ChatCapability):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> ProviderJob:
-        del account_id, worker_id
+        del account_id, worker_id, poll_identity
         base = self.image_path if generation_type == "image" else self.video_path
         data = await self.client.request("GET", f"{base.rstrip('/')}/{quote(provider_job_id, safe='')}")
         return _provider_job(provider_job_id, data, generation_type)

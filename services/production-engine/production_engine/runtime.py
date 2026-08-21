@@ -302,7 +302,6 @@ class VisualProductionRuntime:
             for profile in self.router.registry.all()
             if not self.gateway.providers.is_configured(profile.provider)
             or (allowed_providers and profile.provider not in allowed_providers)
-            or (profile.adapter == "wan" and not self.flags.enabled("wan3", project_id=project_id))
         }
         decision = self.router.rank(requirements, excluded_models=excluded)
         selected = decision.candidates[0]
@@ -689,12 +688,15 @@ class VisualProductionRuntime:
         return ShotRequirements(
             duration=spec.duration,
             resolution=spec.resolution,
+            aspect_ratio=spec.aspect_ratio,
+            reference_image_count=len(context.reference_images),
             characters=len(spec.subjects),
             profile=spec.profile,
             requires_image_to_video=bool(context.reference_images),
             requires_start_frame=bool(context.previous_final_frame_asset_id),
             requires_end_frame=bool(end_frame_asset_id),
             requires_reference_images=bool(context.reference_images),
+            requires_multi_reference=len(context.reference_images) > 1,
             requires_native_audio=bool(spec.audio),
             requires_dialogue=bool(spec.dialogue),
             requires_chinese_dialogue=bool(spec.dialogue and spec.language.startswith("zh")),

@@ -62,6 +62,10 @@ def test_web_director_api_script_to_candidate_flow(container):
         candidates = client.get(f"/v1/shots/{shot_id}/candidates").json()
         assert len(candidates) == 1
         assert candidates[0]["generation_plan"]["provider"] == "google_flow"
+        assert candidates[0]["cost"] > 0
+        assert candidates[0]["cost_source"] == "ESTIMATED"
+        assert candidates[0]["known_actual_cost"] == 0
+        assert candidates[0]["estimated_fallback_cost"] == candidates[0]["cost"]
 
 
 def test_concurrent_generate_requests_replay_one_candidate_and_job(container):

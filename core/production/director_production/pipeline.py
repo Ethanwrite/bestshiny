@@ -21,9 +21,11 @@ from production_domain.models import (
     Asset,
     AssetKind,
     AssetVersion,
+    BillingEvidenceSource,
     CandidateStatus,
     ContinuityMode,
     CostRecord,
+    DecisionOutcomeRecord,
     DecisionRecord,
     GenerationCandidate,
     GenerationEvent,
@@ -31,6 +33,7 @@ from production_domain.models import (
     GenerationPolicy,
     MediaAsset,
     ModelMetric,
+    ProviderBillingEvidence,
     QADecision,
     QAResult,
     Shot,
@@ -540,7 +543,26 @@ class CandidatePipeline:
                             }
                             qa_result.summary = f"HARD_FAIL: visual evaluation {visual_result.decision.value}"
         with self.database.session() as session:
-            return session.get(GenerationCandidate, candidate_id)
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("candidate disappeared after validation")
+            shot = session.get(Shot, candidate.shot_id)
+            qa_result = session.get(QAResult, candidate.qa_result_id) if candidate.qa_result_id else None
+            if shot is not None and qa_result is not None:
+                outcome = {
+                    CandidateStatus.PASSED.value: "QA_PASS_PENDING_COMMIT",
+                    CandidateStatus.HARD_FAILED.value: "QA_REJECTED",
+                }.get(candidate.status, candidate.status)
+                self._upsert_decision_outcome(
+                    session,
+                    candidate=candidate,
+                    shot=shot,
+                    qa=qa_result,
+                    user_outcome=outcome,
+                    accepted=False,
+                )
+            session.flush()
+            return candidate
 
     def commit(self, candidate_id: str, *, accepted_by: str | None = None) -> GenerationCandidate:
         with self.database.session() as session:
@@ -705,6 +727,26 @@ class CandidatePipeline:
                 elif record.candidate_id in candidate_ids:
                     record.accepted = False
                     record.wasted = True
+            self._upsert_decision_outcome(
+                session,
+                candidate=candidate,
+                shot=shot,
+                qa=qa,
+                user_outcome="COMMITTED",
+                accepted=True,
+            )
+            for other in other_candidates:
+                if other.status != CandidateStatus.REJECTED.value:
+                    continue
+                other_qa = session.get(QAResult, other.qa_result_id) if other.qa_result_id else None
+                self._upsert_decision_outcome(
+                    session,
+                    candidate=other,
+                    shot=shot,
+                    qa=other_qa,
+                    user_outcome="REJECTED_BY_ALTERNATE_COMMIT",
+                    accepted=False,
+                )
             session.add(
                 DecisionRecord(
                     project_id=shot.scene.episode.project_id,
@@ -718,3 +760,113 @@ class CandidatePipeline:
             )
             session.flush()
             return session.get(GenerationCandidate, candidate_id)
+
+    def _upsert_decision_outcome(
+        self,
+        session,  # type: ignore[no-untyped-def]
+        *,
+        candidate: GenerationCandidate,
+        shot: Shot,
+        qa: QAResult | None,
+        user_outcome: str,
+        accepted: bool,
+    ) -> DecisionOutcomeRecord:
+        job = session.get(GenerationJob, candidate.generation_job_id) if candidate.generation_job_id else None
+        cost = session.scalar(
+            select(CostRecord)
+            .where(CostRecord.candidate_id == candidate.id)
+            .order_by(CostRecord.created_at.desc())
+        )
+        trusted_billing = None
+        if job is not None:
+            trusted_billing = session.scalar(
+                select(ProviderBillingEvidence)
+                .where(
+                    ProviderBillingEvidence.generation_job_id == job.id,
+                    ProviderBillingEvidence.source.in_(
+                        [
+                            BillingEvidenceSource.VERIFIED_PROVIDER.value,
+                            BillingEvidenceSource.RECONCILED_MANUAL.value,
+                        ]
+                    ),
+                    ProviderBillingEvidence.actual_cost_usd.is_not(None),
+                )
+                .order_by(ProviderBillingEvidence.verified_at.desc())
+            )
+        if trusted_billing is not None:
+            billing_source = trusted_billing.source
+            actual_cost = trusted_billing.actual_cost_usd
+        else:
+            billing_source = (
+                BillingEvidenceSource.ESTIMATED.value
+                if cost is not None and cost.estimated_cost > 0
+                else BillingEvidenceSource.UNKNOWN.value
+            )
+            actual_cost = None
+        estimated_cost = (
+            trusted_billing.estimated_cost_usd
+            if trusted_billing is not None and trusted_billing.estimated_cost_usd is not None
+            else (cost.estimated_cost if cost is not None else None)
+        )
+        qa_json = (
+            {
+                "id": qa.id,
+                "profile": qa.profile,
+                "decision": qa.decision,
+                "overall_score": qa.overall_score,
+                "character_score": qa.character_score,
+                "scene_score": qa.scene_score,
+                "composition_score": qa.composition_score,
+                "action_score": qa.action_score,
+                "camera_score": qa.camera_score,
+                "lighting_score": qa.lighting_score,
+                "narrative_score": qa.narrative_score,
+                "hard_failures": qa.hard_failures,
+                "metrics": qa.metrics_json,
+            }
+            if qa is not None
+            else {}
+        )
+        values = {
+            "project_id": shot.scene.episode.project_id,
+            "shot_id": shot.id,
+            "generation_job_id": job.id if job is not None else None,
+            "qa_result_id": qa.id if qa is not None else None,
+            "continuity_decision": shot.continuity_mode,
+            "generation_policy": shot.generation_policy,
+            "provider": (
+                job.provider
+                if job is not None
+                else (cost.provider if cost is not None else shot.preferred_provider)
+            ),
+            "model": (
+                job.model if job is not None else (cost.model if cost is not None else shot.preferred_model)
+            ),
+            "shot_features_json": {
+                "sequence": shot.sequence,
+                "shot_type": shot.shot_type,
+                "duration": shot.duration,
+                "status": shot.status,
+                "continuity_policy": shot.continuity_policy,
+                "prompt_hash": hashlib.sha256(
+                    (shot.compiled_prompt or shot.prompt).encode("utf-8")
+                ).hexdigest(),
+                "generation_plan": candidate.metadata_json.get("generation_plan", {}),
+            },
+            "qa_result_json": qa_json,
+            "user_outcome": user_outcome,
+            "accepted": accepted,
+            "estimated_cost_usd": estimated_cost,
+            "actual_cost_usd": actual_cost,
+            "billing_source": billing_source,
+        }
+        outcome = session.scalar(
+            select(DecisionOutcomeRecord).where(DecisionOutcomeRecord.candidate_id == candidate.id)
+        )
+        if outcome is None:
+            outcome = DecisionOutcomeRecord(candidate_id=candidate.id, **values)
+            session.add(outcome)
+        else:
+            for field, value in values.items():
+                setattr(outcome, field, value)
+        return outcome

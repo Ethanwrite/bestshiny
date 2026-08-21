@@ -4,6 +4,10 @@ import io
 import os
 
 os.environ.setdefault("DEPLOYMENT_ENVIRONMENT", "test")
+# Importing the API module constructs its default app. Keep that collection-time
+# instance off every developer/user database; individual fixtures supply their
+# own isolated database URLs below.
+os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import pytest
 from platform_shared import Settings

@@ -1,28 +1,31 @@
-from pathlib import Path
-
 import pytest
 from model_registry_core import (
-    ModelCapabilityProfile,
-    ModelCapabilityRegistry,
     ShotRequirements,
-    VideoModelRouter,
+)
+from production_domain.models import (
+    ModelCapabilityProfile as ModelCapabilityProfileRow,
+)
+from production_domain.models import (
+    ModelDefinition,
 )
 from provider_sdk import AssetCriticality, ProviderTrustLevel
 
-CONFIG_ROOT = Path(__file__).parents[1] / "config" / "video-models"
 
-
-def test_registry_loads_valid_versioned_profiles():
-    registry = ModelCapabilityRegistry(CONFIG_ROOT)
+def test_registry_loads_persisted_manual_profiles(container):
+    registry = container.model_registry
     grok = registry.get("grok-video", "grok")
     assert grok is not None
     assert grok.failure_priors["end_frame_direct_gaze"] == 0.8
     assert grok.adapter == "grok"
-    assert registry.get("wan-3.0", "wan").confidence_level == "experimental"
+    wan = registry.get("wan-2.7", "wan")
+    assert wan is not None
+    assert wan.source == "MANUAL_PRIOR"
+    assert wan.supports_t2v is True
+    assert wan.supports_i2v is False
 
 
-def test_router_penalizes_grok_for_rear_view_ending():
-    router = VideoModelRouter(ModelCapabilityRegistry(CONFIG_ROOT))
+def test_router_penalizes_grok_for_rear_view_ending(container):
+    router = container.video_router
     neutral = router.rank(
         ShotRequirements(
             profile="dialogue",
@@ -49,8 +52,8 @@ def test_router_penalizes_grok_for_rear_view_ending():
     assert any("direct-gaze" in item for item in rear_grok.penalties)
 
 
-def test_router_uses_dynamic_commercial_and_action_weights():
-    router = VideoModelRouter(ModelCapabilityRegistry(CONFIG_ROOT))
+def test_router_uses_dynamic_commercial_and_action_weights(container):
+    router = container.video_router
     commercial = router.rank(
         ShotRequirements(profile="commercial_hero", product_fidelity_priority=1, cost_priority=0)
     )
@@ -63,35 +66,52 @@ def test_router_uses_dynamic_commercial_and_action_weights():
         )
     )
     assert commercial.candidates[0].model in {"veo-3.1-quality", "flow-veo-3.1"}
-    assert action.candidates[0].model == "kling-3.0"
+    assert action.candidates[0].model in {
+        "kwaivgi/kling-v3.0-std",
+        "kwaivgi/kling-v3.0-pro",
+    }
 
 
-def test_router_rejects_models_without_required_duration_or_features():
-    decision = VideoModelRouter(ModelCapabilityRegistry(CONFIG_ROOT)).rank(
-        ShotRequirements(duration=20, requires_end_frame=True, resolution="1080p")
-    )
-    assert [candidate.model for candidate in decision.candidates] == ["wan-3.0"]
+def test_router_rejects_models_without_required_duration_or_features(container):
+    with pytest.raises(LookupError, match="no active model"):
+        container.video_router.rank(
+            ShotRequirements(duration=20, requires_end_frame=True, resolution="1080p")
+        )
 
 
 @pytest.mark.parametrize("criticality", [AssetCriticality.CANONICAL, AssetCriticality.HERO])
-def test_router_never_routes_canonical_or_hero_assets_to_edge_provider(criticality):  # type: ignore[no-untyped-def]
-    registry = ModelCapabilityRegistry(CONFIG_ROOT)
-    registry.replace(
-        ModelCapabilityProfile(
-            model_id="edge-video",
+def test_router_never_routes_canonical_or_hero_assets_to_edge_provider(
+    container,
+    criticality,
+):  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        definition = ModelDefinition(
+            logical_name="edge-video-test",
             provider="runapi",
-            version="test",
-            max_duration=60,
-            supported_resolutions=["720p", "1080p"],
-            capability_prior={"visual_quality": 1.0, "product_fidelity": 1.0},
-            cost={"normalized": 0.0},
-            latency={"normalized": 0.0},
-            adapter="wan",
-            provider_trust_level=ProviderTrustLevel.EDGE,
-            criticality_allowed=[AssetCriticality.EDGE, AssetCriticality.TEMPORARY],
+            provider_model_id="edge-video",
+            modality="video",
+            capabilities=["video_generation"],
+            provider_trust_level=ProviderTrustLevel.EDGE.value,
+            criticality_allowed=[AssetCriticality.EDGE.value, AssetCriticality.TEMPORARY.value],
         )
-    )
-    decision = VideoModelRouter(registry).rank(
+        session.add(definition)
+        session.flush()
+        session.add(
+            ModelCapabilityProfileRow(
+                model_definition_id=definition.id,
+                supported_operations=["video_generation"],
+                supports_t2v=True,
+                max_duration=60,
+                supported_resolutions=["720p", "1080p"],
+                render_prior=1.0,
+                provider_metadata={
+                    "adapter": "wan",
+                    "cost": {"normalized": 0.0},
+                    "latency": {"normalized": 0.0},
+                },
+            )
+        )
+    decision = container.video_router.rank(
         ShotRequirements(
             profile="commercial_hero",
             asset_criticality=criticality,

@@ -6,7 +6,7 @@ import pytest
 from google_flow_provider import GoogleFlowProvider
 from platform_shared import Settings
 from production_domain.models import GenerationJob, JobStatus, ProviderAccount
-from provider_sdk import LIVE_PROVIDER_CONFIRMATION, ProviderError
+from provider_sdk import LIVE_PROVIDER_CONFIRMATION, ProviderError, ProviderPollIdentity
 
 
 def flow_settings(**values):  # type: ignore[no-untyped-def]
@@ -59,6 +59,7 @@ async def test_flow_adapter_maps_video_without_leaking_upstream_domain(tmp_path)
             "duration": 8,
             "aspect_ratio": "9:16",
             "model": "veo",
+            "_provider_project_id": "flow-project",
             "start_frame_provider_media_id": "start-media",
         },
         account_id="account",
@@ -72,35 +73,74 @@ async def test_flow_adapter_maps_video_without_leaking_upstream_domain(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_flow_upload_and_poll(tmp_path):
+async def test_flow_upload_and_poll(container, project, tmp_path):
     runtime = FakeRuntime()
-    provider = GoogleFlowProvider(runtime, flow_settings())
+    with container.database.session() as session:
+        account = ProviderAccount(
+            provider="google_flow",
+            account_identifier="upload-poll@example.com",
+            credits=10,
+        )
+        session.add(account)
+        session.flush()
+        job = GenerationJob(
+            project_id=project.id,
+            generation_type="video",
+            provider="google_flow",
+            model="veo",
+            status=JobStatus.SUBMITTED.value,
+            request_json={"prompt": "One action"},
+            provider_request_json={"_provider_project_id": "flow-project"},
+            request_hash="a" * 64,
+            provider_job_id="flow-job-1",
+            provider_project_id="flow-project",
+            submission_state="CONFIRMED",
+            account_id=account.id,
+        )
+        session.add(job)
+        session.flush()
+        account_id = account.id
+        job_id = job.id
+    provider = GoogleFlowProvider(runtime, flow_settings(), container.database)
     image = tmp_path / "reference.png"
     image.write_bytes(b"image-bytes")
     media_id = await provider.upload_asset(
-        {"local_path": str(image), "mime_type": "image/png"},
-        account_id="account",
+        {
+            "local_path": str(image),
+            "mime_type": "image/png",
+            "_provider_project_id": "flow-project",
+        },
+        account_id=account_id,
         worker_id="worker",
     )
     assert media_id == "uploaded-media"
     upload_body = runtime.calls[0][2]["body"]
     assert base64.b64decode(upload_body["imageBytes"]) == b"image-bytes"
     result = await provider.get_job(
-        "flow-job-1", account_id="account", worker_id="worker", generation_type="video"
+        "flow-job-1",
+        account_id=account_id,
+        worker_id="worker",
+        generation_type="video",
+        poll_identity=ProviderPollIdentity(
+            local_generation_job_id=job_id,
+            provider_account_id=account_id,
+            provider_project_id="flow-project",
+            provider_job_id="flow-job-1",
+        ),
     )
     assert result.status == "COMPLETED"
     assert result.output_url == "https://example.test/video.mp4"
 
 
 @pytest.mark.asyncio
-async def test_flow_uses_account_project_id_for_submit_upload_and_poll(container, tmp_path):
+async def test_flow_uses_explicit_affinity_for_submit_upload_and_poll(container, project, tmp_path):
     runtime = FakeRuntime()
     with container.database.session() as session:
         account = ProviderAccount(
             provider="google_flow",
             account_identifier="project-specific@example.com",
             credits=10,
-            metadata_json={"project_id": "account-project"},
+            metadata_json={"project_id": "legacy-account-project-must-not-be-used"},
         )
         session.add(account)
         session.flush()
@@ -117,24 +157,57 @@ async def test_flow_uses_account_project_id_for_submit_upload_and_poll(container
         container.database,
     )
     await provider.generate_video(
-        {"prompt": "One action", "duration": 8, "model": "veo"},
+        {
+            "prompt": "One action",
+            "duration": 8,
+            "model": "veo",
+            "_provider_project_id": "explicit-project",
+        },
         account_id=account_id,
         worker_id="worker",
     )
     submit_body = runtime.calls[-1][2]["body"]
-    assert submit_body["clientContext"]["projectId"] == "account-project"
+    assert submit_body["clientContext"]["projectId"] == "explicit-project"
     image = tmp_path / "reference.png"
     image.write_bytes(b"image-bytes")
-    await provider.upload_asset({"local_path": str(image)}, account_id=account_id, worker_id="worker")
-    assert runtime.calls[-1][2]["body"]["clientContext"]["projectId"] == "account-project"
+    await provider.upload_asset(
+        {"local_path": str(image), "_provider_project_id": "explicit-project"},
+        account_id=account_id,
+        worker_id="worker",
+    )
+    assert runtime.calls[-1][2]["body"]["clientContext"]["projectId"] == "explicit-project"
+    with container.database.session() as session:
+        job = GenerationJob(
+            project_id=project.id,
+            generation_type="video",
+            provider="google_flow",
+            model="veo",
+            status=JobStatus.SUBMITTED.value,
+            request_json={"prompt": "One action"},
+            provider_request_json={"_provider_project_id": "explicit-project"},
+            request_hash="b" * 64,
+            provider_job_id="flow-job-1",
+            provider_project_id="explicit-project",
+            submission_state="CONFIRMED",
+            account_id=account_id,
+        )
+        session.add(job)
+        session.flush()
+        job_id = job.id
     await provider.get_job(
         "flow-job-1",
         account_id=account_id,
         worker_id="worker",
         generation_type="video",
+        poll_identity=ProviderPollIdentity(
+            local_generation_job_id=job_id,
+            provider_account_id=account_id,
+            provider_project_id="explicit-project",
+            provider_job_id="flow-job-1",
+        ),
     )
     poll_body = next(call[2]["body"] for call in runtime.calls if "batchCheck" in call[2]["url"])
-    assert poll_body["media"][0]["projectId"] == "account-project"
+    assert poll_body["media"][0]["projectId"] == "explicit-project"
 
 
 @pytest.mark.asyncio
@@ -159,6 +232,8 @@ async def test_flow_poll_reuses_persisted_submission_project_binding(container, 
             provider_request_json={"_provider_project_id": "persisted-binding-project"},
             request_hash="a" * 64,
             provider_job_id="flow-job-bound-project",
+            provider_project_id="persisted-binding-project",
+            submission_state="CONFIRMED",
             account_id=account.id,
         )
         session.add(job)
@@ -181,6 +256,12 @@ async def test_flow_poll_reuses_persisted_submission_project_binding(container, 
         account_id=account_id,
         worker_id="worker",
         generation_type="video",
+        poll_identity=ProviderPollIdentity(
+            local_generation_job_id=job.id,
+            provider_account_id=account_id,
+            provider_project_id="persisted-binding-project",
+            provider_job_id="flow-job-bound-project",
+        ),
     )
 
     poll_body = next(call[2]["body"] for call in runtime.calls if "batchCheck" in call[2]["url"])
@@ -188,11 +269,46 @@ async def test_flow_poll_reuses_persisted_submission_project_binding(container, 
 
 
 @pytest.mark.asyncio
-async def test_flow_image_poll_returns_image_media_url():
+async def test_flow_image_poll_returns_image_media_url(container, project):
     runtime = FakeRuntime()
-    provider = GoogleFlowProvider(runtime, flow_settings())
+    with container.database.session() as session:
+        account = ProviderAccount(
+            provider="google_flow",
+            account_identifier="image-poll@example.com",
+            credits=10,
+        )
+        session.add(account)
+        session.flush()
+        job = GenerationJob(
+            project_id=project.id,
+            generation_type="image",
+            provider="google_flow",
+            model="NARWHAL",
+            status=JobStatus.SUBMITTED.value,
+            request_json={"prompt": "One image"},
+            provider_request_json={"_provider_project_id": "image-project"},
+            request_hash="c" * 64,
+            provider_job_id="flow-image-1",
+            provider_project_id="image-project",
+            submission_state="CONFIRMED",
+            account_id=account.id,
+        )
+        session.add(job)
+        session.flush()
+        account_id = account.id
+        job_id = job.id
+    provider = GoogleFlowProvider(runtime, flow_settings(), container.database)
     result = await provider.get_job(
-        "flow-image-1", account_id="account", worker_id="worker", generation_type="image"
+        "flow-image-1",
+        account_id=account_id,
+        worker_id="worker",
+        generation_type="image",
+        poll_identity=ProviderPollIdentity(
+            local_generation_job_id=job_id,
+            provider_account_id=account_id,
+            provider_project_id="image-project",
+            provider_job_id="flow-image-1",
+        ),
     )
     assert result.status == "COMPLETED"
     assert result.output_mime_type == "image/png"
@@ -207,7 +323,12 @@ async def test_flow_explicit_bad_request_is_safe_to_retry():
     provider = GoogleFlowProvider(BadRequestRuntime(), flow_settings())
     with pytest.raises(ProviderError) as error:
         await provider.generate_video(
-            {"prompt": "One action", "duration": 8, "model": "veo"},
+            {
+                "prompt": "One action",
+                "duration": 8,
+                "model": "veo",
+                "_provider_project_id": "flow-project",
+            },
             account_id="account",
             worker_id="worker",
         )
@@ -231,7 +352,12 @@ async def test_flow_browser_dispatch_never_runs_outside_live_gate(mode):
     )
     with pytest.raises(ProviderError) as exc:
         await provider.generate_video(
-            {"prompt": "One action", "duration": 8, "model": "veo"},
+            {
+                "prompt": "One action",
+                "duration": 8,
+                "model": "veo",
+                "_provider_project_id": "flow-project",
+            },
             account_id="account",
             worker_id="worker",
         )

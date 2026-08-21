@@ -113,7 +113,41 @@
       "live_enabled": false,
       "max_duration": 15,
       "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "openrouter"}
+      "metadata_json": {"transport": "openrouter"},
+      "capability_profile": {
+        "profile_version": "kling-3.0-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_start_end": true,
+        "supports_character_reference": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "supports_text_rendering": true,
+        "max_reference_images": 4,
+        "min_duration": 1,
+        "max_duration": 15,
+        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.90,
+        "identity_prior": 0.88,
+        "camera_prior": 0.88,
+        "render_prior": 0.82,
+        "action_prior": 0.92,
+        "dialogue_prior": 0.78,
+        "text_render_prior": 0.82,
+        "provider_metadata": {
+          "adapter": "kling",
+          "cost": {"normalized": 0.58, "estimated_per_second": 0.10},
+          "latency": {"normalized": 0.55, "expected_seconds": 150},
+          "failure_priors": {"identity_drift_long_take": 0.18}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "kling-3-pro-openrouter",
@@ -129,7 +163,41 @@
       "live_enabled": false,
       "max_duration": 15,
       "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "openrouter"}
+      "metadata_json": {"transport": "openrouter"},
+      "capability_profile": {
+        "profile_version": "kling-3.0-pro-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_start_end": true,
+        "supports_character_reference": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "supports_text_rendering": true,
+        "max_reference_images": 4,
+        "min_duration": 1,
+        "max_duration": 15,
+        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.92,
+        "identity_prior": 0.90,
+        "camera_prior": 0.90,
+        "render_prior": 0.88,
+        "action_prior": 0.93,
+        "dialogue_prior": 0.80,
+        "text_render_prior": 0.84,
+        "provider_metadata": {
+          "adapter": "kling",
+          "cost": {"normalized": 0.72, "estimated_per_second": 0.14},
+          "latency": {"normalized": 0.62, "expected_seconds": 180},
+          "failure_priors": {"identity_drift_long_take": 0.15}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "flow-veo-3.1-internal",
@@ -149,6 +217,41 @@
         "transport": "internal_flow_gateway",
         "account_affinity_required": true,
         "legacy_execution_aliases": ["veo"]
+      },
+      "capability_profile": {
+        "profile_version": "flow-veo-3.1-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_v2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_start_end": true,
+        "supports_character_reference": true,
+        "supports_video_extension": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 3,
+        "min_duration": 1,
+        "max_duration": 8,
+        "supported_aspect_ratios": ["9:16", "16:9"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.89,
+        "identity_prior": 0.84,
+        "camera_prior": 0.90,
+        "render_prior": 0.94,
+        "action_prior": 0.81,
+        "dialogue_prior": 0.75,
+        "text_render_prior": 0.54,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {"normalized": 0.82, "estimated_per_second": 0.20},
+          "latency": {"normalized": 0.76, "expected_seconds": 250},
+          "failure_priors": {"browser_user_action": 0.18}
+        },
+        "source": "MANUAL_PRIOR"
       }
     },
     {
@@ -164,7 +267,22 @@
       "enabled": true,
       "live_enabled": false,
       "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "internal_flow_gateway", "account_affinity_required": true}
+      "metadata_json": {"transport": "internal_flow_gateway", "account_affinity_required": true},
+      "capability_profile": {
+        "profile_version": "flow-narwhal-manual-v1",
+        "supported_operations": ["image_generation"],
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "max_reference_images": 4,
+        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
+        "supported_resolutions": ["1024p"],
+        "render_prior": 0.85,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {"normalized": 0.50, "estimated_per_image": 0.04}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "seedance-2.5-official",
@@ -180,7 +298,38 @@
       "live_enabled": false,
       "max_duration": 15,
       "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "official_api", "credential_required": true}
+      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "capability_profile": {
+        "profile_version": "seedance-2.5-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_v2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 4,
+        "min_duration": 1,
+        "max_duration": 15,
+        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.84,
+        "identity_prior": 0.82,
+        "camera_prior": 0.90,
+        "render_prior": 0.86,
+        "action_prior": 0.88,
+        "dialogue_prior": 0.88,
+        "text_render_prior": 0.58,
+        "provider_metadata": {
+          "adapter": "seedance",
+          "cost": {"normalized": 0.50, "estimated_per_second": 0.09},
+          "latency": {"normalized": 0.48, "expected_seconds": 130},
+          "failure_priors": {"compressed_multi_action": 0.28}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "veo-3.1-quality-official",
@@ -196,7 +345,40 @@
       "live_enabled": false,
       "max_duration": 8,
       "supported_aspect_ratios": ["9:16", "16:9"],
-      "metadata_json": {"transport": "official_api", "credential_required": true}
+      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "capability_profile": {
+        "profile_version": "veo-3.1-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_start_end": true,
+        "supports_character_reference": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 3,
+        "min_duration": 1,
+        "max_duration": 8,
+        "supported_aspect_ratios": ["9:16", "16:9"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.88,
+        "identity_prior": 0.82,
+        "camera_prior": 0.88,
+        "render_prior": 0.96,
+        "action_prior": 0.80,
+        "dialogue_prior": 0.76,
+        "text_render_prior": 0.55,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {"normalized": 0.90, "estimated_per_second": 0.22},
+          "latency": {"normalized": 0.72, "expected_seconds": 240},
+          "failure_priors": {"duration_over_8s": 0.80}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "grok-video-official",
@@ -212,7 +394,35 @@
       "live_enabled": false,
       "max_duration": 10,
       "supported_aspect_ratios": ["9:16", "16:9"],
-      "metadata_json": {"transport": "official_api", "credential_required": true}
+      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "capability_profile": {
+        "profile_version": "grok-video-manual-v1",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_start_frame": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "supports_text_rendering": true,
+        "min_duration": 1,
+        "max_duration": 10,
+        "supported_aspect_ratios": ["9:16", "16:9"],
+        "supported_resolutions": ["720p"],
+        "physics_prior": 0.66,
+        "identity_prior": 0.66,
+        "camera_prior": 0.62,
+        "render_prior": 0.72,
+        "action_prior": 0.68,
+        "dialogue_prior": 0.84,
+        "text_render_prior": 0.88,
+        "provider_metadata": {
+          "adapter": "grok",
+          "cost": {"normalized": 0.25, "estimated_per_second": 0.04},
+          "latency": {"normalized": 0.20, "expected_seconds": 55},
+          "failure_priors": {"end_frame_direct_gaze": 0.80, "identity_drift": 0.32}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "wan-2.7-official",
@@ -228,7 +438,32 @@
       "live_enabled": false,
       "max_duration": 15,
       "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "official_api", "credential_required": true}
+      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "capability_profile": {
+        "profile_version": "wan-2.7-manual-v1",
+        "confidence_level": "initial",
+        "supported_operations": ["video_generation"],
+        "supports_t2v": true,
+        "supports_camera_instruction": true,
+        "min_duration": 1,
+        "max_duration": 15,
+        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
+        "supported_resolutions": ["720p", "1080p"],
+        "physics_prior": 0.50,
+        "identity_prior": 0.50,
+        "camera_prior": 0.50,
+        "render_prior": 0.50,
+        "action_prior": 0.50,
+        "dialogue_prior": 0.50,
+        "text_render_prior": 0.50,
+        "provider_metadata": {
+          "adapter": "wan",
+          "evidence": "adapter_contract_only_no_live_capability_verification",
+          "cost": {"normalized": 0.42, "estimated_per_second": 0.07},
+          "latency": {"normalized": 0.58, "expected_seconds": 170}
+        },
+        "source": "MANUAL_PRIOR"
+      }
     }
   ],
   "role_bindings": [
@@ -258,6 +493,8 @@
     {"role": "CINEMATOGRAPHY_REASONING", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
     {"role": "PROMPT_COMPILER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
     {"role": "PROMPT_REFINER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
+    {"role": "PROMPT_REFINER_LOW_COST", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
+    {"role": "PROMPT_REFINER_FALLBACK", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
     {"role": "NARRATIVE_COMPILER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
     {"role": "CONTINUITY_REASONER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
     {"role": "GENERATION_POLICY_REASONER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},

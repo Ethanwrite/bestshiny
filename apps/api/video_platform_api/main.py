@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -30,10 +31,20 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from generation_gateway import GenerationTargetError, IdempotencyConflict
+from generation_gateway import (
+    FlowAffinityConflict,
+    GenerationTargetError,
+    IdempotencyConflict,
+)
 from generation_gateway.gateway import UnsafeRetry
 from image_prompt_core import ImagePromptCorrectRequest
-from media_service import ProviderMediaReconciliationConflict, ProviderMediaValidationFailed
+from media_service import (
+    ProviderMediaReconciliationConflict,
+    ProviderMediaValidationFailed,
+    StorageReservationConflict,
+    WorkspaceStorageQuota,
+    WorkspaceStorageQuotaExceeded,
+)
 from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
 from model_registry_core import ShotRequirements
 from platform_contracts import (
@@ -75,11 +86,12 @@ from production_domain.models import (
     WorkerStatus,
     Workspace,
 )
+from provider_sdk import FactLockSet
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
 
-from .auth import AuthPrincipal, AuthService
+from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
 from .container import Container, build_container
 from .request_limits import UploadSizeLimitMiddleware
 from .runtime_routes import register_runtime_routes
@@ -199,6 +211,20 @@ def _job_view(job, *, credit_status: str | None = None) -> dict[str, Any]:  # ty
 
 
 def _candidate_view(candidate, qa=None, costs: list | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    cost_rows = costs or []
+    known_actuals = [item for item in cost_rows if item.actual_cost is not None]
+    effective_cost = sum(
+        (item.actual_cost if item.actual_cost is not None else item.estimated_cost) + item.retry_cost
+        for item in cost_rows
+    )
+    if not cost_rows:
+        cost_source = "UNKNOWN"
+    elif len(known_actuals) == len(cost_rows):
+        cost_source = "ACTUAL"
+    elif known_actuals:
+        cost_source = "MIXED_ACTUAL_ESTIMATED"
+    else:
+        cost_source = "ESTIMATED"
     return {
         "id": candidate.id,
         "shot_id": candidate.shot_id,
@@ -233,7 +259,16 @@ def _candidate_view(candidate, qa=None, costs: list | None = None) -> dict[str, 
             if qa
             else None
         ),
-        "cost": round(sum(item.actual_cost + item.retry_cost for item in costs or []), 4),
+        "cost": round(effective_cost, 4),
+        "cost_source": cost_source,
+        "known_actual_cost": round(
+            sum(item.actual_cost + item.retry_cost for item in known_actuals),
+            4,
+        ),
+        "estimated_fallback_cost": round(
+            sum(item.estimated_cost + item.retry_cost for item in cost_rows if item.actual_cost is None),
+            4,
+        ),
     }
 
 
@@ -243,7 +278,9 @@ def create_app(container: Container | None = None) -> FastAPI:
         container.database,
         session_ttl_days=container.settings.auth_session_ttl_days,
         auth_required=container.settings.auth_required,
+        deployment_environment=container.settings.deployment_environment,
     )
+    storage_quota = WorkspaceStorageQuota(container.database)
     worker_credentials = WorkerCredentialService(
         container.database,
         default_ttl_seconds=container.settings.worker_credential_ttl_seconds,
@@ -257,12 +294,13 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     app = FastAPI(title="AI Director Platform", version="1.0.0", lifespan=lifespan)
     app.state.container = container
+    app.add_middleware(CookieCSRFMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             origin.strip() for origin in container.settings.web_origins.split(",") if origin.strip()
         ],
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -932,7 +970,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/v1/prompts/refine")
-    def refine_prompt(
+    async def refine_prompt(
         body: PromptRefine,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
@@ -941,16 +979,35 @@ def create_app(container: Container | None = None) -> FastAPI:
             if not session.get(Project, body.project_id):
                 raise HTTPException(404, "project not found")
         result = container.image_prompts.correct(ImagePromptCorrectRequest(prompt=body.prompt))
+        approved_prompt = result.corrected_prompt
+        role_result = await container.model_roles.refine_prompt(
+            body.project_id,
+            original_prompt=approved_prompt,
+            fact_locks=FactLockSet(
+                {"narrative_event": approved_prompt},
+                locked_spans={"narrative_event": (approved_prompt,)},
+            ),
+        )
+        refined_prompt = role_result.optimized_candidate
         with container.database.session() as session:
             compilation = PromptCompilation(
                 project_id=body.project_id,
                 user_prompt=result.original_prompt,
-                compiled_prompt=result.corrected_prompt,
-                compiler_version=result.corrector_version,
-                skill_versions={"image-prompt-corrector": "v1"},
+                compiled_prompt=refined_prompt,
+                compiler_version=(f"{result.corrector_version}+{container.model_roles.version}"),
+                skill_versions={
+                    "image-prompt-corrector": "v1",
+                    "model-role-runtime": container.model_roles.version,
+                },
                 diff_json={
                     "changes": [change.model_dump() for change in result.changes],
                     "preserved_facts": result.preserved_constraints,
+                    "model_refinement": {
+                        "accepted": role_result.accepted,
+                        "source": role_result.source,
+                        "reason_codes": list(role_result.reason_codes),
+                        "diff": role_result.diff,
+                    },
                 },
             )
             session.add(compilation)
@@ -958,9 +1015,14 @@ def create_app(container: Container | None = None) -> FastAPI:
             return {
                 "id": compilation.id,
                 "original": result.original_prompt,
-                "refined": result.corrected_prompt,
+                "refined": refined_prompt,
                 "changes": [change.model_dump() for change in result.changes],
                 "preserved_facts": result.preserved_constraints,
+                "model_refinement": {
+                    "accepted": role_result.accepted,
+                    "source": role_result.source,
+                    "reason_codes": list(role_result.reason_codes),
+                },
             }
 
     @app.post("/api/prompt/correct")
@@ -1104,6 +1166,25 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.post("/v1/projects/{project_id}/provider-bindings", dependencies=[Depends(verify_api_key)])
     def bind_provider_project(project_id: str, body: ProviderProjectBind):
+        if body.provider == "google_flow":
+            try:
+                binding = container.flow_affinity.bind_existing(
+                    local_project_id=project_id,
+                    provider_account_id=body.provider_account_id,
+                    provider_project_id=body.provider_project_id,
+                )
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except (FlowAffinityConflict, ValueError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return {
+                "id": binding.id,
+                "project_id": binding.local_project_id,
+                "provider": binding.provider,
+                "provider_account_id": binding.provider_account_id,
+                "provider_project_id": binding.provider_project_id,
+                "status": binding.status,
+            }
         with container.database.session() as session:
             project = session.get(Project, project_id)
             account = session.get(ProviderAccount, body.provider_account_id)
@@ -1191,6 +1272,7 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.post("/v1/assets")
     async def upload_asset(
+        request: Request,
         principal: AuthPrincipal = Depends(auth.current_user),
         project_id: str = Form(...),
         asset_type: str = Form(...),
@@ -1200,9 +1282,12 @@ def create_app(container: Container | None = None) -> FastAPI:
     ):
         asset_type = asset_type.strip().upper()
         auth.require_project(principal, project_id, write=True)
+        workspace_id: str | None = None
         with container.database.session() as session:
-            if not session.get(Project, project_id):
+            project = session.get(Project, project_id)
+            if not project:
                 raise HTTPException(404, "project not found")
+            workspace_id = project.workspace_id
             if character_id:
                 character = session.get(Character, character_id)
                 if not character or character.project_id != project_id:
@@ -1215,6 +1300,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                 episode = session.get(Episode, scene.episode_id)
                 if episode.project_id != project_id:
                     raise HTTPException(409, "shot does not belong to project")
+        reservation_id: str | None = None
+        asset: MediaAsset | None = None
+        reused = False
         try:
             validated = validate_user_media_upload(
                 file.file,
@@ -1228,6 +1316,79 @@ def create_app(container: Container | None = None) -> FastAPI:
                 ),
                 max_image_pixels=container.settings.max_image_pixels,
             )
+            file.file.seek(0, 2)
+            upload_bytes = file.file.tell()
+            file.file.seek(0)
+            digest = hashlib.sha256()
+            while chunk := file.file.read(1024 * 1024):
+                digest.update(chunk)
+            upload_digest = digest.hexdigest()
+            file.file.seek(0)
+            idempotency_key = request.headers.get("Idempotency-Key") or (
+                f"upload-{secrets.token_urlsafe(24)}"
+            )
+            lineage_parts = []
+            if shot_id:
+                lineage_parts.append(f"shot:{shot_id}")
+            if character_id:
+                lineage_parts.append(f"character:{character_id}")
+            lineage_key = "|".join(lineage_parts) or "shared"
+            with container.database.session() as session:
+                asset = session.scalar(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project_id,
+                        MediaAsset.sha256 == upload_digest,
+                        MediaAsset.asset_type == asset_type,
+                        MediaAsset.lineage_key == lineage_key,
+                    )
+                )
+            if asset is not None:
+                if workspace_id:
+                    storage_quota.record_deduplicated(
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        byte_count=upload_bytes,
+                        idempotency_key=idempotency_key,
+                        asset_id=asset.id,
+                        storage_key=asset.storage_key,
+                    )
+                reused = True
+                return {
+                    "id": asset.id,
+                    "sha256": asset.sha256,
+                    "asset_type": asset.asset_type,
+                    "storage_key": asset.storage_key,
+                    "public_url": asset.public_url,
+                    "reused": reused,
+                }
+            if workspace_id:
+                reservation = storage_quota.reserve(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    byte_count=upload_bytes,
+                    idempotency_key=idempotency_key,
+                )
+                reservation_id = reservation.id
+                if reservation.replayed:
+                    asset = container.media.get(reservation.asset_id or "")
+                    if (
+                        asset is None
+                        or asset.project_id != project_id
+                        or asset.asset_type != asset_type
+                        or asset.sha256 != upload_digest
+                    ):
+                        raise StorageReservationConflict(
+                            "Idempotency-Key was already used for a different upload"
+                        )
+                    reused = True
+                    return {
+                        "id": asset.id,
+                        "sha256": asset.sha256,
+                        "asset_type": asset.asset_type,
+                        "storage_key": asset.storage_key,
+                        "public_url": asset.public_url,
+                        "reused": reused,
+                    }
             asset, reused = container.media.register(
                 project_id,
                 asset_type,
@@ -1237,10 +1398,30 @@ def create_app(container: Container | None = None) -> FastAPI:
                 shot_id=shot_id,
                 character_id=character_id,
             )
+            if reservation_id:
+                storage_quota.settle(
+                    reservation_id,
+                    asset_id=asset.id,
+                    storage_key=asset.storage_key,
+                    used_bytes=0 if reused else upload_bytes,
+                )
+        except WorkspaceStorageQuotaExceeded as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except StorageReservationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except StorageLimitExceeded as exc:
             raise HTTPException(413, str(exc)) from exc
         except UnsafeMediaUpload as exc:
             raise HTTPException(415, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        finally:
+            # Release only while no MediaAsset is known to have committed. Once
+            # registration returned, a failed settle keeps the hold RESERVED so
+            # storage can never become unaccounted capacity.
+            if reservation_id and asset is None:
+                storage_quota.release(reservation_id)
+        assert asset is not None
         return {
             "id": asset.id,
             "sha256": asset.sha256,
@@ -1438,24 +1619,31 @@ def create_app(container: Container | None = None) -> FastAPI:
         result = []
         for name in container.providers.list():
             health = await container.providers.get(name).health()
-            capabilities = container.capabilities.get(name)
+            profiles = container.capabilities.by_provider(name)
             result.append(
                 {
                     "name": name,
                     "configured": container.providers.is_configured(name),
                     "healthy": health.ok,
                     "detail": health.detail,
-                    "capabilities": asdict(capabilities) if capabilities else {},
+                    "capabilities": {
+                        profile.model_id: profile.model_dump(mode="json") for profile in profiles
+                    },
                     "models": [
                         {
                             "model_id": profile.model_id,
                             "version": profile.version,
                             "status": profile.status,
                             "confidence_level": profile.confidence_level,
+                            "modality": profile.modality,
+                            "supported_operations": profile.supported_operations,
+                            "supports_reference_image": profile.supports_reference_image,
+                            "max_reference_images": profile.max_reference_images,
+                            "source": profile.source,
                             "cost": profile.cost,
                             "latency": profile.latency,
                         }
-                        for profile in container.model_registry.by_provider(name)
+                        for profile in profiles
                     ],
                 }
             )
@@ -1469,7 +1657,6 @@ def create_app(container: Container | None = None) -> FastAPI:
             profile.key
             for profile in container.model_registry.all()
             if not container.providers.is_configured(profile.provider)
-            or (profile.adapter == "wan" and not container.feature_flags.enabled("wan3"))
         }
         return container.video_router.rank(body, excluded_models=excluded).model_dump()
 

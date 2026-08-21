@@ -12,12 +12,15 @@ from generation_gateway.worker import process_next_job
 from media_service import ProviderMediaReconciliationRequired
 from platform_contracts import GenerationRequest
 from production_domain.models import (
+    BillingEvidenceSource,
     BrowserWorker,
+    CostRecord,
     GenerationJob,
     JobStatus,
     MediaProviderBinding,
     Project,
     ProviderAccount,
+    ProviderBillingEvidence,
     RetryCategory,
     utcnow,
 )
@@ -140,10 +143,11 @@ class UnknownAfterSendProvider(FakeProvider):
 
 
 class BlockingCompletionProvider(FakeProvider):
-    def __init__(self):
+    def __init__(self, raw: dict[str, Any] | None = None):
         super().__init__()
         self.poll_entered = asyncio.Event()
         self.release_poll = asyncio.Event()
+        self.raw = raw or {}
 
     async def get_job(
         self,
@@ -160,6 +164,7 @@ class BlockingCompletionProvider(FakeProvider):
             provider_job_id,
             "COMPLETED",
             output_url="https://provider.invalid/completed.mp4",
+            raw=self.raw,
         )
 
 
@@ -338,12 +343,14 @@ async def test_concurrent_processors_cross_paid_submission_boundary_only_once(co
 
 
 def test_expired_owner_token_cannot_start_paid_submission_after_reclaim(container, project):
+    provider = FakeProvider()
+    add_fake_route(container, provider)
     job, _ = container.gateway.create(
         GenerationRequest(
             project_id=project.id,
             type="video",
-            provider="google_flow",
-            model="flow-veo-3.1",
+            provider="fake",
+            model="fake-model",
             prompt="One action",
             idempotency_key="stale-claim-token",
         )
@@ -361,7 +368,7 @@ def test_expired_owner_token_cannot_start_paid_submission_after_reclaim(containe
             job.id,
             stale_token,
             {"prompt": "must not be sent"},
-            "google_flow",
+            "fake",
         )
         is False
     )
@@ -370,7 +377,7 @@ def test_expired_owner_token_cannot_start_paid_submission_after_reclaim(containe
             job.id,
             current_token,
             {"prompt": "owned request"},
-            "google_flow",
+            "fake",
         )
         is True
     )
@@ -378,12 +385,14 @@ def test_expired_owner_token_cannot_start_paid_submission_after_reclaim(containe
 
 @pytest.mark.asyncio
 async def test_expired_claim_after_submission_boundary_requires_reconciliation(container, project):
+    provider = FakeProvider()
+    add_fake_route(container, provider)
     job, _ = container.gateway.create(
         GenerationRequest(
             project_id=project.id,
             type="video",
-            provider="google_flow",
-            model="flow-veo-3.1",
+            provider="fake",
+            model="fake-model",
             prompt="One action",
             idempotency_key="expired-uncertain-claim",
         )
@@ -394,7 +403,7 @@ async def test_expired_claim_after_submission_boundary_requires_reconciliation(c
         job.id,
         claim_token,
         {"prompt": "possibly dispatched"},
-        "google_flow",
+        "fake",
     )
     with container.database.session() as session:
         stored = session.get(type(job), job.id)
@@ -618,9 +627,72 @@ async def test_concurrent_completion_is_downloaded_finalized_and_released_once(
     assert [event.event_type for event in container.gateway.events(job.id)].count("JOB_COMPLETED") == 1
     with container.database.session() as session:
         account = session.get(ProviderAccount, account_id)
+        evidence = session.scalar(
+            select(ProviderBillingEvidence).where(ProviderBillingEvidence.generation_job_id == job.id)
+        )
+        cost = session.scalar(select(CostRecord).where(CostRecord.generation_job_id == job.id))
+        stored_job = session.get(GenerationJob, job.id)
         assert account.success_count == 1
         assert account.video_inflight == 0
         assert account.pending_jobs == 0
+        assert evidence is not None
+        assert evidence.source == BillingEvidenceSource.UNKNOWN.value
+        assert evidence.actual_cost_usd is None
+        assert stored_job.actual_cost is None
+        assert cost is not None and cost.actual_cost is None
+
+
+@pytest.mark.asyncio
+async def test_mock_provider_reported_cost_cannot_create_verified_billing_evidence(
+    container,
+    project,
+    register_bytes,
+    monkeypatch,
+):
+    provider = BlockingCompletionProvider(raw={"usage": {"cost": "0.42", "credits_used": "3"}})
+    add_fake_route(container, provider)
+    job, _ = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="video",
+            provider="fake",
+            model="fake-model",
+            prompt="One billed action",
+            idempotency_key="verified-provider-billing",
+            cost_estimate=0.5,
+        )
+    )
+    submitted = await container.gateway.process(job.id)
+    assert submitted.status == JobStatus.SUBMITTED.value
+    with container.database.session() as session:
+        session.get(GenerationJob, job.id).next_retry_at = utcnow() - timedelta(seconds=1)
+    output = register_bytes(container, project.id, "VIDEO", b"billed-video")
+
+    async def download_once(*_args, **_kwargs):
+        return output
+
+    monkeypatch.setattr(container.media, "download_and_register", download_once)
+    provider.release_poll.set()
+    completed = await container.gateway.process(job.id)
+    assert completed.status == JobStatus.COMPLETED.value
+
+    with container.database.session() as session:
+        evidence = session.scalar(
+            select(ProviderBillingEvidence).where(ProviderBillingEvidence.generation_job_id == job.id)
+        )
+        cost = session.scalar(select(CostRecord).where(CostRecord.generation_job_id == job.id))
+        stored_job = session.get(GenerationJob, job.id)
+        assert evidence is not None
+        assert evidence.source == BillingEvidenceSource.UNKNOWN.value
+        assert evidence.actual_cost_usd is None
+        assert evidence.provider_credits is None
+        assert float(evidence.estimated_cost_usd) == 0.5
+        assert evidence.metadata_json["actual_field"] == "usage.cost"
+        assert evidence.metadata_json["provider_mode"] == "mock"
+        assert evidence.metadata_json["reported_actual_cost_ignored"] is True
+        assert evidence.metadata_json["reported_provider_credits_ignored"] is True
+        assert stored_job.actual_cost is None
+        assert cost is not None and cost.actual_cost is None
 
 
 @pytest.mark.asyncio
@@ -777,10 +849,14 @@ def test_job_owned_release_is_concurrently_idempotent(container, project):
 
 @pytest.mark.parametrize("terminal_status", [JobStatus.COMPLETED.value, JobStatus.CANCELLED.value])
 def test_reconcile_never_regresses_terminal_generation(container, project, terminal_status):
+    provider = FakeProvider()
+    add_fake_route(container, provider)
     job, _ = container.gateway.create(
         GenerationRequest(
             project_id=project.id,
             type="video",
+            provider="fake",
+            model="fake-model",
             prompt="One action",
             idempotency_key=f"terminal-reconcile-{terminal_status.lower()}",
         )
@@ -815,7 +891,7 @@ async def test_poll_target_removed_after_submission_fails_and_releases_owned_cap
         )
     )
     await container.gateway.process(job.id)
-    container.providers._models[("fake", "video", "fake-model")] = False
+    container.providers.mark_model_unavailable("fake", "fake-model", "video")
     with container.database.session() as session:
         session.get(GenerationJob, job.id).next_retry_at = None
 

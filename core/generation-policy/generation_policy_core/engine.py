@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
+from model_registry_core import ModelCapabilityProfile, ModelCapabilityRegistry
 from platform_database import Database
 from production_domain.models import (
     ContinuityMode,
@@ -12,113 +13,6 @@ from production_domain.models import (
     ProviderAccount,
 )
 from sqlalchemy import select
-
-
-@dataclass(frozen=True)
-class ProviderCapabilities:
-    supports_t2v: bool = True
-    supports_i2v: bool = False
-    supports_v2v: bool = False
-    supports_reference_images: bool = False
-    supports_character_reference: bool = False
-    supports_start_frame: bool = False
-    supports_end_frame: bool = False
-    supports_start_end: bool = False
-    supports_video_extension: bool = False
-    supports_camera_instruction: bool = True
-    supports_audio: bool = False
-    max_reference_images: int = 0
-    supported_aspect_ratios: tuple[str, ...] = ("9:16", "16:9")
-    supported_durations: tuple[int, ...] = (5, 8)
-    supported_resolutions: tuple[str, ...] = ("720p",)
-    identity_reliability: float = 0.5
-    camera_control_score: float = 0.5
-    action_score: float = 0.5
-    render_quality_score: float = 0.5
-
-
-class ProviderCapabilityRegistry:
-    def __init__(self):
-        self._items: dict[str, ProviderCapabilities] = {
-            "google_flow": ProviderCapabilities(
-                supports_i2v=True,
-                supports_reference_images=True,
-                supports_character_reference=True,
-                supports_start_frame=True,
-                supports_end_frame=True,
-                supports_start_end=True,
-                supports_video_extension=True,
-                max_reference_images=3,
-                supported_durations=(5, 6, 8),
-                supported_resolutions=("720p", "1080p"),
-                identity_reliability=0.88,
-                camera_control_score=0.90,
-                action_score=0.86,
-                render_quality_score=0.92,
-            ),
-            "seedance": ProviderCapabilities(
-                supports_i2v=True,
-                supports_reference_images=True,
-                supports_start_frame=True,
-                max_reference_images=4,
-                supported_durations=(5, 10),
-                supported_resolutions=("720p", "1080p"),
-                identity_reliability=0.80,
-                camera_control_score=0.78,
-                action_score=0.90,
-                render_quality_score=0.88,
-            ),
-            "veo_official": ProviderCapabilities(
-                supports_i2v=True,
-                supports_reference_images=True,
-                supports_start_frame=True,
-                supports_end_frame=True,
-                supports_start_end=True,
-                max_reference_images=3,
-                supported_durations=(8,),
-                supported_resolutions=("720p", "1080p"),
-                identity_reliability=0.86,
-                camera_control_score=0.90,
-                action_score=0.88,
-                render_quality_score=0.94,
-            ),
-            "grok": ProviderCapabilities(
-                supports_i2v=True,
-                supports_start_frame=True,
-                identity_reliability=0.58,
-                camera_control_score=0.68,
-                action_score=0.73,
-                render_quality_score=0.76,
-            ),
-            "kling": ProviderCapabilities(
-                supports_i2v=True,
-                supports_start_frame=True,
-                supports_end_frame=True,
-                identity_reliability=0.78,
-                camera_control_score=0.82,
-                action_score=0.84,
-                render_quality_score=0.86,
-            ),
-            "runway": ProviderCapabilities(
-                supports_i2v=True,
-                supports_v2v=True,
-                supports_start_frame=True,
-                identity_reliability=0.72,
-                camera_control_score=0.80,
-                action_score=0.82,
-                render_quality_score=0.83,
-            ),
-            "omni": ProviderCapabilities(supports_reference_images=True, max_reference_images=5),
-        }
-
-    def register(self, name: str, capabilities: ProviderCapabilities) -> None:
-        self._items[name] = capabilities
-
-    def get(self, name: str) -> ProviderCapabilities | None:
-        return self._items.get(name)
-
-    def names(self) -> list[str]:
-        return sorted(self._items)
 
 
 @dataclass(frozen=True)
@@ -296,19 +190,28 @@ class GenerationPolicyEngine:
 
 
 class CapabilityResolver:
-    version = "capability-rules-v1"
+    # Real outcomes inform routing, but never erase the reviewed capability
+    # priors. Observation influence ramps up until the minimum sample count.
+    prior_weight = 0.80
+    observation_weight = 0.20
+    minimum_sample_count = 20
+
+    version = "capability-rules-v2-blended-evidence"
 
     requirements = {
         GenerationPolicy.TEXT_TO_VIDEO.value: ("supports_t2v",),
         GenerationPolicy.IMAGE_TO_VIDEO.value: ("supports_i2v", "supports_start_frame"),
         GenerationPolicy.CONTINUE_I2V.value: ("supports_i2v", "supports_start_frame"),
         GenerationPolicy.CONTINUE_V2V.value: ("supports_v2v",),
-        GenerationPolicy.HYBRID_REFERENCE.value: ("supports_reference_images",),
+        GenerationPolicy.HYBRID_REFERENCE.value: ("supports_reference_image",),
         GenerationPolicy.REANCHOR_CHARACTER.value: ("supports_character_reference",),
-        GenerationPolicy.REANCHOR_SCENE.value: ("supports_reference_images",),
-        GenerationPolicy.REANCHOR_FULL.value: ("supports_character_reference", "supports_reference_images"),
+        GenerationPolicy.REANCHOR_SCENE.value: ("supports_reference_image",),
+        GenerationPolicy.REANCHOR_FULL.value: (
+            "supports_character_reference",
+            "supports_reference_image",
+        ),
         GenerationPolicy.START_END_FRAME.value: ("supports_start_end",),
-        GenerationPolicy.REFERENCE_TO_VIDEO.value: ("supports_reference_images",),
+        GenerationPolicy.REFERENCE_TO_VIDEO.value: ("supports_reference_image",),
     }
 
     required_inputs = {
@@ -343,18 +246,35 @@ class CapabilityResolver:
         GenerationPolicy.REFERENCE_TO_VIDEO.value: ["reference_images", "narrative_state"],
     }
 
-    def __init__(self, database: Database, registry: ProviderCapabilityRegistry):
+    def __init__(self, database: Database, registry: ModelCapabilityRegistry):
         self.database = database
         self.registry = registry
 
-    def _supports(self, provider: str, policy: str) -> bool:
-        capabilities = self.registry.get(provider)
-        return bool(
-            capabilities and all(getattr(capabilities, field) for field in self.requirements.get(policy, ()))
+    def _profile(self, provider: str, policy: str) -> ModelCapabilityProfile | None:
+        profiles = [
+            profile
+            for profile in self.registry.by_provider(provider)
+            if profile.modality == "video"
+            and all(getattr(profile, field) for field in self.requirements.get(policy, ()))
+        ]
+        profiles.sort(
+            key=lambda profile: (
+                -profile.render_prior,
+                -profile.identity_prior,
+                profile.logical_name,
+            )
         )
+        return profiles[0] if profiles else None
+
+    def _supports(self, provider: str, policy: str) -> bool:
+        return self._profile(provider, policy) is not None
 
     def _routing_score(
-        self, provider: str, preferred_provider: str, quality_profile: str
+        self,
+        provider: str,
+        policy: str,
+        preferred_provider: str,
+        quality_profile: str,
     ) -> tuple[float, dict]:
         with self.database.session() as session:
             costs = list(session.scalars(select(CostRecord).where(CostRecord.provider == provider)))
@@ -371,7 +291,11 @@ class CapabilityResolver:
             )
         attempts = len(costs)
         accepted = sum(1 for record in costs if record.accepted)
-        total_cost = sum(record.actual_cost + record.retry_cost for record in costs)
+        total_cost = sum(
+            (record.actual_cost if record.actual_cost is not None else record.estimated_cost)
+            + record.retry_cost
+            for record in costs
+        )
         accepted_cost = total_cost / accepted if accepted else None
         successes = sum(account.success_count for account in accounts)
         failures = sum(account.error_count for account in accounts)
@@ -383,31 +307,64 @@ class CapabilityResolver:
         ]
         average_latency = sum(latencies) / len(latencies) if latencies else None
         preference_penalty = 0.0 if provider == preferred_provider else 0.18
-        capabilities = self.registry.get(provider)
+        capabilities = self._profile(provider, policy)
         assert capabilities is not None
         profile = quality_profile.upper()
         if profile in {"CLOSE_UP_CHARACTER", "DIALOGUE"}:
             expected_quality = (
-                capabilities.identity_reliability * 0.65
-                + capabilities.camera_control_score * 0.20
-                + capabilities.render_quality_score * 0.15
+                capabilities.identity_prior * 0.65
+                + capabilities.camera_prior * 0.20
+                + capabilities.render_prior * 0.15
             )
         elif profile == "ACTION":
             expected_quality = (
-                capabilities.action_score * 0.55
-                + capabilities.camera_control_score * 0.30
-                + capabilities.identity_reliability * 0.15
+                capabilities.action_prior * 0.55
+                + capabilities.camera_prior * 0.30
+                + capabilities.identity_prior * 0.15
             )
         else:
             expected_quality = (
-                capabilities.render_quality_score * 0.50
-                + capabilities.camera_control_score * 0.30
-                + capabilities.action_score * 0.20
+                capabilities.render_prior * 0.50
+                + capabilities.camera_prior * 0.30
+                + capabilities.action_prior * 0.20
             )
-        capability_penalty = (1 - expected_quality) * 0.45
-        cost_penalty = min((accepted_cost or 0.0) / 10, 0.35) if accepted_cost is not None else 0.08
-        reliability_penalty = (1 - reliability) * 0.35 if reliability is not None else 0.08
-        latency_penalty = min((average_latency or 0.0) / 600, 0.2) if average_latency else 0.05
+        observation_samples = max(attempts, successes + failures)
+        observation_coverage = min(1.0, observation_samples / self.minimum_sample_count)
+        effective_observation_weight = self.observation_weight * observation_coverage
+        effective_prior_weight = 1.0 - effective_observation_weight
+
+        observed_quality = accepted / attempts if attempts else None
+        blended_quality = (
+            expected_quality
+            if observed_quality is None
+            else expected_quality * effective_prior_weight + observed_quality * effective_observation_weight
+        )
+        capability_penalty = (1 - blended_quality) * 0.45
+
+        prior_cost_penalty = min(capabilities.cost.get("normalized", 0.23) * 0.35, 0.35)
+        observed_cost_penalty = (
+            min(accepted_cost / 10, 0.35) if accepted_cost is not None else prior_cost_penalty
+        )
+        cost_penalty = (
+            prior_cost_penalty * effective_prior_weight + observed_cost_penalty * effective_observation_weight
+        )
+
+        prior_reliability = 0.85
+        blended_reliability = (
+            prior_reliability
+            if reliability is None
+            else prior_reliability * effective_prior_weight + reliability * effective_observation_weight
+        )
+        reliability_penalty = (1 - blended_reliability) * 0.35
+
+        prior_latency_penalty = min(capabilities.latency.get("normalized", 0.25) * 0.20, 0.20)
+        observed_latency_penalty = (
+            min(average_latency / 600, 0.2) if average_latency is not None else prior_latency_penalty
+        )
+        latency_penalty = (
+            prior_latency_penalty * effective_prior_weight
+            + observed_latency_penalty * effective_observation_weight
+        )
         score = round(
             preference_penalty + capability_penalty + cost_penalty + reliability_penalty + latency_penalty,
             4,
@@ -418,8 +375,16 @@ class CapabilityResolver:
             "cost_per_accepted_shot": accepted_cost,
             "reliability": reliability,
             "average_latency_seconds": average_latency,
+            "prior_weight": self.prior_weight,
+            "observation_weight": self.observation_weight,
+            "effective_prior_weight": round(effective_prior_weight, 4),
+            "effective_observation_weight": round(effective_observation_weight, 4),
+            "minimum_sample_count": self.minimum_sample_count,
+            "observation_sample_count": observation_samples,
+            "observed_acceptance_rate": observed_quality,
             "user_preferred": provider == preferred_provider,
             "expected_task_quality": round(expected_quality, 4),
+            "blended_task_quality": round(blended_quality, 4),
             "capability_penalty": round(capability_penalty, 4),
             "routing_score": score,
         }
@@ -431,7 +396,8 @@ class CapabilityResolver:
         if not eligible:
             return None, {}
         scored = {
-            provider: self._routing_score(provider, preferred, quality_profile) for provider in eligible
+            provider: self._routing_score(provider, policy, preferred, quality_profile)
+            for provider in eligible
         }
         selected = min(eligible, key=lambda provider: scored[provider][0])
         return selected, {provider: detail for provider, (_, detail) in scored.items()}
@@ -487,7 +453,11 @@ class CapabilityResolver:
                         input_features={
                             "desired_policy": policy,
                             "preferred_provider": preferred_provider,
-                            "capabilities": asdict(self.registry.get(selected)),
+                            "capabilities": (
+                                self._profile(selected, resolved_policy).model_dump(mode="json")
+                                if self._profile(selected, resolved_policy)
+                                else {}
+                            ),
                             "provider_scores": routing_features,
                         },
                         selected_action=f"{selected}:{resolved_policy}",

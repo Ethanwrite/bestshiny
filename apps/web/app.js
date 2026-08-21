@@ -1,5 +1,22 @@
 const API = window.AI_DIRECTOR_API || (location.port === "3000" ? "/api" : "http://127.0.0.1:18080");
 const SUBMISSION_STORAGE_KEY = "aiDirectorPendingSubmissions";
+const CSRF_COOKIE_NAME = "ai_director_csrf";
+sessionStorage.removeItem("aiDirectorAccessToken");
+
+function cookieValue(name) {
+  const prefix = `${encodeURIComponent(name)}=`;
+  const item = document.cookie.split("; ").find((entry) => entry.startsWith(prefix));
+  return item ? decodeURIComponent(item.slice(prefix.length)) : "";
+}
+
+function csrfHeaders(method = "GET", headers = {}) {
+  const result = { ...headers };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) {
+    const token = cookieValue(CSRF_COOKIE_NAME);
+    if (token) result["X-CSRF-Token"] = token;
+  }
+  return result;
+}
 
 function restoreSubmissions() {
   try {
@@ -22,7 +39,7 @@ const state = {
   passengerPrompts: { image: "", video: "" }, passengerJobs: { image: null, video: null },
   passengerReferenceUpload: null, modelProfiles: [], imageModelProfiles: [], passengerModels: [],
   confirmedAssets: new Set(), logicalAssets: [],
-  authToken: sessionStorage.getItem("aiDirectorAccessToken") || "", authUser: null,
+  authUser: null,
   authMode: "login", passengerPreviewObjectUrl: null,
   submissions: restoreSubmissions(),
 };
@@ -87,10 +104,11 @@ function finishSubmission(slot, key, succeeded) {
 }
 
 async function request(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (state.authToken) headers.Authorization = `Bearer ${state.authToken}`;
+  const method = options.method || "GET";
+  const headers = csrfHeaders(method, { "Content-Type": "application/json", ...(options.headers || {}) });
   const response = await fetch(`${API}${path}`, {
     ...options,
+    credentials: "include",
     headers,
   });
   if (!response.ok) {
@@ -104,9 +122,7 @@ async function request(path, options = {}) {
 function lockAuth() {
   if (state.passengerPreviewObjectUrl) URL.revokeObjectURL(state.passengerPreviewObjectUrl);
   state.passengerPreviewObjectUrl = null;
-  state.authToken = "";
   state.authUser = null;
-  sessionStorage.removeItem("aiDirectorAccessToken");
   clearWorkspaceState();
   $("authGate").classList.remove("hidden");
   $("appShell").classList.add("auth-locked");
@@ -182,8 +198,6 @@ async function submitAuth(event) {
     const result = await request(`/api/auth/${registering ? "register" : "login"}`, {
       method: "POST", body: JSON.stringify(payload),
     });
-    state.authToken = result.access_token;
-    sessionStorage.setItem("aiDirectorAccessToken", result.access_token);
     unlockAuth(result.user);
     await startWorkspace();
   } catch (error) {
@@ -204,7 +218,6 @@ async function startWorkspace() {
 
 async function bootstrapAuth() {
   health();
-  if (!state.authToken) return lockAuth();
   try {
     const user = await request("/api/auth/me");
     unlockAuth(user);
@@ -267,11 +280,15 @@ async function loadPassengerModels() {
   const providers = await request("/v1/providers");
   const configuredProviders = providers.filter((provider) => provider.configured !== false);
   state.modelProfiles = configuredProviders.flatMap((provider) => (provider.models || [])
-    .filter((model) => model.status !== "disabled")
+    .filter((model) => model.status !== "disabled"
+      && model.modality === "video"
+      && (model.supported_operations || []).includes("video_generation"))
     .map((model) => ({ ...model, provider: provider.name, media: "video" })));
-  state.imageModelProfiles = configuredProviders.some((provider) => provider.name === "google_flow")
-    ? [{ provider: "google_flow", model_id: "NARWHAL", media: "image", cost: {} }]
-    : [];
+  state.imageModelProfiles = configuredProviders.flatMap((provider) => (provider.models || [])
+    .filter((model) => model.status !== "disabled"
+      && model.modality === "image"
+      && (model.supported_operations || []).includes("image_generation"))
+    .map((model) => ({ ...model, provider: provider.name, media: "image" })));
   renderPassengerModels();
 }
 
@@ -298,7 +315,7 @@ function passengerEstimatedCost() {
   if (!profile) return 0;
   const providerCost = state.passengerMedia === "image"
     ? Number(profile.cost?.estimated_per_image || .04)
-    : Math.max(Number(profile.cost?.estimated_per_second || 0) * Number($("passengerDuration").value || 8), 0);
+    : Math.max(Number(profile.cost?.estimated_per_second || 0) * Number($("passengerDuration").value || 4), 0);
   const resolution = { "720p": 1, "1080p": 1.3 }[$("passengerResolution").value] || 1;
   const references = $("passengerReference").files[0] ? 1.04 : 1;
   return providerCost * resolution * references * 1.2;
@@ -332,7 +349,7 @@ async function uploadPassengerReference({ projectId, file }) {
   form.append("file", file);
   const upload = (async () => {
     const response = await fetch(`${API}/v1/assets`, {
-      method: "POST", body: form, headers: { Authorization: `Bearer ${state.authToken}` },
+      method: "POST", body: form, credentials: "include", headers: csrfHeaders("POST"),
     });
     if (!response.ok) throw new Error("参考图片上传失败");
     const asset = await response.json();
@@ -406,7 +423,7 @@ async function renderPassengerJob(job) {
     if (isProtectedLocalMedia) {
       const storagePath = asset.storage_key.split("/").map(encodeURIComponent).join("/");
       const response = await fetch(`${API}/v1/storage/${storagePath}`, {
-        headers: { Authorization: `Bearer ${state.authToken}` },
+        credentials: "include",
       });
       if (response.ok) {
         state.passengerPreviewObjectUrl = URL.createObjectURL(await response.blob());
@@ -442,7 +459,7 @@ async function generatePassenger() {
   const mediaType = state.passengerMedia;
   const aspectRatio = $("passengerAspect").value;
   const resolution = $("passengerResolution").value;
-  const duration = mediaType === "video" ? Number($("passengerDuration").value || 8) : null;
+  const duration = mediaType === "video" ? Number($("passengerDuration").value || 4) : null;
   const estimatedCost = passengerEstimatedCost();
   const freeVideo = mediaType === "video"
     && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
@@ -567,7 +584,8 @@ async function uploadManualAssetVersion() {
     const mediaResponse = await fetch(`${API}/v1/assets`, {
       method: "POST",
       body: form,
-      headers: { Authorization: `Bearer ${state.authToken}` },
+      credentials: "include",
+      headers: csrfHeaders("POST"),
     });
     if (!mediaResponse.ok) {
       const detail = await mediaResponse.json().catch(() => ({}));
@@ -909,7 +927,7 @@ async function confirmCharacterIdentity() {
   form.append("character_id", state.selectedCharacterId);
   form.append("file", file);
   const upload = await fetch(`${API}/v1/assets`, {
-    method: "POST", body: form, headers: { Authorization: `Bearer ${state.authToken}` },
+    method: "POST", body: form, credentials: "include", headers: csrfHeaders("POST"),
   });
   if (!upload.ok) {
     const detail = await upload.json().catch(() => ({ detail: upload.statusText }));

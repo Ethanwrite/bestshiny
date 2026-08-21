@@ -6,12 +6,13 @@ from .infrastructure import (
     RuntimeModelState,
     load_model_infrastructure_config,
 )
-from .registry import ModelCapabilityRegistry
+from .registry import CapabilityObservationConflict, ModelCapabilityRegistry
 from .router import VideoModelRouter
 from .schemas import (
     ModelBindingKind,
     ModelCandidate,
     ModelCapabilityProfile,
+    ModelCapabilityProfileConfig,
     ModelDefinitionConfig,
     ModelInfrastructureConfig,
     ModelRole,
@@ -22,8 +23,10 @@ from .schemas import (
 
 __all__ = [
     "ModelBindingKind",
+    "CapabilityObservationConflict",
     "ModelCandidate",
     "ModelCapabilityProfile",
+    "ModelCapabilityProfileConfig",
     "ModelCapabilityRegistry",
     "ModelDefaultSyncResult",
     "ModelDefinitionConfig",

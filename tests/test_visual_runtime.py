@@ -393,15 +393,15 @@ def test_passenger_rejects_registered_but_unconfigured_provider(container, proje
 
 def test_credit_pricing_is_explainable_and_scales_with_resolution(container):
     low = container.credit_pricing.estimate(
-        provider="kling",
-        model="kling-3.0",
+        provider="openrouter",
+        model="kwaivgi/kling-v3.0-std",
         media_type="video",
         duration=8,
         resolution="720p",
     )
     high = container.credit_pricing.estimate(
-        provider="kling",
-        model="kling-3.0",
+        provider="openrouter",
+        model="kwaivgi/kling-v3.0-std",
         media_type="video",
         duration=8,
         resolution="1080p",

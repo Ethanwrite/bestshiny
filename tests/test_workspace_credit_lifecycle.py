@@ -17,7 +17,6 @@ from production_domain.models import (
     GenerationJob,
     JobStatus,
     MediaProviderBinding,
-    ModelDefinition,
     Project,
     ProviderAccount,
     RetryCategory,
@@ -314,19 +313,6 @@ def _register_submission_provider(
     container.providers.register(provider)
     container.providers.register_model(provider.name, model, "video")
     with container.database.session() as session:
-        session.add(
-            ModelDefinition(
-                logical_name=f"test-{provider.name}-{model}",
-                provider=provider.name,
-                provider_model_id=model,
-                modality="video",
-                capabilities=["video_generation"],
-                enabled=True,
-                live_enabled=False,
-                metadata_json={"test_fixture": True},
-            )
-        )
-        session.flush()
         account = ProviderAccount(
             provider=provider.name,
             account_identifier=f"{provider.name}@example.com",
@@ -625,7 +611,15 @@ def test_paid_submission_boundary_winning_cancel_race_never_refunds(
     container,
 ):  # type: ignore[no-untyped-def]
     workspace_id, (project_id,) = _free_projects(container, "Cancel versus paid boundary")
-    job = _reserve(container, project_id, idempotency_key="cancel-boundary-race")
+    provider = _CancelledPollProvider()
+    _register_submission_provider(container, provider, model="cancel-boundary-model")
+    job = _reserve(
+        container,
+        project_id,
+        idempotency_key="cancel-boundary-race",
+        provider=provider.name,
+        model="cancel-boundary-model",
+    )
     claim_token = container.gateway._claim_for_submission(job.id)
 
     assert claim_token is not None
@@ -633,7 +627,7 @@ def test_paid_submission_boundary_winning_cancel_race_never_refunds(
         job.id,
         claim_token,
         {"prompt": "the paid boundary has already won"},
-        "google_flow",
+        provider.name,
     )
 
     result = asyncio.run(container.gateway.cancel(job.id))
@@ -1297,14 +1291,22 @@ def test_internal_settlement_rejects_active_claim_and_preserves_reservation(
     container,
 ):  # type: ignore[no-untyped-def]
     workspace_id, (project_id,) = _free_projects(container, "Active claim settlement guard")
-    job = _reserve(container, project_id, idempotency_key="active-claim-settlement-guard")
+    provider = _CancelledPollProvider()
+    _register_submission_provider(container, provider, model="active-claim-model")
+    job = _reserve(
+        container,
+        project_id,
+        idempotency_key="active-claim-settlement-guard",
+        provider=provider.name,
+        model="active-claim-model",
+    )
     claim_token = container.gateway._claim_for_submission(job.id)
     assert claim_token is not None
     assert container.gateway._begin_provider_submission(
         job.id,
         claim_token,
         {"prompt": "provider call is still active"},
-        "google_flow",
+        provider.name,
     )
     with container.database.session() as session:
         stored = session.get(GenerationJob, job.id)

@@ -4,7 +4,13 @@ from typing import Any
 
 from production_domain.models import RetryCategory
 
-from .base import GenerationProvider, ProviderHealth, ProviderJob, ProviderSubmission
+from .base import (
+    GenerationProvider,
+    ProviderHealth,
+    ProviderJob,
+    ProviderPollIdentity,
+    ProviderSubmission,
+)
 from .errors import ProviderError
 
 
@@ -42,7 +48,9 @@ class NotConfiguredProvider(GenerationProvider):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> ProviderJob:
+        del poll_identity
         raise self._error()
 
     async def cancel_job(self, provider_job_id: str, *, account_id: str, worker_id: str) -> bool:

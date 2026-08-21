@@ -3,6 +3,8 @@ from .timeline import (
     AuthoritativeTimelineStateEngine,
     TimelinePropagationError,
     TimelinePropagationResult,
+    TimelineRecomputeResult,
+    TimelineStaleResult,
 )
 
 __all__ = [
@@ -11,4 +13,6 @@ __all__ = [
     "NarrativeCompiler",
     "TimelinePropagationError",
     "TimelinePropagationResult",
+    "TimelineRecomputeResult",
+    "TimelineStaleResult",
 ]

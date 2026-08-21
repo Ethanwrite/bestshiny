@@ -7,7 +7,7 @@ from typing import Any
 from browser_runtime import BrowserCommandTimeout, BrowserRuntime, WorkerDisconnected
 from platform_database import Database
 from platform_shared import Settings
-from production_domain.models import GenerationJob, ProviderAccount, RetryCategory
+from production_domain.models import GenerationJob, RetryCategory
 from provider_sdk import (
     GenerationProvider,
     LiveProviderCallDenied,
@@ -16,6 +16,7 @@ from provider_sdk import (
     ProviderError,
     ProviderHealth,
     ProviderJob,
+    ProviderPollIdentity,
     ProviderSubmission,
 )
 from sqlalchemy import select
@@ -61,27 +62,66 @@ class GoogleFlowProvider(GenerationProvider):
                 submitted=False,
             ) from exc
 
-    def _project_id(self, account_id: str, *, provider_job_id: str | None = None) -> str:
-        if self.database:
-            with self.database.session() as session:
-                if provider_job_id:
-                    job = session.scalar(
-                        select(GenerationJob)
-                        .where(
-                            GenerationJob.provider == self.name,
-                            GenerationJob.account_id == account_id,
-                            GenerationJob.provider_job_id == provider_job_id,
-                        )
-                        .order_by(GenerationJob.created_at.desc())
-                    )
-                    if job:
-                        bound_project_id = (job.provider_request_json or {}).get("_provider_project_id")
-                        if bound_project_id:
-                            return str(bound_project_id)
-                account = session.get(ProviderAccount, account_id)
-                if account and account.metadata_json.get("project_id"):
-                    return str(account.metadata_json["project_id"])
-        return self.settings.flow_project_id
+    @staticmethod
+    def _explicit_project_id(payload: dict[str, Any]) -> str:
+        project_id = str(payload.get("_provider_project_id") or "").strip()
+        if not project_id:
+            raise ProviderError(
+                "Google Flow project affinity is missing from the provider request",
+                RetryCategory.INVALID_REQUEST,
+                code="FLOW_PROJECT_MISSING",
+            )
+        return project_id
+
+    def _validated_poll_project(
+        self,
+        provider_job_id: str,
+        account_id: str,
+        poll_identity: ProviderPollIdentity | None,
+    ) -> str:
+        if poll_identity is None:
+            raise ProviderError(
+                "Google Flow poll identity is required",
+                RetryCategory.PERMANENT_ERROR,
+                code="FLOW_POLL_IDENTITY_REQUIRED",
+                submitted=True,
+            )
+        if (
+            poll_identity.provider_job_id != provider_job_id
+            or poll_identity.provider_account_id != account_id
+        ):
+            raise ProviderError(
+                "Google Flow poll identity does not match the routed account or remote job",
+                RetryCategory.PERMANENT_ERROR,
+                code="FLOW_POLL_IDENTITY_MISMATCH",
+                submitted=True,
+            )
+        if self.database is None:
+            raise ProviderError(
+                "Google Flow poll identity cannot be verified without the platform database",
+                RetryCategory.PERMANENT_ERROR,
+                code="FLOW_POLL_IDENTITY_UNVERIFIABLE",
+                submitted=True,
+            )
+        with self.database.session() as session:
+            matched_job_id = session.scalar(
+                select(GenerationJob.id).where(
+                    GenerationJob.id == poll_identity.local_generation_job_id,
+                    GenerationJob.provider == self.name,
+                    GenerationJob.account_id == poll_identity.provider_account_id,
+                    GenerationJob.provider_project_id == poll_identity.provider_project_id,
+                    GenerationJob.provider_job_id == poll_identity.provider_job_id,
+                    GenerationJob.submission_state == "CONFIRMED",
+                )
+            )
+        if matched_job_id is None:
+            raise ProviderError(
+                "Google Flow poll identity is not bound to the persisted local generation job",
+                RetryCategory.PERMANENT_ERROR,
+                code="FLOW_POLL_IDENTITY_NOT_FOUND",
+                submitted=True,
+            )
+        return poll_identity.provider_project_id
 
     def _url(self, endpoint: str) -> str:
         base = self.settings.flow_api_base.rstrip("/")
@@ -166,13 +206,8 @@ class GoogleFlowProvider(GenerationProvider):
     async def generate_video(
         self, request: dict[str, Any], *, account_id: str, worker_id: str
     ) -> ProviderSubmission:
-        project_id = str(request.get("_provider_project_id") or self._project_id(account_id))
-        if not project_id:
-            raise ProviderError(
-                "Google Flow project ID is not configured",
-                RetryCategory.INVALID_REQUEST,
-                code="FLOW_PROJECT_MISSING",
-            )
+        del account_id
+        project_id = self._explicit_project_id(request)
         endpoint, body = video_payload(request, project_id)
         data = await self._request(
             worker_id,
@@ -195,13 +230,8 @@ class GoogleFlowProvider(GenerationProvider):
     async def generate_image(
         self, request: dict[str, Any], *, account_id: str, worker_id: str
     ) -> ProviderSubmission:
-        project_id = str(request.get("_provider_project_id") or self._project_id(account_id))
-        if not project_id:
-            raise ProviderError(
-                "Google Flow project ID is not configured",
-                RetryCategory.INVALID_REQUEST,
-                code="FLOW_PROJECT_MISSING",
-            )
+        del account_id
+        project_id = self._explicit_project_id(request)
         endpoint, body = image_payload(request, project_id)
         data = await self._request(
             worker_id,
@@ -222,13 +252,8 @@ class GoogleFlowProvider(GenerationProvider):
         return ProviderSubmission(media_ids[0], data)
 
     async def upload_asset(self, asset: dict[str, Any], *, account_id: str, worker_id: str) -> str:
-        project_id = str(asset.get("_provider_project_id") or self._project_id(account_id))
-        if not project_id:
-            raise ProviderError(
-                "Google Flow project ID is not configured",
-                RetryCategory.INVALID_REQUEST,
-                code="FLOW_PROJECT_MISSING",
-            )
+        del account_id
+        project_id = self._explicit_project_id(asset)
         path = Path(asset["local_path"])
         image_bytes = base64.b64encode(path.read_bytes()).decode("ascii")
         data = await self._request(
@@ -268,7 +293,9 @@ class GoogleFlowProvider(GenerationProvider):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> ProviderJob:
+        project_id = self._validated_poll_project(provider_job_id, account_id, poll_identity)
         if generation_type == "image":
             if not await self.validate_asset(provider_job_id, account_id=account_id, worker_id=worker_id):
                 return ProviderJob(provider_job_id, "RUNNING")
@@ -286,7 +313,6 @@ class GoogleFlowProvider(GenerationProvider):
                 output_url=response.get("url"),
                 output_mime_type="image/png",
             )
-        project_id = self._project_id(account_id, provider_job_id=provider_job_id)
         data = await self._request(
             worker_id,
             "/v1/video:batchCheckAsyncVideoGenerationStatus",

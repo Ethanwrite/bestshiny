@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -20,6 +21,7 @@ from production_domain.models import (
     Project,
     ProviderAccount,
     ProviderCredential,
+    RunAPIBenchmark,
     User,
     Workspace,
 )
@@ -985,6 +987,14 @@ async def test_live_model_change_at_atomic_boundary_never_reaches_transport(
         "runtime_model_for_target_in_session",
         disable_model_inside_paid_boundary,
     )
+    container.live_canary.create(
+        provider="openrouter",
+        model="kwaivgi/kling-v3.0-std",
+        max_requests=1,
+        max_cost_usd="0.10",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        purpose="reach the independent atomic model-switch regression fence",
+    )
 
     job, replayed = container.gateway.create(
         GenerationRequest(
@@ -1013,10 +1023,11 @@ async def test_live_model_change_at_atomic_boundary_never_reaches_transport(
     "model_id",
     ["kwaivgi/kling-v3.0-std", "kwaivgi/kling-v3.0-pro"],
 )
-def test_openrouter_kling_models_use_reviewed_pricing_aliases(container, model_id: str) -> None:
+def test_openrouter_kling_models_use_persisted_manual_pricing_profiles(container, model_id: str) -> None:
     profile = container.model_registry.get(model_id, "openrouter")
     assert profile is not None
-    assert profile.source == "reviewed_transport_alias"
+    assert profile.source == "MANUAL_PRIOR"
+    assert profile.adapter == "kling"
     estimate = container.credit_pricing.estimate(
         provider="openrouter",
         model=model_id,
@@ -1308,6 +1319,15 @@ async def test_fact_lock_runtime_uses_openrouter_when_runapi_changes_facts(conta
         )
     assert refinement is not None
     assert refinement.selected_action == "fallback"
+    with container.database.session() as session:
+        benchmark = session.scalar(select(RunAPIBenchmark))
+    assert benchmark is not None
+    assert benchmark.task_id == issued_task.task_id
+    assert benchmark.task_type == EdgeTaskRole.PROMPT_DRAFT_REFINEMENT.value
+    assert benchmark.fact_lock_pass is False
+    assert benchmark.fallback_required is True
+    assert benchmark.latency_ms >= 0
+    assert benchmark.actual_cost_usd is None
 
 
 @pytest.mark.parametrize(

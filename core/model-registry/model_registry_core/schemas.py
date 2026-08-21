@@ -57,6 +57,57 @@ ROLE_CAPABILITY: dict[ModelRole, str] = {
 }
 
 
+class ModelCapabilityProfileConfig(BaseModel):
+    """Version-controlled bootstrap for the persisted authoritative profile."""
+
+    model_config = ConfigDict(frozen=True)
+
+    profile_version: str = "1"
+    confidence_level: Literal["initial", "experimental", "validated"] = "initial"
+    supported_operations: list[str] = Field(min_length=1)
+    supports_t2v: bool = False
+    supports_i2v: bool = False
+    supports_v2v: bool = False
+    supports_reference_image: bool = False
+    supports_multi_reference: bool = False
+    supports_start_frame: bool = False
+    supports_end_frame: bool = False
+    supports_start_end: bool = False
+    supports_character_reference: bool = False
+    supports_video_extension: bool = False
+    supports_camera_instruction: bool = False
+    supports_audio: bool = False
+    supports_text_rendering: bool = False
+    max_reference_images: int = Field(default=0, ge=0)
+    min_duration: float | None = Field(default=None, gt=0)
+    max_duration: float | None = Field(default=None, gt=0)
+    supported_aspect_ratios: list[str] = Field(default_factory=list)
+    supported_resolutions: list[str] = Field(default_factory=list)
+    physics_prior: float = Field(default=0.5, ge=0, le=1)
+    identity_prior: float = Field(default=0.5, ge=0, le=1)
+    camera_prior: float = Field(default=0.5, ge=0, le=1)
+    render_prior: float = Field(default=0.5, ge=0, le=1)
+    action_prior: float = Field(default=0.5, ge=0, le=1)
+    dialogue_prior: float = Field(default=0.5, ge=0, le=1)
+    text_render_prior: float = Field(default=0.5, ge=0, le=1)
+    provider_metadata: dict[str, object] = Field(default_factory=dict)
+    source: Literal["MANUAL_PRIOR"] = "MANUAL_PRIOR"
+
+    @model_validator(mode="after")
+    def validate_profile(self) -> ModelCapabilityProfileConfig:
+        if len(self.supported_operations) != len(set(self.supported_operations)):
+            raise ValueError("supported operations must be unique")
+        if self.supports_multi_reference and self.max_reference_images < 2:
+            raise ValueError("multi-reference support requires max_reference_images >= 2")
+        if self.supports_reference_image and self.max_reference_images < 1:
+            raise ValueError("reference-image support requires max_reference_images >= 1")
+        if self.supports_start_end and not (self.supports_start_frame and self.supports_end_frame):
+            raise ValueError("start/end support requires both frame capabilities")
+        if self.min_duration and self.max_duration and self.min_duration > self.max_duration:
+            raise ValueError("minimum duration cannot exceed maximum duration")
+        return self
+
+
 class ModelDefinitionConfig(BaseModel):
     """Version-controlled defaults for a persisted model definition."""
 
@@ -77,6 +128,7 @@ class ModelDefinitionConfig(BaseModel):
     max_duration: float | None = Field(default=None, gt=0)
     supported_aspect_ratios: list[str] = Field(default_factory=list)
     metadata_json: dict[str, object] = Field(default_factory=dict)
+    capability_profile: ModelCapabilityProfileConfig | None = None
 
     @model_validator(mode="after")
     def validate_hard_policy(self) -> ModelDefinitionConfig:
@@ -96,7 +148,29 @@ class ModelDefinitionConfig(BaseModel):
         if incompatible:
             values = ", ".join(item.value for item in incompatible)
             raise ValueError(f"provider trust cannot allow criticalities: {values}")
+        if self.capability_profile is not None:
+            if set(self.capability_profile.supported_operations) != set(self.capabilities):
+                raise ValueError("capability profile operations must match the legacy bootstrap mirror")
+            if self.max_duration != self.capability_profile.max_duration:
+                raise ValueError("model max_duration must match its capability profile")
+            if self.supported_aspect_ratios != self.capability_profile.supported_aspect_ratios:
+                raise ValueError("model aspect ratios must match its capability profile")
         return self
+
+    @property
+    def resolved_capability_profile(self) -> ModelCapabilityProfileConfig:
+        if self.capability_profile is not None:
+            return self.capability_profile
+        metadata = dict(self.metadata_json)
+        metadata.setdefault("adapter", self.provider)
+        return ModelCapabilityProfileConfig(
+            supported_operations=list(self.capabilities),
+            supports_t2v=self.modality == "video" and "video_generation" in self.capabilities,
+            supports_camera_instruction=self.modality == "video",
+            max_duration=self.max_duration,
+            supported_aspect_ratios=list(self.supported_aspect_ratios),
+            provider_metadata=metadata,
+        )
 
 
 class ModelRoleBindingConfig(BaseModel):
@@ -141,37 +215,47 @@ class ModelInfrastructureConfig(BaseModel):
 class ModelCapabilityProfile(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    model_definition_id: str
+    logical_name: str
     model_id: str
     provider: str
+    modality: str
     version: str
     status: Literal["active", "disabled", "experimental"] = "active"
     confidence_level: Literal["initial", "experimental", "validated"] = "initial"
+    supported_operations: list[str] = Field(default_factory=list)
+    supports_t2v: bool = False
+    supports_i2v: bool = False
+    supports_v2v: bool = False
+    supports_reference_image: bool = False
+    supports_multi_reference: bool = False
     max_duration: float | None = None
+    min_duration: float | None = None
+    supported_aspect_ratios: list[str] = Field(default_factory=list)
     supported_resolutions: list[str] = Field(default_factory=list)
-    supports_text_to_video: bool = True
-    supports_image_to_video: bool = False
     supports_start_frame: bool = False
     supports_end_frame: bool = False
-    supports_reference_images: bool = False
-    supports_reference_video: bool = False
-    supports_native_audio: bool = False
-    supports_dialogue: bool = False
-    supports_chinese_dialogue: bool = False
+    supports_start_end: bool = False
+    supports_character_reference: bool = False
+    supports_video_extension: bool = False
+    supports_camera_instruction: bool = False
+    supports_audio: bool = False
     supports_text_rendering: bool = False
-    capability_prior: dict[str, float] = Field(default_factory=dict)
-    failure_priors: dict[str, float] = Field(default_factory=dict)
-    cost: dict[str, float] = Field(default_factory=dict)
-    latency: dict[str, float] = Field(default_factory=dict)
-    adapter: str
+    max_reference_images: int = 0
+    physics_prior: float = Field(default=0.5, ge=0, le=1)
+    identity_prior: float = Field(default=0.5, ge=0, le=1)
+    camera_prior: float = Field(default=0.5, ge=0, le=1)
+    render_prior: float = Field(default=0.5, ge=0, le=1)
+    action_prior: float = Field(default=0.5, ge=0, le=1)
+    dialogue_prior: float = Field(default=0.5, ge=0, le=1)
+    text_render_prior: float = Field(default=0.5, ge=0, le=1)
+    provider_metadata: dict[str, object] = Field(default_factory=dict)
     provider_trust_level: ProviderTrustLevel = ProviderTrustLevel.PRODUCTION
     criticality_allowed: list[AssetCriticality] = Field(default_factory=lambda: list(AssetCriticality))
-    source: str = "configuration"
+    source: str = "MANUAL_PRIOR"
 
     @model_validator(mode="after")
     def validate_scores(self) -> ModelCapabilityProfile:
-        values = [*self.capability_prior.values(), *self.failure_priors.values()]
-        if any(value < 0 or value > 1 for value in values):
-            raise ValueError("capability and failure prior scores must be in the 0.0-1.0 range")
         if any(
             not provider_can_handle(self.provider_trust_level, criticality)
             for criticality in self.criticality_allowed
@@ -183,16 +267,86 @@ class ModelCapabilityProfile(BaseModel):
     def key(self) -> str:
         return f"{self.provider}:{self.model_id}"
 
+    @property
+    def supports_text_to_video(self) -> bool:
+        return self.supports_t2v
+
+    @property
+    def supports_image_to_video(self) -> bool:
+        return self.supports_i2v
+
+    @property
+    def supports_reference_images(self) -> bool:
+        return self.supports_reference_image
+
+    @property
+    def supports_reference_video(self) -> bool:
+        return self.supports_v2v
+
+    @property
+    def supports_native_audio(self) -> bool:
+        return self.supports_audio
+
+    @property
+    def supports_dialogue(self) -> bool:
+        return self.supports_audio and self.dialogue_prior > 0
+
+    @property
+    def supports_chinese_dialogue(self) -> bool:
+        return self.supports_dialogue
+
+    @property
+    def adapter(self) -> str:
+        return str(self.provider_metadata.get("adapter") or self.provider)
+
+    @property
+    def failure_priors(self) -> dict[str, float]:
+        value = self.provider_metadata.get("failure_priors", {})
+        return {str(key): float(score) for key, score in value.items()} if isinstance(value, dict) else {}
+
+    @property
+    def cost(self) -> dict[str, float]:
+        value = self.provider_metadata.get("cost", {})
+        return {str(key): float(score) for key, score in value.items()} if isinstance(value, dict) else {}
+
+    @property
+    def latency(self) -> dict[str, float]:
+        value = self.provider_metadata.get("latency", {})
+        return {str(key): float(score) for key, score in value.items()} if isinstance(value, dict) else {}
+
+    @property
+    def capability_prior(self) -> dict[str, float]:
+        return {
+            "visual_quality": self.render_prior,
+            "character_consistency": self.identity_prior,
+            "scene_consistency": self.render_prior,
+            "complex_motion": self.action_prior,
+            "physical_plausibility": self.physics_prior,
+            "camera_control": self.camera_prior,
+            "multi_character": self.identity_prior,
+            "dialogue": self.dialogue_prior,
+            "chinese_dialogue": self.dialogue_prior,
+            "text_rendering": self.text_render_prior,
+            "product_fidelity": self.render_prior,
+            "long_form": self.action_prior,
+            "lighting": self.render_prior,
+            "material": self.render_prior,
+            "lip_sync": self.dialogue_prior,
+        }
+
 
 class ShotRequirements(BaseModel):
     duration: float = Field(default=8, ge=1, le=60)
     resolution: str = "720p"
+    aspect_ratio: str = "9:16"
+    reference_image_count: int = Field(default=0, ge=0)
     characters: int = Field(default=1, ge=0, le=20)
     profile: Literal["generic", "action", "commercial_hero", "dialogue"] = "generic"
     requires_image_to_video: bool = False
     requires_start_frame: bool = False
     requires_end_frame: bool = False
     requires_reference_images: bool = False
+    requires_multi_reference: bool = False
     requires_reference_video: bool = False
     requires_native_audio: bool = False
     requires_dialogue: bool = False

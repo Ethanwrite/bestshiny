@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 from model_registry_core import ModelRole, ResolvedModel
 from platform_database import Database
-from production_domain.models import DecisionRecord, RetryCategory
+from production_domain.models import (
+    DecisionRecord,
+    ModelExecutionRecord,
+    RetryCategory,
+    RunAPIBenchmark,
+)
 from provider_sdk import (
     AssetCriticality,
     ChatCapability,
@@ -26,7 +33,9 @@ from provider_sdk import (
     ProviderTrustViolation,
     assert_provider_can_handle,
 )
+from sqlalchemy import select
 
+from .canary import CanaryReservation, LiveCanaryDenied, LiveCanaryPermitService
 from .service import WorkspaceModelResolver
 
 
@@ -36,6 +45,7 @@ class ModelRoleExecution:
     capability: ProviderCapability
     response: dict[str, Any]
     decision_record_id: str
+    execution_record_id: str
 
 
 def capability_for_model_role(role: ModelRole | str) -> ProviderCapability:
@@ -62,6 +72,7 @@ class ModelRoleRuntime:
         providers: ProviderCapabilityCatalog,
         *,
         provider_mode: ProviderMode | str = ProviderMode.MOCK,
+        live_canary: LiveCanaryPermitService | None = None,
     ):
         self.database = database
         self.resolver = resolver
@@ -70,6 +81,7 @@ class ModelRoleRuntime:
             self.provider_mode = ProviderMode(provider_mode)
         except ValueError as exc:
             raise ValueError("provider_mode must be mock, recorded, or live") from exc
+        self.live_canary = live_canary
 
     def resolve(
         self,
@@ -145,6 +157,13 @@ class ModelRoleRuntime:
         )
         if capability is not ProviderCapability.CHAT or not isinstance(implementation, ChatCapability):
             raise TypeError(f"model role {requested_role.value} is not executable as chat")
+        request_hash = _execution_request_hash(
+            requested_role,
+            {"messages": messages, "parameters": parameters or {}},
+        )
+        started = time.perf_counter()
+        canary: CanaryReservation | None = None
+        canary_boundary_crossed = False
         try:
             self._revalidate_execution_boundary(
                 project_id,
@@ -152,12 +171,24 @@ class ModelRoleRuntime:
                 criticality=criticality,
                 require_live=require_live,
             )
+            canary = self._reserve_live_canary(
+                selected,
+                estimated_cost=_estimated_cost(parameters or {}),
+            )
+            if canary is not None:
+                self.live_canary.mark_uncertain(
+                    canary.usage_id,
+                    evidence_reference=f"model-execution-boundary:{request_hash}",
+                )
+                canary_boundary_crossed = True
             response = await implementation.chat(
                 model=selected.provider_model_id,
                 messages=messages,
                 parameters=parameters,
             )
+            self._settle_live_canary(canary, response=response, request_hash=request_hash)
         except Exception as exc:
+            self._release_pre_boundary_canary(canary, crossed=canary_boundary_crossed)
             self._record(
                 project_id=project_id,
                 selected=selected,
@@ -166,9 +197,14 @@ class ModelRoleRuntime:
                 input_count=len(messages),
                 outcome="FAILED",
                 reason_codes=["ROLE_RESOLVED", "CAPABILITY_CONFIGURED", type(exc).__name__],
+                request_hash=request_hash,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                parameters=parameters,
+                error_code=getattr(exc, "code", type(exc).__name__),
+                canary_usage_id=canary.usage_id if canary is not None else None,
             )
             raise
-        decision_id = self._record(
+        decision_id, execution_id = self._record(
             project_id=project_id,
             selected=selected,
             capability=capability,
@@ -176,8 +212,13 @@ class ModelRoleRuntime:
             input_count=len(messages),
             outcome="SUCCEEDED",
             reason_codes=["ROLE_RESOLVED", "CAPABILITY_CONFIGURED", "CALL_SUCCEEDED"],
+            request_hash=request_hash,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            parameters=parameters,
+            response=response,
+            canary_usage_id=canary.usage_id if canary is not None else None,
         )
-        return ModelRoleExecution(selected, capability, response, decision_id)
+        return ModelRoleExecution(selected, capability, response, decision_id, execution_id)
 
     async def execute_embeddings(
         self,
@@ -202,6 +243,13 @@ class ModelRoleRuntime:
         ):
             raise TypeError(f"model role {requested_role.value} is not executable as embeddings")
         input_count = len(inputs) if isinstance(inputs, list) else 1
+        request_hash = _execution_request_hash(
+            requested_role,
+            {"inputs": inputs, "parameters": parameters or {}},
+        )
+        started = time.perf_counter()
+        canary: CanaryReservation | None = None
+        canary_boundary_crossed = False
         try:
             self._revalidate_execution_boundary(
                 project_id,
@@ -209,12 +257,24 @@ class ModelRoleRuntime:
                 criticality=criticality,
                 require_live=require_live,
             )
+            canary = self._reserve_live_canary(
+                selected,
+                estimated_cost=_estimated_cost(parameters or {}),
+            )
+            if canary is not None:
+                self.live_canary.mark_uncertain(
+                    canary.usage_id,
+                    evidence_reference=f"model-execution-boundary:{request_hash}",
+                )
+                canary_boundary_crossed = True
             response = await implementation.create_embeddings(
                 model=selected.provider_model_id,
                 inputs=inputs,
                 parameters=parameters,
             )
+            self._settle_live_canary(canary, response=response, request_hash=request_hash)
         except Exception as exc:
+            self._release_pre_boundary_canary(canary, crossed=canary_boundary_crossed)
             self._record(
                 project_id=project_id,
                 selected=selected,
@@ -223,9 +283,14 @@ class ModelRoleRuntime:
                 input_count=input_count,
                 outcome="FAILED",
                 reason_codes=["ROLE_RESOLVED", "CAPABILITY_CONFIGURED", type(exc).__name__],
+                request_hash=request_hash,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                parameters=parameters,
+                error_code=getattr(exc, "code", type(exc).__name__),
+                canary_usage_id=canary.usage_id if canary is not None else None,
             )
             raise
-        decision_id = self._record(
+        decision_id, execution_id = self._record(
             project_id=project_id,
             selected=selected,
             capability=capability,
@@ -233,8 +298,13 @@ class ModelRoleRuntime:
             input_count=input_count,
             outcome="SUCCEEDED",
             reason_codes=["ROLE_RESOLVED", "CAPABILITY_CONFIGURED", "CALL_SUCCEEDED"],
+            request_hash=request_hash,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            parameters=parameters,
+            response=response,
+            canary_usage_id=canary.usage_id if canary is not None else None,
         )
-        return ModelRoleExecution(selected, capability, response, decision_id)
+        return ModelRoleExecution(selected, capability, response, decision_id, execution_id)
 
     async def refine_prompt(
         self,
@@ -276,9 +346,11 @@ class ModelRoleRuntime:
             asset_criticality=AssetCriticality.EDGE,
             estimated_cost_usd=server_estimate,
         )
+        primary_execution: ModelRoleExecution | None = None
 
         async def generate_draft(payload: dict[str, Any]) -> dict[str, Any]:
-            execution = await self.execute_chat(
+            nonlocal primary_execution
+            primary_execution = await self.execute_chat(
                 project_id,
                 ModelRole.PROMPT_REFINER_LOW_COST,
                 messages=_refinement_messages(payload),
@@ -289,7 +361,7 @@ class ModelRoleRuntime:
                 },
                 require_live=require_live,
             )
-            return _chat_json(execution.response)
+            return _chat_json(primary_execution.response)
 
         async def generate_fallback(prompt: str, locks: FactLockSet) -> dict[str, Any]:
             payload = {
@@ -320,20 +392,37 @@ class ModelRoleRuntime:
             async def fallback_as_primary(_payload: dict[str, Any]) -> dict[str, Any]:
                 return await generate_fallback(original_prompt, fact_locks)
 
-            result = await FactLockPromptRefiner(fallback_as_primary).refine(
-                original_prompt=original_prompt,
-                fact_locks=fact_locks,
-            )
-            result = replace(
-                result,
-                source="fallback",
-                reason_codes=("PRIMARY_UNAVAILABLE", *result.reason_codes),
-            )
+            try:
+                result = await FactLockPromptRefiner(fallback_as_primary).refine(
+                    original_prompt=original_prompt,
+                    fact_locks=fact_locks,
+                )
+                result = replace(
+                    result,
+                    source="fallback",
+                    reason_codes=("PRIMARY_UNAVAILABLE", *result.reason_codes),
+                )
+            except (LookupError, ProviderError, ProviderTrustViolation):
+                # A model outage must never make the deterministic product
+                # prompt path unavailable.  Keeping the already-approved input
+                # is the only safe fallback; it is explicitly recorded as an
+                # unoptimized candidate, not as a successful model execution.
+                result = PromptRefinementResult(
+                    original_prompt=original_prompt,
+                    optimized_candidate=original_prompt,
+                    accepted=False,
+                    source="local_safe_fallback",
+                    reason_codes=("PRIMARY_UNAVAILABLE", "FALLBACK_UNAVAILABLE"),
+                    diff="",
+                )
 
         self._record_refinement(
             project_id=project_id,
             result=result,
             primary_unavailable=primary_unavailable,
+            task_id=server_task_id,
+            original_prompt=original_prompt,
+            primary_execution=primary_execution,
         )
         return result
 
@@ -347,8 +436,49 @@ class ModelRoleRuntime:
         input_count: int,
         outcome: str,
         reason_codes: list[str],
-    ) -> str:
+        request_hash: str,
+        latency_ms: float,
+        parameters: dict[str, Any] | None,
+        response: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        canary_usage_id: str | None = None,
+    ) -> tuple[str, str]:
+        usage = response.get("usage") if response and isinstance(response.get("usage"), dict) else {}
+        reported_actual_cost = _actual_cost(response or {})
+        actual_cost = reported_actual_cost if self.provider_mode is ProviderMode.LIVE else None
+        estimated_cost = _estimated_cost(parameters or {})
+        if actual_cost is not None:
+            cost_source = "VERIFIED_PROVIDER"
+        elif estimated_cost is not None:
+            cost_source = "ESTIMATED"
+        else:
+            cost_source = "UNKNOWN"
         with self.database.session() as session:
+            execution = ModelExecutionRecord(
+                project_id=project_id,
+                role=selected.role.value,
+                model_definition_id=selected.definition_id,
+                provider=selected.provider,
+                provider_model_id=selected.provider_model_id,
+                request_hash=request_hash,
+                latency_ms=max(0.0, latency_ms),
+                token_usage_json=_json_safe(usage),
+                estimated_cost_usd=estimated_cost,
+                actual_cost_usd=actual_cost,
+                cost_source=cost_source,
+                status=outcome,
+                error_code=error_code,
+                metadata_json={
+                    "capability": capability.value,
+                    "asset_criticality": criticality.value,
+                    "input_count": input_count,
+                    "live_canary_usage_id": canary_usage_id,
+                    "provider_mode": self.provider_mode.value,
+                    "reported_actual_cost_ignored": (
+                        reported_actual_cost is not None and self.provider_mode is not ProviderMode.LIVE
+                    ),
+                },
+            )
             record = DecisionRecord(
                 project_id=project_id,
                 decision_type="MODEL_ROLE_EXECUTION",
@@ -359,15 +489,62 @@ class ModelRoleRuntime:
                     "capability": capability.value,
                     "input_count": input_count,
                     "outcome": outcome,
+                    "live_canary_usage_id": canary_usage_id,
                 },
                 selected_action=(f"{selected.provider}:{selected.provider_model_id}:{capability.value}"),
                 reason_codes=reason_codes,
                 model_version=selected.logical_name,
                 policy_version=self.version,
             )
-            session.add(record)
+            session.add_all([execution, record])
             session.flush()
-            return record.id
+            return record.id, execution.id
+
+    def _reserve_live_canary(
+        self,
+        selected: ResolvedModel,
+        *,
+        estimated_cost: Decimal | None,
+    ) -> CanaryReservation | None:
+        if self.provider_mode is not ProviderMode.LIVE:
+            return None
+        if self.live_canary is None:
+            raise LiveCanaryDenied("live model execution requires a durable LiveCanaryPermit")
+        return self.live_canary.reserve_matching(
+            provider=selected.provider,
+            model=selected.provider_model_id,
+            estimated_cost_usd=estimated_cost,
+            idempotency_key=f"model-role:{uuid.uuid4().hex}",
+        )
+
+    def _settle_live_canary(
+        self,
+        reservation: CanaryReservation | None,
+        *,
+        response: dict[str, Any],
+        request_hash: str,
+    ) -> None:
+        if reservation is None:
+            return
+        if self.live_canary is None:  # pragma: no cover - constructor invariant.
+            raise RuntimeError("live canary service disappeared")
+        actual = _actual_cost(response)
+        if actual is not None:
+            self.live_canary.settle(
+                reservation.usage_id,
+                actual_cost_usd=actual,
+                evidence_reference=f"model-execution:{request_hash}",
+            )
+
+    def _release_pre_boundary_canary(
+        self,
+        reservation: CanaryReservation | None,
+        *,
+        crossed: bool,
+    ) -> None:
+        if reservation is None or crossed or self.live_canary is None:
+            return
+        self.live_canary.release(reservation.usage_id)
 
     def _record_refinement(
         self,
@@ -375,6 +552,9 @@ class ModelRoleRuntime:
         project_id: str,
         result: PromptRefinementResult,
         primary_unavailable: bool,
+        task_id: str,
+        original_prompt: str,
+        primary_execution: ModelRoleExecution | None,
     ) -> None:
         with self.database.session() as session:
             session.add(
@@ -392,6 +572,86 @@ class ModelRoleRuntime:
                     policy_version="fact-lock-v1",
                 )
             )
+            if primary_execution is not None and primary_execution.resolved_model.provider == "runapi":
+                execution = session.get(
+                    ModelExecutionRecord,
+                    primary_execution.execution_record_id,
+                )
+                existing = session.scalar(select(RunAPIBenchmark).where(RunAPIBenchmark.task_id == task_id))
+                if execution is not None and existing is None:
+                    session.add(
+                        RunAPIBenchmark(
+                            task_id=task_id,
+                            task_type=EdgeTaskRole.PROMPT_DRAFT_REFINEMENT.value,
+                            input_hash=hashlib.sha256(original_prompt.encode("utf-8")).hexdigest(),
+                            output_quality=None,
+                            fact_lock_pass=result.source == "primary" and result.accepted,
+                            fallback_required=result.source != "primary",
+                            latency_ms=execution.latency_ms,
+                            actual_cost_usd=execution.actual_cost_usd,
+                            user_acceptance=None,
+                            metadata_json={
+                                "model_execution_record_id": execution.id,
+                                "provider": execution.provider,
+                                "model": execution.provider_model_id,
+                                "result_source": result.source,
+                                "reason_codes": list(result.reason_codes),
+                                "pricing_version": self.edge_pricing_version,
+                            },
+                        )
+                    )
+
+
+def _json_safe(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _execution_request_hash(role: ModelRole, payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {"role": role.value, "payload": _json_safe(payload)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _money(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+    return parsed.quantize(Decimal("0.000001")) if parsed >= 0 else None
+
+
+def _actual_cost(response: dict[str, Any]) -> Decimal | None:
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    for value in (usage.get("cost"), usage.get("total_cost"), response.get("cost")):
+        parsed = _money(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _estimated_cost(parameters: dict[str, Any]) -> Decimal | None:
+    task = parameters.get("_edge_task")
+    if isinstance(task, EdgeTask):
+        return _money(task.estimated_cost_usd)
+    return _money(parameters.get("estimated_cost_usd"))
 
 
 def _refinement_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -299,6 +299,7 @@ class MediaRegistry:
                 local_path=stored.local_path,
                 public_url=stored.public_url,
                 mime_type=stored.mime_type,
+                size_bytes=stored.size,
                 width=width,
                 height=height,
                 duration=self._video_duration(stored.local_path, stored.mime_type),

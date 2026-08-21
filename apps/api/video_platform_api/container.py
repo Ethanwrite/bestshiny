@@ -12,15 +12,21 @@ from deepseek_provider import DeepSeekProvider
 from director_production import AgentOrchestrator, CandidatePipeline
 from entitlement_core import (
     GenerationAdmissionService,
+    LiveCanaryPermitService,
     ModelRoleRuntime,
     WorkspaceCreditService,
     WorkspaceModelResolver,
 )
 from evaluation_core import GenerationEvaluator, RetryEngine
-from generation_gateway import DirectAPIResourceRegistry, GenerationGateway, ProviderRouter
+from generation_gateway import (
+    DirectAPIResourceRegistry,
+    FlowProjectAllocator,
+    GenerationGateway,
+    ProviderRouter,
+)
 from generation_gateway.retry import RetryPolicy
 from generation_gateway.scheduler import AccountScheduler
-from generation_policy_core import CapabilityResolver, ProviderCapabilityRegistry
+from generation_policy_core import CapabilityResolver
 from google_flow_provider import GoogleFlowProvider
 from grok_provider import GrokProvider
 from image_prompt_core import ImagePromptCorrector
@@ -30,8 +36,8 @@ from memory_core import (
     ContextAssembler,
     ContextBudget,
     LocalTestEmbeddingProvider,
+    ModelRoleEmbeddingProvider,
     MultimodalMemoryEngine,
-    VoyageMultimodalEmbeddingProvider,
 )
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
 from model_registry_core import (
@@ -83,62 +89,6 @@ def _parse_provider_media_hosts(value: str) -> dict[str, tuple[str, ...]]:
     return result
 
 
-def _bind_runtime_video_profile(
-    registry: ModelCapabilityRegistry,
-    provider: str,
-    provider_model_id: str | None,
-) -> None:
-    """Expose an env-resolved model ID without changing its reviewed capability priors."""
-
-    profiles = registry.by_provider(provider)
-    if len(profiles) != 1:
-        raise RuntimeError(f"expected exactly one capability profile for runtime provider {provider}")
-    source = profiles[0]
-    if provider_model_id is None:
-        registry.replace(source.model_copy(update={"status": "disabled"}))
-        return
-    if source.model_id == provider_model_id:
-        return
-    registry.replace(source.model_copy(update={"status": "disabled"}))
-    registry.replace(
-        source.model_copy(
-            update={
-                "model_id": provider_model_id,
-                "version": f"{source.version}+runtime",
-                "source": "runtime_environment_alias",
-            }
-        )
-    )
-
-
-def _bind_provider_model_alias(
-    registry: ModelCapabilityRegistry,
-    *,
-    source_provider: str,
-    source_model_id: str,
-    target_provider: str,
-    target_model_id: str,
-) -> None:
-    """Bind reviewed capability/cost priors to a transport-specific model ID."""
-
-    if registry.get(target_model_id, target_provider) is not None:
-        return
-    source = registry.get(source_model_id, source_provider)
-    if source is None:
-        raise RuntimeError(f"capability alias source is missing: {source_provider}:{source_model_id}")
-    registry.replace(
-        source.model_copy(
-            update={
-                "provider": target_provider,
-                "model_id": target_model_id,
-                "version": f"{source.version}+{target_provider}-alias",
-                "adapter": target_provider,
-                "source": "reviewed_transport_alias",
-            }
-        )
-    )
-
-
 @dataclass
 class Container:
     settings: Settings
@@ -151,6 +101,7 @@ class Container:
     provider_budget: DatabaseProviderBudgetRepository
     direct_api_resources: DirectAPIResourceRegistry
     scheduler: AccountScheduler
+    flow_affinity: FlowProjectAllocator
     continuity: ShotContinuityService
     gateway: GenerationGateway
     credentials: CredentialVault
@@ -160,7 +111,7 @@ class Container:
     narrative: NarrativeCompiler
     characters: CharacterIdentityService
     continuity_decision: ContinuityDecisionEngine
-    capabilities: ProviderCapabilityRegistry
+    capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
     qa: QAPipeline
     cost: CostEngine
@@ -171,6 +122,7 @@ class Container:
     model_infrastructure: ModelInfrastructureService
     workspace_models: WorkspaceModelResolver
     model_roles: ModelRoleRuntime
+    live_canary: LiveCanaryPermitService
     generation_admission: GenerationAdmissionService
     workspace_credits: WorkspaceCreditService
     video_router: VideoModelRouter
@@ -235,7 +187,16 @@ def build_container(settings: Settings | None = None) -> Container:
     provider_budget = DatabaseProviderBudgetRepository(database)
     provider_budget.ensure("runapi", settings.runapi_budget_usd)
     direct_api_resources = DirectAPIResourceRegistry(database)
-    providers = ProviderRouter()
+    model_infrastructure = ModelInfrastructureService(
+        database,
+        settings.model_infrastructure_config,
+    )
+    default_sync = model_infrastructure.ensure_defaults()
+    model_registry = ModelCapabilityRegistry(database)
+    providers = ProviderRouter(
+        model_registry,
+        allow_test_target_registration=settings.deployment_environment == "test",
+    )
     google_flow = GoogleFlowProvider(runtime, settings, database)
     seedance = SeedanceProvider(
         api_key=settings.ark_api_key,
@@ -328,19 +289,15 @@ def build_container(settings: Settings | None = None) -> Container:
         },
     )
     provider_capabilities.register("deepseek", deepseek, {ProviderCapability.CHAT.value})
-    model_registry = ModelCapabilityRegistry(settings.model_config_root)
-    model_infrastructure = ModelInfrastructureService(
-        database,
-        settings.model_infrastructure_config,
-    )
-    default_sync = model_infrastructure.ensure_defaults()
     newly_created_models = set(default_sync.model_names_created)
     workspace_models = WorkspaceModelResolver(database, model_infrastructure)
+    live_canary = LiveCanaryPermitService(database)
     model_roles = ModelRoleRuntime(
         database,
         workspace_models,
         provider_capabilities,
         provider_mode=settings.provider_mode,
+        live_canary=live_canary,
     )
     live_gate_ready = (
         settings.provider_mode == "live"
@@ -358,17 +315,6 @@ def build_container(settings: Settings | None = None) -> Container:
         if definition.modality == "video":
             runtime_video_routes.append(
                 (definition.provider, definition.provider_model_id, definition.enabled)
-            )
-        if definition.logical_name in {
-            "kling-3-standard-openrouter",
-            "kling-3-pro-openrouter",
-        }:
-            _bind_provider_model_alias(
-                model_registry,
-                source_provider="kling",
-                source_model_id="kling-3.0",
-                target_provider=definition.provider,
-                target_model_id=definition.provider_model_id,
             )
 
     doubao_default = defaults_by_name["doubao-free-reasoner"]
@@ -398,11 +344,6 @@ def build_container(settings: Settings | None = None) -> Container:
     runtime_video_routes.append(
         (seedance_default.provider, seedance_runtime.provider_model_id, seedance_available)
     )
-    _bind_runtime_video_profile(
-        model_registry,
-        seedance_default.provider,
-        seedance_runtime.provider_model_id if seedance_available else None,
-    )
 
     wan_default = defaults_by_name["wan-2.7-official"]
     wan_runtime = model_infrastructure.runtime_model(wan_default.logical_name)
@@ -417,14 +358,8 @@ def build_container(settings: Settings | None = None) -> Container:
         wan_runtime = model_infrastructure.runtime_model(wan_default.logical_name)
     wan_available = wan_runtime.enabled and wan.configured
     runtime_video_routes.append((wan_default.provider, wan_runtime.provider_model_id, wan_available))
-    _bind_runtime_video_profile(
-        model_registry,
-        wan_default.provider,
-        wan_runtime.provider_model_id if wan_available else None,
-    )
 
     runapi_default = defaults_by_name["runapi-prompt-refiner-edge"]
-    runapi_runtime = model_infrastructure.runtime_model(runapi_default.logical_name)
     if runapi_default.logical_name in newly_created_models and settings.runapi_model_id.strip():
         runapi_ready = bool(settings.runapi_api_key.strip() and settings.runapi_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -433,10 +368,14 @@ def build_container(settings: Settings | None = None) -> Container:
             enabled=runapi_ready,
             live_enabled=bool(runapi_ready and live_gate_ready and settings.allow_runapi_edge_calls),
         )
-        runapi_runtime = model_infrastructure.runtime_model(runapi_default.logical_name)
 
     for profile in model_registry.all(include_disabled=True):
-        if profile.provider in {"openrouter", "runapi", "seedance", "wan"}:
+        if profile.modality != "video" or profile.provider in {
+            "openrouter",
+            "runapi",
+            "seedance",
+            "wan",
+        }:
             continue
         providers.register_model(
             profile.provider,
@@ -453,10 +392,6 @@ def build_container(settings: Settings | None = None) -> Container:
                 available=True,
             )
     wan_models = {wan_runtime.provider_model_id} if wan_available else set()
-    if runapi_runtime.enabled and runapi.configured:
-        providers.register_model("runapi", runapi_runtime.provider_model_id, "image")
-        providers.register_model("runapi", runapi_runtime.provider_model_id, "video")
-
     openrouter_video_models = {
         provider_model_id
         for provider_name, provider_model_id, enabled in runtime_video_routes
@@ -480,12 +415,6 @@ def build_container(settings: Settings | None = None) -> Container:
             supported_models=wan_models,
             capabilities={"video"},
         )
-    if runapi.configured and runapi_runtime.enabled:
-        direct_api_resources.ensure_provider(
-            "runapi",
-            supported_models={runapi_runtime.provider_model_id},
-            capabilities={"image", "video"},
-        )
     # Flow currently exposes one image model plus a legacy video alias. Both are
     # registered explicitly so arbitrary names never reach a provider transport.
     flow_image_runtime = model_infrastructure.runtime_model("flow-narwhal-image-internal")
@@ -504,6 +433,7 @@ def build_container(settings: Settings | None = None) -> Container:
         available=bool(flow_video_runtime.enabled and flow_profile and flow_profile.status != "disabled"),
     )
     scheduler = AccountScheduler(database)
+    flow_affinity = FlowProjectAllocator(database, scheduler)
     continuity = ShotContinuityService(database, media)
     workspace_credits = WorkspaceCreditService()
     gateway = GenerationGateway(
@@ -518,6 +448,8 @@ def build_container(settings: Settings | None = None) -> Container:
         workspace_credits=workspace_credits,
         model_infrastructure=model_infrastructure,
         provider_mode=settings.provider_mode,
+        flow_affinity=flow_affinity,
+        live_canary=live_canary,
     )
     credentials = CredentialVault(
         settings.credential_encryption_key,
@@ -529,8 +461,8 @@ def build_container(settings: Settings | None = None) -> Container:
     narrative = NarrativeCompiler(database)
     characters = CharacterIdentityService(database)
     continuity_decision = ContinuityDecisionEngine(database)
-    capabilities = ProviderCapabilityRegistry()
-    capability_resolver = CapabilityResolver(database, capabilities)
+    capabilities = model_registry
+    capability_resolver = CapabilityResolver(database, model_registry)
     qa = QAPipeline(database)
     cost = CostEngine(database)
     prompts = PromptCompilerService(database, skills)
@@ -550,19 +482,20 @@ def build_container(settings: Settings | None = None) -> Container:
             voyage_memory=settings.feature_voyage_memory,
             auto_evaluation=settings.feature_auto_evaluation,
             adaptive_router=settings.feature_adaptive_router,
-            wan3=settings.feature_wan3,
             auto_retry=settings.feature_auto_retry,
         ),
     )
+    # Product/recorded embedding calls resolve the project-scoped
+    # MULTIMODAL_EMBEDDING role.  Mock development keeps a deterministic local
+    # vectorizer so ordinary tests and offline generation never need a fixture or
+    # network.  A Voyage key is therefore not consumed directly by business code.
     embeddings = (
-        VoyageMultimodalEmbeddingProvider(
-            settings.voyage_api_key,
-            model=settings.voyage_multimodal_model,
+        LocalTestEmbeddingProvider(settings.memory_embedding_dimension)
+        if settings.provider_mode == "mock"
+        else ModelRoleEmbeddingProvider(
+            model_roles,
             dimension=settings.memory_embedding_dimension,
-            transport_settings=live_provider_settings,
         )
-        if settings.voyage_api_key
-        else LocalTestEmbeddingProvider(settings.memory_embedding_dimension)
     )
     # The engine remains callable for explicit indexing/search endpoints; product
     # pipelines gate automatic retrieval per project through FeatureFlagService.
@@ -619,6 +552,7 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_budget=provider_budget,
         direct_api_resources=direct_api_resources,
         scheduler=scheduler,
+        flow_affinity=flow_affinity,
         continuity=continuity,
         gateway=gateway,
         credentials=credentials,
@@ -639,6 +573,7 @@ def build_container(settings: Settings | None = None) -> Container:
         model_infrastructure=model_infrastructure,
         workspace_models=workspace_models,
         model_roles=model_roles,
+        live_canary=live_canary,
         generation_admission=generation_admission,
         workspace_credits=workspace_credits,
         video_router=video_router,

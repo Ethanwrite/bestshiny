@@ -1,3 +1,9 @@
+from .quota import (
+    StorageQuotaReservation,
+    StorageReservationConflict,
+    WorkspaceStorageQuota,
+    WorkspaceStorageQuotaExceeded,
+)
 from .registry import (
     MediaRegistry,
     ProviderMediaReconciliationConflict,
@@ -16,4 +22,8 @@ __all__ = [
     "ProviderMediaUploadInProgress",
     "ProviderMediaValidationFailed",
     "RemoteMediaSecurityError",
+    "StorageQuotaReservation",
+    "StorageReservationConflict",
+    "WorkspaceStorageQuota",
+    "WorkspaceStorageQuotaExceeded",
 ]

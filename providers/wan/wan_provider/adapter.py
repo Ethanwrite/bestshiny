@@ -9,6 +9,7 @@ from provider_sdk import (
     ProviderError,
     ProviderHealth,
     ProviderJob,
+    ProviderPollIdentity,
     ProviderSubmission,
     ProviderTrustLevel,
 )
@@ -190,8 +191,9 @@ class WanProvider(GenerationProvider, ChatCapability):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> ProviderJob:
-        del account_id, worker_id
+        del account_id, worker_id, poll_identity
         if generation_type != "video":
             raise _invalid("Wan polling only supports video tasks")
         data = await self.video_client.request("GET", f"/tasks/{quote(provider_job_id, safe='')}")

@@ -63,7 +63,7 @@ def test_grok_adapter_preserves_explicitly_approved_camera_gaze():
 
 
 def test_adapter_keeps_assets_out_of_opaque_prompt_only_contract():
-    result = VideoAdapterRegistry().get("wan").compile("wan-3.0", AdapterInput(shot=SHOT, context=CONTEXT))
+    result = VideoAdapterRegistry().get("wan").compile("wan-2.7", AdapterInput(shot=SHOT, context=CONTEXT))
     assert result.asset_bindings == ["lin:v1", "asset-front", "asset-profile"]
     assert result.payload["first_frame"] == "frame-01"
     assert result.payload["last_frame"] == "frame-02"

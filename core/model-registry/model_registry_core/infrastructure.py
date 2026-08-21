@@ -8,7 +8,13 @@ from typing import Any
 
 from platform_database import Database
 from platform_shared import affected_rows
-from production_domain.models import ModelDefinition, ModelRoleBinding
+from production_domain.models import (
+    ModelCapabilityProfile as ModelCapabilityProfileRow,
+)
+from production_domain.models import (
+    ModelDefinition,
+    ModelRoleBinding,
+)
 from provider_sdk import AssetCriticality, ProviderTrustLevel, provider_can_handle
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -31,6 +37,7 @@ class ModelDefaultSyncResult:
     models_created: int
     bindings_created: int
     model_names_created: tuple[str, ...] = ()
+    profiles_created: int = 0
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,8 @@ class RuntimeModelState:
     modality: str
     enabled: bool
     live_enabled: bool
+    supported_operations: tuple[str, ...]
+    capability_profile_version: str
 
 
 def load_model_infrastructure_config(path: Path) -> ModelInfrastructureConfig:
@@ -82,7 +91,9 @@ def _stable_binding_id(role: str, plan_tier: str, logical_name: str) -> str:
 
 
 def _insert_if_missing(
-    session: Session, model: type[ModelDefinition] | type[ModelRoleBinding], values: dict[str, Any]
+    session: Session,
+    model: type[ModelDefinition] | type[ModelRoleBinding] | type[ModelCapabilityProfileRow],
+    values: dict[str, Any],
 ) -> int:
     dialect = session.get_bind().dialect.name
     if dialect == "postgresql":
@@ -112,6 +123,7 @@ class ModelInfrastructureService:
     def ensure_defaults(self) -> ModelDefaultSyncResult:
         models_created = 0
         bindings_created = 0
+        profiles_created = 0
         model_names_created: list[str] = []
         with self.database.session() as session:
             by_name = {item.logical_name: item for item in session.scalars(select(ModelDefinition)).all()}
@@ -157,6 +169,26 @@ class ModelInfrastructureService:
                     f"identity: {missing}"
                 )
 
+            existing_profiles = set(
+                session.scalars(select(ModelCapabilityProfileRow.model_definition_id)).all()
+            )
+            for model_config in self.config.models:
+                definition = by_name[model_config.logical_name]
+                if definition.id in existing_profiles:
+                    continue
+                profile = model_config.resolved_capability_profile
+                profiles_created += _insert_if_missing(
+                    session,
+                    ModelCapabilityProfileRow,
+                    {
+                        "model_definition_id": definition.id,
+                        **profile.model_dump(mode="json"),
+                        "supports_image_generation": ("image_generation" in profile.supported_operations),
+                        "supports_video_generation": ("video_generation" in profile.supported_operations),
+                    },
+                )
+                existing_profiles.add(definition.id)
+
             existing_keys = {
                 (item.role, item.plan_tier, item.model_definition_id)
                 for item in session.scalars(select(ModelRoleBinding)).all()
@@ -191,6 +223,7 @@ class ModelInfrastructureService:
             models_created,
             bindings_created,
             tuple(model_names_created),
+            profiles_created,
         )
 
     def configure_runtime_model(
@@ -262,24 +295,33 @@ class ModelInfrastructureService:
         if not normalized_name:
             raise ValueError("logical_name is required")
         with self.database.session() as session:
-            definition = session.scalar(
-                select(ModelDefinition).where(ModelDefinition.logical_name == normalized_name)
-            )
-            if definition is None:
+            pair = session.execute(
+                select(ModelDefinition, ModelCapabilityProfileRow)
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
+                .where(ModelDefinition.logical_name == normalized_name)
+            ).one_or_none()
+            if pair is None:
                 raise LookupError(f"model definition not found: {normalized_name}")
-            return self._runtime_state(definition)
+            return self._runtime_state(*pair)
 
     def runtime_models(self, provider: str) -> list[RuntimeModelState]:
         normalized_provider = provider.strip()
         if not normalized_provider:
             raise ValueError("provider is required")
         with self.database.session() as session:
-            definitions = session.scalars(
-                select(ModelDefinition)
+            rows = session.execute(
+                select(ModelDefinition, ModelCapabilityProfileRow)
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
                 .where(ModelDefinition.provider == normalized_provider)
                 .order_by(ModelDefinition.logical_name)
             ).all()
-            return [self._runtime_state(definition) for definition in definitions]
+            return [self._runtime_state(*row) for row in rows]
 
     def runtime_model_for_target(
         self,
@@ -334,31 +376,50 @@ class ModelInfrastructureService:
         if not normalized_modality:
             raise ValueError("modality is required")
 
-        statement = select(ModelDefinition).where(
-            ModelDefinition.provider == normalized_provider,
-            ModelDefinition.provider_model_id == normalized_model_id,
-            ModelDefinition.modality == normalized_modality,
+        statement = (
+            select(ModelDefinition, ModelCapabilityProfileRow)
+            .join(
+                ModelCapabilityProfileRow,
+                ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+            )
+            .where(
+                ModelDefinition.provider == normalized_provider,
+                ModelDefinition.provider_model_id == normalized_model_id,
+                ModelDefinition.modality == normalized_modality,
+            )
         )
         if for_update:
             statement = statement.with_for_update()
-        definition = session.scalar(statement)
-        if definition is None:
+        pair = session.execute(statement).one_or_none()
+        if pair is None:
             legacy_logical_name = {
                 ("google_flow", "veo", "video"): "flow-veo-3.1-internal",
             }.get((normalized_provider, normalized_model_id, normalized_modality))
             if legacy_logical_name is not None:
-                alias_statement = select(ModelDefinition).where(
-                    ModelDefinition.logical_name == legacy_logical_name,
-                    ModelDefinition.provider == normalized_provider,
-                    ModelDefinition.modality == normalized_modality,
+                alias_statement = (
+                    select(ModelDefinition, ModelCapabilityProfileRow)
+                    .join(
+                        ModelCapabilityProfileRow,
+                        ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                    )
+                    .where(
+                        ModelDefinition.logical_name == legacy_logical_name,
+                        ModelDefinition.provider == normalized_provider,
+                        ModelDefinition.modality == normalized_modality,
+                    )
                 )
                 if for_update:
                     alias_statement = alias_statement.with_for_update()
-                definition = session.scalar(alias_statement)
-        return self._runtime_state(definition) if definition is not None else None
+                pair = session.execute(alias_statement).one_or_none()
+        return self._runtime_state(*pair) if pair is not None else None
 
     @staticmethod
-    def _runtime_state(definition: ModelDefinition) -> RuntimeModelState:
+    def _runtime_state(
+        definition: ModelDefinition,
+        profile: ModelCapabilityProfileRow | None = None,
+    ) -> RuntimeModelState:
+        if profile is None:
+            raise RuntimeError("model definition is missing its authoritative capability profile")
         return RuntimeModelState(
             definition_id=definition.id,
             logical_name=definition.logical_name,
@@ -367,11 +428,14 @@ class ModelInfrastructureService:
             modality=definition.modality,
             enabled=definition.enabled,
             live_enabled=definition.live_enabled,
+            supported_operations=tuple(profile.supported_operations),
+            capability_profile_version=profile.profile_version,
         )
 
     @staticmethod
     def is_compatible(
         definition: ModelDefinition,
+        profile: ModelCapabilityProfileRow,
         role: ModelRole | str,
         criticality: AssetCriticality | str,
         *,
@@ -381,7 +445,7 @@ class ModelInfrastructureService:
         requested_criticality = AssetCriticality(criticality)
         if not definition.enabled or (require_live and not definition.live_enabled):
             return False
-        if ROLE_CAPABILITY[requested_role] not in definition.capabilities:
+        if ROLE_CAPABILITY[requested_role] not in profile.supported_operations:
             return False
         if requested_criticality.value not in definition.criticality_allowed:
             return False
@@ -400,17 +464,26 @@ class ModelInfrastructureService:
     ) -> list[ResolvedModel]:
         requested_role = ModelRole(role)
         requested_plan = plan_tier.strip().upper() or "ALL"
+        # ``ALL`` is the shared paid/unscoped catalogue, not a FREE fallback.
+        # FREE is a billing boundary: if it has no explicit compatible binding,
+        # resolution must stop locally before a paid provider can be selected.
+        # Paid tiers retain the existing ability to inherit generic bindings.
+        eligible_plan_tiers = {requested_plan} if requested_plan == "FREE" else {"ALL", requested_plan}
         with self.database.session() as session:
             rows = session.execute(
-                select(ModelRoleBinding, ModelDefinition)
+                select(ModelRoleBinding, ModelDefinition, ModelCapabilityProfileRow)
                 .join(
                     ModelDefinition,
                     ModelDefinition.id == ModelRoleBinding.model_definition_id,
                 )
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
                 .where(
                     ModelRoleBinding.role == requested_role.value,
                     ModelRoleBinding.enabled.is_(True),
-                    ModelRoleBinding.plan_tier.in_({"ALL", requested_plan}),
+                    ModelRoleBinding.plan_tier.in_(eligible_plan_tiers),
                 )
             ).all()
 
@@ -419,16 +492,17 @@ class ModelInfrastructureService:
             # model is disabled or incompatible; the caller gets no route and
             # can apply its product-level entitlement/fallback policy.
             tier_rows = [
-                pair for pair in rows if pair[0].plan_tier == requested_plan and requested_plan != "ALL"
+                row for row in rows if row[0].plan_tier == requested_plan and requested_plan != "ALL"
             ]
             if tier_rows:
                 rows = tier_rows
 
             compatible = [
-                (binding, definition)
-                for binding, definition in rows
+                (binding, definition, profile)
+                for binding, definition, profile in rows
                 if self.is_compatible(
                     definition,
+                    profile,
                     requested_role,
                     asset_criticality,
                     require_live=require_live,
@@ -455,7 +529,7 @@ class ModelInfrastructureService:
                     binding_kind=ModelBindingKind(binding.binding_kind),
                     priority=binding.priority,
                 )
-                for binding, definition in compatible
+                for binding, definition, _profile in compatible
             ]
 
     def resolve_role(

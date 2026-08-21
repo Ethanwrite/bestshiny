@@ -10,6 +10,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     DDL,
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     false,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -103,6 +105,60 @@ class WorkerStatus(StrEnum):
     BUSY = "BUSY"
     OFFLINE = "OFFLINE"
     NEEDS_USER_ACTION = "NEEDS_USER_ACTION"
+
+
+class ProviderProjectBindingStatus(StrEnum):
+    PROVISIONING = "PROVISIONING"
+    READY = "READY"
+    DEGRADED = "DEGRADED"
+    MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
+    MIGRATING = "MIGRATING"
+    DISABLED = "DISABLED"
+    FAILED = "FAILED"
+
+
+class FlowMigrationStatus(StrEnum):
+    PLANNED = "PLANNED"
+    USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
+    APPROVED = "APPROVED"
+    MIGRATING = "MIGRATING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class FlowMigrationVerificationStatus(StrEnum):
+    PENDING = "PENDING"
+    USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
+    VERIFIED = "VERIFIED"
+    FAILED = "FAILED"
+
+
+class CredentialStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INVALID = "INVALID"
+    ROTATION_REQUIRED = "ROTATION_REQUIRED"
+    REVOKED = "REVOKED"
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+
+
+class TimelineTransitionType(StrEnum):
+    CONTINUOUS = "CONTINUOUS"
+    SCENE_CUT = "SCENE_CUT"
+    TIME_JUMP = "TIME_JUMP"
+    FLASHBACK = "FLASHBACK"
+    FLASH_FORWARD = "FLASH_FORWARD"
+    MONTAGE = "MONTAGE"
+    DREAM = "DREAM"
+    LOCATION_CHANGE = "LOCATION_CHANGE"
+    EXPLICIT_RESET = "EXPLICIT_RESET"
+
+
+class BillingEvidenceSource(StrEnum):
+    VERIFIED_PROVIDER = "VERIFIED_PROVIDER"
+    ESTIMATED = "ESTIMATED"
+    RECONCILED_MANUAL = "RECONCILED_MANUAL"
+    UNKNOWN = "UNKNOWN"
 
 
 class ContinuityMode(StrEnum):
@@ -218,13 +274,29 @@ class AuthSession(Base, TimestampMixin):
 
 class Workspace(Base, TimestampMixin):
     __tablename__ = "workspaces"
-    __table_args__ = (CheckConstraint("credit_balance >= 0", name="ck_workspace_credit_balance"),)
+    __table_args__ = (
+        CheckConstraint("credit_balance >= 0", name="ck_workspace_credit_balance"),
+        CheckConstraint("max_storage_bytes > 0", name="ck_workspace_max_storage_positive"),
+        CheckConstraint("used_storage_bytes >= 0", name="ck_workspace_storage_used_nonnegative"),
+        CheckConstraint("reserved_storage_bytes >= 0", name="ck_workspace_storage_reserved_nonnegative"),
+        CheckConstraint(
+            "used_storage_bytes + reserved_storage_bytes <= max_storage_bytes",
+            name="ck_workspace_storage_capacity",
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
     plan_tier: Mapped[str] = mapped_column(String(40), default="FREE", nullable=False)
     credit_balance: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    max_storage_bytes: Mapped[int] = mapped_column(
+        BigInteger,
+        default=5 * 1024 * 1024 * 1024,
+        nullable=False,
+    )
+    used_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    reserved_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
 class WorkspaceCreditEntry(Base, TimestampMixin):
@@ -428,6 +500,9 @@ class Shot(Base, TimestampMixin):
     continuity_mode: Mapped[str] = mapped_column(
         String(50), default=ContinuityMode.NONE.value, nullable=False
     )
+    downstream_state_stale: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    stale_reason: Mapped[str | None] = mapped_column(String(240))
+    stale_from_shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
     scene: Mapped[Scene] = relationship(back_populates="shots")
 
 
@@ -565,6 +640,7 @@ class MediaAsset(Base, TimestampMixin):
     local_path: Mapped[str | None] = mapped_column(String(1000))
     public_url: Mapped[str | None] = mapped_column(String(2000))
     mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     duration: Mapped[float | None] = mapped_column(Float)
@@ -857,7 +933,13 @@ class ProviderCredential(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CredentialStatus.ACTIVE.value, index=True, nullable=False
+    )
+    status_reason: Mapped[str | None] = mapped_column(String(240))
+    redacted_fingerprint: Mapped[str | None] = mapped_column(String(80))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -941,7 +1023,25 @@ class WorkerSocketTicket(Base, TimestampMixin):
 
 class GenerationJob(Base, TimestampMixin):
     __tablename__ = "generation_jobs"
-    __table_args__ = (CheckConstraint("quoted_credits >= 0", name="ck_generation_job_quoted_credits"),)
+    __table_args__ = (
+        CheckConstraint("quoted_credits >= 0", name="ck_generation_job_quoted_credits"),
+        CheckConstraint(
+            "provider != 'google_flow' OR provider_job_id IS NULL "
+            "OR status IN ('COMPLETED', 'CANCELLED', 'FAILED') "
+            "OR (account_id IS NOT NULL AND provider_project_id IS NOT NULL)",
+            name="ck_generation_flow_poll_identity",
+        ),
+        Index(
+            "uq_generation_flow_poll_identity",
+            "provider",
+            "account_id",
+            "provider_project_id",
+            "provider_job_id",
+            unique=True,
+            sqlite_where=text("provider = 'google_flow' AND provider_job_id IS NOT NULL"),
+            postgresql_where=text("provider = 'google_flow' AND provider_job_id IS NOT NULL"),
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
@@ -957,6 +1057,7 @@ class GenerationJob(Base, TimestampMixin):
     policy: Mapped[str] = mapped_column(String(60), default=GenerationPolicy.TEXT_TO_VIDEO.value)
     provider_job_id: Mapped[str | None] = mapped_column(String(500), index=True)
     account_id: Mapped[str | None] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
+    provider_project_id: Mapped[str | None] = mapped_column(String(500), index=True)
     worker_id: Mapped[str | None] = mapped_column(ForeignKey("browser_workers.id"), index=True)
     output_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -975,7 +1076,7 @@ class GenerationJob(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cost_estimate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float | None] = mapped_column(Float)
     workspace_credit_required: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )
@@ -1045,14 +1146,115 @@ class MediaProviderBinding(Base, TimestampMixin):
 class ProviderProjectBinding(Base, TimestampMixin):
     __tablename__ = "provider_projects"
     __table_args__ = (
-        UniqueConstraint("local_project_id", "provider", "provider_account_id", name="uq_provider_project"),
+        CheckConstraint(
+            "status IN ('PROVISIONING', 'READY', 'DEGRADED', 'MIGRATION_REQUIRED', "
+            "'MIGRATING', 'DISABLED', 'FAILED')",
+            name="ck_provider_project_status",
+        ),
+        CheckConstraint("version > 0", name="ck_provider_project_version"),
+        CheckConstraint(
+            "status IN ('PROVISIONING', 'MIGRATION_REQUIRED', 'FAILED') OR provider_project_id IS NOT NULL",
+            name="ck_provider_project_remote_id",
+        ),
+        Index(
+            "uq_flow_active_local_project",
+            "local_project_id",
+            "provider",
+            unique=True,
+            sqlite_where=text(
+                "provider = 'google_flow' AND status IN "
+                "('PROVISIONING', 'READY', 'DEGRADED', 'MIGRATION_REQUIRED', 'MIGRATING')"
+            ),
+            postgresql_where=text(
+                "provider = 'google_flow' AND status IN "
+                "('PROVISIONING', 'READY', 'DEGRADED', 'MIGRATION_REQUIRED', 'MIGRATING')"
+            ),
+        ),
+        Index(
+            "uq_non_flow_provider_project_account",
+            "local_project_id",
+            "provider",
+            "provider_account_id",
+            unique=True,
+            sqlite_where=text("provider != 'google_flow'"),
+            postgresql_where=text("provider != 'google_flow'"),
+        ),
+        Index(
+            "uq_flow_remote_project_owner",
+            "provider",
+            "provider_project_id",
+            unique=True,
+            sqlite_where=text("provider = 'google_flow' AND provider_project_id IS NOT NULL"),
+            postgresql_where=text("provider = 'google_flow' AND provider_project_id IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     local_project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     provider_account_id: Mapped[str] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
-    provider_project_id: Mapped[str] = mapped_column(String(500), nullable=False)
-    status: Mapped[str] = mapped_column(String(40), default="READY", nullable=False)
+    provider_project_id: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(
+        String(40), default=ProviderProjectBindingStatus.READY.value, nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    status_reason: Mapped[str | None] = mapped_column(String(240))
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    migration_required_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provisioning_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    provisioning_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class FlowMigrationPlan(Base, TimestampMixin):
+    __tablename__ = "flow_migration_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "migration_status IN ('PLANNED', 'USER_REVIEW_REQUIRED', 'APPROVED', "
+            "'MIGRATING', 'COMPLETED', 'FAILED', 'CANCELLED')",
+            name="ck_flow_migration_status",
+        ),
+        CheckConstraint(
+            "verification_status IN ('PENDING', 'USER_REVIEW_REQUIRED', 'VERIFIED', 'FAILED')",
+            name="ck_flow_migration_verification",
+        ),
+        Index(
+            "uq_flow_migration_active_binding",
+            "source_binding_id",
+            unique=True,
+            sqlite_where=text(
+                "migration_status IN ('PLANNED', 'USER_REVIEW_REQUIRED', 'APPROVED', 'MIGRATING')"
+            ),
+            postgresql_where=text(
+                "migration_status IN ('PLANNED', 'USER_REVIEW_REQUIRED', 'APPROVED', 'MIGRATING')"
+            ),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_binding_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    local_project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    source_account_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    target_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="RESTRICT"), index=True
+    )
+    source_project_id: Mapped[str | None] = mapped_column(String(500))
+    target_project_id: Mapped[str | None] = mapped_column(String(500))
+    characters_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    instructions_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    assets_json: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    migration_status: Mapped[str] = mapped_column(
+        String(40), default=FlowMigrationStatus.USER_REVIEW_REQUIRED.value, index=True, nullable=False
+    )
+    verification_status: Mapped[str] = mapped_column(
+        String(40),
+        default=FlowMigrationVerificationStatus.USER_REVIEW_REQUIRED.value,
+        nullable=False,
+    )
+    trigger_reason: Mapped[str] = mapped_column(String(240), nullable=False)
 
 
 class ProviderCharacterBinding(Base, TimestampMixin):
@@ -1120,7 +1322,7 @@ class CostRecord(Base, TimestampMixin):
     resolution: Mapped[str] = mapped_column(String(40), default="", nullable=False)
     credits: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float | None] = mapped_column(Float)
     retry_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     wasted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -1282,6 +1484,73 @@ class ModelDefinition(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class ModelCapabilityProfile(Base, TimestampMixin):
+    """Authoritative, persisted capability and manual-quality profile for one model."""
+
+    __tablename__ = "model_capability_profiles"
+    __table_args__ = (
+        CheckConstraint("max_reference_images >= 0", name="ck_model_capability_max_references"),
+        CheckConstraint(
+            "min_duration IS NULL OR min_duration > 0",
+            name="ck_model_capability_min_duration",
+        ),
+        CheckConstraint(
+            "max_duration IS NULL OR max_duration > 0",
+            name="ck_model_capability_max_duration",
+        ),
+        CheckConstraint(
+            "min_duration IS NULL OR max_duration IS NULL OR min_duration <= max_duration",
+            name="ck_model_capability_duration_range",
+        ),
+        CheckConstraint(
+            "physics_prior >= 0 AND physics_prior <= 1 "
+            "AND identity_prior >= 0 AND identity_prior <= 1 "
+            "AND camera_prior >= 0 AND camera_prior <= 1 "
+            "AND render_prior >= 0 AND render_prior <= 1 "
+            "AND action_prior >= 0 AND action_prior <= 1 "
+            "AND dialogue_prior >= 0 AND dialogue_prior <= 1 "
+            "AND text_render_prior >= 0 AND text_render_prior <= 1",
+            name="ck_model_capability_manual_priors",
+        ),
+        Index("ix_model_capability_profiles_source", "source"),
+    )
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="CASCADE"), primary_key=True
+    )
+    profile_version: Mapped[str] = mapped_column(String(80), default="1", nullable=False)
+    confidence_level: Mapped[str] = mapped_column(String(40), default="initial", nullable=False)
+    supported_operations: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    supports_image_generation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_video_generation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_t2v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_i2v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_v2v: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_reference_image: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_multi_reference: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_start_frame: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_end_frame: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_start_end: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_character_reference: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_video_extension: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_camera_instruction: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_audio: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_text_rendering: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_reference_images: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    min_duration: Mapped[float | None] = mapped_column(Float)
+    max_duration: Mapped[float | None] = mapped_column(Float)
+    supported_aspect_ratios: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    supported_resolutions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    physics_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    identity_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    camera_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    render_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    action_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    dialogue_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    text_render_prior: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    source: Mapped[str] = mapped_column(String(40), default="MANUAL_PRIOR", nullable=False)
+
+
 class ModelRoleBinding(Base, TimestampMixin):
     """Configurable role-to-model binding, optionally scoped to a plan tier."""
 
@@ -1395,6 +1664,290 @@ class ProductionTrace(Base, TimestampMixin):
     router_scores_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     generation_latency: Mapped[float | None] = mapped_column(Float)
     estimated_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    actual_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost: Mapped[float | None] = mapped_column(Float)
     evaluation_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     retry_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ModelExecutionRecord(Base):
+    """Immutable evidence for every role-runtime provider attempt."""
+
+    __tablename__ = "model_execution_records"
+    __table_args__ = (
+        CheckConstraint("latency_ms >= 0", name="ck_model_execution_latency_nonnegative"),
+        CheckConstraint(
+            "estimated_cost_usd IS NULL OR estimated_cost_usd >= 0",
+            name="ck_model_execution_estimated_cost_nonnegative",
+        ),
+        CheckConstraint(
+            "actual_cost_usd IS NULL OR actual_cost_usd >= 0",
+            name="ck_model_execution_actual_cost_nonnegative",
+        ),
+        Index("ix_model_execution_project_role_created", "project_id", "role", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    provider_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    token_usage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    cost_source: Mapped[str] = mapped_column(
+        String(40), default=BillingEvidenceSource.UNKNOWN.value, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class EmbeddingEvidence(Base):
+    """Vector provenance without persisting the vector in an audit/log table."""
+
+    __tablename__ = "embedding_evidence"
+    __table_args__ = (
+        CheckConstraint("embedding_dimension > 0", name="ck_embedding_evidence_dimension_positive"),
+        CheckConstraint("latency_ms >= 0", name="ck_embedding_evidence_latency_nonnegative"),
+        UniqueConstraint(
+            "model_execution_record_id",
+            "asset_id",
+            "input_hash",
+            name="uq_embedding_evidence_execution_input",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), index=True)
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    model_execution_record_id: Mapped[str] = mapped_column(
+        ForeignKey("model_execution_records.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class ProviderBillingEvidence(Base, TimestampMixin):
+    """Provider cost/credit fact with an explicit trust source."""
+
+    __tablename__ = "provider_billing_evidence"
+    __table_args__ = (
+        UniqueConstraint("generation_job_id", "evidence_key", name="uq_billing_evidence_job_key"),
+        CheckConstraint(
+            "actual_cost_usd IS NULL OR actual_cost_usd >= 0",
+            name="ck_billing_evidence_actual_nonnegative",
+        ),
+        CheckConstraint(
+            "estimated_cost_usd IS NULL OR estimated_cost_usd >= 0",
+            name="ck_billing_evidence_estimated_nonnegative",
+        ),
+        CheckConstraint(
+            "provider_credits IS NULL OR provider_credits >= 0",
+            name="ck_billing_evidence_credits_nonnegative",
+        ),
+        Index("ix_billing_evidence_provider_model", "provider", "model", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    generation_job_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    cost_record_id: Mapped[str | None] = mapped_column(ForeignKey("cost_records.id"), index=True)
+    evidence_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(40), default=BillingEvidenceSource.UNKNOWN.value, index=True, nullable=False
+    )
+    provider_reference: Mapped[str | None] = mapped_column(String(500))
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    provider_credits: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DecisionOutcomeRecord(Base):
+    """Durable training/evaluation join across decision, attempt, QA, cost, and user outcome."""
+
+    __tablename__ = "decision_outcome_records"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_decision_outcome_candidate"),
+        Index("ix_decision_outcome_provider_model", "provider", "model", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), nullable=False
+    )
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    qa_result_id: Mapped[str | None] = mapped_column(ForeignKey("qa_results.id"), index=True)
+    continuity_decision: Mapped[str] = mapped_column(String(80), nullable=False)
+    generation_policy: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    shot_features_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    qa_result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    user_outcome: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    accepted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    estimated_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    billing_source: Mapped[str] = mapped_column(
+        String(40), default=BillingEvidenceSource.UNKNOWN.value, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class TimelineTransition(Base, TimestampMixin):
+    __tablename__ = "timeline_transitions"
+    __table_args__ = (
+        UniqueConstraint("target_shot_id", name="uq_timeline_transition_target_shot"),
+        Index("ix_timeline_transition_project_type", "project_id", "transition_type"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    source_shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    target_shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    transition_type: Mapped[str] = mapped_column(
+        String(40), default=TimelineTransitionType.CONTINUOUS.value, nullable=False
+    )
+    branch_key: Mapped[str | None] = mapped_column(String(120))
+    reconciliation_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class LiveCanaryPermit(Base, TimestampMixin):
+    __tablename__ = "live_canary_permits"
+    __table_args__ = (
+        CheckConstraint("max_requests > 0", name="ck_live_canary_max_requests_positive"),
+        CheckConstraint("max_cost_usd > 0", name="ck_live_canary_max_cost_positive"),
+        CheckConstraint("used_requests >= 0", name="ck_live_canary_used_requests_nonnegative"),
+        CheckConstraint("reserved_cost_usd >= 0", name="ck_live_canary_reserved_cost_nonnegative"),
+        CheckConstraint("actual_cost_usd >= 0", name="ck_live_canary_actual_cost_nonnegative"),
+        Index("ix_live_canary_lookup", "provider", "model", "status", "expires_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    max_requests: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    used_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    actual_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="ACTIVE", index=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class LiveCanaryUsage(Base, TimestampMixin):
+    __tablename__ = "live_canary_usages"
+    __table_args__ = (
+        UniqueConstraint("permit_id", "idempotency_key", name="uq_live_canary_usage_key"),
+        CheckConstraint("estimated_cost_usd >= 0", name="ck_live_canary_usage_estimated_nonnegative"),
+        CheckConstraint(
+            "actual_cost_usd IS NULL OR actual_cost_usd >= 0",
+            name="ck_live_canary_usage_actual_nonnegative",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    permit_id: Mapped[str] = mapped_column(
+        ForeignKey("live_canary_permits.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    evidence_reference: Mapped[str | None] = mapped_column(String(500))
+
+
+class RunAPIBenchmark(Base, TimestampMixin):
+    __tablename__ = "runapi_benchmarks"
+    __table_args__ = (UniqueConstraint("task_id", name="uq_runapi_benchmark_task"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_quality: Mapped[float | None] = mapped_column(Float)
+    fact_lock_pass: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    fallback_required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    user_acceptance: Mapped[bool | None] = mapped_column(Boolean)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class StorageReservation(Base, TimestampMixin):
+    __tablename__ = "storage_reservations"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "idempotency_key", name="uq_storage_reservation_key"),
+        CheckConstraint("reserved_bytes > 0", name="ck_storage_reservation_bytes_positive"),
+        Index("ix_storage_reservation_status", "workspace_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    reserved_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="RESERVED", nullable=False)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"), index=True)
+    storage_key: Mapped[str | None] = mapped_column(String(1000))
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_password_reset_token_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_ip_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class AuthLoginThrottle(Base, TimestampMixin):
+    __tablename__ = "auth_login_throttles"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

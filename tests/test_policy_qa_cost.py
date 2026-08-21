@@ -10,9 +10,11 @@ from director_production import CandidateNotCommittable
 from evaluation_core import EvaluationEvidence
 from platform_contracts import GenerationRequest
 from production_domain.models import (
+    BillingEvidenceSource,
     CandidateStatus,
     ContinuityMode,
     CostRecord,
+    DecisionOutcomeRecord,
     DecisionRecord,
     Episode,
     GenerationCandidate,
@@ -374,6 +376,83 @@ def test_candidate_pass_commit_updates_timeline_and_cost(container, project, tmp
         assert shot.committed_candidate_id == candidate_id
         assert state.state_json["end_frame_asset_id"] == shot.end_frame_asset_id
     assert container.cost.shot_cost(shot_id)["cost_per_accepted_shot"] == 1.25
+
+
+def test_decision_outcome_record_complete(container, project, tmp_path):
+    shot_id, candidate_id = _candidate_video(container, project, tmp_path)
+    with container.database.session() as session:
+        candidate = session.get(GenerationCandidate, candidate_id)
+        job = GenerationJob(
+            project_id=project.id,
+            shot_id=shot_id,
+            candidate_id=candidate_id,
+            generation_type="video",
+            provider="google_flow",
+            model="flow-veo-3.1",
+            status=JobStatus.COMPLETED.value,
+            request_json={"duration": 5},
+            request_hash="d" * 64,
+            cost_estimate=0.75,
+            output_asset_id=candidate.output_asset_id,
+        )
+        session.add(job)
+        session.flush()
+        candidate.generation_job_id = job.id
+        session.add(
+            CostRecord(
+                project_id=project.id,
+                shot_id=shot_id,
+                candidate_id=candidate_id,
+                generation_job_id=job.id,
+                provider=job.provider,
+                model=job.model,
+                estimated_cost=0.75,
+                actual_cost=None,
+            )
+        )
+        session.flush()
+        job_id = job.id
+    container.cost.record_billing_evidence(
+        job_id,
+        evidence_key="flow-billing-record-1",
+        source=BillingEvidenceSource.VERIFIED_PROVIDER,
+        actual_cost_usd="0.70",
+        estimated_cost_usd="0.75",
+        provider_reference="flow-billing-event-1",
+    )
+    evidence = {
+        "identity_samples": [{"face_similarity": 0.92}] * 6,
+        "character_score": 0.92,
+        "scene_score": 0.91,
+        "composition_score": 0.9,
+        "action_score": 0.89,
+        "camera_score": 0.9,
+        "lighting_score": 0.9,
+        "narrative_score": 0.91,
+    }
+    assert container.qa.validate_candidate(candidate_id, evidence).decision == QADecision.PASS.value
+
+    container.candidates.commit(candidate_id, accepted_by=None)
+
+    with container.database.session() as session:
+        outcome = session.scalar(
+            select(DecisionOutcomeRecord).where(DecisionOutcomeRecord.candidate_id == candidate_id)
+        )
+        assert outcome is not None
+        assert outcome.project_id == project.id
+        assert outcome.shot_id == shot_id
+        assert outcome.generation_job_id == job_id
+        assert outcome.qa_result_id is not None
+        assert outcome.continuity_decision == ContinuityMode.NONE.value
+        assert outcome.generation_policy == GenerationPolicy.TEXT_TO_VIDEO.value
+        assert (outcome.provider, outcome.model) == ("google_flow", "flow-veo-3.1")
+        assert outcome.shot_features_json["prompt_hash"]
+        assert outcome.qa_result_json["decision"] == QADecision.PASS.value
+        assert outcome.user_outcome == "COMMITTED"
+        assert outcome.accepted is True
+        assert float(outcome.estimated_cost_usd) == 0.75
+        assert float(outcome.actual_cost_usd) == 0.7
+        assert outcome.billing_source == BillingEvidenceSource.VERIFIED_PROVIDER.value
 
 
 def test_identical_outputs_keep_distinct_candidate_and_end_frame_lineage(

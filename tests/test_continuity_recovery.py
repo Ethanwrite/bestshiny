@@ -6,15 +6,35 @@ from datetime import timedelta
 from platform_contracts import GenerationRequest
 from production_domain.models import (
     AssetType,
-    BrowserWorker,
     ContinuityMode,
     Episode,
+    GenerationJob,
     JobStatus,
+    ProviderProjectBinding,
     Scene,
     Shot,
     WorkerCommand,
     utcnow,
 )
+
+
+def _bind_flow_job(container, project_id, job_id, account_worker):  # type: ignore[no-untyped-def]
+    account_id, worker_id = account_worker
+    remote_project_id = f"flow-recovery-{project_id}"
+    with container.database.session() as session:
+        session.add(
+            ProviderProjectBinding(
+                local_project_id=project_id,
+                provider="google_flow",
+                provider_account_id=account_id,
+                provider_project_id=remote_project_id,
+            )
+        )
+        job = session.get(GenerationJob, job_id)
+        job.account_id = account_id
+        job.worker_id = worker_id
+        job.provider_project_id = remote_project_id
+    return remote_project_id
 
 
 def test_end_frame_extraction_and_next_shot_chaining(container, project, tmp_path):
@@ -74,7 +94,7 @@ def test_end_frame_extraction_and_next_shot_chaining(container, project, tmp_pat
         assert second.start_frame_asset_id == end_frame.id
 
 
-def test_restart_recovery_never_blindly_resubmits(container, project):
+def test_restart_recovery_never_blindly_resubmits(container, project, account_worker):
     request = GenerationRequest(
         project_id=project.id,
         type="video",
@@ -82,6 +102,7 @@ def test_restart_recovery_never_blindly_resubmits(container, project):
         idempotency_key="restart-1",
     )
     job, _ = container.gateway.create(request)
+    _bind_flow_job(container, project.id, job.id, account_worker)
     with container.database.session() as session:
         current = session.get(type(job), job.id)
         current.status = JobStatus.RUNNING.value
@@ -121,7 +142,11 @@ def test_restart_recovery_does_not_steal_a_live_generation_claim(container, proj
     assert reserved.safe_to_retry is True
 
 
-def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(container, project):
+def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(
+    container,
+    project,
+    account_worker,
+):
     job, _ = container.gateway.create(
         GenerationRequest(
             project_id=project.id,
@@ -132,10 +157,11 @@ def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(container,
     )
     claim_token = container.gateway._claim_for_submission(job.id)
     assert claim_token
+    remote_project_id = _bind_flow_job(container, project.id, job.id, account_worker)
     assert container.gateway._begin_provider_submission(
         job.id,
         claim_token,
-        {"prompt": "possibly sent"},
+        {"prompt": "possibly sent", "_provider_project_id": remote_project_id},
         "google_flow",
     )
     with container.database.session() as session:
@@ -149,7 +175,11 @@ def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(container,
     assert quarantined.claim_token is None
 
 
-def test_late_browser_response_is_reconciled_without_resubmission(container, project):
+def test_late_browser_response_is_reconciled_without_resubmission(
+    container,
+    project,
+    account_worker,
+):
     request = GenerationRequest(
         project_id=project.id,
         type="video",
@@ -157,22 +187,15 @@ def test_late_browser_response_is_reconciled_without_resubmission(container, pro
         idempotency_key="orphan-response-1",
     )
     job, _ = container.gateway.create(request)
+    _bind_flow_job(container, project.id, job.id, account_worker)
     with container.database.session() as session:
         current = session.get(type(job), job.id)
         current.status = JobStatus.WORKER_NEEDS_USER_ACTION.value
         current.submission_state = "SENT_UNCONFIRMED"
         current.safe_to_retry = False
         session.add(
-            BrowserWorker(
-                id="late-worker",
-                provider="google_flow",
-                connection_id="late-connection",
-                capabilities=["video"],
-            )
-        )
-        session.add(
             WorkerCommand(
-                worker_id="late-worker",
+                worker_id="worker-1",
                 generation_job_id=job.id,
                 message_type="provider.request",
                 payload={},

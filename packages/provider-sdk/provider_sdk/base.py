@@ -29,6 +29,28 @@ class ProviderHealth:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ProviderPollIdentity:
+    """Server-owned routing identity for a single remote-job poll."""
+
+    local_generation_job_id: str
+    provider_account_id: str
+    provider_project_id: str
+    provider_job_id: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip()
+            for value in (
+                self.local_generation_job_id,
+                self.provider_account_id,
+                self.provider_project_id,
+                self.provider_job_id,
+            )
+        ):
+            raise ValueError("provider poll identity fields cannot be empty")
+
+
 class GenerationProvider(ABC):
     name: str
 
@@ -56,6 +78,7 @@ class GenerationProvider(ABC):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> ProviderJob: ...
 
     @abstractmethod

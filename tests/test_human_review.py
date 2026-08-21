@@ -252,6 +252,7 @@ def test_human_review_requires_reason_confirmation_real_user_and_write_role(cont
             json={"reason": "我无写权限", "explicit_confirmation": True},
         )
         assert denied.status_code == 403
+        client.cookies.clear()
         unauthenticated = client.post(
             f"/v1/shots/{shot_id}/candidates/{candidate_id}/human-review",
             json={"reason": "未登录", "explicit_confirmation": True},

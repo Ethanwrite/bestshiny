@@ -6,9 +6,14 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from entitlement_core import (
+    CanaryReservation,
+    LiveCanaryConflict,
+    LiveCanaryDenied,
+    LiveCanaryPermitService,
     WorkspaceCreditConflict,
     WorkspaceCreditService,
     WorkspaceCreditTransition,
@@ -24,6 +29,7 @@ from platform_contracts import (
 from platform_database import Database
 from production_domain.models import (
     AssetType,
+    BillingEvidenceSource,
     BrowserWorker,
     CandidateStatus,
     CostRecord,
@@ -34,10 +40,13 @@ from production_domain.models import (
     GenerationJob,
     JobStatus,
     MediaAsset,
+    ModelCapabilityProfile,
     ModelDefinition,
     Project,
     ProviderAccount,
+    ProviderBillingEvidence,
     ProviderProjectBinding,
+    ProviderProjectBindingStatus,
     RetryCategory,
     Shot,
     ShotStatus,
@@ -48,11 +57,22 @@ from production_domain.models import (
     utcnow,
 )
 from production_engine import ShotContinuityService
-from provider_sdk import GenerationProvider, ProviderError, ProviderMode
+from provider_sdk import (
+    GenerationProvider,
+    ProviderError,
+    ProviderMode,
+    ProviderPollIdentity,
+)
 from sqlalchemy import and_, case, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from .affinity import (
+    FLOW_PROVIDER,
+    FlowAffinityConflict,
+    FlowAffinityUnavailable,
+    FlowProjectAllocator,
+)
 from .providers import GenerationTargetError, ProviderRouter
 from .retry import RetryPolicy
 from .scheduler import AccountScheduler, NoAccountAvailable
@@ -84,6 +104,70 @@ def canonical_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _billing_decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not parsed.is_finite() or parsed < 0:
+        return None
+    return parsed.quantize(Decimal("0.000001"))
+
+
+def _nested_value(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _provider_billing_facts(
+    raw: dict[str, Any],
+) -> tuple[Decimal | None, Decimal | None, str | None, str | None, str]:
+    actual_candidates = (
+        ("usage.actual_cost_usd", ("usage", "actual_cost_usd")),
+        ("usage.total_cost", ("usage", "total_cost")),
+        ("usage.cost", ("usage", "cost")),
+        ("billing.actual_cost_usd", ("billing", "actual_cost_usd")),
+        ("billing.total_cost", ("billing", "total_cost")),
+        ("actual_cost_usd", ("actual_cost_usd",)),
+        ("actual_cost", ("actual_cost",)),
+        ("cost_usd", ("cost_usd",)),
+    )
+    credit_candidates = (
+        ("usage.credits_used", ("usage", "credits_used")),
+        ("usage.credits", ("usage", "credits")),
+        ("billing.credits_used", ("billing", "credits_used")),
+        ("credits_used", ("credits_used",)),
+        ("creditsUsed", ("creditsUsed",)),
+        ("billed_credits", ("billed_credits",)),
+    )
+    actual: Decimal | None = None
+    actual_field: str | None = None
+    for label, path in actual_candidates:
+        actual = _billing_decimal(_nested_value(raw, *path))
+        if actual is not None:
+            actual_field = label
+            break
+    credits: Decimal | None = None
+    credits_field: str | None = None
+    for label, path in credit_candidates:
+        credits = _billing_decimal(_nested_value(raw, *path))
+        if credits is not None:
+            credits_field = label
+            break
+    raw_hash = hashlib.sha256(
+        json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return actual, credits, actual_field, credits_field, raw_hash
+
+
 def _aware(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -104,6 +188,8 @@ class GenerationGateway:
         workspace_credits: WorkspaceCreditService | None = None,
         model_infrastructure: ModelInfrastructureService | None = None,
         provider_mode: ProviderMode | str = ProviderMode.MOCK,
+        flow_affinity: FlowProjectAllocator | None = None,
+        live_canary: LiveCanaryPermitService | None = None,
     ):
         if claim_lease_seconds < 30:
             raise ValueError("claim_lease_seconds must be at least 30")
@@ -119,6 +205,8 @@ class GenerationGateway:
         self.poll_interval_seconds = poll_interval_seconds
         self.workspace_credits = workspace_credits
         self.model_infrastructure = model_infrastructure
+        self.flow_affinity = flow_affinity or FlowProjectAllocator(database, scheduler)
+        self.live_canary = live_canary
         try:
             self.provider_mode = ProviderMode(provider_mode)
         except ValueError as exc:
@@ -175,6 +263,12 @@ class GenerationGateway:
                 "MODEL_DISABLED",
                 f"server model definition is disabled: {provider}:{model}",
             )
+        required_operation = f"{media_type}_generation"
+        if required_operation not in definition.supported_operations:
+            raise GenerationTargetError(
+                "MODEL_CAPABILITY_DENIED",
+                f"authoritative model profile does not support {required_operation}: {provider}:{model}",
+            )
         if self.provider_mode is ProviderMode.LIVE and not definition.live_enabled:
             raise GenerationTargetError(
                 "MODEL_LIVE_DISABLED",
@@ -184,6 +278,115 @@ class GenerationGateway:
 
     def _next_poll_at(self) -> datetime:
         return utcnow() + timedelta(seconds=self.poll_interval_seconds)
+
+    @staticmethod
+    def _live_canary_operation_key(job_id: str) -> str:
+        return f"generation:{job_id}"
+
+    def _reserve_live_generation_canary(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        model: str,
+    ) -> CanaryReservation | None:
+        if self.provider_mode is not ProviderMode.LIVE:
+            return None
+        if self.live_canary is None:
+            raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
+        reservation = self.live_canary.reserve_matching(
+            provider=provider,
+            model=model,
+            # GenerationRequest.cost_estimate is not a trusted billing quote.
+            # Hold the permit's entire remaining budget for the one operation.
+            estimated_cost_usd=None,
+            idempotency_key=self._live_canary_operation_key(job_id),
+        )
+        if reservation.replayed and reservation.status in {"UNCERTAIN", "SETTLED"}:
+            raise LiveCanaryDenied(
+                "live generation canary outcome is already uncertain or settled; "
+                "automatic resubmission is forbidden"
+            )
+        try:
+            return self.live_canary.mark_uncertain(
+                reservation.usage_id,
+                evidence_reference=f"generation-boundary-prepared:{job_id}",
+            )
+        except BaseException:
+            if reservation.status == "RESERVED":
+                try:
+                    self.live_canary.release(reservation.usage_id)
+                except Exception:
+                    pass
+            raise
+
+    def _release_live_generation_canary_before_boundary(
+        self,
+        reservation: CanaryReservation | None,
+        *,
+        job_id: str,
+        boundary_crossed: bool,
+    ) -> None:
+        if reservation is None or boundary_crossed or self.live_canary is None:
+            return
+        self.live_canary.release_pre_boundary(
+            reservation.usage_id,
+            evidence_reference=f"generation-pre-boundary-release:{job_id}",
+        )
+
+    def _require_live_generation_canary_boundary(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        model: str,
+        session: Session | None = None,
+        allow_settled: bool = False,
+    ) -> CanaryReservation | None:
+        if self.provider_mode is not ProviderMode.LIVE:
+            return None
+        if self.live_canary is None:
+            raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
+        allowed = frozenset({"UNCERTAIN", "SETTLED"}) if allow_settled else frozenset({"UNCERTAIN"})
+        return self.live_canary.require_operation_boundary(
+            provider=provider,
+            model=model,
+            idempotency_key=self._live_canary_operation_key(job_id),
+            allowed_statuses=allowed,
+            # A fresh paid upload/submit must still be inside its explicit
+            # authorization window. Poll/cancel/settle may safely manage an
+            # operation whose paid boundary was already crossed.
+            require_unexpired=not allow_settled,
+            session=session,
+        )
+
+    def _settle_live_generation_canary(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        model: str,
+        provider_job_id: str,
+        raw: dict[str, Any],
+    ) -> None:
+        if self.provider_mode is not ProviderMode.LIVE or self.live_canary is None:
+            return
+        actual, _, _, _, _ = _provider_billing_facts(raw)
+        if actual is None:
+            return
+        reservation = self._require_live_generation_canary_boundary(
+            job_id=job_id,
+            provider=provider,
+            model=model,
+            allow_settled=True,
+        )
+        if reservation is None:  # pragma: no cover - live mode invariant.
+            raise RuntimeError("live generation canary disappeared")
+        self.live_canary.settle(
+            reservation.usage_id,
+            actual_cost_usd=actual,
+            evidence_reference=f"provider-job:{provider}:{provider_job_id}",
+        )
 
     @staticmethod
     def _event(session, job_id: str, event_type: str, **detail: Any) -> None:  # type: ignore[no-untyped-def]
@@ -491,6 +694,78 @@ class GenerationGateway:
             entry = self.workspace_credits.entry_for_job_in_session(session, job_id)
             return entry.status if entry is not None else None
 
+    def _record_provider_billing_evidence(
+        self,
+        session: Session,
+        job: GenerationJob,
+        *,
+        provider_job_id: str,
+        raw: dict[str, Any],
+    ) -> ProviderBillingEvidence:
+        reported_actual, reported_credits, actual_field, credits_field, raw_hash = _provider_billing_facts(
+            raw
+        )
+        trusted_provider_evidence = self.provider_mode is ProviderMode.LIVE
+        actual = reported_actual if trusted_provider_evidence else None
+        provider_credits = reported_credits if trusted_provider_evidence else None
+        source = (
+            BillingEvidenceSource.VERIFIED_PROVIDER
+            if actual is not None or provider_credits is not None
+            else BillingEvidenceSource.UNKNOWN
+        )
+        evidence_key = f"provider-completion:{hashlib.sha256(provider_job_id.encode()).hexdigest()[:32]}"
+        existing = session.scalar(
+            select(ProviderBillingEvidence).where(
+                ProviderBillingEvidence.generation_job_id == job.id,
+                ProviderBillingEvidence.evidence_key == evidence_key,
+            )
+        )
+        if existing is not None:
+            return existing
+        cost_record = session.scalar(select(CostRecord).where(CostRecord.generation_job_id == job.id))
+        estimated = _billing_decimal(job.cost_estimate) if job.cost_estimate > 0 else None
+        evidence = ProviderBillingEvidence(
+            generation_job_id=job.id,
+            cost_record_id=cost_record.id if cost_record is not None else None,
+            evidence_key=evidence_key,
+            provider=job.provider,
+            model=job.model,
+            source=source.value,
+            provider_reference=provider_job_id,
+            actual_cost_usd=actual,
+            estimated_cost_usd=estimated,
+            provider_credits=provider_credits,
+            metadata_json={
+                "actual_field": actual_field,
+                "credits_field": credits_field,
+                "provider_response_sha256": raw_hash,
+                "provider_mode": self.provider_mode.value,
+                "reported_actual_cost_ignored": (
+                    reported_actual is not None and not trusted_provider_evidence
+                ),
+                "reported_provider_credits_ignored": (
+                    reported_credits is not None and not trusted_provider_evidence
+                ),
+            },
+            verified_at=utcnow() if source is BillingEvidenceSource.VERIFIED_PROVIDER else None,
+        )
+        session.add(evidence)
+        if actual is not None:
+            job.actual_cost = float(actual)
+            if cost_record is not None:
+                cost_record.actual_cost = float(actual)
+        session.flush([evidence])
+        self._event(
+            session,
+            job.id,
+            "PROVIDER_BILLING_EVIDENCE",
+            evidence_id=evidence.id,
+            source=source.value,
+            has_actual_cost=actual is not None,
+            has_provider_credits=provider_credits is not None,
+        )
+        return evidence
+
     def retry(self, job_id: str) -> GenerationJob:
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
@@ -704,6 +979,12 @@ class GenerationGateway:
             )
         try:
             provider = self.providers.validate_target(provider_name, model, capability)
+            self._require_live_generation_canary_boundary(
+                job_id=job_id,
+                provider=provider_name,
+                model=model,
+                allow_settled=True,
+            )
             cancelled = await provider.cancel_job(
                 provider_job_id,
                 account_id=account_id,
@@ -903,6 +1184,25 @@ class GenerationGateway:
                 )
             if not provider_job_id:
                 return job
+            recovery_identity_conditions: list[Any] = []
+            if job.provider == FLOW_PROVIDER:
+                if not job.account_id or not job.provider_project_id:
+                    job.error_code = "FLOW_POLL_IDENTITY_MISSING"
+                    job.error_message = (
+                        "late Google Flow response cannot be confirmed until its account/project "
+                        "identity is manually reconciled"
+                    )
+                    self._event(
+                        session,
+                        job.id,
+                        "FLOW_POLL_IDENTITY_RECONCILIATION_REQUIRED",
+                        provider_job_id=provider_job_id,
+                    )
+                    return job
+                recovery_identity_conditions = [
+                    GenerationJob.account_id == job.account_id,
+                    GenerationJob.provider_project_id == job.provider_project_id,
+                ]
             recovered = session.execute(
                 update(GenerationJob)
                 .where(
@@ -914,6 +1214,7 @@ class GenerationGateway:
                         GenerationJob.provider_job_id.is_(None),
                         GenerationJob.provider_job_id == provider_job_id,
                     ),
+                    *recovery_identity_conditions,
                 )
                 .values(
                     provider_job_id=provider_job_id,
@@ -1178,6 +1479,41 @@ class GenerationGateway:
                 RetryCategory.PERMANENT_ERROR,
                 code="ASSET_UPLOAD_CLAIM_LOST",
             )
+        if job.provider != provider:
+            raise ProviderError(
+                "provider asset upload does not match the server-selected generation target",
+                RetryCategory.PERMANENT_ERROR,
+                code="PROVIDER_TARGET_CHANGED",
+            )
+        self._require_live_generation_canary_boundary(
+            job_id=job.id,
+            provider=job.provider,
+            model=job.model,
+            session=session,
+        )
+        if provider == FLOW_PROVIDER:
+            if not job.account_id or not job.provider_project_id:
+                raise ProviderError(
+                    "Google Flow asset upload is missing its persisted account/project affinity",
+                    RetryCategory.PERMANENT_ERROR,
+                    code="FLOW_AFFINITY_IDENTITY_MISSING",
+                )
+            ready_binding = session.scalar(
+                select(ProviderProjectBinding.id).where(
+                    ProviderProjectBinding.local_project_id == job.project_id,
+                    ProviderProjectBinding.provider == FLOW_PROVIDER,
+                    ProviderProjectBinding.provider_account_id == job.account_id,
+                    ProviderProjectBinding.provider_project_id == job.provider_project_id,
+                    ProviderProjectBinding.status == ProviderProjectBindingStatus.READY.value,
+                )
+            )
+            if ready_binding is None:
+                raise ProviderError(
+                    "Google Flow affinity changed before provider asset upload",
+                    RetryCategory.PERMANENT_ERROR,
+                    code="FLOW_AFFINITY_CHANGED",
+                    submitted=job.submission_state != "NOT_SENT",
+                )
         first_boundary = job.submission_state == "NOT_SENT"
         if first_boundary:
             job.submission_state = "SENT_UNCONFIRMED"
@@ -1399,6 +1735,8 @@ class GenerationGateway:
 
         now = utcnow()
         target_fence_lost = False
+        flow_affinity_fence_lost = False
+        flow_boundary_submitted = False
         with self.database.session() as session:
             boundary_conditions = [
                 GenerationJob.id == job_id,
@@ -1415,6 +1753,47 @@ class GenerationGateway:
             provider_name = boundary_job.provider
             model = boundary_job.model
             media_type = boundary_job.generation_type
+            if provider_name != provider:
+                raise GenerationTargetError(
+                    "PROVIDER_TARGET_CHANGED",
+                    "provider implementation no longer matches the server-selected generation target",
+                )
+            self._require_live_generation_canary_boundary(
+                job_id=boundary_job.id,
+                provider=provider_name,
+                model=model,
+                session=session,
+            )
+            flow_binding_predicate = None
+            if provider_name == FLOW_PROVIDER:
+                expected_project_id = str(provider_request.get("_provider_project_id") or "").strip()
+                if (
+                    not boundary_job.account_id
+                    or not boundary_job.provider_project_id
+                    or boundary_job.provider_project_id != expected_project_id
+                ):
+                    raise ProviderError(
+                        "Google Flow submission is missing its persisted account/project affinity",
+                        RetryCategory.PERMANENT_ERROR,
+                        code="FLOW_AFFINITY_IDENTITY_MISSING",
+                        submitted=boundary_job.submission_state != "NOT_SENT",
+                    )
+                flow_boundary_submitted = boundary_job.submission_state != "NOT_SENT"
+                flow_binding_predicate = select(ProviderProjectBinding.id).where(
+                    ProviderProjectBinding.local_project_id == boundary_job.project_id,
+                    ProviderProjectBinding.provider == FLOW_PROVIDER,
+                    ProviderProjectBinding.provider_account_id == boundary_job.account_id,
+                    ProviderProjectBinding.provider_project_id == boundary_job.provider_project_id,
+                    ProviderProjectBinding.status == ProviderProjectBindingStatus.READY.value,
+                )
+                locked_binding = session.scalar(flow_binding_predicate.with_for_update())
+                if locked_binding is None:
+                    raise ProviderError(
+                        "Google Flow affinity changed before provider generation submission",
+                        RetryCategory.PERMANENT_ERROR,
+                        code="FLOW_AFFINITY_CHANGED",
+                        submitted=flow_boundary_submitted,
+                    )
             # Validate and lock the persistent model switch in the same
             # transaction that closes the durable paid-call boundary. The
             # EXISTS predicate also fences databases where row locks are not
@@ -1429,6 +1808,10 @@ class GenerationGateway:
             )
             update_conditions: list[Any] = list(boundary_conditions)
             if definition is not None:
+                capability_field = getattr(
+                    ModelCapabilityProfile,
+                    f"supports_{media_type}_generation",
+                )
                 eligible_definition = select(ModelDefinition.id).where(
                     ModelDefinition.id == definition.definition_id,
                     ModelDefinition.provider == definition.provider,
@@ -1439,6 +1822,17 @@ class GenerationGateway:
                 if self.provider_mode is ProviderMode.LIVE:
                     eligible_definition = eligible_definition.where(ModelDefinition.live_enabled.is_(True))
                 update_conditions.append(eligible_definition.exists())
+                update_conditions.append(
+                    select(ModelCapabilityProfile.model_definition_id)
+                    .where(
+                        ModelCapabilityProfile.model_definition_id == definition.definition_id,
+                        ModelCapabilityProfile.profile_version == definition.capability_profile_version,
+                        capability_field.is_(True),
+                    )
+                    .exists()
+                )
+            if flow_binding_predicate is not None:
+                update_conditions.append(flow_binding_predicate.exists())
             result = session.execute(
                 update(GenerationJob)
                 .where(*update_conditions)
@@ -1450,9 +1844,13 @@ class GenerationGateway:
                 .execution_options(synchronize_session=False)
             )
             if not self._updated_one_row(result):
+                boundary_still_owned = (
+                    session.scalar(select(GenerationJob.id).where(*boundary_conditions)) is not None
+                )
+                if flow_binding_predicate is not None and boundary_still_owned:
+                    flow_affinity_fence_lost = session.scalar(flow_binding_predicate) is None
                 target_fence_lost = (
-                    definition is not None
-                    and session.scalar(select(GenerationJob.id).where(*boundary_conditions)) is not None
+                    not flow_affinity_fence_lost and definition is not None and boundary_still_owned
                 )
             else:
                 session.expire(boundary_job)
@@ -1465,6 +1863,13 @@ class GenerationGateway:
                         attempt=max(job.attempt_count, 1),
                     )
                 self._event(session, job_id, "REQUEST_SUBMITTED", provider=provider)
+        if flow_affinity_fence_lost:
+            raise ProviderError(
+                "Google Flow affinity changed at the paid-call boundary",
+                RetryCategory.PERMANENT_ERROR,
+                code="FLOW_AFFINITY_CHANGED",
+                submitted=flow_boundary_submitted,
+            )
         if target_fence_lost:
             # Resolve again after the failed atomic predicate so callers receive
             # the authoritative MODEL_DISABLED / MODEL_LIVE_DISABLED failure.
@@ -1504,6 +1909,8 @@ class GenerationGateway:
                 capability = job.generation_type
                 provider_name = job.provider
                 model = job.model
+                project_id = job.project_id
+                priority = job.priority
                 project = session.get(Project, job.project_id)
                 workspace_scoped = bool(project and project.workspace_id)
         if attempts_exhausted:
@@ -1532,18 +1939,94 @@ class GenerationGateway:
                 submitted=False,
                 claim_token=claim_token,
             )
-        submission_boundary_crossed = False
+        canary_reservation: CanaryReservation | None = None
         try:
-            account, worker = self.scheduler.select_account(
-                job.provider,
-                capability,
-                job.model,
-                job.priority,
-                project_id=job.project_id,
-                generation_job_id=job_id,
+            canary_reservation = self._reserve_live_generation_canary(
+                job_id=job_id,
+                provider=provider_name,
+                model=model,
+            )
+        except (LiveCanaryDenied, LiveCanaryConflict) as exc:
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "LIVE_CANARY_DENIED",
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+            )
+        canary_boundary_crossed = False
+        submission_boundary_crossed = False
+        flow_affinity_existed = True
+        try:
+            flow_binding_id = None
+            if provider_name == FLOW_PROVIDER:
+                flow_affinity_existed = self.flow_affinity.binding_for_project(project_id) is not None
+                # With no existing affinity, acquisition may call the remote
+                # create-project provisioner. The canary is already UNCERTAIN.
+                canary_boundary_crossed = not flow_affinity_existed
+                affinity = await self.flow_affinity.acquire_for_generation(
+                    local_project_id=project_id,
+                    capability=capability,
+                    model=model,
+                    priority=priority,
+                    generation_job_id=job_id,
+                    claim_token=claim_token,
+                )
+                account = affinity.provider_account
+                worker = affinity.worker
+                provider_project_id = affinity.provider_project_id
+                flow_binding_id = affinity.binding_id
+            else:
+                account, worker = self.scheduler.select_account(
+                    provider_name,
+                    capability,
+                    model,
+                    priority,
+                    project_id=project_id,
+                    generation_job_id=job_id,
+                    claim_token=claim_token,
+                )
+                provider_project_id = None
+        except FlowAffinityUnavailable as exc:
+            if flow_affinity_existed or exc.code in {
+                "FLOW_PROVISIONING_ACCOUNT_UNAVAILABLE",
+                "FLOW_PROVISIONING_UNAVAILABLE",
+            }:
+                canary_boundary_crossed = False
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
+            return self._schedule_error(
+                job_id,
+                (RetryCategory.PROVIDER_BUSY if exc.retryable else RetryCategory.PERMANENT_ERROR),
+                exc.code,
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+            )
+        except FlowAffinityConflict as exc:
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "FLOW_AFFINITY_CONFLICT",
+                str(exc),
+                submitted=False,
                 claim_token=claim_token,
             )
         except NoAccountAvailable as exc:
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
             return self._schedule_error(
                 job_id,
                 RetryCategory.PROVIDER_BUSY,
@@ -1553,6 +2036,7 @@ class GenerationGateway:
                 claim_token=claim_token,
             )
         claim_lost = False
+        affinity_lost = False
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
             if (
@@ -1562,52 +2046,95 @@ class GenerationGateway:
                 or job.submission_state != "NOT_SENT"
             ):
                 claim_lost = True
-                provider_project_id = None
             else:
-                job.account_id = account.id
-                job.worker_id = worker.id
-                job.started_at = job.started_at or utcnow()
-                job.reserved_at = utcnow()
-                job.claim_expires_at = utcnow() + timedelta(seconds=self.claim_lease_seconds)
-                job.attempt_count += 1
-                project_binding = session.scalar(
-                    select(ProviderProjectBinding).where(
-                        ProviderProjectBinding.local_project_id == job.project_id,
-                        ProviderProjectBinding.provider == job.provider,
-                        ProviderProjectBinding.provider_account_id == account.id,
-                        ProviderProjectBinding.status == "READY",
+                if provider_name == FLOW_PROVIDER:
+                    project_binding = session.scalar(
+                        select(ProviderProjectBinding).where(
+                            ProviderProjectBinding.id == flow_binding_id,
+                            ProviderProjectBinding.local_project_id == job.project_id,
+                            ProviderProjectBinding.provider == FLOW_PROVIDER,
+                            ProviderProjectBinding.provider_account_id == account.id,
+                            ProviderProjectBinding.provider_project_id == provider_project_id,
+                            ProviderProjectBinding.status == ProviderProjectBindingStatus.READY.value,
+                        )
                     )
-                )
-                provider_project_id = (
-                    project_binding.provider_project_id
-                    if project_binding
-                    else account.metadata_json.get("project_id")
-                )
-                self._event(
-                    session,
-                    job.id,
-                    "ACCOUNT_SELECTED",
-                    account_id=account.id,
-                    credits=account.credits,
-                )
-                self._event(session, job.id, "WORKER_SELECTED", worker_id=worker.id)
-                session.flush()
-        if claim_lost:
+                    affinity_lost = project_binding is None
+                else:
+                    project_binding = session.scalar(
+                        select(ProviderProjectBinding).where(
+                            ProviderProjectBinding.local_project_id == job.project_id,
+                            ProviderProjectBinding.provider == job.provider,
+                            ProviderProjectBinding.provider_account_id == account.id,
+                            ProviderProjectBinding.status == ProviderProjectBindingStatus.READY.value,
+                        )
+                    )
+                    provider_project_id = (
+                        project_binding.provider_project_id
+                        if project_binding
+                        else account.metadata_json.get("project_id")
+                    )
+                if not affinity_lost:
+                    job.account_id = account.id
+                    job.worker_id = worker.id
+                    job.provider_project_id = provider_project_id
+                    job.started_at = job.started_at or utcnow()
+                    job.reserved_at = utcnow()
+                    job.claim_expires_at = utcnow() + timedelta(seconds=self.claim_lease_seconds)
+                    job.attempt_count += 1
+                    self._event(
+                        session,
+                        job.id,
+                        "ACCOUNT_SELECTED",
+                        account_id=account.id,
+                        provider_project_id=provider_project_id,
+                        flow_binding_id=flow_binding_id,
+                        credits=account.credits,
+                    )
+                    self._event(session, job.id, "WORKER_SELECTED", worker_id=worker.id)
+                    session.flush()
+        if claim_lost or affinity_lost:
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
             self.scheduler.release_job(
                 job_id,
-                success=False,
-                error="claim lost",
+                success=None,
+                error=("Flow affinity changed" if affinity_lost else "claim lost"),
                 clear_routing=True,
             )
+            if affinity_lost:
+                return self._schedule_error(
+                    job_id,
+                    RetryCategory.PERMANENT_ERROR,
+                    "FLOW_AFFINITY_CHANGED",
+                    "Google Flow affinity changed before the generation boundary",
+                    submitted=False,
+                    claim_token=claim_token,
+                )
             current = self.get(job_id)
             if current is None:  # pragma: no cover - deleted concurrently by an administrator.
                 raise LookupError("generation job not found")
             return current
         try:
-            request["_provider_project_id"] = provider_project_id
+            if provider_project_id:
+                request["_provider_project_id"] = provider_project_id
+            else:
+                request.pop("_provider_project_id", None)
             current_job = self.get(job_id)
             if current_job is None:
                 raise LookupError("generation job not found during asset resolution")
+            if any(
+                (
+                    request.get("start_frame_asset_id"),
+                    request.get("end_frame_asset_id"),
+                    request.get("reference_asset_ids"),
+                )
+            ):
+                # Asset resolution may validate or upload provider media. Both
+                # are transport calls and therefore make failure ambiguous.
+                canary_boundary_crossed = True
             request = await self._resolve_assets(
                 current_job,
                 request,
@@ -1633,8 +2160,14 @@ class GenerationGateway:
                     error="submission claim expired or was superseded",
                     clear_routing=True,
                 )
+                self._release_live_generation_canary_before_boundary(
+                    canary_reservation,
+                    job_id=job_id,
+                    boundary_crossed=canary_boundary_crossed,
+                )
                 return current
             submission_boundary_crossed = True
+            canary_boundary_crossed = True
             if capability == "image":
                 submission = await provider.generate_image(
                     request, account_id=account.id, worker_id=worker.id
@@ -1644,24 +2177,29 @@ class GenerationGateway:
                     request, account_id=account.id, worker_id=worker.id
                 )
             with self.database.session() as session:
+                confirmation_conditions: list[Any] = [
+                    GenerationJob.id == job_id,
+                    GenerationJob.account_id == account.id,
+                    GenerationJob.worker_id == worker.id,
+                    GenerationJob.provider_job_id.is_(None),
+                    GenerationJob.output_asset_id.is_(None),
+                    GenerationJob.submission_state == "SENT_UNCONFIRMED",
+                    or_(
+                        and_(
+                            GenerationJob.status == JobStatus.RESERVED.value,
+                            GenerationJob.claim_token == claim_token,
+                        ),
+                        and_(
+                            GenerationJob.status == JobStatus.WORKER_NEEDS_USER_ACTION.value,
+                            GenerationJob.claim_token.is_(None),
+                        ),
+                    ),
+                ]
+                if provider_name == FLOW_PROVIDER:
+                    confirmation_conditions.append(GenerationJob.provider_project_id == provider_project_id)
                 confirmed = session.execute(
                     update(GenerationJob)
-                    .where(
-                        GenerationJob.id == job_id,
-                        GenerationJob.provider_job_id.is_(None),
-                        GenerationJob.output_asset_id.is_(None),
-                        GenerationJob.submission_state == "SENT_UNCONFIRMED",
-                        or_(
-                            and_(
-                                GenerationJob.status == JobStatus.RESERVED.value,
-                                GenerationJob.claim_token == claim_token,
-                            ),
-                            and_(
-                                GenerationJob.status == JobStatus.WORKER_NEEDS_USER_ACTION.value,
-                                GenerationJob.claim_token.is_(None),
-                            ),
-                        ),
-                    )
+                    .where(*confirmation_conditions)
                     .values(
                         provider_job_id=submission.provider_job_id,
                         submission_state="CONFIRMED",
@@ -1714,6 +2252,11 @@ class GenerationGateway:
                 session.flush()
                 return job
         except GenerationTargetError as exc:
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
@@ -1731,6 +2274,11 @@ class GenerationGateway:
             # conservative. It must never move the job back to NOT_SENT or
             # authorize a refund/re-submit after provider execution began.
             effective_submitted = submission_boundary_crossed or exc.submitted
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed or effective_submitted,
+            )
             return self._schedule_error(
                 job_id,
                 exc.category,
@@ -1743,6 +2291,11 @@ class GenerationGateway:
                 clear_routing=not effective_submitted,
             )
         except Exception as exc:
+            self._release_live_generation_canary_before_boundary(
+                canary_reservation,
+                job_id=job_id,
+                boundary_crossed=canary_boundary_crossed,
+            )
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
@@ -1765,6 +2318,7 @@ class GenerationGateway:
             provider_name = job.provider
             model = job.model
             account_id, worker_id = job.account_id, job.worker_id
+            provider_project_id = job.provider_project_id
             provider_job_id = job.provider_job_id
             capability = job.generation_type
         try:
@@ -1780,7 +2334,26 @@ class GenerationGateway:
                 release_reservation=True,
                 release_error=str(exc),
             )
-        if not all([account_id, worker_id, provider_job_id]):
+        try:
+            self._require_live_generation_canary_boundary(
+                job_id=job_id,
+                provider=provider_name,
+                model=model,
+                allow_settled=True,
+            )
+        except (LiveCanaryDenied, LiveCanaryConflict) as exc:
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "LIVE_CANARY_MISSING_FOR_POLL",
+                str(exc),
+                submitted=True,
+                claim_token=claim_token,
+                force_user_action=True,
+            )
+        if not all([account_id, worker_id, provider_job_id]) or (
+            provider_name == FLOW_PROVIDER and not provider_project_id
+        ):
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
@@ -1790,13 +2363,41 @@ class GenerationGateway:
                 claim_token=claim_token,
                 force_user_action=True,
             )
-        try:
-            result = await provider.get_job(
-                provider_job_id,
-                account_id=account_id,
-                worker_id=worker_id,
-                generation_type=capability,
+        assert account_id is not None
+        assert worker_id is not None
+        assert provider_job_id is not None
+        poll_identity = None
+        if provider_name == FLOW_PROVIDER:
+            assert provider_project_id is not None
+            poll_identity = ProviderPollIdentity(
+                local_generation_job_id=job_id,
+                provider_account_id=account_id,
+                provider_project_id=provider_project_id,
+                provider_job_id=provider_job_id,
             )
+        poll_fence_conditions: list[Any] = []
+        if poll_identity is not None:
+            poll_fence_conditions = [
+                GenerationJob.provider == FLOW_PROVIDER,
+                GenerationJob.account_id == poll_identity.provider_account_id,
+                GenerationJob.provider_project_id == poll_identity.provider_project_id,
+            ]
+        try:
+            if poll_identity is None:
+                result = await provider.get_job(
+                    provider_job_id,
+                    account_id=account_id,
+                    worker_id=worker_id,
+                    generation_type=capability,
+                )
+            else:
+                result = await provider.get_job(
+                    provider_job_id,
+                    account_id=account_id,
+                    worker_id=worker_id,
+                    generation_type=capability,
+                    poll_identity=poll_identity,
+                )
             if not self._renew_claim(job_id, claim_token):
                 current = self.get(job_id)
                 if current is None:  # pragma: no cover - deleted concurrently by an administrator.
@@ -1804,7 +2405,14 @@ class GenerationGateway:
                 return current
             with self.database.session() as session:
                 self._event(
-                    session, job_id, "PROVIDER_JOB_POLL", status=result.status, progress=result.progress
+                    session,
+                    job_id,
+                    "PROVIDER_JOB_POLL",
+                    status=result.status,
+                    progress=result.progress,
+                    provider_account_id=account_id,
+                    provider_project_id=provider_project_id,
+                    provider_job_id=provider_job_id,
                 )
             if result.status in {"CANCELLED", "CANCELED"}:
                 with self.database.session() as session:
@@ -1817,6 +2425,7 @@ class GenerationGateway:
                             GenerationJob.provider_job_id == provider_job_id,
                             GenerationJob.submission_state == "CONFIRMED",
                             GenerationJob.output_asset_id.is_(None),
+                            *poll_fence_conditions,
                         )
                         .values(
                             status=JobStatus.CANCELLED.value,
@@ -1873,6 +2482,7 @@ class GenerationGateway:
                     claim_token=claim_token,
                     release_reservation=True,
                     release_error=result.error,
+                    poll_identity=poll_identity,
                 )
             if result.status != "COMPLETED":
                 with self.database.session() as session:
@@ -1885,6 +2495,7 @@ class GenerationGateway:
                             GenerationJob.provider_job_id == provider_job_id,
                             GenerationJob.submission_state == "CONFIRMED",
                             GenerationJob.output_asset_id.is_(None),
+                            *poll_fence_conditions,
                         )
                         .values(
                             status=JobStatus.RUNNING.value,
@@ -1921,6 +2532,10 @@ class GenerationGateway:
                         GenerationJob.id == job_id,
                         GenerationJob.status == JobStatus.RESERVED.value,
                         GenerationJob.claim_token == claim_token,
+                        GenerationJob.provider_job_id == provider_job_id,
+                        GenerationJob.submission_state == "CONFIRMED",
+                        GenerationJob.output_asset_id.is_(None),
+                        *poll_fence_conditions,
                     )
                 )
                 if not job:
@@ -1960,6 +2575,7 @@ class GenerationGateway:
                         GenerationJob.provider_job_id == provider_job_id,
                         GenerationJob.submission_state == "CONFIRMED",
                         GenerationJob.output_asset_id.is_(None),
+                        *poll_fence_conditions,
                     )
                     .values(
                         output_asset_id=asset.id,
@@ -1977,6 +2593,12 @@ class GenerationGateway:
                         raise LookupError("generation job not found")
                     session.refresh(job)
                     finalized = True
+                    self._record_provider_billing_evidence(
+                        session,
+                        job,
+                        provider_job_id=provider_job_id,
+                        raw=result.raw,
+                    )
                     if self.workspace_credits is not None:
                         credit_settlement = self.workspace_credits.settle_generation(
                             session,
@@ -2020,6 +2642,24 @@ class GenerationGateway:
                 if current is None:  # pragma: no cover - deleted concurrently by an administrator.
                     raise LookupError("generation job not found")
                 return current
+            try:
+                self._settle_live_generation_canary(
+                    job_id=job_id,
+                    provider=provider_name,
+                    model=model,
+                    provider_job_id=provider_job_id,
+                    raw=result.raw,
+                )
+            except (LiveCanaryDenied, LiveCanaryConflict, ValueError) as exc:
+                # Generation is already durably complete. Canary settlement
+                # ambiguity must remain reviewable, never roll back media.
+                with self.database.session() as session:
+                    self._event(
+                        session,
+                        job_id,
+                        "LIVE_CANARY_SETTLEMENT_REVIEW_REQUIRED",
+                        error=str(exc),
+                    )
             if shot_id and not candidate_id and capability == "video" and self.continuity:
                 try:
                     end_frame = self.continuity.extract_and_chain(shot_id, asset.id)
@@ -2047,6 +2687,7 @@ class GenerationGateway:
                 claim_token=claim_token,
                 release_reservation=release_reservation,
                 release_error=str(exc),
+                poll_identity=poll_identity,
             )
         except Exception as exc:
             return self._schedule_error(
@@ -2056,6 +2697,7 @@ class GenerationGateway:
                 str(exc),
                 submitted=True,
                 claim_token=claim_token,
+                poll_identity=poll_identity,
             )
 
     def _schedule_error(
@@ -2071,6 +2713,7 @@ class GenerationGateway:
         release_error: str | None = None,
         clear_routing: bool = False,
         force_user_action: bool = False,
+        poll_identity: ProviderPollIdentity | None = None,
     ) -> GenerationJob:
         with self.database.session() as session:
             job = session.get(GenerationJob, job_id)
@@ -2084,6 +2727,14 @@ class GenerationGateway:
                 return job
             if claim_token is not None and (
                 job.claim_token != claim_token or job.status != JobStatus.RESERVED.value
+            ):
+                return job
+            if poll_identity is not None and (
+                job.id != poll_identity.local_generation_job_id
+                or job.provider != FLOW_PROVIDER
+                or job.account_id != poll_identity.provider_account_id
+                or job.provider_project_id != poll_identity.provider_project_id
+                or job.provider_job_id != poll_identity.provider_job_id
             ):
                 return job
             # Durable submission facts are monotonic. A caller may have read
@@ -2128,6 +2779,14 @@ class GenerationGateway:
                 conditions.append(GenerationJob.provider_job_id.is_(None))
             else:
                 conditions.append(GenerationJob.provider_job_id == observed_provider_job_id)
+            if poll_identity is not None:
+                conditions.extend(
+                    [
+                        GenerationJob.provider == FLOW_PROVIDER,
+                        GenerationJob.account_id == poll_identity.provider_account_id,
+                        GenerationJob.provider_project_id == poll_identity.provider_project_id,
+                    ]
+                )
             if claim_token is not None:
                 conditions.extend(
                     [

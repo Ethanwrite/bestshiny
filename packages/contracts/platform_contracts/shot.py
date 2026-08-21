@@ -93,3 +93,15 @@ class PassengerGenerationCommand(BaseModel):
     estimated_cost: float = Field(default=0, ge=0)
     estimated_credits: int | None = Field(default=None, ge=1, exclude=True)
     pricing_version: str = Field(default="", max_length=80, exclude=True)
+
+    @model_validator(mode="after")
+    def apply_starter_video_duration(self) -> PassengerGenerationCommand:
+        """Keep the default Free starter request within the audited 50-credit grant.
+
+        Explicit durations remain authoritative and are still rejected by admission
+        when the workspace cannot reserve their server-calculated price.
+        """
+
+        if self.media_type == "video" and self.duration is None:
+            self.duration = 4
+        return self

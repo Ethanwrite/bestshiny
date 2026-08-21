@@ -1,4 +1,10 @@
 from .admission import AdmittedGeneration, GenerationAdmissionService
+from .canary import (
+    CanaryReservation,
+    LiveCanaryConflict,
+    LiveCanaryDenied,
+    LiveCanaryPermitService,
+)
 from .credits import (
     InsufficientWorkspaceCredits,
     ReconcileAction,
@@ -18,8 +24,12 @@ from .service import (
 
 __all__ = [
     "AdmittedGeneration",
+    "CanaryReservation",
     "GenerationAdmissionService",
     "InsufficientWorkspaceCredits",
+    "LiveCanaryConflict",
+    "LiveCanaryDenied",
+    "LiveCanaryPermitService",
     "ModelRoleExecution",
     "ModelRoleRuntime",
     "PlanEntitlementDenied",

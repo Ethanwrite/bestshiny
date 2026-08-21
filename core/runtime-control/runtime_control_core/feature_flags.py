@@ -15,7 +15,6 @@ class FeatureFlagDefaults:
     voyage_memory: bool = False
     auto_evaluation: bool = False
     adaptive_router: bool = False
-    wan3: bool = False
     auto_retry: bool = False
 
 

@@ -18,6 +18,8 @@ from production_domain.models import (
     Shot,
     ShotStatus,
     TimelineState,
+    TimelineTransition,
+    TimelineTransitionType,
 )
 from sqlalchemy import delete, func, select
 
@@ -557,6 +559,44 @@ class NarrativeCompiler:
                     output_state.shot_id = shot.id
                     if previous_shot:
                         previous_shot.next_shot_id = shot.id
+                        transition_type = (
+                            TimelineTransitionType.CONTINUOUS
+                            if previous_shot.scene_id == shot.scene_id
+                            else TimelineTransitionType.SCENE_CUT
+                        )
+                        session.add(
+                            TimelineTransition(
+                                project_id=episode.project_id,
+                                source_shot_id=previous_shot.id,
+                                target_shot_id=shot.id,
+                                transition_type=transition_type.value,
+                                reconciliation_required=False,
+                                metadata_json={
+                                    "source": "narrative_compiler",
+                                    "propagation_semantics": (
+                                        "FULL"
+                                        if transition_type is TimelineTransitionType.CONTINUOUS
+                                        else "RESET_BOUNDARY"
+                                    ),
+                                    "spatial_state": (
+                                        "PROPAGATE"
+                                        if transition_type is TimelineTransitionType.CONTINUOUS
+                                        else "RESET"
+                                    ),
+                                    "character_state": (
+                                        "PROPAGATE"
+                                        if transition_type is TimelineTransitionType.CONTINUOUS
+                                        else "MAY_PROPAGATE_WITH_EXPLICIT_OPT_IN"
+                                    ),
+                                    "propagate_character_state": False,
+                                    "inferred_from": (
+                                        "narrative_sequence"
+                                        if transition_type is TimelineTransitionType.CONTINUOUS
+                                        else "scene_boundary"
+                                    ),
+                                },
+                            )
+                        )
                     shot_ids.append(shot.id)
                     event_ids.append(event.id)
                     event_timeline.append(

@@ -66,6 +66,16 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
     assert "sk-" not in source
     assert "ark-" not in source
     assert "runapi_" not in source
+    free_refinement_roles = {
+        binding.role
+        for binding in config.role_bindings
+        if binding.plan_tier == "FREE" and binding.model_logical_name == "doubao-free-reasoner"
+    }
+    assert {
+        ModelRole.PROMPT_REFINER,
+        ModelRole.PROMPT_REFINER_LOW_COST,
+        ModelRole.PROMPT_REFINER_FALLBACK,
+    } <= free_refinement_roles
 
 
 def test_defaults_are_persisted_idempotently_without_overwriting_admin_state(container) -> None:
@@ -119,6 +129,18 @@ def test_free_doubao_override_fails_closed_instead_of_using_openrouter(container
             plan_tier="FREE",
             asset_criticality=AssetCriticality.STANDARD,
         )
+
+
+def test_paid_and_unscoped_plans_still_inherit_all_bindings(container) -> None:
+    service = container.model_infrastructure
+
+    paid = service.resolve_role(ModelRole.DIRECTOR, plan_tier="PRO")
+    unscoped = service.resolve_role(ModelRole.DIRECTOR, plan_tier="ALL")
+
+    assert paid.provider == "openrouter"
+    assert paid.plan_tier == "ALL"
+    assert unscoped.provider == "openrouter"
+    assert unscoped.plan_tier == "ALL"
 
 
 def test_runtime_model_configuration_explicitly_enables_doubao_without_enabling_live(container) -> None:

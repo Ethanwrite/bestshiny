@@ -9,16 +9,19 @@ from cost_core import CreditEstimate
 from entitlement_core import PlanEntitlementDenied, WorkspaceModelResolver
 from fastapi.testclient import TestClient
 from model_registry_core import ModelRole
+from openrouter_provider import OpenRouterProvider
 from production_domain.models import (
     CostRecord,
     GenerationJob,
+    ModelRoleBinding,
     Project,
     User,
     Workspace,
     WorkspaceCreditEntry,
 )
 from provider_budget_core import DatabaseProviderBudgetRepository
-from provider_sdk import ProviderBudgetConflict, ProviderBudgetExceeded
+from provider_sdk import MockProviderTransport, ProviderBudgetConflict, ProviderBudgetExceeded
+from runapi_provider import RunAPIEdgeProvider
 from sqlalchemy import func, select
 from video_platform_api.main import create_app
 
@@ -58,15 +61,79 @@ def test_free_workspace_resolves_seedance_and_denies_paid_video_roles(container)
 def test_unconfigured_free_doubao_fails_closed_without_openrouter_fallback(container):
     project_id = _free_project(container)
     resolver = WorkspaceModelResolver(container.database, container.model_infrastructure)
+    with container.database.session() as session:
+        free_director = session.scalar(
+            select(ModelRoleBinding).where(
+                ModelRoleBinding.role == ModelRole.DIRECTOR.value,
+                ModelRoleBinding.plan_tier == "FREE",
+            )
+        )
+        assert free_director is not None
+        free_director.enabled = False
 
     with pytest.raises(LookupError, match="no compatible model binding"):
         resolver.resolve(project_id, ModelRole.DIRECTOR)
+    with pytest.raises(LookupError, match="no compatible model binding"):
+        resolver.resolve(project_id, ModelRole.MULTIMODAL_EMBEDDING)
 
     candidates = container.model_infrastructure.candidates_for_role(
         ModelRole.DIRECTOR,
         plan_tier="FREE",
     )
-    assert all(candidate.provider != "openrouter" for candidate in candidates)
+    embedding_candidates = container.model_infrastructure.candidates_for_role(
+        ModelRole.MULTIMODAL_EMBEDDING,
+        plan_tier="FREE",
+    )
+    assert candidates == []
+    assert embedding_candidates == []
+
+
+def test_free_prompt_refine_without_free_bindings_never_reaches_paid_transports(container):
+    project_id = _free_project(container)
+    with container.database.session() as session:
+        free_bindings = session.scalars(
+            select(ModelRoleBinding).where(
+                ModelRoleBinding.role.in_(
+                    {
+                        ModelRole.PROMPT_REFINER_LOW_COST.value,
+                        ModelRole.PROMPT_REFINER_FALLBACK.value,
+                    }
+                ),
+                ModelRoleBinding.plan_tier == "FREE",
+            )
+        ).all()
+        assert len(free_bindings) == 2
+        for binding in free_bindings:
+            binding.enabled = False
+
+    container.model_infrastructure.configure_runtime_model(
+        "runapi-prompt-refiner-edge",
+        "paid-runapi-refiner",
+        enabled=True,
+    )
+    runapi = container.providers.get("runapi")
+    openrouter = container.providers.get("openrouter")
+    assert isinstance(runapi, RunAPIEdgeProvider)
+    assert isinstance(openrouter, OpenRouterProvider)
+    assert isinstance(runapi.client.transport, MockProviderTransport)
+    assert isinstance(openrouter.client.transport, MockProviderTransport)
+    runapi.configured = True
+    openrouter.configured = True
+
+    with TestClient(create_app(container)) as client:
+        response = client.post(
+            "/v1/prompts/refine",
+            json={"project_id": project_id, "prompt": "Mina raises the red phone."},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model_refinement"] == {
+        "accepted": False,
+        "source": "local_safe_fallback",
+        "reason_codes": ["PRIMARY_UNAVAILABLE", "FALLBACK_UNAVAILABLE"],
+    }
+    assert runapi.client.transport.requests == []
+    assert openrouter.client.transport.requests == []
 
 
 def test_database_provider_budget_reserve_settle_and_exhaustion(container):
@@ -412,6 +479,55 @@ def test_insufficient_free_credits_roll_back_job_cost_and_ledger(container, monk
         assert session.scalar(select(func.count(GenerationJob.id))) == 0
         assert session.scalar(select(func.count(WorkspaceCreditEntry.id))) == 0
         assert session.scalar(select(func.count(CostRecord.id))) == 0
+
+
+def test_free_starter_default_video_fits_one_seedance_reservation(container, monkeypatch):
+    container.settings.auth_required = True
+    seedance = container.providers.get("seedance")
+    monkeypatch.setattr(seedance, "configured", True)
+    container.providers.register_model("seedance", "seedance-2.5", "video")
+
+    with TestClient(create_app(container)) as client:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "email": "free-starter-video@example.com",
+                "password": "correct horse battery staple",
+            },
+        ).json()
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        project = client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"title": "Starter Video"},
+        ).json()
+        response = client.post(
+            "/api/passenger/generate",
+            headers=headers,
+            json={
+                "project_id": project["id"],
+                "media_type": "video",
+                "prompt": "One visible action",
+                "idempotency_key": "starter-default-four-seconds",
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["provider"] == "seedance"
+    assert response.json()["estimated_credits"] == 44
+    with container.database.session() as session:
+        stored_project = session.get(Project, project["id"])
+        assert stored_project is not None
+        workspace = session.get(Workspace, stored_project.workspace_id)
+        assert workspace is not None
+        assert workspace.credit_balance == 6
+        job = session.scalar(select(GenerationJob))
+        assert job is not None
+        assert job.request_json["duration"] == 4
+        entry = session.scalar(select(WorkspaceCreditEntry))
+        assert entry is not None
+        assert entry.status == "RESERVED"
+        assert entry.credits == 44
 
 
 def test_model_roles_endpoint_hides_unconfigured_deployment_models(container):

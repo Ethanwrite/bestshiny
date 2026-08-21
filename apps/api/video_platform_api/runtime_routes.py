@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -10,6 +12,7 @@ from asset_registry_core import (
 )
 from entitlement_core import (
     InsufficientWorkspaceCredits,
+    LiveCanaryConflict,
     PlanEntitlementDenied,
     WorkspaceCreditConflict,
 )
@@ -18,7 +21,7 @@ from evaluation_core import (
     EvaluationExpectation,
     EvaluationResult,
 )
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from generation_gateway import IdempotencyConflict
 from memory_core import MemoryLayer, MemoryQuery, MultimodalContent, ShotMemoryInput
 from model_registry_core import ModelRole
@@ -26,9 +29,23 @@ from platform_contracts import GenerationRequest, PassengerGenerationCommand
 from production_domain.models import (
     Asset,
     AssetVersion,
+    CostRecord,
+    DecisionOutcomeRecord,
+    Episode,
+    GenerationCandidate,
     GenerationJob,
+    LiveCanaryPermit,
+    LiveCanaryUsage,
     MediaAsset,
+    ModelExecutionRecord,
     ProductionTrace,
+    Project,
+    ProviderBillingEvidence,
+    ProviderProjectBinding,
+    QAResult,
+    Scene,
+    Shot,
+    TimelineTransition,
     Workspace,
 )
 from provider_budget_core import (
@@ -43,8 +60,8 @@ from provider_sdk import (
     ProviderTrustViolation,
     assert_provider_can_handle,
 )
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sqlalchemy import or_, select
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -175,6 +192,45 @@ class ProviderBudgetReconcileRequest(BaseModel):
         return self
 
 
+class LiveCanaryPermitCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=255)
+    max_requests: int = Field(strict=True, ge=1, le=10_000)
+    max_cost_usd: Decimal = Field(
+        gt=0,
+        le=Decimal("99999999.999999"),
+        max_digits=14,
+        decimal_places=6,
+    )
+    expires_at: datetime
+    purpose: str = Field(min_length=3, max_length=500)
+    explicit_confirmation: Literal[True]
+
+    @field_validator("provider", "model", "purpose", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("expires_at")
+    @classmethod
+    def require_future_aware_expiry(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("expires_at must include a timezone")
+        normalized = value.astimezone(UTC)
+        if normalized <= datetime.now(UTC):
+            raise ValueError("expires_at must be in the future")
+        return normalized
+
+    @field_validator("explicit_confirmation", mode="before")
+    @classmethod
+    def require_literal_boolean_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("explicit_confirmation must be the boolean true")
+        return value
+
+
 def _asset_view(asset: Asset) -> dict[str, Any]:
     return {
         "id": asset.id,
@@ -200,6 +256,245 @@ def _version_view(version: AssetVersion) -> dict[str, Any]:
         "continuity_state": version.continuity_state,
         "source": version.source,
         "status": version.status,
+    }
+
+
+def _money_view(value: Decimal | None) -> str | None:
+    return format(value, "f") if value is not None else None
+
+
+def _live_canary_permit_view(
+    permit: LiveCanaryPermit,
+    usages: list[LiveCanaryUsage],
+) -> dict[str, Any]:
+    def money(value: Decimal) -> str:
+        return format(value.quantize(Decimal("0.000001")), "f")
+
+    usage_statuses = {
+        status: sum(usage.status == status for usage in usages)
+        for status in ("RESERVED", "UNCERTAIN", "SETTLED", "RELEASED")
+    }
+    if usage_statuses["UNCERTAIN"]:
+        usage_status = "RECONCILIATION_REQUIRED"
+    elif usage_statuses["RESERVED"]:
+        usage_status = "RESERVED"
+    elif usage_statuses["SETTLED"] and usage_statuses["RELEASED"]:
+        usage_status = "MIXED_FINAL"
+    elif usage_statuses["SETTLED"]:
+        usage_status = "SETTLED"
+    elif usage_statuses["RELEASED"]:
+        usage_status = "RELEASED"
+    else:
+        usage_status = "UNUSED"
+    expires_at = permit.expires_at
+    aware_expiry = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at.astimezone(UTC)
+    effective_status = (
+        "EXPIRED" if permit.status == "ACTIVE" and aware_expiry <= datetime.now(UTC) else permit.status
+    )
+    return {
+        "id": permit.id,
+        "provider": permit.provider,
+        "model": permit.model,
+        "max_requests": permit.max_requests,
+        "used_requests": permit.used_requests,
+        "remaining_requests": max(0, permit.max_requests - permit.used_requests),
+        "max_cost_usd": money(permit.max_cost_usd),
+        "reserved_cost_usd": money(permit.reserved_cost_usd),
+        "actual_cost_usd": money(permit.actual_cost_usd),
+        "remaining_cost_usd": money(
+            max(
+                Decimal("0"),
+                permit.max_cost_usd - permit.reserved_cost_usd - permit.actual_cost_usd,
+            )
+        ),
+        "expires_at": permit.expires_at,
+        "purpose": permit.purpose,
+        "status": effective_status,
+        "usage_status": usage_status,
+        "usage_statuses": usage_statuses,
+        "requires_reconciliation": usage_statuses["UNCERTAIN"] > 0,
+        "created_at": permit.created_at,
+        "updated_at": permit.updated_at,
+    }
+
+
+def _reference_fingerprint(value: str | None) -> str | None:
+    return hashlib.sha256(value.encode()).hexdigest() if value else None
+
+
+def _safe_code_list(value: Any, *, limit: int = 20) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item[:160] for item in value if isinstance(item, str)][:limit]
+
+
+def _timeline_metadata_view(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed_values = {
+        "propagation_semantics": frozenset({"FULL", "RESET_BOUNDARY"}),
+        "spatial_state": frozenset({"RESET"}),
+        "character_state": frozenset({"MAY_PROPAGATE_WITH_EXPLICIT_OPT_IN"}),
+        "timeline_branch": frozenset({"NEW_BRANCH"}),
+        "inferred_from": frozenset({"legacy_state_hint", "scene_boundary", "linked_shot_default"}),
+    }
+    result = {key: item for key, permitted in allowed_values.items() if (item := value.get(key)) in permitted}
+    for key in ("propagate_character_state", "reconciled"):
+        if isinstance(value.get(key), bool):
+            result[key] = value[key]
+    return result
+
+
+def _safe_scalar_mapping(
+    value: Any,
+    *,
+    allowed_keys: frozenset[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in allowed_keys:
+        if key not in value:
+            continue
+        item = value.get(key)
+        if item is None or isinstance(item, str | int | float | bool):
+            result[key] = item
+        elif (
+            isinstance(item, list)
+            and len(item) <= 20
+            and all(entry is None or isinstance(entry, str | int | float | bool) for entry in item)
+        ):
+            result[key] = item
+    return result
+
+
+def _model_execution_evidence_view(item: ModelExecutionRecord) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "project_id": item.project_id,
+        "role": item.role,
+        "model_definition_id": item.model_definition_id,
+        "provider": item.provider,
+        "provider_model_id": item.provider_model_id,
+        "request_hash": item.request_hash,
+        "latency_ms": item.latency_ms,
+        "token_usage": _safe_scalar_mapping(
+            item.token_usage_json,
+            allowed_keys=frozenset(
+                {
+                    "input_tokens",
+                    "output_tokens",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                }
+            ),
+        ),
+        "estimated_cost_usd": _money_view(item.estimated_cost_usd),
+        "actual_cost_usd": _money_view(item.actual_cost_usd),
+        "cost_source": item.cost_source,
+        "status": item.status,
+        "error_code": item.error_code,
+        "execution_context": _safe_scalar_mapping(
+            item.metadata_json,
+            allowed_keys=frozenset({"capability", "asset_criticality", "input_count"}),
+        ),
+        "created_at": item.created_at,
+    }
+
+
+def _qa_evidence_view(item: QAResult) -> dict[str, Any]:
+    metrics = item.metrics_json if isinstance(item.metrics_json, dict) else {}
+    character = metrics.get("character_evidence")
+    character_summary: dict[str, Any] | None = None
+    if isinstance(character, dict):
+        samples = character.get("samples")
+        character_summary = {
+            "producer_run_id": character.get("producer_run_id"),
+            "producer_version": character.get("producer_version"),
+            "character_id": character.get("character_id"),
+            "tracking_status": character.get("tracking_status"),
+            "tracking_reason_codes": _safe_code_list(character.get("tracking_reason_codes")),
+            "review_requirements": _safe_code_list(character.get("review_requirements")),
+            "sample_count": len(samples) if isinstance(samples, list) else 0,
+            "aggregate": _safe_scalar_mapping(
+                character.get("aggregate"),
+                allowed_keys=frozenset(
+                    {
+                        "average_identity",
+                        "minimum_identity",
+                        "identity_p10",
+                        "drift_slope",
+                        "low_score_duration",
+                        "appearance_similarity",
+                        "hair_similarity",
+                        "costume_similarity",
+                        "reacquisition_score",
+                        "usable_samples",
+                        "total_samples",
+                        "dominant_face_view",
+                        "average_face_visibility",
+                    }
+                ),
+            ),
+            "threshold_profile": _safe_scalar_mapping(
+                character.get("threshold_profile"),
+                allowed_keys=frozenset(
+                    {
+                        "profile_id",
+                        "version",
+                        "shot_type",
+                        "face_view",
+                        "visibility_range",
+                        "identity_pass",
+                        "identity_hard_fail",
+                        "drift_limit",
+                        "minimum_required_samples",
+                    }
+                ),
+            ),
+        }
+    return {
+        "id": item.id,
+        "candidate_id": item.candidate_id,
+        "profile": item.profile,
+        "level_reached": item.level_reached,
+        "decision": item.decision,
+        "overall_score": item.overall_score,
+        "scores": {
+            "character": item.character_score,
+            "scene": item.scene_score,
+            "composition": item.composition_score,
+            "action": item.action_score,
+            "camera": item.camera_score,
+            "lighting": item.lighting_score,
+            "narrative": item.narrative_score,
+        },
+        "hard_failures": _safe_code_list(item.hard_failures),
+        "evidence": {
+            "source": metrics.get("evidence_source"),
+            "complete": metrics.get("evidence_complete"),
+            "missing_dimensions": _safe_code_list(metrics.get("missing_dimensions")),
+            "semantic_review_required": metrics.get("semantic_review_required"),
+            "semantic_review_reason": metrics.get("semantic_review_reason"),
+            "identity": _safe_scalar_mapping(
+                metrics.get("identity"),
+                allowed_keys=frozenset(
+                    {
+                        "average_identity",
+                        "minimum_identity",
+                        "identity_p10",
+                        "drift_slope",
+                        "low_score_duration",
+                        "appearance_similarity",
+                        "reacquisition_score",
+                        "usable_samples",
+                    }
+                ),
+            ),
+            "character": character_summary,
+        },
+        "created_at": item.created_at,
     }
 
 
@@ -803,6 +1098,442 @@ def register_runtime_routes(
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         return {"name": value.name, "project_id": value.project_id, "enabled": value.enabled}
+
+    @internal_router.post("/internal/live-canary-permits", status_code=201)
+    def create_live_canary_permit(
+        body: LiveCanaryPermitCreate,
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key", max_length=200),
+        ] = None,
+    ):
+        """Persist a bounded authorization; this endpoint never executes a provider call."""
+
+        if not idempotency_key or not idempotency_key.strip():
+            raise HTTPException(400, "Idempotency-Key is required")
+        try:
+            permit, audit_decision_id, replayed = container.live_canary.create_authorized(
+                provider=body.provider,
+                model=body.model,
+                max_requests=body.max_requests,
+                max_cost_usd=body.max_cost_usd,
+                expires_at=body.expires_at,
+                purpose=body.purpose,
+                explicit_confirmation=body.explicit_confirmation,
+                actor_type="PLATFORM_API_KEY",
+                idempotency_key=idempotency_key,
+            )
+        except LiveCanaryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with container.database.session() as session:
+            stored_permit = session.get(LiveCanaryPermit, permit.id)
+            if stored_permit is None:  # pragma: no cover - transaction invariant.
+                raise RuntimeError("live canary permit disappeared after authorization")
+            usages = list(
+                session.scalars(
+                    select(LiveCanaryUsage)
+                    .where(LiveCanaryUsage.permit_id == permit.id)
+                    .order_by(LiveCanaryUsage.created_at, LiveCanaryUsage.id)
+                )
+            )
+        return {
+            **_live_canary_permit_view(stored_permit, usages),
+            "audit_decision_id": audit_decision_id,
+            "replayed": replayed,
+        }
+
+    @internal_router.get("/internal/live-canary-permits")
+    def list_live_canary_permits(
+        permit_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        provider: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
+        model: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
+        status: Annotated[
+            Literal["ACTIVE", "EXHAUSTED", "EXPIRED"] | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ):
+        statement = select(LiveCanaryPermit)
+        if permit_id:
+            statement = statement.where(LiveCanaryPermit.id == permit_id)
+        if provider:
+            statement = statement.where(LiveCanaryPermit.provider == provider)
+        if model:
+            statement = statement.where(LiveCanaryPermit.model == model)
+        if status == "ACTIVE":
+            statement = statement.where(
+                LiveCanaryPermit.status == "ACTIVE",
+                LiveCanaryPermit.expires_at > datetime.now(UTC),
+            )
+        elif status == "EXPIRED":
+            statement = statement.where(
+                or_(
+                    LiveCanaryPermit.status == "EXPIRED",
+                    LiveCanaryPermit.expires_at <= datetime.now(UTC),
+                )
+            )
+        elif status is not None:
+            statement = statement.where(LiveCanaryPermit.status == status)
+
+        with container.database.session() as session:
+            permits = list(
+                session.scalars(
+                    statement.order_by(
+                        LiveCanaryPermit.created_at.desc(),
+                        LiveCanaryPermit.id.desc(),
+                    ).limit(limit)
+                )
+            )
+            permit_ids = [permit.id for permit in permits]
+            usage_rows = (
+                list(
+                    session.scalars(
+                        select(LiveCanaryUsage)
+                        .where(LiveCanaryUsage.permit_id.in_(permit_ids))
+                        .order_by(LiveCanaryUsage.created_at, LiveCanaryUsage.id)
+                    )
+                )
+                if permit_ids
+                else []
+            )
+            usages_by_permit = {
+                permit.id: [usage for usage in usage_rows if usage.permit_id == permit.id]
+                for permit in permits
+            }
+            return {
+                "limit": limit,
+                "permits": [
+                    _live_canary_permit_view(permit, usages_by_permit[permit.id]) for permit in permits
+                ],
+            }
+
+    @internal_router.get("/internal/production-evidence")
+    def production_evidence(
+        project_id: Annotated[str, Query(min_length=1, max_length=100)],
+        job_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        shot_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ):
+        """Read a redacted production evidence join under an exact project scope."""
+
+        with container.database.session() as session:
+            if session.get(Project, project_id) is None:
+                raise HTTPException(404, "scoped project not found")
+
+            scoped_job = session.get(GenerationJob, job_id) if job_id else None
+            if job_id and (scoped_job is None or scoped_job.project_id != project_id):
+                raise HTTPException(404, "scoped generation job not found")
+
+            if shot_id:
+                scoped_shot_id = session.scalar(
+                    select(Shot.id)
+                    .join(Scene, Scene.id == Shot.scene_id)
+                    .join(Episode, Episode.id == Scene.episode_id)
+                    .where(Shot.id == shot_id, Episode.project_id == project_id)
+                )
+                if scoped_shot_id is None:
+                    raise HTTPException(404, "scoped shot not found")
+            if scoped_job is not None and shot_id and scoped_job.shot_id != shot_id:
+                raise HTTPException(404, "generation job is not associated with the scoped shot")
+
+            effective_shot_id = shot_id or (scoped_job.shot_id if scoped_job is not None else None)
+            effective_shot = None
+            if effective_shot_id:
+                effective_shot = session.scalar(
+                    select(Shot)
+                    .join(Scene, Scene.id == Shot.scene_id)
+                    .join(Episode, Episode.id == Scene.episode_id)
+                    .where(Shot.id == effective_shot_id, Episode.project_id == project_id)
+                )
+                if effective_shot is None:
+                    raise HTTPException(404, "effective scoped shot not found")
+
+            execution_rows = list(
+                session.scalars(
+                    select(ModelExecutionRecord)
+                    .where(ModelExecutionRecord.project_id == project_id)
+                    .order_by(ModelExecutionRecord.created_at.desc(), ModelExecutionRecord.id.desc())
+                    .limit(limit)
+                )
+            )
+
+            job_statement = select(GenerationJob).where(GenerationJob.project_id == project_id)
+            if job_id:
+                job_statement = job_statement.where(GenerationJob.id == job_id)
+            if shot_id:
+                job_statement = job_statement.where(GenerationJob.shot_id == shot_id)
+            job_rows = list(
+                session.scalars(
+                    job_statement.order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc()).limit(
+                        limit
+                    )
+                )
+            )
+
+            billing_statement = (
+                select(ProviderBillingEvidence)
+                .join(
+                    GenerationJob,
+                    GenerationJob.id == ProviderBillingEvidence.generation_job_id,
+                )
+                .where(GenerationJob.project_id == project_id)
+            )
+            if job_id:
+                billing_statement = billing_statement.where(GenerationJob.id == job_id)
+            if shot_id:
+                billing_statement = billing_statement.where(GenerationJob.shot_id == shot_id)
+            billing_rows = list(
+                session.scalars(
+                    billing_statement.order_by(
+                        ProviderBillingEvidence.created_at.desc(),
+                        ProviderBillingEvidence.id.desc(),
+                    ).limit(limit)
+                )
+            )
+
+            cost_statement = select(CostRecord).where(CostRecord.project_id == project_id)
+            if job_id:
+                cost_statement = cost_statement.where(CostRecord.generation_job_id == job_id)
+            if shot_id:
+                cost_statement = cost_statement.where(CostRecord.shot_id == shot_id)
+            cost_rows = list(
+                session.scalars(
+                    cost_statement.order_by(CostRecord.created_at.desc(), CostRecord.id.desc()).limit(limit)
+                )
+            )
+
+            binding_rows = list(
+                session.scalars(
+                    select(ProviderProjectBinding)
+                    .where(
+                        ProviderProjectBinding.local_project_id == project_id,
+                        ProviderProjectBinding.provider == "google_flow",
+                    )
+                    .order_by(
+                        ProviderProjectBinding.created_at.desc(),
+                        ProviderProjectBinding.id.desc(),
+                    )
+                    .limit(limit)
+                )
+            )
+
+            qa_statement = (
+                select(QAResult)
+                .join(
+                    GenerationCandidate,
+                    GenerationCandidate.id == QAResult.candidate_id,
+                )
+                .join(Shot, Shot.id == GenerationCandidate.shot_id)
+                .join(Scene, Scene.id == Shot.scene_id)
+                .join(Episode, Episode.id == Scene.episode_id)
+                .where(Episode.project_id == project_id)
+            )
+            if scoped_job is not None:
+                job_candidate_conditions = [
+                    GenerationCandidate.generation_job_id == scoped_job.id,
+                ]
+                if scoped_job.candidate_id:
+                    job_candidate_conditions.append(GenerationCandidate.id == scoped_job.candidate_id)
+                qa_statement = qa_statement.where(or_(*job_candidate_conditions))
+            if effective_shot_id:
+                qa_statement = qa_statement.where(GenerationCandidate.shot_id == effective_shot_id)
+            qa_rows = list(
+                session.scalars(
+                    qa_statement.order_by(QAResult.created_at.desc(), QAResult.id.desc()).limit(limit)
+                )
+            )
+
+            outcome_statement = select(DecisionOutcomeRecord).where(
+                DecisionOutcomeRecord.project_id == project_id
+            )
+            if job_id:
+                outcome_statement = outcome_statement.where(DecisionOutcomeRecord.generation_job_id == job_id)
+            if effective_shot_id:
+                outcome_statement = outcome_statement.where(
+                    DecisionOutcomeRecord.shot_id == effective_shot_id
+                )
+            outcome_rows = list(
+                session.scalars(
+                    outcome_statement.order_by(
+                        DecisionOutcomeRecord.created_at.desc(),
+                        DecisionOutcomeRecord.id.desc(),
+                    ).limit(limit)
+                )
+            )
+
+            transition_statement = select(TimelineTransition).where(
+                TimelineTransition.project_id == project_id
+            )
+            if effective_shot_id:
+                transition_statement = transition_statement.where(
+                    or_(
+                        TimelineTransition.source_shot_id == effective_shot_id,
+                        TimelineTransition.target_shot_id == effective_shot_id,
+                    )
+                )
+            transition_rows = list(
+                session.scalars(
+                    transition_statement.order_by(
+                        TimelineTransition.created_at.desc(),
+                        TimelineTransition.id.desc(),
+                    ).limit(limit)
+                )
+            )
+
+            return {
+                "scope": {
+                    "project_id": project_id,
+                    "job_id": job_id,
+                    "shot_id": shot_id,
+                    "effective_shot_id": effective_shot_id,
+                    "limit_per_collection": limit,
+                    "model_execution_linkage": "PROJECT_ONLY",
+                },
+                "shot_state": (
+                    {
+                        "id": effective_shot.id,
+                        "downstream_state_stale": effective_shot.downstream_state_stale,
+                        "stale_reason": effective_shot.stale_reason,
+                        "stale_from_shot_id": effective_shot.stale_from_shot_id,
+                    }
+                    if effective_shot is not None
+                    else None
+                ),
+                "model_executions": [_model_execution_evidence_view(item) for item in execution_rows],
+                "provider_jobs": [
+                    {
+                        "id": item.id,
+                        "project_id": item.project_id,
+                        "shot_id": item.shot_id,
+                        "candidate_id": item.candidate_id,
+                        "generation_type": item.generation_type,
+                        "provider": item.provider,
+                        "model": item.model,
+                        "status": item.status,
+                        "provider_job_id": item.provider_job_id,
+                        "provider_project_id": item.provider_project_id,
+                        "output_asset_id": item.output_asset_id,
+                        "attempt_count": item.attempt_count,
+                        "max_attempts": item.max_attempts,
+                        "retry_category": item.retry_category,
+                        "submission_state": item.submission_state,
+                        "safe_to_retry": item.safe_to_retry,
+                        "error_code": item.error_code,
+                        "cost_estimate": item.cost_estimate,
+                        "actual_cost": item.actual_cost,
+                        "created_at": item.created_at,
+                        "submitted_at": item.submitted_at,
+                        "completed_at": item.completed_at,
+                    }
+                    for item in job_rows
+                ],
+                "provider_billing_evidence": [
+                    {
+                        "id": item.id,
+                        "generation_job_id": item.generation_job_id,
+                        "cost_record_id": item.cost_record_id,
+                        "evidence_key": item.evidence_key,
+                        "provider": item.provider,
+                        "model": item.model,
+                        "source": item.source,
+                        "provider_reference_fingerprint": _reference_fingerprint(item.provider_reference),
+                        "actual_cost_usd": _money_view(item.actual_cost_usd),
+                        "estimated_cost_usd": _money_view(item.estimated_cost_usd),
+                        "provider_credits": _money_view(item.provider_credits),
+                        "verified_at": item.verified_at,
+                        "created_at": item.created_at,
+                    }
+                    for item in billing_rows
+                ],
+                "cost_records": [
+                    {
+                        "id": item.id,
+                        "project_id": item.project_id,
+                        "shot_id": item.shot_id,
+                        "candidate_id": item.candidate_id,
+                        "generation_job_id": item.generation_job_id,
+                        "provider": item.provider,
+                        "model": item.model,
+                        "duration": item.duration,
+                        "resolution": item.resolution,
+                        "credits": item.credits,
+                        "estimated_cost": item.estimated_cost,
+                        "actual_cost": item.actual_cost,
+                        "retry_cost": item.retry_cost,
+                        "accepted": item.accepted,
+                        "wasted": item.wasted,
+                        "created_at": item.created_at,
+                    }
+                    for item in cost_rows
+                ],
+                "flow_bindings": [
+                    {
+                        "id": item.id,
+                        "local_project_id": item.local_project_id,
+                        "provider": item.provider,
+                        "provider_account_id": item.provider_account_id,
+                        "provider_project_id": item.provider_project_id,
+                        "status": item.status,
+                        "version": item.version,
+                        "ready_at": item.ready_at,
+                        "migration_required_at": item.migration_required_at,
+                        "created_at": item.created_at,
+                    }
+                    for item in binding_rows
+                ],
+                "qa_evidence": [_qa_evidence_view(item) for item in qa_rows],
+                "decision_outcomes": [
+                    {
+                        "id": item.id,
+                        "project_id": item.project_id,
+                        "shot_id": item.shot_id,
+                        "candidate_id": item.candidate_id,
+                        "generation_job_id": item.generation_job_id,
+                        "qa_result_id": item.qa_result_id,
+                        "continuity_decision": item.continuity_decision,
+                        "generation_policy": item.generation_policy,
+                        "provider": item.provider,
+                        "model": item.model,
+                        "shot_features": _safe_scalar_mapping(
+                            item.shot_features_json,
+                            allowed_keys=frozenset(
+                                {
+                                    "sequence",
+                                    "shot_type",
+                                    "duration",
+                                    "status",
+                                    "continuity_policy",
+                                    "prompt_hash",
+                                }
+                            ),
+                        ),
+                        "user_outcome": item.user_outcome,
+                        "accepted": item.accepted,
+                        "estimated_cost_usd": _money_view(item.estimated_cost_usd),
+                        "actual_cost_usd": _money_view(item.actual_cost_usd),
+                        "billing_source": item.billing_source,
+                        "created_at": item.created_at,
+                    }
+                    for item in outcome_rows
+                ],
+                "timeline_transitions": [
+                    {
+                        "id": item.id,
+                        "project_id": item.project_id,
+                        "source_shot_id": item.source_shot_id,
+                        "target_shot_id": item.target_shot_id,
+                        "transition_type": item.transition_type,
+                        "branch_key": item.branch_key,
+                        "reconciliation_required": item.reconciliation_required,
+                        "metadata": _timeline_metadata_view(item.metadata_json),
+                        "created_at": item.created_at,
+                        "updated_at": item.updated_at,
+                    }
+                    for item in transition_rows
+                ],
+            }
 
     @internal_router.get("/internal/shots/{shot_id}/traces")
     def shot_traces(shot_id: str):

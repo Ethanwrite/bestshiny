@@ -12,6 +12,7 @@ from production_domain.models import (
     ProviderAccount,
     ProviderCredential,
     ProviderProjectBinding,
+    ProviderProjectBindingStatus,
     WorkerStatus,
     utcnow,
 )
@@ -94,11 +95,11 @@ class AccountScheduler:
                         )
                     )
                 )
-                if project_bindings:
+                if project_bindings or provider == "google_flow":
                     bound_account_ids = {
                         binding.provider_account_id
                         for binding in project_bindings
-                        if binding.status == "READY"
+                        if binding.status == ProviderProjectBindingStatus.READY.value
                     }
                     accounts = [account for account in accounts if account.id in bound_account_ids]
             candidates: list[tuple[tuple, str, str]] = []
@@ -208,7 +209,12 @@ class AccountScheduler:
                     ProviderProjectBinding.status == "READY",
                 )
             )
-            conditions.append(or_(~any_binding, ready_binding))
+            # Flow account/project context is sticky. Only the allocator may
+            # select an unbound account while creating the first remote project.
+            # Ordinary generation must never fall through to another account.
+            conditions.append(
+                ready_binding if provider == "google_flow" else or_(~any_binding, ready_binding)
+            )
 
         account_values = {
             "pending_jobs": ProviderAccount.pending_jobs + 1,
@@ -307,7 +313,7 @@ class AccountScheduler:
         now = utcnow()
         job_values: dict[str, object] = {"reservation_released_at": now}
         if clear_routing:
-            job_values.update(account_id=None, worker_id=None)
+            job_values.update(account_id=None, worker_id=None, provider_project_id=None)
         ownership_update = session.execute(
             update(GenerationJob)
             .where(
@@ -394,6 +400,7 @@ class AccountScheduler:
         if clear_routing:
             job.account_id = None
             job.worker_id = None
+            job.provider_project_id = None
         return True
 
     def release_job(

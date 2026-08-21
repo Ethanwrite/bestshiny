@@ -96,7 +96,7 @@ class GenerationContext(BaseModel):
 
 
 class EmbeddingProvenance(BaseModel):
-    provider: Literal["voyage", "local_test"]
+    provider: str = Field(min_length=1, max_length=80)
     model: str
     dimension: int
     input_type: Literal["query", "document"]

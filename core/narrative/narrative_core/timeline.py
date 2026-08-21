@@ -5,19 +5,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from platform_database import Database
-from production_domain.models import DecisionRecord, Episode, Scene, Shot, ShotStatus, TimelineState
+from production_domain.models import (
+    DecisionRecord,
+    Episode,
+    Scene,
+    Shot,
+    ShotStatus,
+    TimelineState,
+    TimelineTransition,
+    TimelineTransitionType,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-RESET_TRANSITIONS = frozenset(
-    {
-        "SCENE_CHANGE",
-        "TIMELINE_JUMP",
-        "FLASHBACK",
-        "MONTAGE",
-        "EXPLICIT_RESET",
-    }
-)
 
 _MISSING = object()
 
@@ -26,6 +25,47 @@ PROPAGATION_TARGET_STATUSES = frozenset(
         ShotStatus.DRAFT.value,
         ShotStatus.PLANNED.value,
         ShotStatus.READY.value,
+    }
+)
+
+_BRANCH_TRANSITIONS = frozenset(
+    {
+        TimelineTransitionType.FLASHBACK,
+        TimelineTransitionType.FLASH_FORWARD,
+        TimelineTransitionType.DREAM,
+    }
+)
+_RECONCILIATION_TRANSITIONS = frozenset(
+    {
+        TimelineTransitionType.TIME_JUMP,
+        TimelineTransitionType.FLASH_FORWARD,
+        TimelineTransitionType.MONTAGE,
+    }
+)
+_RESET_TRANSITIONS = frozenset(
+    {
+        TimelineTransitionType.SCENE_CUT,
+        TimelineTransitionType.TIME_JUMP,
+        TimelineTransitionType.FLASHBACK,
+        TimelineTransitionType.FLASH_FORWARD,
+        TimelineTransitionType.MONTAGE,
+        TimelineTransitionType.DREAM,
+        TimelineTransitionType.LOCATION_CHANGE,
+        TimelineTransitionType.EXPLICIT_RESET,
+    }
+)
+_LEGACY_TRANSITIONS = {
+    "SCENE_CHANGE": TimelineTransitionType.SCENE_CUT,
+    "TIMELINE_JUMP": TimelineTransitionType.TIME_JUMP,
+}
+_SPATIAL_CHARACTER_FIELDS = frozenset(
+    {
+        "position",
+        "orientation",
+        "location",
+        "coordinates",
+        "blocking",
+        "pose",
     }
 )
 
@@ -44,16 +84,39 @@ class TimelinePropagationResult:
     target_state_id: str | None
     target_output_state_id: str | None
     output_rebased: bool
+    transition_type: str | None
+    reconciliation_required: bool
+    branch_key: str | None
+
+
+@dataclass(frozen=True)
+class TimelineStaleResult:
+    edited_shot_id: str
+    marked_shot_ids: tuple[str, ...]
+    planning_shot_ids: tuple[str, ...]
+    immutable_shot_ids: tuple[str, ...]
+    reason_code: str = "RECOMPUTE_REQUIRED"
+
+
+@dataclass(frozen=True)
+class TimelineRecomputeResult:
+    edited_shot_id: str
+    recomputed_shot_ids: tuple[str, ...]
+    blocked_shot_id: str | None
+    reason_code: str
 
 
 class AuthoritativeTimelineStateEngine:
     """Propagate committed SQL state without consulting semantic memory.
 
-    Vector/LLM memory may help retrieve context, but it is never accepted as a
-    replacement for the committed ``SHOT_OUTPUT`` row.
+    ``TimelineTransition`` is the relational source of truth for boundaries.
+    Legacy transition hints are migrated into a row on first use. Vector/LLM
+    memory may help retrieve context, but it is never accepted as a replacement
+    for the committed ``SHOT_OUTPUT`` row.
     """
 
-    version = "sql-timeline-propagation-v2"
+    version = "sql-timeline-propagation-v3"
+    policy_version = "timeline-v3"
 
     def __init__(self, database: Database):
         self.database = database
@@ -67,12 +130,195 @@ class AuthoritativeTimelineStateEngine:
         return episode.project_id
 
     @staticmethod
-    def _transition_kind(next_input: TimelineState) -> str | None:
+    def _legacy_transition_kind(next_input: TimelineState) -> TimelineTransitionType | None:
         state = next_input.state_json or {}
         raw: Any = state.get("transition_kind") or state.get("timeline_transition")
         if raw is None and isinstance(state.get("transition"), dict):
             raw = state["transition"].get("kind")
-        return str(raw).strip().upper() if raw else None
+        if not raw:
+            return None
+        normalized = str(raw).strip().upper()
+        normalized = _LEGACY_TRANSITIONS.get(normalized, normalized)
+        try:
+            return TimelineTransitionType(normalized)
+        except ValueError as exc:
+            raise TimelinePropagationError(f"unknown timeline transition: {raw}") from exc
+
+    @staticmethod
+    def _transition_metadata(transition_type: TimelineTransitionType) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "propagation_semantics": "FULL"
+            if transition_type is TimelineTransitionType.CONTINUOUS
+            else "RESET_BOUNDARY",
+        }
+        if transition_type in {
+            TimelineTransitionType.SCENE_CUT,
+            TimelineTransitionType.LOCATION_CHANGE,
+        }:
+            metadata.update(
+                {
+                    "spatial_state": "RESET",
+                    "character_state": "MAY_PROPAGATE_WITH_EXPLICIT_OPT_IN",
+                    "propagate_character_state": False,
+                }
+            )
+        if transition_type in _BRANCH_TRANSITIONS:
+            metadata["timeline_branch"] = "NEW_BRANCH"
+        return metadata
+
+    @staticmethod
+    def _branch_key(
+        transition_type: TimelineTransitionType,
+        target_shot_id: str,
+        supplied: str | None,
+    ) -> str | None:
+        if transition_type not in _BRANCH_TRANSITIONS:
+            return None
+        return supplied or f"{transition_type.value.lower()}:{target_shot_id}"
+
+    @staticmethod
+    def _transition_type(value: TimelineTransitionType | str) -> TimelineTransitionType:
+        try:
+            return TimelineTransitionType(str(value).strip().upper())
+        except ValueError as exc:
+            raise TimelinePropagationError(f"unknown timeline transition: {value}") from exc
+
+    def _resolve_transition(
+        self,
+        session: Session,
+        source_shot: Shot,
+        target_shot: Shot,
+        target_input: TimelineState,
+        *,
+        project_id: str,
+    ) -> tuple[TimelineTransition, TimelineTransitionType]:
+        transition = session.scalar(
+            select(TimelineTransition)
+            .where(TimelineTransition.target_shot_id == target_shot.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if transition is not None:
+            if transition.project_id != project_id or transition.source_shot_id != source_shot.id:
+                raise TimelinePropagationError("timeline transition has invalid shot ownership")
+            transition_type = self._transition_type(transition.transition_type)
+            if transition.reconciliation_required:
+                target_shot.downstream_state_stale = True
+                target_shot.stale_reason = "RECOMPUTE_REQUIRED"
+                target_shot.stale_from_shot_id = source_shot.id
+            return transition, transition_type
+
+        legacy_type = self._legacy_transition_kind(target_input)
+        transition_type = legacy_type or (
+            TimelineTransitionType.CONTINUOUS
+            if target_shot.scene_id == source_shot.scene_id
+            else TimelineTransitionType.SCENE_CUT
+        )
+        metadata = self._transition_metadata(transition_type)
+        if legacy_type is not None:
+            metadata["inferred_from"] = "legacy_state_hint"
+        elif target_shot.scene_id != source_shot.scene_id:
+            metadata["inferred_from"] = "scene_boundary"
+        else:
+            metadata["inferred_from"] = "linked_shot_default"
+        transition = TimelineTransition(
+            project_id=project_id,
+            source_shot_id=source_shot.id,
+            target_shot_id=target_shot.id,
+            transition_type=transition_type.value,
+            branch_key=self._branch_key(transition_type, target_shot.id, None),
+            reconciliation_required=transition_type in _RECONCILIATION_TRANSITIONS,
+            metadata_json=metadata,
+        )
+        session.add(transition)
+        if transition.reconciliation_required:
+            target_shot.downstream_state_stale = True
+            target_shot.stale_reason = "RECOMPUTE_REQUIRED"
+            target_shot.stale_from_shot_id = source_shot.id
+        session.flush()
+        return transition, transition_type
+
+    def set_transition(
+        self,
+        target_shot_id: str,
+        transition_type: TimelineTransitionType | str,
+        *,
+        branch_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TimelineTransition:
+        """Create or replace the explicit transition leading into a shot."""
+
+        normalized = self._transition_type(transition_type)
+        with self.database.session() as session:
+            target = session.scalar(
+                select(Shot)
+                .where(Shot.id == target_shot_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if target is None:
+                raise LookupError("target shot not found")
+            if not target.previous_shot_id:
+                raise TimelinePropagationError("target shot has no source shot")
+            source = session.get(Shot, target.previous_shot_id)
+            if source is None:
+                raise TimelinePropagationError("transition source shot not found")
+            project_id = self._project_id(session, target)
+            if self._project_id(session, source) != project_id:
+                raise TimelinePropagationError("transition shots belong to different projects")
+            row = session.scalar(
+                select(TimelineTransition)
+                .where(TimelineTransition.target_shot_id == target.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                row = TimelineTransition(project_id=project_id, target_shot_id=target.id)
+                session.add(row)
+            row.project_id = project_id
+            row.source_shot_id = source.id
+            row.transition_type = normalized.value
+            row.branch_key = self._branch_key(normalized, target.id, branch_key)
+            row.reconciliation_required = normalized in _RECONCILIATION_TRANSITIONS
+            row.metadata_json = {
+                **self._transition_metadata(normalized),
+                **(metadata or {}),
+            }
+            if row.reconciliation_required:
+                target.downstream_state_stale = True
+                target.stale_reason = "RECOMPUTE_REQUIRED"
+                target.stale_from_shot_id = source.id
+            session.flush()
+            # Detach a stable snapshot from the short-lived session.
+            session.expunge(row)
+            return row
+
+    def list_transitions(self, project_id: str) -> list[dict[str, Any]]:
+        """Minimal development observability for formal transition records."""
+
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(TimelineTransition)
+                    .where(TimelineTransition.project_id == project_id)
+                    .order_by(TimelineTransition.created_at, TimelineTransition.id)
+                )
+            )
+            return [
+                {
+                    "id": row.id,
+                    "project_id": row.project_id,
+                    "source_shot_id": row.source_shot_id,
+                    "target_shot_id": row.target_shot_id,
+                    "transition_type": row.transition_type,
+                    "branch_key": row.branch_key,
+                    "reconciliation_required": row.reconciliation_required,
+                    "metadata": deepcopy(row.metadata_json),
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }
+                for row in rows
+            ]
 
     @classmethod
     def _replay_delta(cls, baseline: Any, planned: Any, current: Any) -> Any:
@@ -118,9 +364,114 @@ class AuthoritativeTimelineStateEngine:
         authoritative_input: dict[str, Any],
     ) -> dict[str, Any]:
         rebased = cls._replay_delta(baseline_input, planned_output, authoritative_input)
-        if not isinstance(rebased, dict):  # pragma: no cover - guarded by the typed inputs above.
+        if not isinstance(rebased, dict):  # pragma: no cover - guarded by typed inputs above.
             raise TimelinePropagationError("rebased shot output state must be an object")
         return rebased
+
+    @staticmethod
+    def _character_state_across_spatial_reset(
+        baseline: dict[str, Any],
+        authoritative: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Copy explicitly stable character facts without carrying spatial pose."""
+
+        reconciled = deepcopy(baseline)
+        for key in ("costume", "held_props"):
+            if key in authoritative:
+                reconciled[key] = deepcopy(authoritative[key])
+        source_characters = authoritative.get("characters")
+        target_characters = reconciled.get("characters")
+        if isinstance(source_characters, dict) and isinstance(target_characters, dict):
+            for character_id, source_state in source_characters.items():
+                if not isinstance(source_state, dict):
+                    continue
+                target_state = target_characters.setdefault(character_id, {})
+                if not isinstance(target_state, dict):
+                    continue
+                for field, value in source_state.items():
+                    if field not in _SPATIAL_CHARACTER_FIELDS:
+                        target_state[field] = deepcopy(value)
+        return reconciled
+
+    def _apply_transition(
+        self,
+        *,
+        transition: TimelineTransition,
+        transition_type: TimelineTransitionType,
+        output_state: TimelineState,
+        next_input: TimelineState,
+        next_output: TimelineState,
+    ) -> tuple[bool, bool, str]:
+        if transition.reconciliation_required:
+            return False, False, f"{transition_type.value}_RECONCILIATION_REQUIRED"
+        if transition_type in _RESET_TRANSITIONS:
+            if (
+                transition_type in {TimelineTransitionType.SCENE_CUT, TimelineTransitionType.LOCATION_CHANGE}
+                and transition.metadata_json.get("propagate_character_state") is True
+            ):
+                baseline_input = deepcopy(next_input.state_json)
+                authoritative_input = self._character_state_across_spatial_reset(
+                    baseline_input,
+                    deepcopy(output_state.state_json),
+                )
+                planned_output = deepcopy(next_output.state_json)
+                next_input.state_json = authoritative_input
+                next_input.previous_state_id = output_state.id
+                next_output.state_json = self._rebase_planned_output(
+                    baseline_input,
+                    planned_output,
+                    authoritative_input,
+                )
+                return True, True, f"{transition_type.value}_CHARACTER_PROPAGATED_SPATIAL_RESET"
+            if transition_type in _BRANCH_TRANSITIONS:
+                return False, False, f"{transition_type.value}_BRANCH_START"
+            inferred = transition.metadata_json.get("inferred_from")
+            if transition_type is TimelineTransitionType.SCENE_CUT and inferred == "scene_boundary":
+                return False, False, "SCENE_CHANGE"
+            return False, False, f"{transition_type.value}_RESET"
+
+        baseline_input = deepcopy(next_input.state_json)
+        authoritative_input = deepcopy(output_state.state_json)
+        planned_output = deepcopy(next_output.state_json)
+        if not all(
+            isinstance(value, dict) for value in (baseline_input, authoritative_input, planned_output)
+        ):
+            raise TimelinePropagationError("timeline state payloads must be objects")
+        next_input.state_json = authoritative_input
+        next_input.previous_state_id = output_state.id
+        next_output.state_json = self._rebase_planned_output(
+            baseline_input,
+            planned_output,
+            authoritative_input,
+        )
+        return True, True, "CONTINUOUS_TIMELINE"
+
+    @staticmethod
+    def _transition_requires_state_write(
+        transition: TimelineTransition,
+        transition_type: TimelineTransitionType,
+    ) -> bool:
+        return transition_type is TimelineTransitionType.CONTINUOUS or (
+            transition_type in {TimelineTransitionType.SCENE_CUT, TimelineTransitionType.LOCATION_CHANGE}
+            and transition.metadata_json.get("propagate_character_state") is True
+            and not transition.reconciliation_required
+        )
+
+    @staticmethod
+    def _preserved_boundary_reason(
+        transition: TimelineTransition,
+        transition_type: TimelineTransitionType,
+    ) -> str:
+        if transition.reconciliation_required:
+            return f"{transition_type.value}_RECONCILIATION_REQUIRED"
+        if transition_type in _BRANCH_TRANSITIONS:
+            return f"{transition_type.value}_BRANCH_START"
+        if (
+            transition_type is TimelineTransitionType.SCENE_CUT
+            and transition.metadata_json.get("inferred_from") == "scene_boundary"
+        ):
+            return "SCENE_CHANGE"
+        return f"{transition_type.value}_RESET"
 
     def propagate(
         self,
@@ -166,6 +517,8 @@ class AuthoritativeTimelineStateEngine:
         )
         target_state_id: str | None = None
         target_output_state_id: str | None = None
+        transition_type: TimelineTransitionType | None = None
+        transition: TimelineTransition | None = None
         propagated = False
         output_rebased = False
         reason = "NO_NEXT_SHOT"
@@ -191,15 +544,24 @@ class AuthoritativeTimelineStateEngine:
                 or next_input.shot_id not in {None, next_shot.id}
             ):
                 raise TimelinePropagationError("next shot input state has invalid ownership or kind")
-            transition_kind = self._transition_kind(next_input)
-            if next_shot.scene_id != shot.scene_id:
-                reason = "SCENE_CHANGE"
-            elif transition_kind in RESET_TRANSITIONS:
-                reason = transition_kind
-            elif next_shot.status not in PROPAGATION_TARGET_STATUSES:
+            transition, transition_type = self._resolve_transition(
+                session,
+                shot,
+                next_shot,
+                next_input,
+                project_id=project_id,
+            )
+            requires_state_write = self._transition_requires_state_write(
+                transition,
+                transition_type,
+            )
+            if next_shot.status not in PROPAGATION_TARGET_STATUSES and requires_state_write:
                 raise TimelinePropagationError(
                     f"cannot overwrite the input state of a {next_shot.status} next shot"
                 )
+            if not requires_state_write:
+                reason = self._preserved_boundary_reason(transition, transition_type)
+                target_output_state_id = next_shot.output_state_id
             else:
                 next_output = (
                     session.scalar(
@@ -220,27 +582,13 @@ class AuthoritativeTimelineStateEngine:
                     or next_output.shot_id not in {None, next_shot.id}
                 ):
                     raise TimelinePropagationError("next shot output state has invalid ownership or kind")
-                baseline_input = deepcopy(next_input.state_json)
-                authoritative_input = deepcopy(output_state.state_json)
-                planned_output = deepcopy(next_output.state_json)
-                if not all(
-                    isinstance(value, dict) for value in (baseline_input, authoritative_input, planned_output)
-                ):
-                    raise TimelinePropagationError("timeline state payloads must be objects")
-                rebased_output = self._rebase_planned_output(
-                    baseline_input,
-                    planned_output,
-                    authoritative_input,
+                propagated, output_rebased, reason = self._apply_transition(
+                    transition=transition,
+                    transition_type=transition_type,
+                    output_state=output_state,
+                    next_input=next_input,
+                    next_output=next_output,
                 )
-                # Exact copy is intentional: this is the state invariant. IDs and
-                # provenance stay in relational columns rather than contaminating
-                # the semantic state payload.
-                next_input.state_json = authoritative_input
-                next_input.previous_state_id = output_state.id
-                next_output.state_json = rebased_output
-                propagated = True
-                output_rebased = True
-                reason = "CONTINUOUS_TIMELINE"
 
         result = TimelinePropagationResult(
             current_shot_id=shot.id,
@@ -251,6 +599,9 @@ class AuthoritativeTimelineStateEngine:
             target_state_id=target_state_id,
             target_output_state_id=target_output_state_id,
             output_rebased=output_rebased,
+            transition_type=transition_type.value if transition_type else None,
+            reconciliation_required=bool(transition and transition.reconciliation_required),
+            branch_key=transition.branch_key if transition else None,
         )
         if record_decision:
             session.add(
@@ -265,12 +616,15 @@ class AuthoritativeTimelineStateEngine:
                         "target_state_id": target_state_id,
                         "target_output_state_id": target_output_state_id,
                         "output_rebased": output_rebased,
+                        "transition_type": result.transition_type,
+                        "reconciliation_required": result.reconciliation_required,
+                        "branch_key": result.branch_key,
                         "sql_authoritative": True,
                     },
-                    selected_action="PROPAGATE" if propagated else "PRESERVE_RESET_BOUNDARY",
+                    selected_action="PROPAGATE" if propagated else "PRESERVE_TRANSITION_BOUNDARY",
                     reason_codes=[reason],
                     model_version=self.version,
-                    policy_version="timeline-v2",
+                    policy_version=self.policy_version,
                 )
             )
         return result
@@ -284,3 +638,287 @@ class AuthoritativeTimelineStateEngine:
             if output_state is None:
                 raise LookupError("shot output timeline state not found")
             return self.propagate(session, shot, output_state)
+
+    def mark_downstream_stale_after_edit(self, edited_shot_id: str) -> TimelineStaleResult:
+        """Mark every later shot stale without modifying timeline or media payloads."""
+
+        with self.database.session() as session:
+            edited = session.scalar(
+                select(Shot)
+                .where(Shot.id == edited_shot_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if edited is None:
+                raise LookupError("edited shot not found")
+            if edited.status != ShotStatus.COMMITTED.value:
+                raise TimelinePropagationError(
+                    "only an edited committed shot can invalidate downstream state"
+                )
+            project_id = self._project_id(session, edited)
+            marked: list[str] = []
+            planning: list[str] = []
+            immutable: list[str] = []
+            visited = {edited.id}
+            next_id = edited.next_shot_id
+            while next_id:
+                if next_id in visited:
+                    raise TimelinePropagationError("shot lineage contains a cycle")
+                visited.add(next_id)
+                downstream = session.scalar(
+                    select(Shot)
+                    .where(Shot.id == next_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if downstream is None:
+                    raise TimelinePropagationError("shot lineage points to a missing downstream shot")
+                if self._project_id(session, downstream) != project_id:
+                    raise TimelinePropagationError("downstream shot belongs to a different project")
+                downstream.downstream_state_stale = True
+                downstream.stale_reason = "RECOMPUTE_REQUIRED"
+                downstream.stale_from_shot_id = edited.id
+                marked.append(downstream.id)
+                if downstream.status in PROPAGATION_TARGET_STATUSES:
+                    planning.append(downstream.id)
+                else:
+                    immutable.append(downstream.id)
+                next_id = downstream.next_shot_id
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=edited.id,
+                    decision_type="TIMELINE_DOWNSTREAM_INVALIDATION",
+                    input_features={
+                        "edited_shot_id": edited.id,
+                        "marked_shot_ids": marked,
+                        "planning_shot_ids": planning,
+                        "immutable_shot_ids": immutable,
+                        "committed_media_modified": False,
+                    },
+                    selected_action="RECOMPUTE_REQUIRED",
+                    reason_codes=["DOWNSTREAM_STATE_STALE_AFTER_COMMITTED_EDIT"],
+                    model_version=self.version,
+                    policy_version=self.policy_version,
+                )
+            )
+            return TimelineStaleResult(
+                edited_shot_id=edited.id,
+                marked_shot_ids=tuple(marked),
+                planning_shot_ids=tuple(planning),
+                immutable_shot_ids=tuple(immutable),
+            )
+
+    def recompute_downstream_planning(self, edited_shot_id: str) -> TimelineRecomputeResult:
+        """Rebase stale planning states and stop at reconciliation or immutable work."""
+
+        with self.database.session() as session:
+            source = session.scalar(
+                select(Shot)
+                .where(Shot.id == edited_shot_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if source is None:
+                raise LookupError("edited shot not found")
+            if source.status != ShotStatus.COMMITTED.value or not source.output_state_id:
+                raise TimelinePropagationError("recompute must start from a committed shot output")
+            project_id = self._project_id(session, source)
+            source_output = session.get(TimelineState, source.output_state_id)
+            if source_output is None:
+                raise TimelinePropagationError("source shot output state not found")
+            if (
+                source_output.project_id != project_id
+                or source_output.state_kind != "SHOT_OUTPUT"
+                or source_output.shot_id not in {None, source.id}
+            ):
+                raise TimelinePropagationError("source shot output state has invalid ownership or kind")
+            recomputed: list[str] = []
+            blocked_shot_id: str | None = None
+            reason = "RECOMPUTED"
+            visited = {source.id}
+            next_id = source.next_shot_id
+            while next_id:
+                if next_id in visited:
+                    raise TimelinePropagationError("shot lineage contains a cycle")
+                visited.add(next_id)
+                target = session.scalar(
+                    select(Shot)
+                    .where(Shot.id == next_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if target is None:
+                    raise TimelinePropagationError("shot lineage points to a missing downstream shot")
+                if self._project_id(session, target) != project_id:
+                    raise TimelinePropagationError("downstream shot belongs to a different project")
+                if target.status not in PROPAGATION_TARGET_STATUSES:
+                    blocked_shot_id = target.id
+                    reason = "IMMUTABLE_OR_ACTIVE_SHOT_REQUIRES_REVIEW"
+                    break
+                if not target.input_state_id or not target.output_state_id:
+                    raise TimelinePropagationError("downstream planning shot has incomplete timeline state")
+                target_input = session.get(TimelineState, target.input_state_id)
+                target_output = session.get(TimelineState, target.output_state_id)
+                if target_input is None or target_output is None:
+                    raise TimelinePropagationError("downstream timeline state not found")
+                if (
+                    target_input.project_id != project_id
+                    or target_input.state_kind != "SHOT_INPUT"
+                    or target_input.shot_id not in {None, target.id}
+                    or target_output.project_id != project_id
+                    or target_output.state_kind != "SHOT_OUTPUT"
+                    or target_output.shot_id not in {None, target.id}
+                ):
+                    raise TimelinePropagationError("downstream timeline state has invalid ownership or kind")
+                transition, transition_type = self._resolve_transition(
+                    session,
+                    source,
+                    target,
+                    target_input,
+                    project_id=project_id,
+                )
+                if transition.reconciliation_required:
+                    blocked_shot_id = target.id
+                    reason = f"{transition_type.value}_RECONCILIATION_REQUIRED"
+                    break
+                if transition_type is TimelineTransitionType.CONTINUOUS:
+                    baseline_input = deepcopy(target_input.state_json)
+                    authoritative_input = deepcopy(source_output.state_json)
+                    target_output.state_json = self._rebase_planned_output(
+                        baseline_input,
+                        deepcopy(target_output.state_json),
+                        authoritative_input,
+                    )
+                    target_input.state_json = authoritative_input
+                    target_input.previous_state_id = source_output.id
+                elif (
+                    transition_type
+                    in {TimelineTransitionType.SCENE_CUT, TimelineTransitionType.LOCATION_CHANGE}
+                    and transition.metadata_json.get("propagate_character_state") is True
+                ):
+                    baseline_input = deepcopy(target_input.state_json)
+                    reconciled_input = self._character_state_across_spatial_reset(
+                        baseline_input,
+                        deepcopy(source_output.state_json),
+                    )
+                    target_output.state_json = self._rebase_planned_output(
+                        baseline_input,
+                        deepcopy(target_output.state_json),
+                        reconciled_input,
+                    )
+                    target_input.state_json = reconciled_input
+                    target_input.previous_state_id = source_output.id
+                # Other transition kinds are explicit reset/branch boundaries;
+                # their pre-existing planning state remains independent.
+                target.downstream_state_stale = False
+                target.stale_reason = None
+                target.stale_from_shot_id = None
+                recomputed.append(target.id)
+                source = target
+                source_output = target_output
+                next_id = target.next_shot_id
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=edited_shot_id,
+                    decision_type="TIMELINE_RECOMPUTE",
+                    input_features={
+                        "edited_shot_id": edited_shot_id,
+                        "recomputed_shot_ids": recomputed,
+                        "blocked_shot_id": blocked_shot_id,
+                        "committed_media_modified": False,
+                    },
+                    selected_action="RECOMPUTED" if blocked_shot_id is None else "REVIEW_REQUIRED",
+                    reason_codes=[reason],
+                    model_version=self.version,
+                    policy_version=self.policy_version,
+                )
+            )
+            return TimelineRecomputeResult(
+                edited_shot_id=edited_shot_id,
+                recomputed_shot_ids=tuple(recomputed),
+                blocked_shot_id=blocked_shot_id,
+                reason_code=reason,
+            )
+
+    def reconcile_transition(
+        self,
+        target_shot_id: str,
+        reconciled_input_state: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Explicitly reconcile a discontinuity without changing committed media."""
+
+        if not reason.strip():
+            raise ValueError("reconciliation reason is required")
+        with self.database.session() as session:
+            target = session.scalar(
+                select(Shot)
+                .where(Shot.id == target_shot_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if target is None:
+                raise LookupError("target shot not found")
+            if target.status not in PROPAGATION_TARGET_STATUSES:
+                raise TimelinePropagationError("committed or active shot planning state is immutable")
+            transition = session.scalar(
+                select(TimelineTransition)
+                .where(TimelineTransition.target_shot_id == target.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if transition is None or not transition.reconciliation_required:
+                raise TimelinePropagationError("timeline transition does not require reconciliation")
+            if not target.input_state_id or not target.output_state_id:
+                raise TimelinePropagationError("target shot has incomplete timeline state")
+            target_input = session.get(TimelineState, target.input_state_id)
+            target_output = session.get(TimelineState, target.output_state_id)
+            if target_input is None or target_output is None:
+                raise TimelinePropagationError("target timeline state not found")
+            project_id = self._project_id(session, target)
+            if (
+                transition.project_id != project_id
+                or target_input.project_id != project_id
+                or target_input.state_kind != "SHOT_INPUT"
+                or target_input.shot_id not in {None, target.id}
+                or target_output.project_id != project_id
+                or target_output.state_kind != "SHOT_OUTPUT"
+                or target_output.shot_id not in {None, target.id}
+            ):
+                raise TimelinePropagationError("timeline reconciliation state has invalid ownership or kind")
+            baseline_input = deepcopy(target_input.state_json)
+            target_output.state_json = self._rebase_planned_output(
+                baseline_input,
+                deepcopy(target_output.state_json),
+                deepcopy(reconciled_input_state),
+            )
+            target_input.state_json = deepcopy(reconciled_input_state)
+            transition.reconciliation_required = False
+            transition.metadata_json = {
+                **transition.metadata_json,
+                "reconciled": True,
+                "reconciliation_reason": reason.strip(),
+            }
+            target.downstream_state_stale = False
+            target.stale_reason = None
+            target.stale_from_shot_id = None
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=target.id,
+                    decision_type="TIMELINE_TRANSITION_RECONCILIATION",
+                    input_features={
+                        "transition_id": transition.id,
+                        "transition_type": transition.transition_type,
+                        "reason": reason.strip(),
+                        "committed_media_modified": False,
+                    },
+                    selected_action="RECONCILED_PLANNING_STATE",
+                    reason_codes=["EXPLICIT_RECONCILIATION"],
+                    model_version=self.version,
+                    policy_version=self.policy_version,
+                )
+            )

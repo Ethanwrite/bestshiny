@@ -1,4 +1,10 @@
-from .base import GenerationProvider, ProviderHealth, ProviderJob, ProviderSubmission
+from .base import (
+    GenerationProvider,
+    ProviderHealth,
+    ProviderJob,
+    ProviderPollIdentity,
+    ProviderSubmission,
+)
 from .budget import (
     InMemoryProviderBudgetRepository,
     ProviderBudgetConflict,
@@ -57,6 +63,7 @@ __all__ = [
     "GenerationProvider",
     "ProviderHealth",
     "ProviderJob",
+    "ProviderPollIdentity",
     "ProviderSubmission",
     "ProviderError",
     "RetryCategory",

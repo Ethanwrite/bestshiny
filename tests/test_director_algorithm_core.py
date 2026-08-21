@@ -112,8 +112,9 @@ class _CompletedVideoFixtureProvider(GenerationProvider):
         account_id: str,
         worker_id: str,
         generation_type: str,
+        poll_identity=None,  # type: ignore[no-untyped-def]
     ) -> ProviderJob:
-        del account_id, worker_id, generation_type
+        del account_id, worker_id, generation_type, poll_identity
         return ProviderJob(
             provider_job_id,
             "COMPLETED",
@@ -327,8 +328,8 @@ LinJin turns toward ZhaoKai.
         )
         assert decision.input_features["output_rebased"] is True
         assert decision.input_features["target_output_state_id"] == target_output_id
-        assert decision.model_version == "sql-timeline-propagation-v2"
-        assert decision.policy_version == "timeline-v2"
+        assert decision.model_version == "sql-timeline-propagation-v3"
+        assert decision.policy_version == "timeline-v3"
 
 
 def test_timeline_state_propagation_rejects_uncommitted_source(container, project):
@@ -742,7 +743,12 @@ async def test_three_shot_fixture_generation_qa_commit_e2e(
 ):
     """Exercise three complete offline generation lifecycles through the production services."""
 
-    del account_worker
+    account_id, _ = account_worker
+    container.flow_affinity.bind_existing(
+        local_project_id=project.id,
+        provider_account_id=account_id,
+        provider_project_id="flow-project-test",
+    )
     fixture_provider = _CompletedVideoFixtureProvider()
     monkeypatch.setitem(container.providers._providers, "google_flow", fixture_provider)
     container.providers.register_model("google_flow", "flow-veo-3.1", "video")

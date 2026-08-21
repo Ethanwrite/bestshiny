@@ -10,12 +10,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import (
+    AuthLoginThrottle,
     AuthSession,
     LegacyWorkspaceClaim,
+    PasswordResetToken,
     Project,
     User,
     Workspace,
@@ -24,6 +26,10 @@ from production_domain.models import (
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
+from starlette.datastructures import Headers
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 600_000
@@ -31,6 +37,62 @@ PASSWORD_SALT_BYTES = 16
 PASSWORD_DIGEST_BYTES = 32
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 ROLE_RANK = {"VIEWER": 10, "EDITOR": 20, "ADMIN": 30, "OWNER": 40}
+AUTH_COOKIE_NAME = "ai_director_session"
+CSRF_COOKIE_NAME = "ai_director_csrf"
+CSRF_HEADER_NAME = "X-CSRF-Token"
+UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_EXEMPT_PATHS = frozenset(
+    {
+        "/api/auth/register",
+        "/api/auth/login",
+        "/api/auth/password-reset/request",
+        "/api/auth/password-reset/confirm",
+    }
+)
+PASSWORD_RESET_TTL = timedelta(minutes=30)
+LOGIN_THROTTLE_WINDOW = timedelta(minutes=15)
+LOGIN_THROTTLE_BLOCK = timedelta(minutes=15)
+LOGIN_THROTTLE_FAILURE_LIMIT = 5
+
+
+class CookieCSRFMiddleware:
+    """Require a double-submit token only when an unsafe request uses the auth cookie.
+
+    Bearer clients remain backwards compatible. A malformed or invalid Bearer token
+    cannot fall back to the cookie in ``current_user``, so adding an Authorization
+    header cannot turn a cookie-authenticated request into a CSRF bypass.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method = str(scope.get("method", "GET")).upper()
+        path = str(scope.get("path", ""))
+        if method not in UNSAFE_HTTP_METHODS or path in CSRF_EXEMPT_PATHS or path.startswith("/internal/"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        authorization = headers.get("authorization", "")
+        scheme, _, bearer_token = authorization.partition(" ")
+        has_bearer = scheme.casefold() == "bearer" and bool(bearer_token.strip())
+        request = StarletteRequest(scope)
+        auth_cookie = request.cookies.get(AUTH_COOKIE_NAME, "")
+        if auth_cookie and not has_bearer:
+            cookie_token = request.cookies.get(CSRF_COOKIE_NAME, "")
+            header_token = headers.get(CSRF_HEADER_NAME, "")
+            if not cookie_token or not header_token or not secrets.compare_digest(cookie_token, header_token):
+                response = JSONResponse(
+                    {"detail": "CSRF token is missing or invalid"},
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class RegistrationConflict(RuntimeError):
@@ -38,6 +100,16 @@ class RegistrationConflict(RuntimeError):
 
 
 class InvalidCredentials(RuntimeError):
+    pass
+
+
+class LoginThrottled(RuntimeError):
+    def __init__(self, retry_after_seconds: int):
+        super().__init__("登录尝试过多，请稍后重试")
+        self.retry_after_seconds = max(1, retry_after_seconds)
+
+
+class PasswordResetRejected(RuntimeError):
     pass
 
 
@@ -61,6 +133,15 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=500)
+    new_password: str = Field(min_length=12, max_length=1024)
+
+
 class LegacyWorkspaceClaimRequest(BaseModel):
     target_user_id: str = Field(min_length=1, max_length=100)
     idempotency_key: str = Field(min_length=8, max_length=200)
@@ -81,6 +162,12 @@ class IssuedSession:
     token: str
     principal: AuthPrincipal
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class PasswordResetIssue:
+    token: str | None
+    expires_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -154,16 +241,79 @@ class AuthService:
         *,
         session_ttl_days: int = 30,
         auth_required: bool = True,
+        deployment_environment: str = "production",
+        login_failure_limit: int = LOGIN_THROTTLE_FAILURE_LIMIT,
     ):
         self.database = database
         self.session_ttl = timedelta(days=max(1, min(session_ttl_days, 90)))
         self.auth_required = auth_required
+        self.deployment_environment = deployment_environment.strip().casefold()
+        self.secure_cookies = self.deployment_environment == "production"
+        self.login_failure_limit = max(2, min(login_failure_limit, 100))
         # Used to make a missing-user login take the same expensive KDF path.
         self._dummy_password_hash = hash_password("not-a-real-password")
 
     @staticmethod
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _login_throttle_id(email: str, client_ip: str) -> str:
+        normalized_identifier = email.strip().casefold()[:320]
+        normalized_ip = client_ip.strip()[:128] or "unknown"
+        material = f"login\0{normalized_identifier}\0{normalized_ip}".encode()
+        return hashlib.sha256(material).hexdigest()
+
+    @staticmethod
+    def _request_ip_hash(client_ip: str) -> str | None:
+        normalized = client_ip.strip()[:128]
+        if not normalized:
+            return None
+        return hashlib.sha256(f"password-reset\0{normalized}".encode()).hexdigest()
+
+    def _check_login_throttle(self, throttle_id: str, *, now: datetime) -> None:
+        with self.database.session() as session:
+            throttle = session.get(AuthLoginThrottle, throttle_id)
+            if throttle is None or throttle.blocked_until is None:
+                return
+            blocked_until = _utc(throttle.blocked_until)
+            if blocked_until > now:
+                retry_after = int((blocked_until - now).total_seconds()) + 1
+                raise LoginThrottled(retry_after)
+            throttle.failure_count = 0
+            throttle.window_started_at = now
+            throttle.blocked_until = None
+
+    def _record_login_failure(self, throttle_id: str, *, now: datetime) -> None:
+        for attempt in range(2):
+            try:
+                with self.database.session() as session:
+                    throttle = session.get(AuthLoginThrottle, throttle_id, with_for_update=True)
+                    if throttle is None:
+                        throttle = AuthLoginThrottle(
+                            id=throttle_id,
+                            failure_count=1,
+                            window_started_at=now,
+                        )
+                        session.add(throttle)
+                    elif now - _utc(throttle.window_started_at) >= LOGIN_THROTTLE_WINDOW:
+                        throttle.failure_count = 1
+                        throttle.window_started_at = now
+                        throttle.blocked_until = None
+                    else:
+                        throttle.failure_count += 1
+                    if throttle.failure_count >= self.login_failure_limit:
+                        throttle.blocked_until = now + LOGIN_THROTTLE_BLOCK
+                return
+            except IntegrityError:
+                # A concurrent first failure can win the primary-key insert.
+                # Retry once and increment its durable row under the row lock.
+                if attempt == 1:
+                    raise
+
+    def _clear_login_throttle(self, throttle_id: str) -> None:
+        with self.database.session() as session:
+            session.execute(delete(AuthLoginThrottle).where(AuthLoginThrottle.id == throttle_id))
 
     def register(
         self,
@@ -203,21 +353,120 @@ class AuthService:
         except IntegrityError as exc:
             raise RegistrationConflict("该邮箱已注册") from exc
 
-    def login(self, body: LoginRequest, *, user_agent: str = "") -> IssuedSession:
+    def login(
+        self,
+        body: LoginRequest,
+        *,
+        user_agent: str = "",
+        client_ip: str = "",
+    ) -> IssuedSession:
+        throttle_id = self._login_throttle_id(body.email, client_ip)
+        now = datetime.now(UTC)
+        self._check_login_throttle(throttle_id, now=now)
         try:
             email = normalize_email(body.email)
         except ValueError as exc:
             verify_password(body.password, self._dummy_password_hash)
+            self._record_login_failure(throttle_id, now=now)
             raise InvalidCredentials("邮箱或密码错误") from exc
+        issued: IssuedSession | None = None
         with self.database.session() as session:
             user = session.scalar(select(User).where(func.lower(User.email) == email))
             password_hash = user.password_hash if user and user.password_hash else self._dummy_password_hash
             password_ok = verify_password(body.password, password_hash)
-            if not user or not password_ok or user.status != "ACTIVE":
-                raise InvalidCredentials("邮箱或密码错误")
-            if not user.password_hash.startswith(f"{PASSWORD_ALGORITHM}${PASSWORD_ITERATIONS}$"):
-                user.password_hash = hash_password(body.password)
-            return self._issue(session, user, user_agent=user_agent)
+            if user and password_ok and user.status == "ACTIVE":
+                if not user.password_hash.startswith(f"{PASSWORD_ALGORITHM}${PASSWORD_ITERATIONS}$"):
+                    user.password_hash = hash_password(body.password)
+                issued = self._issue(session, user, user_agent=user_agent)
+        if issued is None:
+            self._record_login_failure(throttle_id, now=now)
+            raise InvalidCredentials("邮箱或密码错误")
+        self._clear_login_throttle(throttle_id)
+        return issued
+
+    def request_password_reset(
+        self,
+        body: PasswordResetRequest,
+        *,
+        client_ip: str = "",
+    ) -> PasswordResetIssue:
+        try:
+            email = normalize_email(body.email)
+        except ValueError:
+            return PasswordResetIssue(token=None, expires_at=None)
+
+        now = datetime.now(UTC)
+        expires_at = now + PASSWORD_RESET_TTL
+        token = secrets.token_urlsafe(32)
+        with self.database.session() as session:
+            user = session.scalar(select(User).where(func.lower(User.email) == email))
+            if user is None or user.status != "ACTIVE":
+                return PasswordResetIssue(token=None, expires_at=None)
+            session.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.user_id == user.id,
+                    PasswordResetToken.consumed_at.is_(None),
+                )
+                .values(consumed_at=now)
+            )
+            session.add(
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash=self._token_hash(token),
+                    expires_at=expires_at,
+                    requested_ip_hash=self._request_ip_hash(client_ip),
+                )
+            )
+        return PasswordResetIssue(token=token, expires_at=expires_at)
+
+    def confirm_password_reset(self, body: PasswordResetConfirmRequest) -> None:
+        password_hash = hash_password(body.new_password)
+        now = datetime.now(UTC)
+        with self.database.session() as session:
+            reset_token = session.scalar(
+                select(PasswordResetToken)
+                .where(PasswordResetToken.token_hash == self._token_hash(body.token))
+                .with_for_update()
+            )
+            if (
+                reset_token is None
+                or reset_token.consumed_at is not None
+                or _utc(reset_token.expires_at) <= now
+            ):
+                raise PasswordResetRejected("重置链接无效或已过期")
+            consumed = session.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.id == reset_token.id,
+                    PasswordResetToken.consumed_at.is_(None),
+                    PasswordResetToken.expires_at > now,
+                )
+                .values(consumed_at=now)
+                .execution_options(synchronize_session=False)
+            )
+            if affected_rows(consumed) != 1:
+                raise PasswordResetRejected("重置链接无效或已过期")
+            user = session.get(User, reset_token.user_id)
+            if user is None or user.status != "ACTIVE":
+                raise PasswordResetRejected("重置链接无效或已过期")
+            user.password_hash = password_hash
+            session.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.user_id == user.id,
+                    PasswordResetToken.consumed_at.is_(None),
+                )
+                .values(consumed_at=now)
+            )
+            session.execute(
+                update(AuthSession)
+                .where(
+                    AuthSession.user_id == user.id,
+                    AuthSession.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            )
 
     def claim_legacy_workspaces(
         self,
@@ -431,11 +680,51 @@ class AuthService:
             if auth_session and auth_session.user_id == principal.user_id:
                 auth_session.revoked_at = datetime.now(UTC)
 
+    def set_session_cookies(self, response: Response, issued: IssuedSession) -> None:
+        max_age = max(1, int((issued.expires_at - datetime.now(UTC)).total_seconds()))
+        response.set_cookie(
+            AUTH_COOKIE_NAME,
+            issued.token,
+            max_age=max_age,
+            expires=issued.expires_at,
+            path="/",
+            secure=self.secure_cookies,
+            httponly=True,
+            samesite="lax",
+        )
+        response.set_cookie(
+            CSRF_COOKIE_NAME,
+            secrets.token_urlsafe(32),
+            max_age=max_age,
+            expires=issued.expires_at,
+            path="/",
+            secure=self.secure_cookies,
+            httponly=False,
+            samesite="lax",
+        )
+
+    def clear_session_cookies(self, response: Response) -> None:
+        response.delete_cookie(
+            AUTH_COOKIE_NAME,
+            path="/",
+            secure=self.secure_cookies,
+            httponly=True,
+            samesite="lax",
+        )
+        response.delete_cookie(
+            CSRF_COOKIE_NAME,
+            path="/",
+            secure=self.secure_cookies,
+            httponly=False,
+            samesite="lax",
+        )
+
     def current_user(
         self,
+        request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> AuthPrincipal:
-        if not authorization and not self.auth_required:
+        if not authorization and not request.cookies.get(AUTH_COOKIE_NAME) and not self.auth_required:
             return AuthPrincipal(
                 user_id="development-bypass",
                 email="development@local.invalid",
@@ -444,15 +733,26 @@ class AuthService:
                 workspace_roles={},
                 development_bypass=True,
             )
-        scheme, _, token = (authorization or "").partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
+        token = ""
+        if authorization:
+            scheme, _, bearer_token = authorization.partition(" ")
+            if scheme.casefold() != "bearer" or not bearer_token.strip():
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "请先登录",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            token = bearer_token.strip()
+        else:
+            token = request.cookies.get(AUTH_COOKIE_NAME, "").strip()
+        if not token:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
                 "请先登录",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         try:
-            return self.authenticate(token.strip())
+            return self.authenticate(token)
         except InvalidCredentials as exc:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
@@ -545,6 +845,15 @@ class AuthService:
                         if workspace_id in workspace_details
                         else "FREE"
                     ),
+                    "storage": (
+                        {
+                            "max_bytes": workspace_details[workspace_id].max_storage_bytes,
+                            "used_bytes": workspace_details[workspace_id].used_storage_bytes,
+                            "reserved_bytes": (workspace_details[workspace_id].reserved_storage_bytes),
+                        }
+                        if workspace_id in workspace_details
+                        else None
+                    ),
                 }
                 for workspace_id, role in principal.workspace_roles.items()
             ],
@@ -558,30 +867,69 @@ class AuthService:
         router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
         @router.post("/register", status_code=status.HTTP_201_CREATED)
-        def register(body: RegisterRequest, request: Request):
+        def register(body: RegisterRequest, request: Request, response: Response):
             try:
                 issued = self.register(body, user_agent=request.headers.get("user-agent", ""))
             except ValueError as exc:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
             except RegistrationConflict as exc:
                 raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+            self.set_session_cookies(response, issued)
             return self._issued_view(issued)
 
         @router.post("/login")
-        def login(body: LoginRequest, request: Request):
+        def login(body: LoginRequest, request: Request, response: Response):
             try:
-                issued = self.login(body, user_agent=request.headers.get("user-agent", ""))
+                issued = self.login(
+                    body,
+                    user_agent=request.headers.get("user-agent", ""),
+                    client_ip=request.client.host if request.client else "",
+                )
+            except LoginThrottled as exc:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    str(exc),
+                    headers={"Retry-After": str(exc.retry_after_seconds)},
+                ) from exc
             except InvalidCredentials as exc:
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED,
                     str(exc),
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from exc
+            self.set_session_cookies(response, issued)
             return self._issued_view(issued)
 
         @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-        def logout(principal: AuthPrincipal = Depends(self.current_user)) -> None:
+        def logout(
+            response: Response,
+            principal: AuthPrincipal = Depends(self.current_user),
+        ) -> None:
             self.revoke(principal)
+            self.clear_session_cookies(response)
+
+        @router.post("/password-reset/request")
+        def request_password_reset(body: PasswordResetRequest, request: Request):
+            issued = self.request_password_reset(
+                body,
+                client_ip=request.client.host if request.client else "",
+            )
+            response: dict[str, Any] = {
+                "message": "如果该邮箱存在，重置说明已发送",
+            }
+            if self.deployment_environment in {"development", "test"} and issued.token:
+                response["reset_token"] = issued.token
+                response["expires_at"] = issued.expires_at.isoformat() if issued.expires_at else None
+            return response
+
+        @router.post("/password-reset/confirm")
+        def confirm_password_reset(body: PasswordResetConfirmRequest, response: Response):
+            try:
+                self.confirm_password_reset(body)
+            except (PasswordResetRejected, ValueError) as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+            self.clear_session_cookies(response)
+            return {"message": "密码已重置，请重新登录"}
 
         @router.get("/me")
         def me(principal: AuthPrincipal = Depends(self.current_user)):

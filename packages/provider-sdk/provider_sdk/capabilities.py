@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from enum import StrEnum
 from typing import Any
 
+from .base import GenerationProvider
+
 
 class ProviderCapability(StrEnum):
     CHAT = "chat"
@@ -18,20 +20,44 @@ class CapabilityProviderNotFound(LookupError):
 
 
 class ProviderCapabilityCatalog:
-    """Infrastructure lookup used after ModelRole resolution selects a provider."""
+    """Adapter-interface lookup after the model registry selects a model.
+
+    This catalog describes Python interfaces implemented by a transport. It is
+    deliberately not a source of model capability truth; supported operations
+    are authorized by the persisted ModelCapabilityRegistry first.
+    """
 
     def __init__(self) -> None:
         self._providers: dict[str, object] = {}
         self._capabilities: dict[str, frozenset[str]] = {}
 
-    def register(self, name: str, implementation: object, capabilities: set[str]) -> None:
+    def register(
+        self,
+        name: str,
+        implementation: object,
+        capabilities: set[str] | None = None,
+    ) -> None:
         normalized = name.strip()
-        if not normalized or not capabilities:
-            raise ValueError("provider name and capabilities are required")
+        if not normalized:
+            raise ValueError("provider name is required")
         if normalized in self._providers:
             raise ValueError(f"provider capability client already registered: {normalized}")
+        implemented: set[str] = set()
+        if isinstance(implementation, ChatCapability):
+            implemented.add(ProviderCapability.CHAT.value)
+        if isinstance(implementation, ResponsesCapability):
+            implemented.add(ProviderCapability.RESPONSES.value)
+        if isinstance(implementation, EmbeddingCapability):
+            implemented.add(ProviderCapability.EMBEDDINGS.value)
+        if isinstance(implementation, GenerationProvider):
+            implemented.update({ProviderCapability.IMAGE.value, ProviderCapability.VIDEO.value})
+        if capabilities is not None and not capabilities.issubset(implemented):
+            unsupported = ", ".join(sorted(capabilities.difference(implemented)))
+            raise ValueError(f"adapter does not implement claimed interfaces: {unsupported}")
+        if not implemented:
+            raise ValueError("provider implementation exposes no supported interface")
         self._providers[normalized] = implementation
-        self._capabilities[normalized] = frozenset(capabilities)
+        self._capabilities[normalized] = frozenset(implemented)
 
     def resolve(self, provider: str, capability: ProviderCapability | str) -> object:
         normalized = str(capability)

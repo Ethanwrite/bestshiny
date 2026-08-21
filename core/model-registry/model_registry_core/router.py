@@ -69,12 +69,14 @@ class VideoModelRouter:
         "requires_image_to_video": "supports_image_to_video",
         "requires_start_frame": "supports_start_frame",
         "requires_end_frame": "supports_end_frame",
-        "requires_reference_images": "supports_reference_images",
-        "requires_reference_video": "supports_reference_video",
-        "requires_native_audio": "supports_native_audio",
+        "requires_reference_images": "supports_reference_image",
+        "requires_multi_reference": "supports_multi_reference",
+        "requires_reference_video": "supports_v2v",
+        "requires_native_audio": "supports_audio",
         "requires_dialogue": "supports_dialogue",
         "requires_chinese_dialogue": "supports_chinese_dialogue",
         "requires_text_rendering": "supports_text_rendering",
+        "requires_camera_control": "supports_camera_instruction",
     }
 
     def __init__(
@@ -108,8 +110,17 @@ class VideoModelRouter:
             failures.append("model disabled")
         if profile.max_duration is not None and requirements.duration > profile.max_duration:
             failures.append(f"duration exceeds {profile.max_duration:g}s")
+        if profile.min_duration is not None and requirements.duration < profile.min_duration:
+            failures.append(f"duration is below {profile.min_duration:g}s")
         if profile.supported_resolutions and requirements.resolution not in profile.supported_resolutions:
             failures.append(f"resolution {requirements.resolution} unsupported")
+        if (
+            profile.supported_aspect_ratios
+            and requirements.aspect_ratio not in profile.supported_aspect_ratios
+        ):
+            failures.append(f"aspect ratio {requirements.aspect_ratio} unsupported")
+        if requirements.reference_image_count > profile.max_reference_images:
+            failures.append(f"reference image count exceeds {profile.max_reference_images}")
         if not provider_can_handle(profile.provider_trust_level, requirements.asset_criticality):
             failures.append(
                 f"provider trust {profile.provider_trust_level.value} is below "

@@ -4,11 +4,20 @@ import math
 from datetime import UTC, datetime
 
 from platform_database import Database
-from production_domain.models import Asset, AssetVersion, Episode, Project, Scene, Shot, ShotMemory
+from production_domain.models import (
+    Asset,
+    AssetVersion,
+    DecisionRecord,
+    Episode,
+    Project,
+    Scene,
+    Shot,
+    ShotMemory,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .embedding import EmbeddingProvider
+from .embedding import EmbeddingProvider, MemoryEmbeddingUnavailable
 from .schemas import (
     MemoryLayer,
     MemoryQuery,
@@ -79,8 +88,13 @@ class MultimodalMemoryEngine:
     def index(self, value: ShotMemoryInput) -> ShotMemory:
         with self.database.session() as session:
             self._validate_project_links(session, value)
-        vector = self.embeddings.embed(value.content, input_type="document")
-        provenance = self.embeddings.provenance.model_copy(update={"input_type": "document"})
+        embedded = self.embeddings.embed_with_provenance(
+            value.content,
+            input_type="document",
+            project_id=value.project_id,
+        )
+        vector = embedded.values
+        provenance = embedded.provenance
         with self.database.session() as session:
             # Revalidate after the external embedding call so deleted or reassigned
             # associations cannot be persisted through the JSON version references.
@@ -111,15 +125,21 @@ class MultimodalMemoryEngine:
     def search(self, query: MemoryQuery) -> list[RetrievedMemory]:
         if not self.enabled:
             return []
-        query_vector = self.embeddings.embed(
-            MultimodalContent(
-                text=query.text,
-                image_urls=query.image_urls,
-                video_urls=query.video_urls,
-            ),
-            input_type="query",
-        )
-        provenance = self.embeddings.provenance
+        try:
+            embedded = self.embeddings.embed_with_provenance(
+                MultimodalContent(
+                    text=query.text,
+                    image_urls=query.image_urls,
+                    video_urls=query.video_urls,
+                ),
+                input_type="query",
+                project_id=query.project_id,
+            )
+        except MemoryEmbeddingUnavailable as exc:
+            self._record_vector_degraded(query.project_id, exc)
+            return []
+        query_vector = embedded.values
+        provenance = embedded.provenance
         layer_values = [layer.value for layer in query.layers]
         with self.database.session() as session:
             statement = select(ShotMemory).where(
@@ -200,6 +220,20 @@ class MultimodalMemoryEngine:
             )
         ranked.sort(key=lambda item: (-item.score, item.layer.value, item.id))
         return ranked[: query.top_k]
+
+    def _record_vector_degraded(self, project_id: str, error: Exception) -> None:
+        with self.database.session() as session:
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    decision_type="MEMORY_VECTOR_DEGRADED",
+                    input_features={"error_type": type(error).__name__},
+                    selected_action="STRUCTURED_TIMELINE_ONLY",
+                    reason_codes=["MEMORY_VECTOR_DEGRADED"],
+                    model_version=self.version,
+                    policy_version="memory-degrade-v1",
+                )
+            )
 
     def current_state(self, project_id: str, *, scene_id: str | None = None) -> RetrievedMemory | None:
         query = MemoryQuery(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
@@ -22,6 +23,13 @@ from production_domain.models import (
     new_id,
 )
 from sqlalchemy import update
+
+from .evidence import (
+    VLM_REVIEW_REQUIRED,
+    CanonicalIdentityReference,
+    CharacterEvidenceProducer,
+    CharacterEvidenceReport,
+)
 
 TERMINAL_CANDIDATE_STATUSES = {
     CandidateStatus.COMMITTED.value,
@@ -232,9 +240,15 @@ class QAPipeline:
         },
     }
 
-    def __init__(self, database: Database, identity_qa: DynamicIdentityQA | None = None):
+    def __init__(
+        self,
+        database: Database,
+        identity_qa: DynamicIdentityQA | None = None,
+        evidence_producer: CharacterEvidenceProducer | None = None,
+    ):
         self.database = database
         self.identity_qa = identity_qa or RuleBasedDynamicIdentityQA()
+        self.evidence_producer = evidence_producer
 
     @staticmethod
     def adaptive_sample_positions() -> tuple[float, ...]:
@@ -244,6 +258,97 @@ class QAPipeline:
 
     def identity_sample_positions(self) -> tuple[float, ...]:
         return self.identity_qa.sample_positions()
+
+    def produce_character_evidence(
+        self,
+        candidate_id: str,
+        *,
+        character_id: str,
+        references: Sequence[CanonicalIdentityReference],
+        profile: str = "DIALOGUE",
+        sample_positions: tuple[float, ...] | None = None,
+    ) -> CharacterEvidenceReport:
+        """Run the configured local evidence stack against a candidate video."""
+
+        if self.evidence_producer is None:
+            raise RuntimeError("CharacterEvidenceProducer is not configured")
+        with self.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None or candidate.output_asset_id is None:
+                raise LookupError("candidate output is not available")
+            asset = session.get(MediaAsset, candidate.output_asset_id)
+            if asset is None or not asset.local_path:
+                raise LookupError("candidate output has no local evidence file")
+            video_path = Path(asset.local_path)
+        return self.evidence_producer.produce(
+            video_path,
+            candidate_id=candidate_id,
+            character_id=character_id,
+            references=references,
+            shot_type=profile,
+            sample_positions=sample_positions,
+        )
+
+    def validate_candidate_with_character_evidence(
+        self,
+        candidate_id: str,
+        *,
+        character_id: str,
+        references: Sequence[CanonicalIdentityReference],
+        semantic_evidence: dict[str, Any] | None = None,
+        profile: str = "DIALOGUE",
+        sample_positions: tuple[float, ...] | None = None,
+        defer_pass: bool = False,
+    ) -> QAResult:
+        report = self.produce_character_evidence(
+            candidate_id,
+            character_id=character_id,
+            references=references,
+            profile=profile,
+            sample_positions=sample_positions,
+        )
+        return self.validate_candidate(
+            candidate_id,
+            semantic_evidence,
+            profile=profile,
+            defer_pass=defer_pass,
+            character_evidence=report,
+        )
+
+    @staticmethod
+    def _character_identity_metrics(report: CharacterEvidenceReport) -> IdentityDriftMetrics:
+        aggregate = report.aggregate
+        observation_duration = (
+            max(sample.sample_time for sample in report.samples)
+            - min(sample.sample_time for sample in report.samples)
+            if len(report.samples) >= 2
+            else 0.0
+        )
+        low_fraction = (
+            min(1.0, aggregate.low_score_duration / observation_duration) if observation_duration > 0 else 0.0
+        )
+        recovery = (
+            max(0.0, aggregate.reacquisition_score - aggregate.minimum_identity)
+            if aggregate.reacquisition_score is not None and aggregate.minimum_identity is not None
+            else None
+        )
+        return IdentityDriftMetrics(
+            minimum_similarity=aggregate.minimum_identity,
+            average_similarity=aggregate.average_identity,
+            p10_similarity=aggregate.identity_p10,
+            drift_slope=aggregate.drift_slope,
+            low_score_fraction=round(low_fraction, 4),
+            recovery=round(recovery, 4) if recovery is not None else None,
+            usable_samples=aggregate.usable_samples,
+            invalid_samples=0,
+            average_identity=aggregate.average_identity,
+            minimum_identity=aggregate.minimum_identity,
+            identity_p10=aggregate.identity_p10,
+            appearance_similarity=aggregate.appearance_similarity,
+            costume_similarity=None,
+            hair_similarity=None,
+            reacquisition_score=aggregate.reacquisition_score,
+        )
 
     def approve_human_review(
         self,
@@ -391,8 +496,19 @@ class QAPipeline:
         *,
         profile: str = "DIALOGUE",
         defer_pass: bool = False,
+        character_evidence: CharacterEvidenceReport | None = None,
     ) -> QAResult:
-        evidence = evidence or {}
+        evidence = dict(evidence or {})
+        if character_evidence is not None:
+            if character_evidence.candidate_id != candidate_id:
+                raise ValueError("character evidence belongs to a different candidate")
+            if "identity_samples" in evidence:
+                raise ValueError("typed character evidence cannot be mixed with scalar identity samples")
+            evidence["character_score"] = (
+                character_evidence.aggregate.average_identity
+                if character_evidence.aggregate.average_identity is not None
+                else character_evidence.aggregate.appearance_similarity
+            )
         with self.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate or not candidate.output_asset_id:
@@ -417,21 +533,53 @@ class QAPipeline:
             for gate, reason_code in reviewer_reason_codes.items():
                 if evidence.get(gate):
                     hard_failures.append(reason_code)
-            identity = self.identity_qa.evaluate(evidence.get("identity_samples", []))
+            identity = (
+                self._character_identity_metrics(character_evidence)
+                if character_evidence is not None
+                else self.identity_qa.evaluate(evidence.get("identity_samples", []))
+            )
+            semantic_review_required = bool(
+                character_evidence is not None and character_evidence.semantic_review_required
+            )
             if identity.invalid_samples:
                 hard_failures.append("INVALID_IDENTITY_EVIDENCE")
-            if identity.minimum_similarity is not None and identity.minimum_similarity < 0.62:
-                hard_failures.append("IDENTITY_MINIMUM_TOO_LOW")
-                hard_failures.append("IDENTITY_DRIFT")
+            if character_evidence is not None:
+                threshold = character_evidence.threshold_profile
+                # An uncertain track cannot support a hard identity judgment;
+                # route it to semantic/VLM review instead of binding the wrong person.
+                if not semantic_review_required:
+                    if (
+                        identity.minimum_similarity is not None
+                        and identity.minimum_similarity < threshold.identity_hard_fail
+                    ):
+                        hard_failures.append("IDENTITY_MINIMUM_TOO_LOW")
+                        hard_failures.append("IDENTITY_DRIFT")
+                    if (
+                        identity.drift_slope is not None
+                        and identity.drift_slope <= -threshold.drift_limit
+                        and identity.minimum_similarity is not None
+                        and identity.minimum_similarity < threshold.identity_pass
+                    ):
+                        hard_failures.append("SUSTAINED_IDENTITY_DRIFT")
+                        hard_failures.append("IDENTITY_DRIFT")
+            else:
+                threshold = None
+                if identity.minimum_similarity is not None and identity.minimum_similarity < 0.62:
+                    hard_failures.append("IDENTITY_MINIMUM_TOO_LOW")
+                    hard_failures.append("IDENTITY_DRIFT")
+                if (
+                    identity.drift_slope is not None
+                    and identity.drift_slope <= -0.045
+                    and identity.minimum_similarity is not None
+                    and identity.minimum_similarity < 0.72
+                ):
+                    hard_failures.append("SUSTAINED_IDENTITY_DRIFT")
+                    hard_failures.append("IDENTITY_DRIFT")
             if (
-                identity.drift_slope is not None
-                and identity.drift_slope <= -0.045
-                and identity.minimum_similarity is not None
-                and identity.minimum_similarity < 0.72
+                identity.average_identity is not None
+                and identity.average_identity < 0.5
+                and not semantic_review_required
             ):
-                hard_failures.append("SUSTAINED_IDENTITY_DRIFT")
-                hard_failures.append("IDENTITY_DRIFT")
-            if identity.average_identity is not None and identity.average_identity < 0.5:
                 hard_failures.append("WRONG_CHARACTER")
             if identity.hair_similarity is not None and identity.hair_similarity < 0.65:
                 hard_failures.append("HAIR_DRIFT")
@@ -461,10 +609,23 @@ class QAPipeline:
             required_dimensions = {key for key, weight in weights.items() if weight > 0}
             missing_dimensions = sorted(required_dimensions - available.keys())
             identity_not_applicable = bool(
-                evidence.get("identity_not_applicable") and evidence.get("_trusted_source") == "INTERNAL_QC"
+                character_evidence is None
+                and evidence.get("identity_not_applicable")
+                and evidence.get("_trusted_source") == "INTERNAL_QC"
             )
-            sample_positions = self.identity_sample_positions()
-            identity_complete = identity_not_applicable or identity.usable_samples >= len(sample_positions)
+            sample_positions = (
+                tuple(sample.sample_time for sample in character_evidence.samples)
+                if character_evidence is not None
+                else self.identity_sample_positions()
+            )
+            minimum_required_samples = (
+                character_evidence.threshold_profile.minimum_required_samples
+                if character_evidence is not None
+                else len(sample_positions)
+            )
+            identity_complete = identity_not_applicable or (
+                identity.usable_samples >= minimum_required_samples and not semantic_review_required
+            )
             evidence_complete = not missing_dimensions and identity_complete
             weight_sum = sum(weights[key] for key in available)
             overall = (
@@ -472,9 +633,23 @@ class QAPipeline:
             )
             if hard_failures:
                 decision = QADecision.HARD_FAIL.value
+            elif semantic_review_required:
+                decision = QADecision.USER_REVIEW_REQUIRED.value
             elif not evidence_complete:
                 decision = QADecision.USER_REVIEW_REQUIRED.value
-            elif overall >= 0.78 and (identity.minimum_similarity or 1.0) >= 0.72:
+            elif character_evidence is not None and (
+                overall >= 0.78
+                and identity.average_identity is not None
+                and identity.average_identity >= character_evidence.threshold_profile.identity_pass
+                and (identity.minimum_similarity or 1.0)
+                >= character_evidence.threshold_profile.identity_hard_fail
+            ):
+                decision = QADecision.PASS.value
+            elif (
+                character_evidence is None
+                and overall >= 0.78
+                and (identity.minimum_similarity or 1.0) >= 0.72
+            ):
                 decision = QADecision.PASS.value
             elif overall >= 0.62:
                 decision = QADecision.SOFT_FAIL.value
@@ -505,11 +680,20 @@ class QAPipeline:
                     "level0": file_metrics,
                     "identity": asdict(identity),
                     "adaptive_samples": sample_positions,
-                    "evidence_source": evidence.get("_trusted_source", "UNTRUSTED_OR_NONE"),
+                    "evidence_source": (
+                        "CHARACTER_EVIDENCE_PRODUCER_V1"
+                        if character_evidence is not None
+                        else evidence.get("_trusted_source", "UNTRUSTED_OR_NONE")
+                    ),
                     "evidence_complete": evidence_complete,
                     "missing_dimensions": missing_dimensions,
                     "identity_not_applicable": identity_not_applicable,
-                    "minimum_identity_samples": len(sample_positions),
+                    "minimum_identity_samples": minimum_required_samples,
+                    "semantic_review_required": semantic_review_required,
+                    "semantic_review_reason": (VLM_REVIEW_REQUIRED if semantic_review_required else None),
+                    "character_evidence": (
+                        character_evidence.to_dict() if character_evidence is not None else None
+                    ),
                 },
                 summary=(
                     f"{decision}: {', '.join(sorted(set(hard_failures))) or 'weighted profile decision'}"
@@ -535,6 +719,14 @@ class QAPipeline:
             if affected_rows(updated) != 1:
                 raise LookupError("candidate became terminal before QA could be saved")
             session.refresh(candidate)
-            candidate.metadata_json = {**candidate.metadata_json, "qa_decision": decision}
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "qa_decision": decision,
+                **(
+                    {"character_evidence_run_id": character_evidence.producer_run_id}
+                    if character_evidence is not None
+                    else {}
+                ),
+            }
             session.flush()
             return result

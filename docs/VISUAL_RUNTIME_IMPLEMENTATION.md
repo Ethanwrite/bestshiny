@@ -24,6 +24,28 @@ Autopilot ──────┘          │       │                    │
                            └─ Evaluation ── bounded Retry/Switch
 ```
 
+## 2026-08-22 增量 — Project Style Lock 与全片画风漂移门禁
+
+- 迁移 `0029_project_style_lock` 新增项目级精确版本指针以及不可变
+  `StyleEmbedding / ProjectStyleLock / CandidateStyleEvaluation`。
+- STYLE 仍通过通用 Asset Registry 管理多版本和显式 Canonical promotion；真实用户确认后，项目只能
+  一次性锁定当前 Canonical READY 版本。素材库后续换 Canonical 不会改变已锁项目。
+- `ProjectStyleService` 从版本媒体自动提取 64-D 归一化本地 descriptor，持久化
+  algorithm/model/dimension/vector hash、源媒体 ID/hash 与 `DETERMINISTIC_LOCAL` provenance。
+- `VisualProductionRuntime` 优先装配锁定画风参考媒体；`CanonicalShotSpec`、中性 Prompt、模型 Prompt、
+  Generation Job metadata 和 Adapter payload 共用同一 lock/version/embedding provenance。
+- 图片候选直接评估；视频候选用 FFmpeg 在 `0/0.2/0.4/0.6/0.8/0.98` 抽帧。结果记录
+  average/minimum/p10 similarity、drift slope、low-score fraction 与冻结阈值。
+- QAPipeline 将风格 FAIL 作为硬失败、缺证据作为 review；Candidate Commit 在非规范副作用发生前和
+  CAS 采用事务内再次核对 PASS evaluation 与 candidate output/style lock/version/embedding。
+- `GET/POST /api/projects/{project_id}/style-lock` 和 Web“锁定为整部作品画风”确认已接通；开发 bypass
+  不能伪造真实用户锁定来源。
+
+当前 descriptor 是无需网络的确定性颜色、明度、饱和度、边缘与粗空间统计，不是已校准学习型
+encoder。Adapter `style_control` 是平台内部适配合同；真实 Provider 是否支持原生 embedding 字段仍须
+按官方合同逐个映射并执行 canary。当前实际外部控制是 Prompt 与锁定参考媒体；`0029` 也尚无
+PostgreSQL/Compose populated upgrade 证据。
+
 ## Feature flag 清单
 
 | Flag | Env default | 默认 | 影响范围 | 安全降级 |

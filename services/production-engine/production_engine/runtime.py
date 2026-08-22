@@ -30,17 +30,20 @@ from platform_contracts import (
 )
 from platform_database import Database
 from production_domain.models import (
+    AssetVersion,
     DecisionRecord,
     GenerationCandidate,
     GenerationIdempotency,
     GenerationJob,
     JobStatus,
     ProductionTrace,
+    Project,
     Shot,
     TimelineState,
 )
 from runtime_control_core import FeatureFlagService
 from sqlalchemy import func, select
+from style_core import ProjectStyleService
 from video_adapter_core import AdapterInput, ModelGenerationRequest, VideoAdapterRegistry
 from video_prompt_core import VideoShotPromptCompiler
 
@@ -81,6 +84,7 @@ class VisualProductionRuntime:
         benchmarks: ModelBenchmarkSuite,
         flags: FeatureFlagService,
         generation_admission: GenerationAdmissionService | None = None,
+        styles: ProjectStyleService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -96,6 +100,7 @@ class VisualProductionRuntime:
         self.benchmarks = benchmarks
         self.flags = flags
         self.generation_admission = generation_admission
+        self.styles = styles
 
     def submit_passenger(
         self,
@@ -255,6 +260,11 @@ class VisualProductionRuntime:
             timeline_fence = self._timeline_fence(session, shot, project_id)
 
         canonical_assets, canonical_media_ids = self._canonical_assets(project_id)
+        style_control = self.styles.generation_control(project_id) if self.styles else None
+        if style_control:
+            for item in canonical_assets:
+                if item.get("id") == style_control.asset_id:
+                    item["style_lock"] = style_control.prompt_view()
         entity_ids = [str(item["id"]) for item in canonical_assets]
         memories = (
             self.memory.search(
@@ -278,8 +288,16 @@ class VisualProductionRuntime:
             previous_final_frame_asset_id=start_frame_asset_id,
         )
         extra_references = list(dict.fromkeys(reference_asset_ids or []))
+        style_references = list(style_control.reference_media_ids) if style_control else []
         generation_context.reference_images = list(
-            dict.fromkeys([*extra_references, *canonical_media_ids, *generation_context.reference_images])
+            dict.fromkeys(
+                [
+                    *style_references,
+                    *extra_references,
+                    *canonical_media_ids,
+                    *generation_context.reference_images,
+                ]
+            )
         )[: self.context.budget.max_images]
         compiled = self.compiler.compile(
             shot_id,
@@ -311,6 +329,7 @@ class VisualProductionRuntime:
                 "start_frame": start_frame_asset_id,
                 "end_frame": end_frame_asset_id,
                 "reference_images": generation_context.reference_images,
+                "style_control": style_control.provider_view() if style_control else None,
             }
         )
         model_request = self.adapters.get(selected.adapter).compile(
@@ -339,6 +358,8 @@ class VisualProductionRuntime:
                 "canonical_shot_spec": compiled.spec.model_dump(mode="json"),
                 "adapter_payload": model_request.payload,
                 "router": decision.model_dump(mode="json"),
+                "style_lock": style_control.prompt_view() if style_control else None,
+                "style_control": style_control.provider_view() if style_control else None,
             },
         )
         if self._current_timeline_fence(shot_id) != timeline_fence:
@@ -569,6 +590,7 @@ class VisualProductionRuntime:
                     "canonical_asset_ids": list(request.get("reference_asset_ids") or []),
                     "start_frame": request.get("start_frame_asset_id"),
                     "end_frame": request.get("end_frame_asset_id"),
+                    "style_control": metadata.get("style_control") or metadata.get("style_lock"),
                 }
                 adapted = self.adapters.get(profile.adapter).compile(
                     next_model,
@@ -637,10 +659,26 @@ class VisualProductionRuntime:
     def _canonical_assets(self, project_id: str) -> tuple[list[dict[str, Any]], list[str]]:
         result: list[dict[str, Any]] = []
         image_media_ids: list[str] = []
+        with self.database.session() as session:
+            project = session.get(Project, project_id)
+            locked_style_version_id = project.canonical_style_version_id if project else None
+            locked_style_version = (
+                session.get(AssetVersion, locked_style_version_id) if locked_style_version_id else None
+            )
+            locked_style_asset_id = locked_style_version.asset_id if locked_style_version else None
         for asset in self.assets.list(project_id):
+            if asset.asset_type == "STYLE" and not locked_style_version_id:
+                continue
+            if asset.asset_type == "STYLE" and asset.id != locked_style_asset_id:
+                continue
             try:
-                resolved = self.assets.resolve(asset.id)
+                resolved = self.assets.resolve(
+                    asset.id,
+                    version_id=(locked_style_version_id if asset.asset_type == "STYLE" else None),
+                )
             except CanonicalVersionNotSet:
+                continue
+            if asset.asset_type == "STYLE" and resolved.version.id != locked_style_version_id:
                 continue
             media = [reference.media for reference in resolved.references]
             if resolved.primary_media:

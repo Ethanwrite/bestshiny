@@ -1,13 +1,17 @@
 # AI Director Platform — Production Evidence
 
-Evidence date: 2026-08-21
+Evidence date: 2026-08-22
 
-Scope: Phase III “Production Evidence Core” offline checkpoint
+Scope: Phase III tagged evidence plus current untagged offline development checkpoint
 
 Release verdict: **NOT PRODUCTION-READY**
 
 This report distinguishes implemented evidence plumbing from evidence collected against a real Provider. The
 Phase III full-repository gate is `406 passed, 57 warnings in 71.58s`.
+
+The current working tree additionally contains migration `0028_persistent_character_state` and
+`0029_project_style_lock`. Their validation is reported separately below and does not retroactively extend the
+tagged Phase III PostgreSQL/Docker evidence.
 
 ## Executive truth
 
@@ -38,6 +42,7 @@ Phase III full-repository gate is `406 passed, 57 warnings in 71.58s`.
 | Model evidence | `ModelExecutionRecord` stores role/model/provider/request hash/latency/tokens/cost source/status; `EmbeddingEvidence` stores dimension and hashes, never full vectors | Offline persistence regression | Actual cost stays null without trusted Provider evidence |
 | Character evidence | `CharacterEvidenceProducer` performs FFmpeg frame sampling, injected detection/tracking, view-aware face and appearance matching, confidence weighting, temporal aggregation and versioned thresholds | Self-generated, non-user MP4 fixture; local deterministic inference doubles | Production detector/tracker/face/appearance models are not bundled or deployment-validated; hair/costume are `UNAVAILABLE` |
 | Character QA safety | Low-quality samples have lower weight; uncertain tracking requires semantic/VLM review; evidence records sample/reference/encoder versions | Offline fixture regression | No real-user identity result and no production VLM review occurred |
+| Project style lock | Exact Canonical STYLE version, immutable version-bound 64-D descriptor, one-time project lock, prompt/reference/payload inheritance, sampled similarity/drift evidence and an independent Candidate Commit PASS gate | SQLite/service/API/runtime offline regression in the current working tree | Descriptor is deterministic local statistics, not a calibrated learned encoder; Provider-native style embedding fields, real-work calibration and migration `0029` PostgreSQL/Compose validation are unverified |
 | Timeline | Relational `TimelineTransition` v3, nine transition types, branch/reconciliation semantics, downstream stale marking and planning-only recompute | Offline SQL regression | Committed media remains immutable; no public committed-shot edit workflow is claimed complete |
 | Billing truth | `ProviderBillingEvidence` separates `VERIFIED_PROVIDER`, `ESTIMATED`, `RECONCILED_MANUAL` and `UNKNOWN`; missing Provider amount leaves `actual_cost = null` | Offline gateway/cost regression, including Mock/Recorded cost-spoof rejection | Only LIVE-mode Provider evidence can populate verified actual cost; no external invoice or live billing metadata was collected |
 | Accepted-shot economics | All failed, accepted and repair attempts are included in accepted-shot/wasted-cost aggregation and provider/model performance | Offline cost regression | Observations are blended with manual priors (`0.80/0.20`, minimum 20 samples) and do not replace priors at low sample counts |
@@ -116,11 +121,25 @@ Actual canary results for this phase:
 | --- | --- |
 | Historical offline-core freeze | `348 passed, 39 warnings`; Ruff, Mypy, Node and SQLite/Alembic checks passed before commit `0a74d31` |
 | Phase III full repository test | `406 passed, 57 warnings in 71.58s`; warnings are mainly known Alembic/SQLite/Starlette deprecations and SQLAlchemy FK-cycle warning |
+| Current `0029` offline working tree | `451 passed, 61 warnings in 88.91s`; Ruff format/check, Mypy 122 source files, Node syntax, Alembic single head and `git diff --check` passed |
 | Phase III Ruff / Mypy / Node | Ruff lint passed; Ruff format reports 226 files already formatted; Mypy passed over 121 source files; Node syntax and `git diff --check` passed |
 | Alembic head | `0027_production_evidence_core` |
 | PostgreSQL 17 + pgvector | PostgreSQL 17.10 + pgvector 0.8.6 fresh/populated/round-trip, `vector(16)`, constraints and credit/enqueue transactions passed |
 | Docker build/up/health | Docker Desktop 29.5.3: config, three image builds, up, service health, HTTP 200 smoke and in-container migration check passed; fake credentials and no Provider keys |
 | Real Provider calls | NOT EXECUTED |
+
+### Current working-tree style evidence
+
+Migration `0029_project_style_lock` is the current single code head. The implementation prevents a project style
+pointer from being written directly, cleared or replaced; changing the asset library's Canonical version does not
+move an existing project lock. Autopilot carries the locked version, reference media and descriptor provenance into
+the compiled prompt and internal adapter contract. Image/video candidates retain immutable sampled style scores,
+and commit requires a provenance-matching `PASS` row even if generic QA is manually approved.
+
+This is offline algorithm and database evidence only. The internal `style_control` payload is not proof that a
+Provider accepts a native embedding field; the externally meaningful controls currently remain locked reference
+media and prompt constraints. No user-work calibration, paid call, PostgreSQL `0029` run or Compose upgrade was
+performed for this checkpoint.
 
 ## Remaining production blockers
 
@@ -130,3 +149,5 @@ Actual canary results for this phase:
 3. Collect real Provider billing/credit evidence and compare it with server estimates.
 4. Finish email verification, MFA/invitations/device-session operations, backup/restore, monitoring/alerts and
    production secret/storage/HTTPS deployment.
+5. Calibrate the style descriptor and thresholds on approved real works, map only documented Provider-native style
+   controls, and validate migration `0029` on populated PostgreSQL/Compose before release.

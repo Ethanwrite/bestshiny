@@ -5,14 +5,14 @@ Repository: `ai-director-platform`
 Branch: `main`
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0028_persistent_character_state`
+Migration head: `0029_project_style_lock`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
 development checkpoint. The offline baseline was frozen after the historical `348 passed, 39 warnings` gate. The tagged
 Phase III checkpoint passed `406 passed, 57 warnings in 71.58s`, Mypy over 121 source files, Ruff lint, Ruff format
 (226 files), Node syntax and `git diff --check`. Those numbers are historical tag evidence, not a test count for every
-later working-tree edit. The current working tree passes `446 passed, 61 warnings in 89.79s`, Ruff format/check,
+later working-tree edit. The current working tree passes `451 passed, 61 warnings in 88.91s`, Ruff format/check,
 Mypy over 122 source files and `git diff --check`. The checkpoint remains offline evidence rather than a production
 release; no real Provider call was executed, and this state milestone adds no Provider.
 
@@ -45,6 +45,7 @@ flowchart TB
   Registry["Persistent Model Registry\nModelDefinition + ModelCapabilityProfile"]
   Memory["Narrative Memory\nSQL timeline + runtime embedding"]
   State["Persistent Character State\nversion + delta + validation + commit + CAS head"]
+  Style["Project Style Lock\nversion embedding + injection + drift gate"]
   QA["CharacterEvidence + QA\nlocal frames + confidence + review"]
   Visual["VisualProductionRuntime\ncontext + routing + prompt adapters"]
   Gateway["GenerationGateway\njob + paid boundary + billing evidence"]
@@ -62,12 +63,15 @@ flowchart TB
   Director --> Memory
   Director --> State
   Director --> QA
+  Director --> Style
   Director --> Evidence
   Memory --> Roles
   State --> QA
   State --> Director
   Roles --> Registry
   Visual --> Registry
+  Style --> Visual
+  Style --> QA
   Visual --> Gateway
   Gateway --> FlowAffinity
   Gateway --> Ledger
@@ -78,6 +82,7 @@ flowchart TB
   Roles --> Providers
   Director --> DB
   State --> DB
+  Style --> DB
   Registry --> DB
   FlowAffinity --> DB
   Ledger --> DB
@@ -96,9 +101,9 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Web | `apps/web/` | WIP implemented; cookie/CSRF client path and 4-second starter default connected |
 | API | `apps/api/video_platform_api/` | WIP implemented; auth/quota/canary/evidence routes added |
 | Browser worker | `apps/browser-worker-extension/`, `services/browser-runtime/` | Frozen baseline; no current Flow live validation |
-| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0028`; persistent character-state rows are schema-backed |
+| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0029`; persistent character-state and project-style rows are schema-backed |
 | Model infrastructure | `core/model-registry/`, `core/entitlements/`, `config/model-registry/` | Persistent single capability truth and role runtime |
-| Director/QA/cost | `core/character/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state transition/commit/propagation |
+| Director/QA/cost | `core/character/`, `core/style/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state and locked-style generation/commit gates |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
 | Skills | `skills/` | Existing guidance retained; no broad Phase III expansion |
@@ -335,6 +340,26 @@ character/instruction/asset transfer facts and returns `USER_REVIEW_REQUIRED` if
 Polling identifies the tuple `(local_generation_job_id, provider_account_id, provider_project_id,
 provider_job_id)` rather than trusting a remote job ID alone.
 
+## Project style lock and drift gate
+
+`STYLE` remains an ordinary logical asset with immutable versions and explicit Canonical promotion. A project does
+not follow that mutable asset pointer after confirmation: `ProjectStyleService.lock()` requires a Canonical READY
+STYLE version, extracts or reuses its version-bound `StyleEmbedding`, appends one `ProjectStyleLock`, and sets
+`projects.canonical_style_version_id` exactly once. Database triggers reject direct pointer writes, cross-project or
+non-STYLE bindings, history edits, unlocks, and replacement locks.
+
+Autopilot resolves the locked version even if the asset library later promotes another version. Its reference media
+is placed ahead of the bounded image context; the exact version/hash and constraints enter `CanonicalShotSpec`, the
+neutral/model prompt, Generation Job metadata, and each model adapter's `style_control` payload. The current offline
+descriptor is a deterministic normalized 64-D color/tonal/saturation/edge/spatial vector, not a calibrated learned
+model and not a Provider capability claim.
+
+After generation, `ProjectStyleService.evaluate_candidate()` samples video positions
+`0, 0.2, 0.4, 0.6, 0.8, 0.98` (or evaluates a still), persists average/minimum/p10 similarity, low-score fraction and
+drift slope in `CandidateStyleEvaluation`, and returns PASS/FAIL/REVIEW_REQUIRED. `QAPipeline` consumes this evidence,
+while `CandidatePipeline.commit()` independently rechecks that the immutable PASS row matches the current candidate
+output, style lock, exact style version and embedding. A generic human QA approval cannot bypass that final gate.
+
 ## Character evidence and QA
 
 `CharacterEvidenceProducer` V1 has the following local pipeline:
@@ -442,6 +467,7 @@ Phase III extends the existing table groups with:
 | Auth | `password_reset_tokens`, `auth_login_throttles`; credential status/fingerprint fields |
 | Storage | workspace max/used/reserved bytes, `storage_reservations`, `media_assets.size_bytes` |
 | Persistent character state | append-only `character_state_versions`, `character_state_deltas`, `character_state_validations`, `character_state_commits`; mutable CAS projection `character_state_heads` |
+| Project visual style | `projects.canonical_style_version_id`; append-only `style_embeddings`, `project_style_locks`, `candidate_style_evaluations` |
 
 The migration chain is single-head through:
 
@@ -451,6 +477,7 @@ The migration chain is single-head through:
 -> 0026_model_capability_registry
 -> 0027_production_evidence_core
 -> 0028_persistent_character_state
+-> 0029_project_style_lock
 ```
 
 PostgreSQL 17.10 + pgvector 0.8.6 was validated on temporary databases for fresh and populated paths, supported
@@ -461,6 +488,11 @@ commit evidence; and head fencing on both SQLite and PostgreSQL code paths. Dedi
 positive/negative trigger cases on a fresh temporary PostgreSQL 17 instance pass for `0028`. This is development
 evidence, not proof that the historical Compose volume or an existing production database has been upgraded. The
 ignored `data/platform.db` is not used as production migration evidence and must not be blindly stamped or upgraded.
+
+Migration `0029` is the current code head and adds a one-time, exact-version project style pointer plus immutable
+embedding, lock, and candidate evaluation rows. SQLite migration/schema regression is covered. No PostgreSQL 17,
+Compose populated-upgrade, real learned style encoder, or Provider style-control canary evidence is claimed for
+`0029` yet.
 
 ## Internal observability
 
@@ -491,7 +523,7 @@ Docker Desktop 29.5.3 was used for an offline production-like smoke with develop
 - no Provider key was supplied and no live Provider call was possible.
 
 The stack is shut down after the smoke without deleting volumes. This is local deployment evidence for the tagged
-`0027` checkpoint, not evidence that `0028` has run in that Compose stack, and not evidence for managed secrets,
+  `0027` checkpoint, not evidence that `0028` or `0029` has run in that Compose stack, and not evidence for managed secrets,
 HTTPS, backups, external observability or a public production environment.
 
 ## Current release posture

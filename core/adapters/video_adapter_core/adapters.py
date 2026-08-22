@@ -28,7 +28,8 @@ def _result(
         model=model,
         prompt=prompt,
         negative_prompt=(
-            "identity drift, altered canonical product, extra subjects, duplicate limbs, extra cuts"
+            "identity drift, visual style drift, palette drift, altered canonical product, "
+            "extra subjects, duplicate limbs, extra cuts"
         ),
         payload=payload,
         asset_bindings=list(dict.fromkeys(asset for asset in assets if asset)),
@@ -60,6 +61,7 @@ class KlingAdapter(VideoModelAdapter):
             "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "generate_audio": bool(common["audio"]),
+            "style_control": common["style_control"],
         }
         return _result(provider="kling", model=model, prompt=prompt, payload=payload, context=value.context)
 
@@ -84,6 +86,7 @@ class VeoAdapter(VideoModelAdapter):
             "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "generate_audio": bool(common["audio"]),
+            "style_control": common["style_control"],
         }
         provider = "google_flow" if model.startswith("flow-") else "veo_official"
         return _result(provider=provider, model=model, prompt=prompt, payload=payload, context=value.context)
@@ -109,6 +112,7 @@ class SeedanceAdapter(VideoModelAdapter):
             "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "audio": common["audio"],
+            "style_control": common["style_control"],
         }
         return _result(
             provider="seedance", model=model, prompt=prompt, payload=payload, context=value.context
@@ -136,6 +140,7 @@ class GrokAdapter(VideoModelAdapter):
             "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "audio": common["audio"],
+            "style_control": common["style_control"],
         }
         return _result(provider="grok", model=model, prompt=prompt, payload=payload, context=value.context)
 
@@ -161,5 +166,6 @@ class WanAdapter(VideoModelAdapter):
             "size": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "audio": common["audio"],
+            "style_control": common["style_control"],
         }
         return _result(provider="wan", model=model, prompt=prompt, payload=payload, context=value.context)

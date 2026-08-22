@@ -73,6 +73,7 @@ from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
 from skill_core import PromptCompilerService
+from style_core import ProjectStyleService
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from video_prompt_core import VideoShotPromptCompiler
@@ -130,6 +131,7 @@ class Container:
     video_adapters: VideoAdapterRegistry
     image_prompts: ImagePromptCorrector
     asset_registry: AssetRegistry
+    styles: ProjectStyleService
     feature_flags: FeatureFlagService
     memory: MultimodalMemoryEngine
     context: ContextAssembler
@@ -478,6 +480,7 @@ def build_container(settings: Settings | None = None) -> Container:
     video_adapters = VideoAdapterRegistry()
     image_prompts = ImagePromptCorrector()
     asset_registry = AssetRegistry(database)
+    styles = ProjectStyleService(database, storage)
     feature_flags = FeatureFlagService(
         database,
         FeatureFlagDefaults(
@@ -530,6 +533,7 @@ def build_container(settings: Settings | None = None) -> Container:
         benchmarks,
         feature_flags,
         generation_admission,
+        styles,
     )
     candidates = CandidatePipeline(
         database,
@@ -542,6 +546,7 @@ def build_container(settings: Settings | None = None) -> Container:
         visual_runtime=visual_runtime,
         generation_admission=generation_admission,
         character_states=character_states,
+        styles=styles,
     )
     orchestrator = AgentOrchestrator(narrative, characters, continuity_decision, prompts, candidates)
     return Container(
@@ -584,6 +589,7 @@ def build_container(settings: Settings | None = None) -> Container:
         video_adapters=video_adapters,
         image_prompts=image_prompts,
         asset_registry=asset_registry,
+        styles=styles,
         feature_flags=feature_flags,
         memory=memory,
         context=context,

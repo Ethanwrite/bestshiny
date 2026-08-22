@@ -6,7 +6,7 @@
 仓库已将 Phase II 离线算法核心冻结为 commit `0a74d31`、tag
 `v0.2.0-algorithm-core-offline`。Phase III 实现提交为 `99f9c60`，离线证据快照 tag 为
 `v0.3.0-production-evidence-core-offline`；该 tag 不是生产发布证明。当前未发布工作树又增加了
-`0028_persistent_character_state` 与持久叙事角色状态闭环，没有新增 Provider。
+`0028_persistent_character_state`、`0029_project_style_lock` 与项目级锁定画风闭环，没有新增 Provider。
 
 ## 首先阅读
 
@@ -43,16 +43,17 @@
 - 历史离线基线：`348 passed, 39 warnings`，冻结于 `0a74d31`。
 - Phase III tag 全仓：`406 passed, 57 warnings in 71.58s`；Mypy 121 source files、Ruff lint、Node syntax 和
   `git diff --check` 通过。warning 主要是已知 Alembic/SQLite/Starlette 弃用项和 SQLAlchemy FK cycle。
-- 2026-08-22 当前工作树：`446 passed, 61 warnings in 89.79s`；Ruff format/check、Mypy
-  122 source files 和 `git diff --check` 全绿。
+- 2026-08-22 当前工作树：`451 passed, 61 warnings in 88.91s`；Ruff format/check、Mypy 122
+  source files、Node syntax、Alembic 单 head 与 `git diff --check` 通过。
 - PostgreSQL 17.10 + pgvector 0.8.6：fresh/populated、`vector(16)`、约束与事务验证通过，head
-  为当时的 `0027_production_evidence_core`。当前代码 head 是 `0028_persistent_character_state`；
+  为当时的 `0027_production_evidence_core`。当前代码 head 是 `0029_project_style_lock`；
   专项 SQLite schema/migration 与新临时 PostgreSQL 17 trigger 正/反例已通过，但不等于生产库已升级。
 - Docker Desktop 29.5.3：Compose config/build/up/health、HTTP 200 smoke 与容器内 Alembic
   `0027` head/check 通过；仅使用假 development 凭据，未传入 Provider Key。
 - Live Provider：RunAPI/OpenRouter/Voyage/Flow/单视频全部 **NOT EXECUTED**；已知支出 **USD 0**。
 - Persistent Narrative Character State：已有米拉镜头 12→13→14 离线事务 fixture，覆盖身份硬隔离、规则锁、可视证据、版本/commit/head CAS、传播、Voyage 降级人工、错配拒绝与 stale fence。proposal 只能在 Candidate `CREATED`/pre-dispatch 分配事务写入，proposal-set hash 绑定 Candidate/Generation Job 并在 validate/commit 复核；显式 `branch_key` 可从 input 选定的不可变版本分叉为独立 scope v1/head，不推进 main head。
 - 角色状态 JSON 上限为 256 KiB/5,000 节点/12 层/200 条 constraints；baseline initialize 不为已采用候选额外写入第二个无类型 `ShotStateSnapshot`。
+- STYLE 版本必须先显式提升为 Canonical，再由真实用户一次性锁定到项目；锁定版本绑定不可变 embedding，自动进入每镜参考图、Prompt/Adapter payload，并以相似度和漂移证据阻断不合格 Candidate Commit。当前 64-D 本地 descriptor 是离线确定性证据，不是生产学习型 encoder 或 Provider canary。
 
 主要阻断是具体生产视觉检测/跟踪/编码模型部署与校准、具有可核验 provenance 的
 `VLM_REVIEWER`、真实 Provider/账单 canary、剩余公网认证/运营控制与备份恢复。

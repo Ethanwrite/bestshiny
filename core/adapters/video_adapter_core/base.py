@@ -57,6 +57,7 @@ def canonical_lines(spec: CanonicalShotSpec, context: dict[str, Any]) -> list[st
         f"Audio: {shot.get('audio', {})}",
         f"End state: {shot.get('end_state', {})}",
         f"Continuity: {shot.get('continuity', {})}",
+        f"Locked visual style: {shot.get('style_lock', {})}",
         f"Canonical context assets: {context.get('canonical_asset_ids', [])}",
         f"Previous final frame: {context.get('previous_final_frame_asset_id', '')}",
         f"Constraints: {shot.get('constraints', [])}",
@@ -81,4 +82,6 @@ def common_payload(spec: CanonicalShotSpec, context: dict[str, Any]) -> dict[str
         "reference_video": context.get("reference_video")
         or (reference_videos[0] if reference_videos else None),
         "audio": shot.get("audio") or {},
+        "style_embedding": (context.get("style_control") or {}).get("embedding"),
+        "style_control": context.get("style_control"),
     }

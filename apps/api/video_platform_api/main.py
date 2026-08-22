@@ -449,7 +449,12 @@ def create_app(container: Container | None = None) -> FastAPI:
             )
             session.add(item)
             session.flush()
-            return {"id": item.id, "title": item.title, "status": item.status}
+            return {
+                "id": item.id,
+                "title": item.title,
+                "status": item.status,
+                "canonical_style_version_id": item.canonical_style_version_id,
+            }
 
     @app.get("/v1/projects")
     def list_projects(principal: AuthPrincipal = Depends(auth.current_user)):
@@ -466,6 +471,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                     "status": project.status,
                     "default_provider": project.default_provider,
                     "default_aspect_ratio": project.default_aspect_ratio,
+                    "canonical_style_version_id": project.canonical_style_version_id,
                 }
                 for project in session.scalars(query)
             ]
@@ -491,6 +497,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "name": project.name or project.title,
                 "description": project.description,
                 "status": project.status,
+                "canonical_style_version_id": project.canonical_style_version_id,
                 "defaults": {
                     "aspect_ratio": project.default_aspect_ratio,
                     "provider": project.default_provider,

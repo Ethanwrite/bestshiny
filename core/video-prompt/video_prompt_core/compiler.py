@@ -356,6 +356,19 @@ class VideoShotPromptCompiler:
         constraints.extend(
             str(item) for asset in canonical_assets for item in asset.get("constraints", []) if item
         )
+        locked_style = next(
+            (
+                dict(asset.get("style_lock") or {})
+                for asset in canonical_assets
+                if asset.get("type") == "STYLE" and asset.get("style_lock")
+            ),
+            {},
+        )
+        if locked_style:
+            constraints.append(
+                "preserve the locked visual style across every frame; do not drift in palette, "
+                "contrast, texture, rendering medium, or edge treatment"
+            )
         constraints.extend(state_constraint_lines)
         spec = CanonicalShotSpec(
             project_id=project_id,
@@ -380,6 +393,7 @@ class VideoShotPromptCompiler:
                 "previous_shot_id": start_state.get("previous_shot_id"),
                 "previous_final_frame_asset_id": start_state.get("previous_final_frame_asset_id"),
             },
+            style_lock=locked_style,
             constraints=list(dict.fromkeys(constraints)),
             allow_camera_gaze=allow_camera_gaze,
             generation_policy=generation_policy,
@@ -428,6 +442,7 @@ class VideoShotPromptCompiler:
             "dialogue": payload["dialogue"],
             "end_state": payload["end_state"],
             "continuity": payload["continuity"],
+            "style_lock": payload["style_lock"],
             "constraints": payload["constraints"],
         }
         return json.dumps(ordered, ensure_ascii=False, indent=2)

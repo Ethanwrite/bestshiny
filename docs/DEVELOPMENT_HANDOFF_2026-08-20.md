@@ -2,13 +2,39 @@
 
 快照日期：2026-08-22（文件名保留初始交接日期）
 仓库：`ai-director-platform`
-当前结论：**Phase III tag 保留了离线、PostgreSQL 与 Docker 证据；当前开发检查点又完成了 Persistent Narrative Character State 的代码、数据库和离线回归闭环。没有真实 Provider/生产视觉 QA/账单证据，因此仍不可发布或开启商用 live。**
+当前结论：**Phase III tag 保留了离线、PostgreSQL 与 Docker 证据；当前开发检查点又完成了 Persistent Narrative Character State 与 Project Style Lock 的代码、数据库和离线回归闭环。没有真实 Provider/生产视觉 QA/账单证据，因此仍不可发布或开启商用 live。**
+
+## 2026-08-22 Project Style Lock 交接（优先于下文所有段落）
+
+- 当前工作树实测 `451 passed, 61 warnings in 88.91s`；Ruff format/check、Mypy 122 source files、
+  Node syntax、Alembic 单 head 与 `git diff --check` 全绿。
+- 单一 Alembic head 已续到 `0029_project_style_lock`，新增
+  `projects.canonical_style_version_id`、`style_embeddings`、`project_style_locks` 和
+  `candidate_style_evaluations`。前三类审计事实 append-only；项目画风指针只能经一条 fresh lock 从空值设置
+  一次，不能解除或换版。
+- STYLE 仍先走现有 `AssetVersion -> explicit Canonical promotion`。用户确认锁定时服务核对同项目、STYLE、
+  READY、当前 Canonical 与媒体 provenance，自动提取/复用和该不可变版本绑定的 64-D descriptor，并记录
+  actor、理由、阈值、embedding model/hash 与源媒体 hash。
+- 后续素材库即使把同一 STYLE 资产的另一个版本设为 Canonical，项目仍精确解析原锁定版本。每个
+  Autopilot 镜头优先携带锁定参考媒体，`CanonicalShotSpec`、中性 Prompt、模型 Prompt、Generation Job
+  metadata 和 Adapter `style_control` payload 都写入同一 version/embedding provenance。
+- 候选图片或 FFmpeg 抽样视频会产生平均/最低/p10 相似度、低分比例和漂移斜率，并持久为不可变
+  `CandidateStyleEvaluation`。缺证据为 `REVIEW_REQUIRED`，低相似度/持续漂移为 `FAIL`；Commit 在抽尾帧
+  前和采用 CAS 事务内各复核一次 PASS 行、output asset、style lock/version/embedding，普通人工 QA 不能
+  绕过此门禁。
+- 当前 embedding 是确定性的颜色/明度/饱和度/边缘/空间统计描述符，用于离线可审计约束与回归；它
+  不是已经校准的学习型 Style Encoder，也没有真实 Provider style payload/canary 证据。上线前要在批准的
+  真实作品上校准阈值或接入新的版本化 encoder，并保持旧 embedding/评估历史可解释。
+- 用户 API：`GET/POST /api/projects/{project_id}/style-lock`。POST 要求真实账号、布尔 true 明确确认和理由；
+  Web 素材区仅在已选 STYLE 有 Canonical 且项目尚未锁定时启用“锁定为整部作品画风”。
+- 迁移 `0029` 当前只声明 SQLite/离线测试证据；尚未复跑临时 PostgreSQL 17 trigger 正反例、Compose
+  populated upgrade/rollback 或任何真实 Provider。历史 `0027`/`0028` 证据不能外推为 `0029` 生产证明。
 
 ## 2026-08-22 Persistent Narrative Character State 交接（优先于后文所有历史段落）
 
 ### 本轮范围与结论
 
-- 当前工作树实测 `446 passed, 61 warnings in 89.79s`；Ruff format/check、Mypy
+- 该功能完成时的工作树实测为 `446 passed, 61 warnings in 89.79s`；Ruff format/check、Mypy
   122 source files 和 `git diff --check` 全绿。专项 SQLite schema/migration 回归以及新临时
   PostgreSQL 17 的 `0028` trigger 正/反例通过。
 - 按产品决策，本轮**没有继续堆 Provider**，而是补齐平台自有的
@@ -44,7 +70,7 @@
 
 ### 数据库与 API
 
-- 单一 Alembic head 现为 `0028_persistent_character_state`。新表：
+- 该 Persistent State 检查点当时的 Alembic head 为 `0028_persistent_character_state`。新表：
   `character_state_versions`、`character_state_deltas`、`character_state_validations`、
   `character_state_commits`、`character_state_heads`。
 - SQLite/PostgreSQL 迁移路径都定义了项目/角色/identity/candidate/timeline 所有权、身份路径隔离、
@@ -85,9 +111,11 @@
 1. 先保持当前 character-state schema/service/pipeline/API 和 Mira 回归不回归。
 2. 保留已通过的临时 SQLite/PostgreSQL 17 `0028` schema/trigger 门禁，后续修改迁移时必须复跑；
    部署前另做含真实历史数据的 production-like Compose populated upgrade/rollback 演练。不要盲目升级已知混合
-   `data/platform.db`。
-3. 将具体、可校准的 VLM Reviewer 接到已有 `FACT_OBSERVATION` 合同；在此之前保持人工复核。
-4. 不要用增加 Provider 或将 Voyage 改成“裁判器”来替代上述工作。
+  `data/platform.db`。
+3. 保持项目 style lock、version-bound embedding 和 Candidate style evaluation 全部 append-only；不要把
+   Narrative Memory/Voyage embedding 当作画风 Commit 裁判器。
+4. 将具体、可校准的 VLM Reviewer 接到已有 `FACT_OBSERVATION` 合同；在此之前保持人工复核。
+5. 不要用增加 Provider 或将 Voyage 改成“裁判器”来替代上述工作。
 
 ## 2026-08-21 Phase III 当前交接（优先于下文所有 Phase II 历史段落）
 
@@ -827,10 +855,11 @@ workspace + plan
 | `0025_flow_project_affinity` | Flow sticky account/project、唯一所有权与迁移计划 | Phase III tag 已通过 SQLite/PostgreSQL/Docker 检查 |
 | `0026_model_capability_registry` | 持久单一 ModelCapabilityProfile | Phase III tag 已通过 SQLite/PostgreSQL/Docker 检查 |
 | `0027_production_evidence_core` | model/billing/outcome/timeline/live-canary/auth/storage 证据 | Phase III tag 与 Docker smoke 的历史 head |
-| `0028_persistent_character_state` | version/delta/validation/commit/CAS head 与 identity/state 数据库边界 | 当前代码 head；SQLite 专项回归与临时 PostgreSQL 17 trigger 正/反例通过，不代表 Compose/生产库已升级 |
+| `0028_persistent_character_state` | version/delta/validation/commit/CAS head 与 identity/state 数据库边界 | SQLite 专项回归与临时 PostgreSQL 17 trigger 正/反例通过，不代表 Compose/生产库已升级 |
+| `0029_project_style_lock` | 项目精确画风版本、version-bound embedding、候选风格证据与 Commit 门禁 | 当前代码 head；SQLite/离线回归，不代表 PostgreSQL/Compose/生产库已升级 |
 
-“在 `0023` 修复前不得续号”是 2026-08-20 的历史阻断，已被后续修复和 `0024`–`0028`
-取代。下一个迁移只能在 `0028` 单 head 上协调续号，且不得用 ORM `create_all` 代替迁移。
+“在 `0023` 修复前不得续号”是 2026-08-20 的历史阻断，已被后续修复和 `0024`–`0029`
+取代。下一个迁移只能在 `0029` 单 head 上协调续号，且不得用 ORM `create_all` 代替迁移。
 
 ### 8.1 本地开发库的特别风险
 

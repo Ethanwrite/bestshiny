@@ -40,11 +40,13 @@ from production_domain.models import (
     ModelExecutionRecord,
     ProductionTrace,
     Project,
+    ProjectStyleLock,
     ProviderBillingEvidence,
     ProviderProjectBinding,
     QAResult,
     Scene,
     Shot,
+    StyleEmbedding,
     TimelineTransition,
     Workspace,
 )
@@ -62,6 +64,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_, select
+from style_core import StyleLockConflict
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -96,6 +99,18 @@ class LogicalAssetVersionCreate(BaseModel):
 class AssetPromoteBody(BaseModel):
     reason: str = "user approved"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectStyleLockBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    style_version_id: str = Field(min_length=1, max_length=36)
+    reason: str = Field(min_length=1, max_length=2000)
+    explicit_confirmation: Literal[True]
+    similarity_threshold: float = Field(default=0.72, ge=0, le=1)
+    minimum_similarity_threshold: float = Field(default=0.55, ge=0, le=1)
+    drift_limit: float = Field(default=0.06, ge=0, le=1)
+    max_low_score_fraction: float = Field(default=0.5, ge=0, le=1)
 
 
 class GenerationPromoteBody(BaseModel):
@@ -256,6 +271,32 @@ def _version_view(version: AssetVersion) -> dict[str, Any]:
         "continuity_state": version.continuity_state,
         "source": version.source,
         "status": version.status,
+    }
+
+
+def _style_lock_view(style_lock: ProjectStyleLock, embedding: StyleEmbedding) -> dict[str, Any]:
+    return {
+        "id": style_lock.id,
+        "project_id": style_lock.project_id,
+        "style_asset_id": style_lock.style_asset_id,
+        "style_version_id": style_lock.style_version_id,
+        "style_embedding": {
+            "id": embedding.id,
+            "provider": embedding.provider,
+            "model": embedding.model,
+            "dimension": embedding.dimension,
+            "embedding_hash": embedding.embedding_hash,
+            "evidence_kind": embedding.evidence_kind,
+            "source_media_ids": embedding.source_media_ids,
+        },
+        "thresholds": {
+            "average": style_lock.similarity_threshold,
+            "minimum": style_lock.minimum_similarity_threshold,
+            "drift_limit": style_lock.drift_limit,
+            "max_low_score_fraction": style_lock.max_low_score_fraction,
+        },
+        "reason": style_lock.reason,
+        "locked_at": style_lock.created_at,
     }
 
 
@@ -714,6 +755,55 @@ def register_runtime_routes(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @user_router.get("/api/projects/{project_id}/style-lock")
+    def get_project_style_lock(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
+        with container.database.session() as session:
+            style_lock = session.scalar(
+                select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
+            )
+            if not style_lock:
+                return {"locked": False, "project_id": project_id}
+            embedding = session.get(StyleEmbedding, style_lock.style_embedding_id)
+            if not embedding:
+                raise HTTPException(409, "project style lock embedding is missing")
+            return {"locked": True, **_style_lock_view(style_lock, embedding)}
+
+    @user_router.post("/api/projects/{project_id}/style-lock")
+    def lock_project_style(
+        project_id: str,
+        body: ProjectStyleLockBody,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id, write=True)
+        if principal.development_bypass:
+            raise HTTPException(403, "锁定整部作品画风需要真实登录用户明确确认")
+        try:
+            style_lock = container.styles.lock(
+                project_id,
+                body.style_version_id,
+                locked_by_user_id=principal.user_id,
+                reason=body.reason,
+                explicit_confirmation=body.explicit_confirmation,
+                similarity_threshold=body.similarity_threshold,
+                minimum_similarity_threshold=body.minimum_similarity_threshold,
+                drift_limit=body.drift_limit,
+                max_low_score_fraction=body.max_low_score_fraction,
+            )
+            with container.database.session() as session:
+                persisted = session.get(ProjectStyleLock, style_lock.id)
+                embedding = session.get(StyleEmbedding, style_lock.style_embedding_id)
+                if not persisted or not embedding:
+                    raise HTTPException(409, "project style lock provenance is incomplete")
+                return {"locked": True, **_style_lock_view(persisted, embedding)}
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (ValueError, StyleLockConflict) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @user_router.get("/api/assets/{asset_id}")
     def get_logical_asset(
         asset_id: str,
@@ -782,15 +872,24 @@ def register_runtime_routes(
                 raise HTTPException(404, "asset not found")
             auth.require_project(principal, asset.project_id, write=True)
         try:
-            return _asset_view(
-                container.asset_registry.promote(
-                    asset_id,
-                    version_id,
-                    promoted_by_user_id=(None if principal.development_bypass else principal.user_id),
-                    reason=body.reason,
-                    metadata=body.metadata,
-                )
+            promoted = container.asset_registry.promote(
+                asset_id,
+                version_id,
+                promoted_by_user_id=(None if principal.development_bypass else principal.user_id),
+                reason=body.reason,
+                metadata=body.metadata,
             )
+            result = _asset_view(promoted)
+            if promoted.asset_type == "STYLE":
+                embedding = container.styles.ensure_embedding(version_id)
+                result["style_embedding"] = {
+                    "id": embedding.id,
+                    "model": embedding.model,
+                    "dimension": embedding.dimension,
+                    "embedding_hash": embedding.embedding_hash,
+                    "evidence_kind": embedding.evidence_kind,
+                }
+            return result
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except (ValueError, AssetVersionNotPromotable) as exc:

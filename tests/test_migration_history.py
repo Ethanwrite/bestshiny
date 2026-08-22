@@ -1073,7 +1073,7 @@ def test_persistent_character_state_supports_assetless_recovery_and_rejects_part
     engine = sa.create_engine(recovery_url)
     with engine.connect() as connection:
         revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0028_persistent_character_state"
+    assert revision == "0029_project_style_lock"
     assert not {
         "character_state_versions",
         "character_state_deltas",

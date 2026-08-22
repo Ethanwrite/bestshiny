@@ -67,6 +67,7 @@ from provider_sdk import (
 from qa_core import QAPipeline
 from skill_core import PromptCompilerService
 from sqlalchemy import func, select, update
+from style_core import ProjectStyleService, StyleCommitViolation
 
 if TYPE_CHECKING:
     from entitlement_core import GenerationAdmissionService
@@ -93,6 +94,7 @@ class CandidatePipeline:
         visual_runtime: VisualProductionRuntime | None = None,
         generation_admission: GenerationAdmissionService | None = None,
         character_states: PersistentCharacterStateService | None = None,
+        styles: ProjectStyleService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -104,6 +106,7 @@ class CandidatePipeline:
         self.visual_runtime = visual_runtime
         self.generation_admission = generation_admission
         self.character_states = character_states or PersistentCharacterStateService(database)
+        self.styles = styles
         self.timeline = AuthoritativeTimelineStateEngine(database)
         self.policy = GenerationPolicyEngine(database)
 
@@ -807,6 +810,9 @@ class CandidatePipeline:
                 candidate.status = CandidateStatus.VALIDATING.value
                 output_asset_id = job.output_asset_id
         if output_asset_id:
+            style_evaluation = (
+                self.styles.evaluate_candidate(candidate_id) if self.styles is not None else None
+            )
             auto_evaluation_enabled = bool(
                 job
                 and self.visual_runtime is not None
@@ -832,6 +838,7 @@ class CandidatePipeline:
                 validation_evidence,
                 profile=shot_type or "DIALOGUE",
                 defer_pass=auto_evaluation_enabled,
+                style_evaluation=style_evaluation,
             )
             if auto_evaluation_enabled and legacy_qa.decision == QADecision.PASS.value:
                 assert job is not None and self.visual_runtime is not None
@@ -994,6 +1001,11 @@ class CandidatePipeline:
                 raise CandidateNotCommittable("only candidates with PASS validation can be committed")
             self._assert_candidate_timeline_fence(session, candidate, shot)
             self._assert_character_state_proposal_fence(session, candidate)
+            if self.styles is not None:
+                try:
+                    self.styles.assert_candidate_committable_in_session(session, candidate)
+                except StyleCommitViolation as exc:
+                    raise CandidateNotCommittable(str(exc)) from exc
             asset = session.get(MediaAsset, candidate.output_asset_id)
             if not asset or asset.project_id != shot.scene.episode.project_id:
                 raise CandidateNotCommittable("candidate output does not belong to the shot project")
@@ -1046,6 +1058,11 @@ class CandidatePipeline:
                 raise CandidateNotCommittable("candidate output changed before adoption")
             self._assert_candidate_timeline_fence(session, candidate, shot)
             self._assert_character_state_proposal_fence(session, candidate)
+            if self.styles is not None:
+                try:
+                    self.styles.assert_candidate_committable_in_session(session, candidate)
+                except StyleCommitViolation as exc:
+                    raise CandidateNotCommittable(str(exc)) from exc
             self._assert_commit_provider_trust(session, candidate, asset)
             output_state = session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
             if not output_state:

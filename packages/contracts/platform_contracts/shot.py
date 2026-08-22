@@ -60,6 +60,7 @@ class CanonicalShotSpec(BaseModel):
     language: str = "zh-CN"
     audio: dict[str, Any] = Field(default_factory=dict)
     continuity: dict[str, Any] = Field(default_factory=dict)
+    style_lock: dict[str, Any] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
     allow_camera_gaze: bool = False
     generation_policy: str = "TEXT_TO_VIDEO"

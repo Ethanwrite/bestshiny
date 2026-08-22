@@ -1,6 +1,6 @@
 # Production Readiness Checklist
 
-Snapshot: 2026-08-21
+Snapshot: 2026-08-22
 
 Current verdict: **NOT PRODUCTION-READY**
 
@@ -22,6 +22,8 @@ a live Provider result. The authoritative evidence narrative is
 ## Data and deployment
 
 - [x] Phase III full test result recorded: `406 passed, 57 warnings in 71.58s`.
+- [x] Current `0029` offline working tree passes `451 passed, 61 warnings in 88.91s`; Ruff format/check,
+  Mypy 122 source files, Node syntax, Alembic single-head and `git diff --check` pass.
 - [x] Ruff lint, Ruff format (226 files already formatted), Mypy (121 files), Node syntax and `git diff --check` pass.
 - [x] PostgreSQL 17.10 + pgvector 0.8.6 fresh, populated and supported round-trip migrations validated through head `0027`.
 - [x] PostgreSQL constraints, vector/index creation, credit transactions and generation enqueue transactions
@@ -57,6 +59,22 @@ a live Provider result. The authoritative evidence narrative is
 - [ ] Concrete production detector/tracker/face/appearance models are deployed and calibrated on approved data.
 - [ ] Real non-fixture identity evidence has been reviewed for accuracy, bias and failure modes.
 - [ ] Production VLM review path is deployed for uncertain tracking/evidence.
+
+## Project style continuity
+
+- [x] A project can be locked once to an exact READY Canonical STYLE version only after explicit real-user confirmation.
+- [x] Style descriptors are immutable, version-bound and retain algorithm/model/hash/source-media provenance.
+- [x] Autopilot inherits the locked version through reference media, prompt/spec metadata and the internal Adapter
+  `style_control` contract; later asset-library Canonical changes do not move the project lock.
+- [x] Image/video candidate evaluations persist average/minimum/p10 similarity, drift slope, low-score fraction,
+  thresholds and sample provenance.
+- [x] Candidate Commit independently requires provenance-matching style `PASS` evidence and cannot be bypassed by
+  generic human QA approval.
+- [ ] Style encoder/thresholds are calibrated on approved real-user works. The current 64-D descriptor is a
+  deterministic offline baseline, not a production learned encoder.
+- [ ] Provider-native style controls are mapped from current official contracts and validated by bounded canaries;
+  the internal payload alone is not evidence of Provider support.
+- [ ] Migration `0029_project_style_lock` has passed fresh/populated/round-trip PostgreSQL and Compose validation.
 
 ## Commercial safety
 

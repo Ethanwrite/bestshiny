@@ -10,8 +10,8 @@
 > **当前 Phase III 离线检查点仍不可直接发布。** 离线算法核心已冻结为 commit `0a74d31`、tag `v0.2.0-algorithm-core-offline`；Phase III 实现提交为 `99f9c60`，证据快照 tag 为 `v0.3.0-production-evidence-core-offline`。Phase III 全仓门禁为 `406 passed, 57 warnings in 71.58s`；PostgreSQL 17.10 + pgvector 0.8.6 与 Docker Compose 生产类似 smoke 已实机通过。任何真实 Provider canary 都不得从代码实现推导为已验证：本轮真实 Provider 调用为 **0**，开发引起的已知 Provider 支出为 **USD 0**，单视频 canary 为 **NOT EXECUTED**。
 
 2026-08-22 的当前开发检查点在不新增 Provider 的前提下，增加了迁移
-`0028_persistent_character_state` 和持久叙事角色状态闭环。上述 `406 passed` 是前一个已打 tag
-检查点的历史证据。当前工作树门禁实测为 `446 passed, 61 warnings in 89.79s`，
+`0028_persistent_character_state`、迁移 `0029_project_style_lock` 和项目级锁定画风闭环。上述 `406 passed` 是前一个已打 tag
+检查点的历史证据。当前工作树门禁实测为 `451 passed, 61 warnings in 88.91s`，
 Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；这仍不是对真实视觉评审精度或生产上线的背书。
 
 ## 当前已实现
@@ -24,6 +24,7 @@ Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；�
 - Model Registry/Router：逻辑模型、provider model ID、信任等级与套餐角色绑定持久化到数据库；持久的 `ModelCapabilityProfile` 是 UI、Policy、Router、Cost 与 Adapter 的单一能力/质量先验事实源，旧 `config/video-models/*.json` 多头配置已移除，Wan 对齐 2.7。路由先执行能力与 `AssetCriticality` 硬门禁，低样本真实观测不会覆盖人工先验；`EDGE` 永远不能处理 canonical/hero/important 资产。
 - Model live kill switch：Gateway 在排队前与付费调用边界都核对持久模型身份和 `enabled/live_enabled`，最终检查与 Job CAS 同事务；重启不会覆盖管理员禁用状态，请求 metadata 也无法解锁。
 - Asset Registry：逻辑资产与不可变版本覆盖人物、场景、商品、道具等素材；只有显式提升才会改变 canonical 版本，数据库触发器防止跨资产链接、未记录切换和历史改写。
+- Project Style Lock：用户先把 `STYLE` 版本显式提升为 Canonical，再通过真实账号确认一次性锁定到项目。锁定版本拥有不可变的 64 维本地 Style Embedding 与 hash；后续素材库 Canonical 变更不会改写项目锁。所有 Autopilot 镜头自动继承锁定参考图、Prompt 约束及 Adapter style payload，生成结果逐帧计算相似度、低分比例和漂移斜率；缺证据、低相似度或持续漂移不能通过 Candidate Commit 门禁。
 - ModelRoleRuntime：业务模型调用统一按 role 解析 chat/embedding/fact-locked refinement，每次成功或失败都写 `ModelExecutionRecord`；真实模式还必须匹配未过期的 `LiveCanaryPermit`。
 - Memory/Context：L0/L1/L2 记忆、metadata-first 检索、文本/图片/视频预算装配。Narrative Memory 的 Voyage 路径已收口到 `ModelRoleRuntime → MULTIMODAL_EMBEDDING`，保存维度/输入/向量哈希而不保存审计向量全文；不可用时降级到 SQL 结构化时间线并记录 `MEMORY_VECTOR_DEGRADED`。
 - Evaluation/Retry：结构化质量维度、关键失败、`ACCEPT / RETRY_SAME_MODEL / RETRY_REWRITE_PROMPT / SWITCH_MODEL / REJECT` 与有界重试计划。
@@ -65,7 +66,7 @@ uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0028_persistent_character_state`：`0025` 增加 Flow affinity/迁移约束，`0026` 增加持久单一 Capability Registry，`0027` 增加模型/嵌入/账单/决策证据、Timeline v3、Live Canary、Auth 加固与存储配额，`0028` 增加 append-only 的 character state version/delta/validation/commit 和可 CAS 前移的 branch head。历史 Phase III PostgreSQL/Docker 证据只背书到 `0027`；当前 `0028` 已在新临时 PostgreSQL 17 实例通过 trigger 正/反例专项验证，但这不等于旧 Compose volume 或生产库已执行升级。
+当前迁移代码链为单 head `0029_project_style_lock`：`0025` 增加 Flow affinity/迁移约束，`0026` 增加持久单一 Capability Registry，`0027` 增加模型/嵌入/账单/决策证据、Timeline v3、Live Canary、Auth 加固与存储配额，`0028` 增加 append-only 的 character state version/delta/validation/commit 和可 CAS 前移的 branch head，`0029` 增加项目 `canonical_style_version_id`、不可变 Style Embedding/Lock/Candidate Evaluation 与数据库一致性保护。历史 PostgreSQL/Docker 证据只背书到 `0027`；`0029` 当前只有 SQLite/离线代码证据，不代表旧 Compose volume 或生产库已执行升级。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 
@@ -173,6 +174,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/api/assets/{asset_id}` | 查看资产与版本 |
 | `POST` | `/api/assets/{asset_id}/versions` | 新增不可变版本 |
 | `POST` | `/api/assets/{asset_id}/versions/{version_id}/promote` | 显式切换 canonical 版本 |
+| `GET/POST` | `/api/projects/{project_id}/style-lock` | 查询或由真实用户明确确认一次性锁定项目画风；锁定后不可替换 |
 
 ### 内部运行时与观测
 
@@ -207,6 +209,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 - 角色状态可视证据只有在同项目、同候选输出素材上由成功的 `VLM_REVIEWER` 执行生成，并显式声明 `CHARACTER_STATE_FACT_OBSERVATION` provenance 时，才可作为 `FACT_OBSERVATION`。Voyage、缺执行记录、绑定了其他素材或低置信证据均 fail closed 到人工复核；高置信不匹配则拒绝。
 - 真实模式下，三重 live 环境门之外还要求 Provider+模型精确匹配的持久 `LiveCanaryPermit`；到期、请求数或成本触顶都是硬停。跨过远程边界后未返回可信账单的用量保持 `UNCERTAIN`。
 - 专用视觉评审器缺失或证据不足时，不会伪装成高置信通过；需要人工确认或返回修复/拒绝决策。
+- 当前 Style Embedding 是可审计的本地确定性 64 维颜色/明度/饱和度/边缘描述符，适合离线约束和回归，不等于已校准的生产视觉模型。候选视频用本地 FFmpeg 抽帧后计算相似度；生产上线前仍需以批准数据校准阈值或接入版本化的学习型风格 encoder。
 - Gateway 对状态未知的付费提交不盲目重发；自动重试使用新幂等键并受次数上限控制。
 - 多 worker 通过数据库 CAS claim token 与可过期租约串行化付费提交、供应商轮询和完成落库；跨过付费边界后失联必须先人工对账，不会自动再提交。
 - 供应商参考素材首次上传按素材、Provider、账号原子领取；付费边界后的未知结果保持 `NEEDS_RECONCILIATION`，只能通过受保护接口验证远端 ID，或由管理员明确确认远端未创建后再释放重传资格，所有操作写审计记录。
@@ -233,7 +236,7 @@ docker compose config -q
 
 离线基线的历史冻结结果是 **348 passed, 39 warnings**。Phase III tag 历史完整套件为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
 
-2026-08-22 当前未发布工作树实测为 **446 passed, 61 warnings in 89.79s**；Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿。专项 SQLite schema/migration 回归及新临时 PostgreSQL 17 的 `0028` trigger 正/反例通过；这不改变历史 Compose smoke 只运行到 `0027` 的事实。
+2026-08-22 当前未发布工作树实测为 **451 passed, 61 warnings in 88.91s**；Ruff format/check、Mypy（122 source files）、Node syntax、Alembic 单 head 和 `git diff --check` 全绿。专项 SQLite schema/migration 回归及新临时 PostgreSQL 17 的 `0028` trigger 正/反例通过；`0029` 仍只有 SQLite/离线证据，这不改变历史 Compose smoke 只运行到 `0027` 的事实。
 
 PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/populated migration、`vector(16)`、关键索引/唯一性/外键、积分事务、生成 enqueue 事务和 head `0027`。Docker Desktop 29.5.3 上 Compose config、API/worker/Web 镜像 build、up、PostgreSQL/MinIO/API health、Web/Worker 运行、宿主 HTTP 200 smoke 和容器内 Alembic head/check 均通过；使用纯假 development smoke 凭据，无 Provider key/live call，并在结束后不删卷 shutdown。完整证据见 [生产证据报告](docs/PRODUCTION_EVIDENCE.md) 和 [开发交接](docs/DEVELOPMENT_HANDOFF_2026-08-20.md)。
 
@@ -248,5 +251,6 @@ PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/popula
 - 单文件流式限制与工作空间级存储 reserve/settle/release 已接入；生产套餐配额值、保留期和删除运营政策仍待审核。
 - CharacterEvidence V1 已对自生成本地 MP4 执行真实抽帧与证据聚合，但检测/跟踪/人脸/外观模型仍是可注入边界+测试替身，不是已部署的生产视觉 AI。
 - Persistent Narrative Character State 已用“米拉镜头 12 基线 → 镜头 13 伤口血迹/信号弹位置/站位 delta → policy + 可视证据 → commit v2 → 镜头 14 继承”离线回归覆盖；这证明事务与传播合同，不证明生产 VLM 的视觉判定精度。
+- Project Style Lock 已覆盖版本绑定 embedding、一次性锁定、锁后资产库 Canonical 变化隔离、Prompt/参考图/Adapter payload 自动继承、相似度/漂移证据持久化和 Commit 硬门禁；尚未对真实用户作品校准 descriptor/阈值，也未执行任何 Provider 端 style-control canary。
 - Docker 本地生产类似 smoke 已通过，但五个真实 Provider canary 仍未执行；单视频 canary 明确为 **NOT EXECUTED**。
 - Adaptive router 需要真实样本与 benchmark 结果才能超过静态先验；低样本期应保持 feature flag 关闭并人工审阅。

@@ -41,6 +41,7 @@ const state = {
   confirmedAssets: new Set(), logicalAssets: [],
   authUser: null,
   authMode: "login", passengerPreviewObjectUrl: null,
+  styleLock: null,
   submissions: restoreSubmissions(),
 };
 const $ = (id) => document.getElementById(id);
@@ -138,6 +139,7 @@ function clearWorkspaceState() {
   state.candidates = [];
   state.characters = [];
   state.logicalAssets = [];
+  state.styleLock = null;
   state.passengerJobs = { image: null, video: null };
   state.passengerPrompts = { image: "", video: "" };
   state.passengerReferenceUpload = null;
@@ -150,6 +152,8 @@ function clearWorkspaceState() {
   $("manualExistingAsset").innerHTML = '<option value="">新建一个素材</option>';
   $("manualAssetFile").value = "";
   $("manualAssetStatus").textContent = "人物主参考图也可以在“智能导演 → 人物”中直接更新。";
+  $("lockProjectStyleBtn").disabled = true;
+  $("projectStyleLockStatus").textContent = "请先把一版视觉风格设为正式参考，再由项目成员明确锁定。";
   $("passengerReference").value = "";
   $("passengerPrompt").value = "";
   $("scriptInput").value = "";
@@ -549,20 +553,58 @@ async function loadProjects() {
 
 async function loadLogicalAssets() {
   if (!state.project) return;
-  state.logicalAssets = await request(`/api/projects/${state.project.id}/assets`);
+  [state.logicalAssets, state.styleLock] = await Promise.all([
+    request(`/api/projects/${state.project.id}/assets`),
+    request(`/api/projects/${state.project.id}/style-lock`),
+  ]);
   $("passengerExistingAsset").innerHTML = '<option value="">新建一个素材</option>' + state.logicalAssets
     .map((asset) => `<option value="${asset.id}">${simpleLabel(asset.asset_type)} · ${escapeHTML(asset.name)}${asset.canonical_version_id ? " · 正式版" : ""}</option>`)
     .join("");
   $("manualExistingAsset").innerHTML = '<option value="">新建一个素材</option>' + state.logicalAssets
     .map((asset) => `<option value="${asset.id}">${simpleLabel(asset.asset_type)} · ${escapeHTML(asset.name)}${asset.canonical_version_id ? " · 当前正式参考" : ""}</option>`)
     .join("");
+  renderProjectStyleLock();
+}
+
+function renderProjectStyleLock() {
+  const selected = state.logicalAssets.find((asset) => asset.id === $("manualExistingAsset").value);
+  const lockable = selected?.asset_type === "STYLE" && selected.canonical_version_id;
+  $("lockProjectStyleBtn").disabled = Boolean(state.styleLock?.locked) || !lockable;
+  $("lockProjectStyleBtn").textContent = state.styleLock?.locked ? "整部作品画风已锁定" : "锁定为整部作品画风";
+  $("projectStyleLockStatus").textContent = state.styleLock?.locked
+    ? `已锁定版本 ${state.styleLock.style_version_id.slice(0, 8)}；后续镜头会自动继承并经过画风漂移检查。`
+    : (lockable ? "锁定后不可替换；系统会提取 Style Embedding 并用于全片生成与质量门禁。" : "请选择一项已有的视觉风格正式参考。 ");
 }
 
 function syncManualAssetSelection() {
   const selected = state.logicalAssets.find((asset) => asset.id === $("manualExistingAsset").value);
-  if (!selected) return;
+  if (!selected) {
+    renderProjectStyleLock();
+    return;
+  }
   $("manualAssetType").value = selected.asset_type;
   $("manualAssetName").value = selected.name;
+  renderProjectStyleLock();
+}
+
+async function lockSelectedProjectStyle() {
+  if (!state.project) return toast("请先创建项目");
+  const selected = state.logicalAssets.find((asset) => asset.id === $("manualExistingAsset").value);
+  if (selected?.asset_type !== "STYLE" || !selected.canonical_version_id) {
+    return toast("请选择已经设为正式参考的视觉风格");
+  }
+  if (!window.confirm("画风锁定后不可替换，并会成为所有镜头的生成与采用门禁。确认继续？")) return;
+  state.styleLock = await request(`/api/projects/${state.project.id}/style-lock`, {
+    method: "POST",
+    body: JSON.stringify({
+      style_version_id: selected.canonical_version_id,
+      reason: "用户在项目素材管理中明确确认整部作品画风",
+      explicit_confirmation: true,
+    }),
+  });
+  state.project.canonical_style_version_id = state.styleLock.style_version_id;
+  renderProjectStyleLock();
+  toast("画风已锁定；所有后续镜头将自动继承并检查漂移");
 }
 
 async function uploadManualAssetVersion() {
@@ -616,6 +658,7 @@ async function uploadManualAssetVersion() {
     }
     await loadLogicalAssets();
     $("manualExistingAsset").value = logical.id;
+    renderProjectStyleLock();
     $("manualAssetFile").value = "";
     $("manualAssetStatus").textContent = `已保存 ${simpleLabel(assetType)}“${assetName}”的 v${version.version}${promoted ? "，并设为当前正式参考" : "；当前正式参考未改变"}。`;
     toast("新版本已保存，旧版本仍可追溯");
@@ -994,6 +1037,7 @@ $("passengerRefreshBtn").addEventListener("click", () => refreshPassengerJob().c
 $("promotePassengerAssetBtn").addEventListener("click", () => confirmPassengerAsset().catch((error) => toast(error.message)));
 $("manualExistingAsset").addEventListener("change", syncManualAssetSelection);
 $("manualAssetUploadBtn").addEventListener("click", () => uploadManualAssetVersion().catch((error) => toast(error.message)));
+$("lockProjectStyleBtn").addEventListener("click", () => lockSelectedProjectStyle().catch((error) => toast(error.message)));
 $("passengerModel").addEventListener("change", updatePassengerCost);
 $("passengerDuration").addEventListener("input", updatePassengerCost);
 $("passengerResolution").addEventListener("change", updatePassengerCost);

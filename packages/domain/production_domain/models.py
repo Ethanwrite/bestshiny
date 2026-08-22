@@ -466,6 +466,9 @@ class Project(Base, TimestampMixin):
     default_aspect_ratio: Mapped[str] = mapped_column(String(20), default="9:16", nullable=False)
     default_provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
     default_language: Mapped[str] = mapped_column(String(30), default="zh-CN", nullable=False)
+    canonical_style_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True
+    )
     episodes: Mapped[list[Episode]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
@@ -1774,6 +1777,125 @@ class QAResult(Base, TimestampMixin):
     hard_failures: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class StyleEmbedding(Base, TimestampMixin):
+    """Immutable visual-style descriptor bound to one immutable asset version."""
+
+    __tablename__ = "style_embeddings"
+    __table_args__ = (
+        UniqueConstraint("asset_version_id", "model", name="uq_style_embedding_version_model"),
+        CheckConstraint("dimension > 0", name="ck_style_embedding_dimension_positive"),
+        CheckConstraint("length(embedding_hash) = 64", name="ck_style_embedding_hash_length"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    asset_version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    embedding: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(120), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    embedding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_media_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    source_media_hashes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evidence_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ProjectStyleLock(Base, TimestampMixin):
+    """Append-only confirmation that freezes one STYLE version for a project."""
+
+    __tablename__ = "project_style_locks"
+    __table_args__ = (
+        UniqueConstraint("project_id", name="uq_project_style_lock_project"),
+        CheckConstraint(
+            "similarity_threshold >= 0 AND similarity_threshold <= 1",
+            name="ck_style_lock_similarity_range",
+        ),
+        CheckConstraint(
+            "minimum_similarity_threshold >= 0 AND minimum_similarity_threshold <= 1",
+            name="ck_style_lock_minimum_range",
+        ),
+        CheckConstraint(
+            "drift_limit >= 0 AND drift_limit <= 1",
+            name="ck_style_lock_drift_range",
+        ),
+        CheckConstraint(
+            "max_low_score_fraction >= 0 AND max_low_score_fraction <= 1",
+            name="ck_style_lock_low_fraction_range",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_embedding_id: Mapped[str] = mapped_column(
+        ForeignKey("style_embeddings.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    similarity_threshold: Mapped[float] = mapped_column(Float, default=0.72, nullable=False)
+    minimum_similarity_threshold: Mapped[float] = mapped_column(Float, default=0.55, nullable=False)
+    drift_limit: Mapped[float] = mapped_column(Float, default=0.06, nullable=False)
+    max_low_score_fraction: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    locked_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class CandidateStyleEvaluation(Base, TimestampMixin):
+    """Append-only style-similarity evidence used by the candidate commit gate."""
+
+    __tablename__ = "candidate_style_evaluations"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_candidate_style_evaluation_candidate"),
+        CheckConstraint(
+            "status IN ('PASS', 'FAIL', 'REVIEW_REQUIRED')",
+            name="ck_candidate_style_evaluation_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    output_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_lock_id: Mapped[str] = mapped_column(
+        ForeignKey("project_style_locks.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_version_id: Mapped[str] = mapped_column(
+        ForeignKey("asset_versions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    style_embedding_id: Mapped[str] = mapped_column(
+        ForeignKey("style_embeddings.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    average_similarity: Mapped[float | None] = mapped_column(Float)
+    minimum_similarity: Mapped[float | None] = mapped_column(Float)
+    p10_similarity: Mapped[float | None] = mapped_column(Float)
+    drift_slope: Mapped[float | None] = mapped_column(Float)
+    low_score_fraction: Mapped[float | None] = mapped_column(Float)
+    sample_positions: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    sample_scores: Mapped[list[float]] = mapped_column(JSON, default=list, nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evaluator_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    evidence_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class CostRecord(Base, TimestampMixin):
@@ -3088,3 +3210,183 @@ def _install_character_state_integrity_ddl() -> None:
 
 
 _install_character_state_integrity_ddl()
+
+
+def _install_project_style_integrity_ddl() -> None:
+    """Keep style descriptors, locks, and QA evidence immutable and project-scoped."""
+
+    anchor = CandidateStyleEvaluation.__table__
+    sqlite_statements = (
+        """CREATE TRIGGER IF NOT EXISTS trg_style_embeddings_consistency
+        BEFORE INSERT ON style_embeddings WHEN NOT EXISTS (
+            SELECT 1 FROM asset_versions AS version
+            JOIN assets AS asset ON asset.id = version.asset_id
+            WHERE version.id = NEW.asset_version_id
+              AND asset.project_id = NEW.project_id
+              AND asset.asset_type = 'STYLE'
+        ) BEGIN SELECT RAISE(ABORT, 'style embedding must belong to a STYLE version in the project'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_project_style_locks_consistency
+        BEFORE INSERT ON project_style_locks WHEN NOT EXISTS (
+            SELECT 1 FROM projects AS project
+            JOIN assets AS asset ON asset.project_id = project.id
+            JOIN asset_versions AS version
+              ON version.id = NEW.style_version_id AND version.asset_id = asset.id
+            JOIN style_embeddings AS embedding
+              ON embedding.id = NEW.style_embedding_id
+             AND embedding.asset_version_id = version.id
+             AND embedding.project_id = project.id
+            WHERE project.id = NEW.project_id
+              AND asset.id = NEW.style_asset_id
+              AND asset.asset_type = 'STYLE'
+              AND asset.canonical_version_id = version.id
+              AND version.status = 'READY'
+        ) BEGIN
+          SELECT RAISE(ABORT, 'project style lock requires a canonical STYLE version and embedding');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_projects_style_lock_update
+        BEFORE UPDATE OF canonical_style_version_id ON projects
+        WHEN NOT (NEW.canonical_style_version_id IS OLD.canonical_style_version_id) AND (
+            OLD.canonical_style_version_id IS NOT NULL
+            OR NEW.canonical_style_version_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM project_style_locks AS style_lock
+                WHERE style_lock.project_id = NEW.id
+                  AND style_lock.style_version_id = NEW.canonical_style_version_id
+                  AND style_lock.created_at >= OLD.updated_at
+            )
+        ) BEGIN
+          SELECT RAISE(ABORT, 'project style can only be locked once through a fresh style lock');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_candidate_style_evaluations_consistency
+        BEFORE INSERT ON candidate_style_evaluations WHEN NOT EXISTS (
+            SELECT 1 FROM generation_candidates AS candidate
+            JOIN shots AS shot ON shot.id = candidate.shot_id
+            JOIN scenes AS scene ON scene.id = shot.scene_id
+            JOIN episodes AS episode ON episode.id = scene.episode_id
+            JOIN media_assets AS output ON output.id = NEW.output_asset_id
+            JOIN project_style_locks AS style_lock ON style_lock.id = NEW.style_lock_id
+            WHERE candidate.id = NEW.candidate_id
+              AND candidate.output_asset_id = NEW.output_asset_id
+              AND episode.project_id = NEW.project_id
+              AND output.project_id = NEW.project_id
+              AND style_lock.project_id = NEW.project_id
+              AND style_lock.style_version_id = NEW.style_version_id
+              AND style_lock.style_embedding_id = NEW.style_embedding_id
+        ) BEGIN SELECT RAISE(ABORT, 'candidate style evaluation provenance is inconsistent'); END""",
+    )
+    for statement in sqlite_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="sqlite"))
+    for table_name in (
+        "style_embeddings",
+        "project_style_locks",
+        "candidate_style_evaluations",
+    ):
+        for operation in ("UPDATE", "DELETE"):
+            event.listen(
+                anchor,
+                "after_create",
+                DDL(
+                    f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_append_only_{operation.lower()} "
+                    f"BEFORE {operation} ON {table_name} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table_name} is append-only'); END"
+                ).execute_if(dialect="sqlite"),
+            )
+
+    postgres_statements = (
+        """CREATE OR REPLACE FUNCTION enforce_project_style_consistency()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_TABLE_NAME = 'style_embeddings' THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM asset_versions AS version
+                    JOIN assets AS asset ON asset.id = version.asset_id
+                    WHERE version.id = NEW.asset_version_id
+                      AND asset.project_id = NEW.project_id
+                      AND asset.asset_type = 'STYLE'
+                ) THEN
+                    RAISE EXCEPTION 'style embedding must belong to a STYLE version in the project';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'project_style_locks' THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM projects AS project
+                    JOIN assets AS asset ON asset.project_id = project.id
+                    JOIN asset_versions AS version
+                      ON version.id = NEW.style_version_id AND version.asset_id = asset.id
+                    JOIN style_embeddings AS embedding
+                      ON embedding.id = NEW.style_embedding_id
+                     AND embedding.asset_version_id = version.id
+                     AND embedding.project_id = project.id
+                    WHERE project.id = NEW.project_id
+                      AND asset.id = NEW.style_asset_id
+                      AND asset.asset_type = 'STYLE'
+                      AND asset.canonical_version_id = version.id
+                      AND version.status = 'READY'
+                ) THEN
+                    RAISE EXCEPTION 'project style lock requires a canonical STYLE version and embedding';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'projects' THEN
+                IF NEW.canonical_style_version_id IS DISTINCT FROM OLD.canonical_style_version_id AND (
+                    OLD.canonical_style_version_id IS NOT NULL
+                    OR NEW.canonical_style_version_id IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1 FROM project_style_locks AS style_lock
+                        WHERE style_lock.project_id = NEW.id
+                          AND style_lock.style_version_id = NEW.canonical_style_version_id
+                          AND style_lock.created_at >= OLD.updated_at
+                    )
+                ) THEN
+                    RAISE EXCEPTION 'project style can only be locked once through a fresh style lock';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'candidate_style_evaluations' THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM generation_candidates AS candidate
+                    JOIN shots AS shot ON shot.id = candidate.shot_id
+                    JOIN scenes AS scene ON scene.id = shot.scene_id
+                    JOIN episodes AS episode ON episode.id = scene.episode_id
+                    JOIN media_assets AS output ON output.id = NEW.output_asset_id
+                    JOIN project_style_locks AS style_lock ON style_lock.id = NEW.style_lock_id
+                    WHERE candidate.id = NEW.candidate_id
+                      AND candidate.output_asset_id = NEW.output_asset_id
+                      AND episode.project_id = NEW.project_id
+                      AND output.project_id = NEW.project_id
+                      AND style_lock.project_id = NEW.project_id
+                      AND style_lock.style_version_id = NEW.style_version_id
+                      AND style_lock.style_embedding_id = NEW.style_embedding_id
+                ) THEN RAISE EXCEPTION 'candidate style evaluation provenance is inconsistent'; END IF;
+            END IF;
+            RETURN NEW;
+        END; $$""",
+        """CREATE OR REPLACE FUNCTION enforce_project_style_append_only()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION '%% is append-only', TG_TABLE_NAME USING ERRCODE = '23000';
+            RETURN OLD;
+        END; $$""",
+        """CREATE TRIGGER trg_style_embeddings_consistency BEFORE INSERT ON style_embeddings
+        FOR EACH ROW EXECUTE FUNCTION enforce_project_style_consistency()""",
+        """CREATE TRIGGER trg_project_style_locks_consistency BEFORE INSERT ON project_style_locks
+        FOR EACH ROW EXECUTE FUNCTION enforce_project_style_consistency()""",
+        """CREATE TRIGGER trg_projects_style_lock_update
+        BEFORE UPDATE OF canonical_style_version_id ON projects
+        FOR EACH ROW EXECUTE FUNCTION enforce_project_style_consistency()""",
+        """CREATE TRIGGER trg_candidate_style_evaluations_consistency
+        BEFORE INSERT ON candidate_style_evaluations
+        FOR EACH ROW EXECUTE FUNCTION enforce_project_style_consistency()""",
+    )
+    for statement in postgres_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="postgresql"))
+    for table_name in (
+        "style_embeddings",
+        "project_style_locks",
+        "candidate_style_evaluations",
+    ):
+        event.listen(
+            anchor,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER trg_{table_name}_append_only BEFORE UPDATE OR DELETE ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_project_style_append_only()"
+            ).execute_if(dialect="postgresql"),
+        )
+
+
+_install_project_style_integrity_ddl()

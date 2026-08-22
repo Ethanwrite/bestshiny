@@ -145,12 +145,12 @@ Required invariants:
 - rollback, audit, compare and regeneration must operate through history/version selection, never by editing an old
   state row.
 
-Current implementation truth: migration `0028_persistent_character_state`, `PersistentCharacterStateService`,
+Current implementation truth for this character-state requirement: migration `0028_persistent_character_state`, `PersistentCharacterStateService`,
 candidate generation/QA/commit integration, prompt target injection, state APIs and the Mira 12→13→14 offline
 fixture implement this contract. The fixture preserves the torn sleeve, unlit flare and cold dusk lighting while
 committing dried blood/flare relocation/tunnel-edge location as v2 and propagating it to shot 14. It also covers
 identity mutation, premature flare ignition, Voyage advisory evidence, visual mismatch, proposal freeze/binding,
-explicit branch fork and stale-fence failures. The current working-tree gate is `446 passed, 61 warnings in 89.79s`,
+explicit branch fork and stale-fence failures. The current working-tree gate is `451 passed, 61 warnings in 88.91s`,
 with Ruff format/check, Mypy over 122 source files and `git diff --check` passing; dedicated temporary PostgreSQL 17
 trigger tests are development evidence for `0028`, not a production upgrade claim.
 
@@ -162,6 +162,27 @@ and continuity constraints. This prevents a legal injury/outfit-damage update fr
 This is database/service/fixture evidence. A concrete calibrated production `VLM_REVIEWER`, real-user output
 validation and live Provider canary remain unverified. Therefore the system must keep absent or unverifiable visual
 provenance fail-closed to human review.
+
+### Project-level locked visual style decision
+
+The selected visual style is a project invariant after explicit user confirmation, not a floating lookup of the
+latest STYLE asset version. The implementation contract is:
+
+- a STYLE version must first become Canonical through the existing explicit promotion audit;
+- a real user then creates exactly one `ProjectStyleLock`; `projects.canonical_style_version_id` cannot be directly
+  written, cleared, or replaced;
+- `StyleEmbedding` is immutable and bound to that exact `AssetVersion`, including model/hash/source-media provenance;
+- every Autopilot shot inherits the exact version, style references, Prompt constraints, and Adapter style control;
+- generated frames are compared against the locked embedding and retain average/minimum/p10 similarity, low-score
+  fraction, drift slope, thresholds, and sample positions;
+- absent evidence requires review; low similarity or sustained drift fails; Candidate Commit independently requires
+  matching PASS evidence and cannot be authorized by ordinary human QA alone.
+
+Current implementation truth: migration `0029_project_style_lock`, `ProjectStyleService`, Visual Runtime/Prompt/
+Adapter injection, QAPipeline integration, Candidate Commit revalidation, authenticated style-lock APIs and Web
+confirmation implement this contract with offline tests. The bundled descriptor is a deterministic local 64-D
+color/tonal/saturation/edge/spatial vector. This is an auditable fallback algorithm, not evidence of a calibrated
+learned Style Encoder or a live Provider accepting a native embedding field.
 
 ## Commercial product requirements
 

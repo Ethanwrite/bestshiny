@@ -13,6 +13,7 @@ from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import (
     CandidateStatus,
+    CandidateStyleEvaluation,
     DecisionRecord,
     GenerationCandidate,
     MediaAsset,
@@ -582,6 +583,7 @@ class QAPipeline:
         profile: str = "DIALOGUE",
         defer_pass: bool = False,
         character_evidence: CharacterEvidenceReport | None = None,
+        style_evaluation: CandidateStyleEvaluation | None = None,
     ) -> QAResult:
         evidence = dict(evidence or {})
         character_state_evidence = self._validated_character_state_evidence(evidence)
@@ -603,6 +605,17 @@ class QAPipeline:
                 raise LookupError("committed or rejected candidates cannot be revalidated")
             asset = session.get(MediaAsset, candidate.output_asset_id)
             file_metrics, hard_failures = self._file_metrics(asset)
+            if style_evaluation is not None:
+                if (
+                    style_evaluation.candidate_id != candidate.id
+                    or style_evaluation.output_asset_id != candidate.output_asset_id
+                ):
+                    raise ValueError("style evaluation does not match the candidate output")
+                if style_evaluation.status == "FAIL":
+                    hard_failures.extend(style_evaluation.reason_codes or ["STYLE_DRIFT"])
+            style_review_required = bool(
+                style_evaluation is not None and style_evaluation.status == "REVIEW_REQUIRED"
+            )
             reviewer_reason_codes = {
                 "wrong_main_character": "WRONG_CHARACTER",
                 "critical_identity_failure": "IDENTITY_DRIFT",
@@ -719,7 +732,7 @@ class QAPipeline:
             )
             if hard_failures:
                 decision = QADecision.HARD_FAIL.value
-            elif semantic_review_required:
+            elif semantic_review_required or style_review_required:
                 decision = QADecision.USER_REVIEW_REQUIRED.value
             elif not evidence_complete:
                 decision = QADecision.USER_REVIEW_REQUIRED.value
@@ -777,6 +790,27 @@ class QAPipeline:
                     "minimum_identity_samples": minimum_required_samples,
                     "semantic_review_required": semantic_review_required,
                     "semantic_review_reason": (VLM_REVIEW_REQUIRED if semantic_review_required else None),
+                    "style_review_required": style_review_required,
+                    "style_evaluation": (
+                        {
+                            "id": style_evaluation.id,
+                            "status": style_evaluation.status,
+                            "style_version_id": style_evaluation.style_version_id,
+                            "style_embedding_id": style_evaluation.style_embedding_id,
+                            "average_similarity": style_evaluation.average_similarity,
+                            "minimum_similarity": style_evaluation.minimum_similarity,
+                            "p10_similarity": style_evaluation.p10_similarity,
+                            "drift_slope": style_evaluation.drift_slope,
+                            "low_score_fraction": style_evaluation.low_score_fraction,
+                            "sample_positions": style_evaluation.sample_positions,
+                            "sample_scores": style_evaluation.sample_scores,
+                            "reason_codes": style_evaluation.reason_codes,
+                            "evidence_kind": style_evaluation.evidence_kind,
+                            "evaluator_version": style_evaluation.evaluator_version,
+                        }
+                        if style_evaluation is not None
+                        else None
+                    ),
                     "character_evidence": (
                         character_evidence.to_dict() if character_evidence is not None else None
                     ),

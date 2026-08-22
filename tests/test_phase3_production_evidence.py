@@ -14,6 +14,7 @@ from entitlement_core import (
 )
 from memory_core import (
     LocalTestEmbeddingProvider,
+    MemoryEmbeddingUnavailable,
     MemoryQuery,
     ModelRoleEmbeddingProvider,
     MultimodalContent,
@@ -159,6 +160,41 @@ def test_model_role_embedding_returns_project_scoped_provenance(container, proje
         assert evidence is not None
         assert evidence.embedding_dimension == 256
         assert len(evidence.embedding_hash) == 64
+
+
+def test_model_role_embedding_rejects_unverified_direct_video_url(container, project) -> None:  # type: ignore[no-untyped-def]
+    capability = _FixtureEmbeddingCapability()
+    providers = ProviderCapabilityCatalog()
+    providers.register(
+        "openrouter",
+        capability,
+        {ProviderCapability.EMBEDDINGS.value},
+    )
+    runtime = ModelRoleRuntime(
+        container.database,
+        WorkspaceModelResolver(container.database, container.model_infrastructure),
+        providers,
+        provider_mode="mock",
+    )
+    adapter = ModelRoleEmbeddingProvider(runtime, dimension=256)
+
+    with pytest.raises(MemoryEmbeddingUnavailable, match="extract bounded timestamped image frames"):
+        adapter.embed_with_provenance(
+            MultimodalContent(video_urls=["https://media.invalid/candidate.mp4"]),
+            input_type="document",
+            project_id=project.id,
+        )
+
+    assert capability.call_count == 0
+    with container.database.session() as session:
+        assert (
+            session.scalar(select(ModelExecutionRecord).where(ModelExecutionRecord.project_id == project.id))
+            is None
+        )
+        assert (
+            session.scalar(select(EmbeddingEvidence).where(EmbeddingEvidence.project_id == project.id))
+            is None
+        )
 
 
 def test_memory_vector_failure_degrades_to_structured_timeline(container, project) -> None:  # type: ignore[no-untyped-def]

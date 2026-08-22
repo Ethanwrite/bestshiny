@@ -9,6 +9,11 @@
 
 > **当前 Phase III 离线检查点仍不可直接发布。** 离线算法核心已冻结为 commit `0a74d31`、tag `v0.2.0-algorithm-core-offline`；Phase III 实现提交为 `99f9c60`，证据快照 tag 为 `v0.3.0-production-evidence-core-offline`。Phase III 全仓门禁为 `406 passed, 57 warnings in 71.58s`；PostgreSQL 17.10 + pgvector 0.8.6 与 Docker Compose 生产类似 smoke 已实机通过。任何真实 Provider canary 都不得从代码实现推导为已验证：本轮真实 Provider 调用为 **0**，开发引起的已知 Provider 支出为 **USD 0**，单视频 canary 为 **NOT EXECUTED**。
 
+2026-08-22 的当前开发检查点在不新增 Provider 的前提下，增加了迁移
+`0028_persistent_character_state` 和持久叙事角色状态闭环。上述 `406 passed` 是前一个已打 tag
+检查点的历史证据。当前工作树门禁实测为 `446 passed, 61 warnings in 89.79s`，
+Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；这仍不是对真实视觉评审精度或生产上线的背书。
+
 ## 当前已实现
 
 - Commercial Auth：邮箱注册/登录/退出、PBKDF2-SHA256 强哈希密码、HttpOnly 会话 Cookie（生产 Secure、SameSite=Lax）、double-submit CSRF、持久登录限流、一次性密码重置、工作空间 `OWNER / ADMIN / EDITOR / VIEWER` 权限与项目/素材/生成路由租户隔离。
@@ -25,6 +30,9 @@
 - Metrics/Benchmark/Trace：生产指标、基准测试结果与镜头级生产 trace；自适应路由默认关闭。
 - Credits admission + lifecycle：所有已认证的公开生成入口都由服务端解析套餐/模型角色/部署可用性/信任/估价；Free 在同一交易中创建 Job、积分预占、CostRecord 和幂等记录。完成时结算，明确的提交前终态会原子退回，跨过付费边界的不确定结果则冻结并进入内部审计对账，不盲退、不盲重试。
 - Candidate + QA + Commit：一个镜头可有多个候选；自动证据不足时可由有写权限的真实用户填写理由并显式确认，形成独立审计记录，再单独采用；采用后原子写入唯一正式候选、时间线快照、尾帧与成本记录。
+- Persistent Narrative Character State：已将不可变的角色 identity 与可随剧情变化的伤口、衣物破损/污渍/湿润、道具、位置、时间和灯光状态硬隔离。每个候选以显式 JSON Patch 提议 delta，先过确定性 policy，再校验与候选输出绑定的可视证据；只有采用候选时才追加新版本、commit 记录，通过 branch-aware head CAS 前移并传播给下一镜。旧版本、delta、验证与 commit 全部保留，保留审计/比较所需事实并拒绝过期冲突。
+- 状态提议只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于 Candidate/Generation Job 分配事务内写入。全部提议的 proposal-set hash 同时绑定 Candidate 与 Generation Job，并在 validate/commit 再校验，阻断生成后偷换 delta。显式 `branch_key` 可从 input TimelineState 选定的不可变状态版本创建独立 scope v1/head，不推进 main head。
+- 输入/目标状态 JSON 在服务边界限制为最大 256 KiB、5,000 个节点、12 层深度和 200 条 continuity constraints。baseline initialize 只更新 authoritative TimelineState 中的有类型状态引用并传播，不额外写入第二个无类型 `ShotStateSnapshot`。
 - Timeline v3 + 三镜 Fixture：`TimelineTransition` 以九种显式类型控制传播、分支、空间重置与 reconciliation；修改前镜状态只会标记下游 `RECOMPUTE_REQUIRED`，规划重算不会改写已提交成片。离线回归已走过 3 Candidates/Jobs/MP4 outputs/QA/commits/end frames/snapshots/accepted costs，但不等于真实 Provider。
 - Character Evidence V1：本地 FFmpeg 抽帧、可注入检测/跟踪/人脸与外观 encoder、视角感知参考选择、可见度/清晰度/检测/跟踪置信加权、时序汇总和版本化阈值已接入 QA。当前证据来自自生成非用户 MP4 + 确定性推理替身；生产检测/跟踪/编码模型尚未部署，hair/costume 诚实为 `UNAVAILABLE`。
 - Production Evidence：`ProviderBillingEvidence` 分离 verified/estimated/manual/unknown，Provider 无可信金额时 `actual_cost = null`；accepted-shot cost 包含失败与 repair attempts，`DecisionOutcomeRecord` 串联镜头特征、决策、Provider/模型、QA、用户结果和成本来源。
@@ -57,7 +65,7 @@ uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0027_production_evidence_core`：`0025` 增加 Flow affinity/迁移约束，`0026` 增加持久单一 Capability Registry，`0027` 增加模型/嵌入/账单/决策证据、Timeline v3、Live Canary、Auth 加固与存储配额。历史离线基线已验证 fresh/historical/populated SQLite；Phase III 又在 PostgreSQL 17.10 + pgvector 0.8.6 上通过 fresh/populated/round-trip、`vector(16)`、约束、积分预占和生成 enqueue 事务验证。
+当前迁移代码链为单 head `0028_persistent_character_state`：`0025` 增加 Flow affinity/迁移约束，`0026` 增加持久单一 Capability Registry，`0027` 增加模型/嵌入/账单/决策证据、Timeline v3、Live Canary、Auth 加固与存储配额，`0028` 增加 append-only 的 character state version/delta/validation/commit 和可 CAS 前移的 branch head。历史 Phase III PostgreSQL/Docker 证据只背书到 `0027`；当前 `0028` 已在新临时 PostgreSQL 17 实例通过 trigger 正/反例专项验证，但这不等于旧 Compose volume 或生产库已执行升级。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 
@@ -152,6 +160,9 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/v1/generations/{job_id}` | 查询生成任务 |
 | `POST` | `/api/generations/{job_id}/promote` | 把完成结果新增为资产版本，并可显式提升为 canonical |
 | `POST` | `/v1/shots/{shot_id}/candidates/{candidate_id}/human-review` | 对需要人工确认且没有硬失败的候选填写理由并显式确认；仍需另行采用 |
+| `POST` | `/v1/characters/{character_id}/narrative-state/initialize` | 从已采用镜头建立人工显式确认的角色叙事状态 v1 |
+| `GET` | `/v1/projects/{project_id}/characters/{character_id}/narrative-state` | 读取指定 timeline scope 的当前状态 head 和不可变 identity 绑定 |
+| `GET` | `/v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions` | 读取 candidate 的 delta、分阶段验证和已提交版本审计视图 |
 
 ### 资产
 
@@ -192,7 +203,8 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 - 普通注册永远只创建新的空工作空间，不会自动认领升级前的本地数据。Legacy 项目默认属于隔离账号且对新用户不可见；只能通过 `PLATFORM_API_KEY` 保护的内部路由、指定已存在的活跃用户并提供幂等键后转移，结果会持久化审计。
 - 生产环境缺少合法高熵 `CREDENTIAL_ENCRYPTION_KEY` 时拒绝启动。本地开发的空 key 降级为每进程随机临时 key，重启后旧凭据不可解密，不能用于共享或生产。
 - 用户上传仅允许验证过的 PNG/JPEG/WebP/MP4/MOV/WebM；网关在 multipart 解析前和流式接收时限制大小，下载设置 `nosniff` 与安全 Content-Disposition。供应商返回的媒体 URL 只允许 HTTPS/已配置主机，逐跳校验 DNS/重定向并拒绝私网、loopback 与云元数据地址。
-- Voyage 不再由业务路径直连；Narrative Memory 通过 `ModelRoleRuntime` 请求 embedding。运行时不可用时不会伪造远程调用，而是记录 `MEMORY_VECTOR_DEGRADED` 并继续使用结构化 SQL 时间线；降级不具备真正多模态语义质量，也不是身份裁判。
+- Voyage 不再由业务路径直连；Narrative Memory 通过 `ModelRoleRuntime` 请求 embedding。`voyage-multimodal-3.5` 的结果在类型和持久层都只能是 `ADVISORY`，用于跨模态检索、相似度辅助或证据帧排序；不得输出 identity verdict、状态事实、delta 批准或 commit 授权。不可用时记录 `MEMORY_VECTOR_DEGRADED` 并继续使用结构化 SQL 时间线。
+- 角色状态可视证据只有在同项目、同候选输出素材上由成功的 `VLM_REVIEWER` 执行生成，并显式声明 `CHARACTER_STATE_FACT_OBSERVATION` provenance 时，才可作为 `FACT_OBSERVATION`。Voyage、缺执行记录、绑定了其他素材或低置信证据均 fail closed 到人工复核；高置信不匹配则拒绝。
 - 真实模式下，三重 live 环境门之外还要求 Provider+模型精确匹配的持久 `LiveCanaryPermit`；到期、请求数或成本触顶都是硬停。跨过远程边界后未返回可信账单的用量保持 `UNCERTAIN`。
 - 专用视觉评审器缺失或证据不足时，不会伪装成高置信通过；需要人工确认或返回修复/拒绝决策。
 - Gateway 对状态未知的付费提交不盲目重发；自动重试使用新幂等键并受次数上限控制。
@@ -217,9 +229,11 @@ docker compose config -q
 
 真实浏览器已在 1440px、1024px 与 390px 验证注册、退出/重新登录、双模式切换、中文画面描述优化/恢复原文、人物主参考 v1→v2、场景资产 v1→v2 与显式正式版切换；三个断点无横向溢出，控制台无 error/warning。
 
-### 当前 Phase III 离线检查点门禁
+### Phase III tag 历史门禁与当前工作树门禁
 
-离线基线的历史冻结结果是 **348 passed, 39 warnings**。当前 Phase III 完整套件实测为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
+离线基线的历史冻结结果是 **348 passed, 39 warnings**。Phase III tag 历史完整套件为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
+
+2026-08-22 当前未发布工作树实测为 **446 passed, 61 warnings in 89.79s**；Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿。专项 SQLite schema/migration 回归及新临时 PostgreSQL 17 的 `0028` trigger 正/反例通过；这不改变历史 Compose smoke 只运行到 `0027` 的事实。
 
 PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/populated migration、`vector(16)`、关键索引/唯一性/外键、积分事务、生成 enqueue 事务和 head `0027`。Docker Desktop 29.5.3 上 Compose config、API/worker/Web 镜像 build、up、PostgreSQL/MinIO/API health、Web/Worker 运行、宿主 HTTP 200 smoke 和容器内 Alembic head/check 均通过；使用纯假 development smoke 凭据，无 Provider key/live call，并在结束后不删卷 shutdown。完整证据见 [生产证据报告](docs/PRODUCTION_EVIDENCE.md) 和 [开发交接](docs/DEVELOPMENT_HANDOFF_2026-08-20.md)。
 
@@ -233,5 +247,6 @@ PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/popula
 - HttpOnly/Secure/SameSite Cookie、CSRF、找回密码和持久登录限流已完成；邮箱验证、MFA、成员邀请/移除、设备会话和完整安全事件仍需在公网商用前完成。
 - 单文件流式限制与工作空间级存储 reserve/settle/release 已接入；生产套餐配额值、保留期和删除运营政策仍待审核。
 - CharacterEvidence V1 已对自生成本地 MP4 执行真实抽帧与证据聚合，但检测/跟踪/人脸/外观模型仍是可注入边界+测试替身，不是已部署的生产视觉 AI。
+- Persistent Narrative Character State 已用“米拉镜头 12 基线 → 镜头 13 伤口血迹/信号弹位置/站位 delta → policy + 可视证据 → commit v2 → 镜头 14 继承”离线回归覆盖；这证明事务与传播合同，不证明生产 VLM 的视觉判定精度。
 - Docker 本地生产类似 smoke 已通过，但五个真实 Provider canary 仍未执行；单视频 canary 明确为 **NOT EXECUTED**。
 - Adaptive router 需要真实样本与 benchmark 结果才能超过静态先验；低样本期应保持 feature flag 关闭并人工审阅。

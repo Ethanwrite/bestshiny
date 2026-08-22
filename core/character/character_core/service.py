@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from asset_registry_core import assert_canonical_media_provenance
 from platform_database import Database
-from production_domain.models import Character, CharacterIdentityVersion, MediaAsset
+from production_domain.models import (
+    Character,
+    CharacterIdentityVersion,
+    CharacterStateHead,
+    CharacterStateVersion,
+    MediaAsset,
+    TimelineState,
+)
 from sqlalchemy import func, select
 
 
@@ -41,7 +48,12 @@ class CharacterIdentityService:
     ) -> CharacterIdentityVersion:
         references = references or {}
         with self.database.session() as session:
-            character = session.get(Character, character_id)
+            character = session.scalar(
+                select(Character)
+                .where(Character.id == character_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             asset = session.get(MediaAsset, master_asset_id)
             if not character or not asset:
                 raise LookupError("character or master asset not found")
@@ -103,13 +115,56 @@ class CharacterIdentityService:
                 raise LookupError("identity version not found")
             raise IdentityLocked("confirmed identity versions are immutable; create a new version")
 
-    def binding(self, character_id: str) -> dict:
+    def binding(
+        self,
+        character_id: str,
+        *,
+        project_id: str | None = None,
+        timeline_state_id: str | None = None,
+        timeline_scope_key: str = "main",
+    ) -> dict:
         with self.database.session() as session:
             character = session.get(Character, character_id)
-            if not character or not character.current_identity_version_id:
+            if not character or (project_id is not None and character.project_id != project_id):
+                raise LookupError("character not found in project")
+            if not character.current_identity_version_id:
                 raise LookupError("character has no confirmed identity")
-            identity = session.get(CharacterIdentityVersion, character.current_identity_version_id)
-            return {
+            state_version = None
+            if timeline_state_id:
+                timeline_state = session.get(TimelineState, timeline_state_id)
+                if timeline_state is None or timeline_state.project_id != character.project_id:
+                    raise LookupError("timeline state not found in character project")
+                state_ref = (timeline_state.state_json.get("character_state_refs") or {}).get(character.id)
+                if isinstance(state_ref, dict) and state_ref.get("state_version_id"):
+                    state_version = session.get(CharacterStateVersion, state_ref["state_version_id"])
+                    if (
+                        state_version is None
+                        or state_version.character_id != character.id
+                        or state_version.project_id != character.project_id
+                        or state_ref.get("state_hash") != state_version.state_hash
+                        or state_ref.get("version") != state_version.version
+                        or state_ref.get("timeline_scope_key") != state_version.timeline_scope_key
+                        or state_ref.get("identity_version_id") != state_version.identity_version_id
+                    ):
+                        raise LookupError("timeline character-state reference is invalid")
+            elif state_version is None:
+                head = session.scalar(
+                    select(CharacterStateHead).where(
+                        CharacterStateHead.project_id == character.project_id,
+                        CharacterStateHead.character_id == character.id,
+                        CharacterStateHead.timeline_scope_key == timeline_scope_key,
+                    )
+                )
+                state_version = session.get(CharacterStateVersion, head.state_version_id) if head else None
+            identity_version_id = (
+                state_version.identity_version_id
+                if state_version is not None
+                else character.current_identity_version_id
+            )
+            identity = session.get(CharacterIdentityVersion, identity_version_id)
+            if identity is None or identity.character_id != character.id or identity.status != "LOCKED":
+                raise LookupError("character identity binding is invalid")
+            result = {
                 "character_id": character.id,
                 "identity_version_id": identity.id,
                 "version": identity.version,
@@ -130,3 +185,17 @@ class CharacterIdentityService:
                 "costume_signature": identity.costume_signature,
                 "provider_bindings": identity.provider_bindings_json,
             }
+            if state_version is not None:
+                result.update(
+                    {
+                        "narrative_state_version_id": state_version.id,
+                        "narrative_state_version": state_version.version,
+                        "narrative_state_hash": state_version.state_hash,
+                        "timeline_scope_key": state_version.timeline_scope_key,
+                        "narrative_state": state_version.narrative_state_json,
+                        "continuity_constraints": state_version.narrative_state_json.get(
+                            "continuity_constraints", []
+                        ),
+                    }
+                )
+            return result

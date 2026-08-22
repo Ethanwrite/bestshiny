@@ -1048,6 +1048,204 @@ def test_production_evidence_downgrade_rejects_populated_evidence(
     assert permit_count == 1
 
 
+def test_persistent_character_state_supports_assetless_recovery_and_rejects_partial_schema(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    recovery_path = tmp_path / "persistent-state-assetless-recovery.db"
+    recovery_url = f"sqlite:///{recovery_path}"
+    monkeypatch.setenv("DATABASE_URL", recovery_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+
+    engine = sa.create_engine(recovery_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL PRIMARY KEY)"
+        )
+        connection.execute(
+            sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "0027_production_evidence_core"},
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = sa.create_engine(recovery_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+    assert revision == "0028_persistent_character_state"
+    assert not {
+        "character_state_versions",
+        "character_state_deltas",
+        "character_state_validations",
+        "character_state_commits",
+        "character_state_heads",
+    }.intersection(sa.inspect(engine).get_table_names())
+    engine.dispose()
+
+    partial_path = tmp_path / "persistent-state-partial-schema.db"
+    partial_url = f"sqlite:///{partial_path}"
+    monkeypatch.setenv("DATABASE_URL", partial_url)
+    partial_config = Config(str(ROOT / "alembic.ini"))
+    partial_config.set_main_option("script_location", str(ROOT / "migrations"))
+    engine = sa.create_engine(partial_url)
+    core_tables = (
+        "projects",
+        "episodes",
+        "scenes",
+        "shots",
+        "characters",
+        "character_identity_versions",
+        "generation_candidates",
+        "timeline_states",
+        "model_execution_records",
+        "qa_results",
+        "media_assets",
+        "users",
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL PRIMARY KEY)"
+        )
+        connection.execute(
+            sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": "0027_production_evidence_core"},
+        )
+        for table_name in core_tables:
+            connection.exec_driver_sql(f'CREATE TABLE "{table_name}" (id VARCHAR(36) PRIMARY KEY)')
+        connection.exec_driver_sql("CREATE TABLE character_state_versions (id VARCHAR(36) PRIMARY KEY)")
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="partial pre-existing tables"):
+        command.upgrade(partial_config, "head")
+    engine = sa.create_engine(partial_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+    engine.dispose()
+    assert revision == "0027_production_evidence_core"
+
+
+def test_persistent_character_state_downgrade_rejects_audit_records(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "persistent-state-downgrade-guard.db"
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(
+        engine,
+        only=[
+            "projects",
+            "media_assets",
+            "characters",
+            "character_identity_versions",
+            "character_state_versions",
+        ],
+    )
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        connection.execute(
+            metadata.tables["projects"].insert(),
+            {
+                "id": "persistent-state-project",
+                "name": "Persistent state",
+                "title": "Persistent state",
+                "description": "",
+                "status": "ACTIVE",
+                "default_aspect_ratio": "9:16",
+                "default_provider": "seedance",
+                "default_language": "zh-CN",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["media_assets"].insert(),
+            {
+                "id": "persistent-state-master",
+                "project_id": "persistent-state-project",
+                "asset_type": "CHARACTER_MASTER",
+                "sha256": "a" * 64,
+                "lineage_key": "shared",
+                "storage_key": "persistent-state/master.png",
+                "mime_type": "image/png",
+                "size_bytes": 1,
+                "metadata_json": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["characters"].insert(),
+            {
+                "id": "persistent-state-character",
+                "project_id": "persistent-state-project",
+                "name": "Mira Okonkwo",
+                "description": "",
+                "canonical_facts": {},
+                "status": "DRAFT",
+                "current_identity_version_id": None,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["character_identity_versions"].insert(),
+            {
+                "id": "persistent-state-identity-v1",
+                "character_id": "persistent-state-character",
+                "version": 1,
+                "master_asset_id": "persistent-state-master",
+                "hair_signature": "short braids with silver highlights",
+                "costume_signature": "charcoal field jacket",
+                "provider_bindings_json": {},
+                "status": "LOCKED",
+                "locked_at": now,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            metadata.tables["character_state_versions"].insert(),
+            {
+                "id": "persistent-state-v1",
+                "project_id": "persistent-state-project",
+                "character_id": "persistent-state-character",
+                "timeline_scope_key": "main",
+                "version": 1,
+                "previous_state_version_id": None,
+                "identity_version_id": "persistent-state-identity-v1",
+                "source_shot_id": None,
+                "source_candidate_id": None,
+                "state_schema_version": "character-state-v1",
+                "narrative_state_json": {"props": {"flare": {"state": "unlit"}}},
+                "identity_fingerprint": "b" * 64,
+                "previous_state_hash": None,
+                "state_hash": "c" * 64,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="would discard audit records"):
+        command.downgrade(config, "0027_production_evidence_core")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+        state_count = connection.scalar(sa.text("SELECT COUNT(*) FROM character_state_versions"))
+    engine.dispose()
+    assert revision == "0028_persistent_character_state"
+    assert state_count == 1
+
+
 def test_production_evidence_populated_legacy_costs_round_trip(
     tmp_path,
     monkeypatch,

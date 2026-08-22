@@ -12,10 +12,61 @@ class MemoryLayer(StrEnum):
     EPISODIC = "L2"
 
 
+class EvidencePurpose(StrEnum):
+    """Declared use of embedding output at the narrative-memory boundary.
+
+    Voyage-style embeddings are useful for retrieval and ranking, but cosine
+    similarity is not an observation of a discrete story fact.  Forbidden
+    purposes remain typed enum members so attempts to cross that boundary fail
+    with a precise policy error instead of becoming an untyped string.
+    """
+
+    RETRIEVAL_HINT = "RETRIEVAL_HINT"
+    SUPPORTING_SIMILARITY = "SUPPORTING_SIMILARITY"
+    EVIDENCE_FRAME_RANKING = "EVIDENCE_FRAME_RANKING"
+    IDENTITY_VERDICT = "IDENTITY_VERDICT"
+    STATE_FACT_ASSERTION = "STATE_FACT_ASSERTION"
+    STATE_DELTA_APPROVAL = "STATE_DELTA_APPROVAL"
+    COMMIT_AUTHORIZATION = "COMMIT_AUTHORIZATION"
+
+
+class AuthorityLevel(StrEnum):
+    ADVISORY = "ADVISORY"
+    AUTHORITATIVE = "AUTHORITATIVE"
+
+
+ADVISORY_EVIDENCE_PURPOSES = frozenset(
+    {
+        EvidencePurpose.RETRIEVAL_HINT,
+        EvidencePurpose.SUPPORTING_SIMILARITY,
+        EvidencePurpose.EVIDENCE_FRAME_RANKING,
+    }
+)
+
+
+def _enforce_advisory_use(
+    evidence_purpose: EvidencePurpose,
+    authority_level: AuthorityLevel,
+) -> None:
+    if authority_level is not AuthorityLevel.ADVISORY:
+        raise ValueError("multimodal embedding evidence is advisory and cannot be authoritative")
+    if evidence_purpose not in ADVISORY_EVIDENCE_PURPOSES:
+        raise ValueError(
+            f"multimodal embedding evidence is advisory and cannot be used for {evidence_purpose.value}"
+        )
+
+
 class MultimodalContent(BaseModel):
     text: str = ""
     image_urls: list[str] = Field(default_factory=list, max_length=16)
     video_urls: list[str] = Field(default_factory=list, max_length=4)
+    evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
+    authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
+
+    @model_validator(mode="after")
+    def embeddings_are_advisory(self) -> MultimodalContent:
+        _enforce_advisory_use(self.evidence_purpose, self.authority_level)
+        return self
 
 
 class ShotMemoryInput(BaseModel):
@@ -53,6 +104,13 @@ class MemoryQuery(BaseModel):
     )
     temporal_position: float | None = None
     top_k: int = Field(default=8, ge=1, le=50)
+    evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
+    authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
+
+    @model_validator(mode="after")
+    def embeddings_are_advisory(self) -> MemoryQuery:
+        _enforce_advisory_use(self.evidence_purpose, self.authority_level)
+        return self
 
 
 class RetrievedMemory(BaseModel):
@@ -71,6 +129,13 @@ class RetrievedMemory(BaseModel):
     score: float
     score_components: dict[str, float]
     metadata: dict[str, Any]
+    evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
+    authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
+
+    @model_validator(mode="after")
+    def retrieval_is_advisory(self) -> RetrievedMemory:
+        _enforce_advisory_use(self.evidence_purpose, self.authority_level)
+        return self
 
 
 class ContextBudget(BaseModel):
@@ -100,3 +165,10 @@ class EmbeddingProvenance(BaseModel):
     model: str
     dimension: int
     input_type: Literal["query", "document"]
+    evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
+    authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
+
+    @model_validator(mode="after")
+    def embeddings_are_advisory(self) -> EmbeddingProvenance:
+        _enforce_advisory_use(self.evidence_purpose, self.authority_level)
+        return self

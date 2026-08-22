@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -66,6 +68,131 @@ class VideoShotPromptCompiler:
                     return True
         return False
 
+    @staticmethod
+    def _uuid_key(value: object) -> str | None:
+        try:
+            return str(uuid.UUID(str(value)))
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+    @staticmethod
+    def _canonical_props(value: object) -> list[dict[str, Any]]:
+        """Preserve both legacy prop lists and authoritative UUID-key maps."""
+
+        if isinstance(value, list):
+            return [dict(item) if isinstance(item, dict) else {"state": item} for item in value]
+        if not isinstance(value, dict):
+            return []
+        props: list[dict[str, Any]] = []
+        for prop_id, state in value.items():
+            payload = dict(state) if isinstance(state, dict) else {"state": state}
+            # The authoritative map key identifies the prop even when the
+            # state payload contains only name/visibility/holder fields.
+            payload["asset_id"] = str(prop_id)
+            props.append(payload)
+        return props
+
+    @staticmethod
+    def _state_value(state: dict[str, Any], path: str) -> Any:
+        current: Any = state
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                raise ValueError(f"required character-state path is missing: {path}")
+            current = current[part]
+        return current
+
+    @classmethod
+    def _inject_character_state_targets(
+        cls,
+        start_state: dict[str, Any],
+        end_state: dict[str, Any],
+        character_bindings: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+        """Condition generation/evaluation on an approved, still-uncommitted target."""
+
+        start = deepcopy(start_state)
+        end = deepcopy(end_state)
+        start_characters = dict(start.get("characters") or {})
+        end_characters = dict(end.get("characters") or {})
+        validation = dict(end.get("_validation") or {})
+        existing_requirements = validation.get("required_state_paths", [])
+        if not isinstance(existing_requirements, list):
+            raise ValueError("end-state required_state_paths must be an array")
+        requirements_by_path = {
+            str(item.get("path")): dict(item)
+            for item in existing_requirements
+            if isinstance(item, dict) and item.get("path")
+        }
+        constraint_lines: list[str] = []
+        for binding in character_bindings:
+            character_id = binding.get("character_id")
+            base_state = binding.get("narrative_state")
+            if not character_id or not isinstance(base_state, dict):
+                continue
+            character_key = str(character_id)
+            target_state = binding.get("proposed_narrative_state", base_state)
+            if not isinstance(target_state, dict):
+                raise ValueError("proposed character narrative state must be an object")
+            start_row = dict(start_characters.get(character_key) or {})
+            existing_version = start_row.get("narrative_state_version_id")
+            if existing_version and existing_version != binding.get("narrative_state_version_id"):
+                raise ValueError("timeline state and character binding versions do not match")
+            start_row.update(
+                {
+                    "character_id": character_key,
+                    "narrative_state": deepcopy(base_state),
+                    "narrative_state_version_id": binding.get("narrative_state_version_id"),
+                    "narrative_state_hash": binding.get("narrative_state_hash"),
+                }
+            )
+            start_characters[character_key] = start_row
+            end_row = dict(end_characters.get(character_key) or start_row)
+            end_row.update(
+                {
+                    "character_id": character_key,
+                    "narrative_state": deepcopy(target_state),
+                    "narrative_state_version_id": binding.get("narrative_state_version_id"),
+                    "narrative_state_status": (
+                        "PROPOSED" if binding.get("proposed_narrative_state") is not None else "UNCHANGED"
+                    ),
+                    "proposed_narrative_state_hash": binding.get("proposed_narrative_state_hash"),
+                }
+            )
+            end_characters[character_key] = end_row
+            constraints_by_path = {
+                str(item.get("path")): item
+                for item in target_state.get("continuity_constraints", [])
+                if isinstance(item, dict) and item.get("path")
+            }
+            for relative_path in binding.get("generation_required_visual_state_paths", []):
+                relative_path = str(relative_path)
+                expected = cls._state_value(target_state, relative_path)
+                full_path = f"characters.{character_key}.narrative_state.{relative_path}"
+                continuity = constraints_by_path.get(relative_path, {})
+                requirement: dict[str, Any] = {
+                    "path": full_path,
+                    "operator": continuity.get("rule", "EQUALS"),
+                    "minimum_confidence": 0.75,
+                    "severity": "REJECT",
+                    "reason_code": continuity.get("id", "CHARACTER_STATE_MISMATCH"),
+                    "evidence_required": True,
+                }
+                if requirement["operator"] != "MUST_EXIST":
+                    requirement["expected_value"] = deepcopy(expected)
+                requirements_by_path[full_path] = requirement
+            constraint_lines.append(
+                f"character {character_key} narrative state target: "
+                + json.dumps(target_state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+        if start_characters:
+            start["characters"] = start_characters
+        if end_characters:
+            end["characters"] = end_characters
+        if requirements_by_path:
+            validation["required_state_paths"] = list(requirements_by_path.values())
+            end["_validation"] = validation
+        return start, end, constraint_lines
+
     def compile(
         self,
         shot_id: str,
@@ -96,18 +223,39 @@ class VideoShotPromptCompiler:
             generation_policy = shot.generation_policy
             continuity_policy = shot.continuity_policy
 
+        start_state, end_state, state_constraint_lines = self._inject_character_state_targets(
+            start_state,
+            end_state,
+            character_bindings,
+        )
         action = self._single_action(raw_action)
         state_characters = start_state.get("characters", {})
-        binding_by_character = {str(binding.get("character_id")): binding for binding in character_bindings}
+        binding_by_character = {
+            self._uuid_key(character_id) or str(character_id): binding
+            for binding in character_bindings
+            if (character_id := binding.get("character_id")) is not None
+        }
         subjects: list[CanonicalSubjectSpec] = []
         if isinstance(state_characters, dict):
-            for name, state in state_characters.items():
+            for state_key, state in state_characters.items():
                 state = state if isinstance(state, dict) else {}
-                binding = binding_by_character.get(str(state.get("character_id")), {})
+                explicit_character_id = state.get("character_id")
+                normalized_state_key = self._uuid_key(state_key)
+                key_character_id = (
+                    str(state_key) if str(state_key) in binding_by_character else normalized_state_key
+                )
+                character_id = (
+                    self._uuid_key(explicit_character_id) or str(explicit_character_id)
+                    if explicit_character_id is not None
+                    else key_character_id
+                )
+                binding = binding_by_character.get(character_id or "", {})
+                resolved_character_id = binding.get("character_id") or character_id
+                subject_name = state.get("name") or binding.get("name") or state_key
                 subjects.append(
                     CanonicalSubjectSpec(
-                        name=str(name),
-                        asset_id=binding.get("character_id"),
+                        name=str(subject_name),
+                        asset_id=resolved_character_id,
                         asset_version_id=binding.get("identity_version_id"),
                         screen_position=str(
                             state.get("screen_position") or state.get("position") or "center"
@@ -119,6 +267,7 @@ class VideoShotPromptCompiler:
                         ),
                         eyeline_target=str(
                             state.get("eyeline_target")
+                            or state.get("gaze_target")
                             or "approved scene partner or action target, never the camera"
                         ),
                         pose=str(state.get("pose") or "preserve approved pose"),
@@ -191,7 +340,7 @@ class VideoShotPromptCompiler:
         }
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
         dialogue = str(end_state.get("dialogue") or start_state.get("dialogue") or "")
-        props = start_state.get("props", []) if isinstance(start_state.get("props"), list) else []
+        props = self._canonical_props(start_state.get("props", []))
         constraints = [
             "one shot contains exactly one dominant action",
             "one dominant camera movement only",
@@ -207,6 +356,7 @@ class VideoShotPromptCompiler:
         constraints.extend(
             str(item) for asset in canonical_assets for item in asset.get("constraints", []) if item
         )
+        constraints.extend(state_constraint_lines)
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -250,7 +400,7 @@ class VideoShotPromptCompiler:
                     "camera-movement": "v2",
                     "lighting": "v2",
                     "character-consistency": "v2",
-                    "prompt-compiler": "v2",
+                    "prompt-compiler": "v3-persistent-character-state",
                 },
                 diff_json={
                     "canonical_shot_spec": spec.model_dump(mode="json"),
@@ -269,6 +419,7 @@ class VideoShotPromptCompiler:
         ordered = {
             "intent": payload["intent"],
             "subjects": payload["subjects"],
+            "props": payload["props"],
             "start_state": payload["start_state"],
             "dominant_action": payload["dominant_action"],
             "blocking": payload["blocking"],

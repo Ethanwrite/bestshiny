@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -152,6 +153,43 @@ class TimelineTransitionType(StrEnum):
     DREAM = "DREAM"
     LOCATION_CHANGE = "LOCATION_CHANGE"
     EXPLICIT_RESET = "EXPLICIT_RESET"
+
+
+class CharacterStateProposalKind(StrEnum):
+    INITIALIZE = "INITIALIZE"
+    NARRATIVE = "NARRATIVE"
+    EVIDENCE_DERIVED = "EVIDENCE_DERIVED"
+    IDENTITY_REBASE = "IDENTITY_REBASE"
+
+
+class CharacterStateProposalSource(StrEnum):
+    RULES = "RULES"
+    LLM = "LLM"
+    HUMAN = "HUMAN"
+    VISUAL_EVIDENCE = "VISUAL_EVIDENCE"
+
+
+class CharacterStateValidationStage(StrEnum):
+    POLICY = "POLICY"
+    VISUAL = "VISUAL"
+    HUMAN_OVERRIDE = "HUMAN_OVERRIDE"
+
+
+class CharacterStateDecision(StrEnum):
+    PASS = "PASS"
+    REJECT = "REJECT"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
+class CharacterStateValidatorKind(StrEnum):
+    RULE_ENGINE = "RULE_ENGINE"
+    VLM = "VLM"
+    HUMAN = "HUMAN"
+
+
+class CharacterStateCommitActor(StrEnum):
+    SYSTEM = "SYSTEM"
+    HUMAN = "HUMAN"
 
 
 class BillingEvidenceSource(StrEnum):
@@ -551,18 +589,25 @@ class NarrativeEvent(Base, TimestampMixin):
 
 class Character(Base, TimestampMixin):
     __tablename__ = "characters"
+    __table_args__ = (UniqueConstraint("id", "project_id", name="uq_characters_id_project"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     canonical_facts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
-    current_identity_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    current_identity_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_identity_versions.id", ondelete="SET NULL"), index=True
+    )
 
 
 class CharacterIdentityVersion(Base, TimestampMixin):
     __tablename__ = "character_identity_versions"
-    __table_args__ = (UniqueConstraint("character_id", "version", name="uq_character_identity_version"),)
+    __table_args__ = (
+        UniqueConstraint("character_id", "version", name="uq_character_identity_version"),
+        UniqueConstraint("id", "character_id", name="uq_character_identity_id_character"),
+        CheckConstraint("version > 0", name="ck_character_identity_version_positive"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     character_id: Mapped[str] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -580,6 +625,429 @@ class CharacterIdentityVersion(Base, TimestampMixin):
     provider_bindings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="LOCKED", nullable=False)
     locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class CharacterStateVersion(Base, TimestampMixin):
+    """Immutable, fully materialized narrative state for one timeline scope."""
+
+    __tablename__ = "character_state_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "character_id",
+            "timeline_scope_key",
+            "version",
+            name="uq_character_state_version_scope_number",
+        ),
+        UniqueConstraint("id", "character_id", name="uq_character_state_version_id_character"),
+        CheckConstraint("version > 0", name="ck_character_state_version_positive"),
+        CheckConstraint(
+            "length(timeline_scope_key) > 0",
+            name="ck_character_state_version_scope_nonempty",
+        ),
+        CheckConstraint(
+            "length(identity_fingerprint) = 64 AND length(state_hash) = 64",
+            name="ck_character_state_version_hash_lengths",
+        ),
+        CheckConstraint(
+            "(previous_state_version_id IS NULL AND previous_state_hash IS NULL) OR "
+            "(previous_state_version_id IS NOT NULL AND previous_state_hash IS NOT NULL "
+            "AND length(previous_state_hash) = 64)",
+            name="ck_character_state_version_previous_hash",
+        ),
+        CheckConstraint(
+            "previous_state_version_id IS NULL OR previous_state_version_id != id",
+            name="ck_character_state_version_not_self_parent",
+        ),
+        CheckConstraint(
+            "(source_shot_id IS NULL AND source_candidate_id IS NULL) OR "
+            "(source_shot_id IS NOT NULL AND source_candidate_id IS NOT NULL)",
+            name="ck_character_state_version_source_pair",
+        ),
+        ForeignKeyConstraint(
+            ["character_id", "project_id"],
+            ["characters.id", "characters.project_id"],
+            name="fk_character_state_version_character_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["previous_state_version_id", "character_id"],
+            ["character_state_versions.id", "character_state_versions.character_id"],
+            name="fk_character_state_version_previous_character",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["identity_version_id", "character_id"],
+            ["character_identity_versions.id", "character_identity_versions.character_id"],
+            name="fk_character_state_version_identity_character",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_character_state_version_scope",
+            "project_id",
+            "character_id",
+            "timeline_scope_key",
+            "version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    timeline_scope_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_state_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    identity_version_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    source_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="RESTRICT"), index=True
+    )
+    source_candidate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="RESTRICT"), index=True
+    )
+    state_schema_version: Mapped[str] = mapped_column(
+        String(80), default="character-state-v1", nullable=False
+    )
+    narrative_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    identity_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_state_hash: Mapped[str | None] = mapped_column(String(64))
+    state_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+
+
+class CharacterStateDelta(Base, TimestampMixin):
+    """Immutable proposal; superseding a proposal always creates a new row."""
+
+    __tablename__ = "character_state_deltas"
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_character_state_delta_project_key"),
+        UniqueConstraint(
+            "candidate_id",
+            "character_id",
+            "proposal_revision",
+            name="uq_character_state_delta_candidate_revision",
+        ),
+        CheckConstraint("proposal_revision > 0", name="ck_character_state_delta_revision_positive"),
+        CheckConstraint("target_version > 0", name="ck_character_state_delta_target_positive"),
+        CheckConstraint("length(timeline_scope_key) > 0", name="ck_character_state_delta_scope_nonempty"),
+        CheckConstraint("patch_format = 'JSON_PATCH_V1'", name="ck_character_state_delta_patch_format"),
+        CheckConstraint(
+            "proposal_kind IN ('INITIALIZE', 'NARRATIVE', 'EVIDENCE_DERIVED', 'IDENTITY_REBASE')",
+            name="ck_character_state_delta_proposal_kind",
+        ),
+        CheckConstraint(
+            "source_kind IN ('RULES', 'LLM', 'HUMAN', 'VISUAL_EVIDENCE')",
+            name="ck_character_state_delta_source_kind",
+        ),
+        CheckConstraint(
+            "length(target_state_hash) = 64 AND length(input_timeline_state_hash) = 64 "
+            "AND length(planned_output_timeline_state_hash) = 64",
+            name="ck_character_state_delta_hash_lengths",
+        ),
+        CheckConstraint(
+            "(proposal_kind = 'INITIALIZE' AND base_state_version_id IS NULL "
+            "AND base_state_hash IS NULL) OR "
+            "(proposal_kind != 'INITIALIZE' AND base_state_version_id IS NOT NULL "
+            "AND base_state_hash IS NOT NULL AND length(base_state_hash) = 64)",
+            name="ck_character_state_delta_base_contract",
+        ),
+        CheckConstraint(
+            "supersedes_delta_id IS NULL OR supersedes_delta_id != id",
+            name="ck_character_state_delta_not_self_supersede",
+        ),
+        CheckConstraint(
+            "source_kind NOT IN ('LLM', 'VISUAL_EVIDENCE') OR model_execution_record_id IS NOT NULL",
+            name="ck_character_state_delta_model_provenance",
+        ),
+        CheckConstraint(
+            "source_kind != 'HUMAN' OR proposed_by_user_id IS NOT NULL",
+            name="ck_character_state_delta_human_provenance",
+        ),
+        ForeignKeyConstraint(
+            ["character_id", "project_id"],
+            ["characters.id", "characters.project_id"],
+            name="fk_character_state_delta_character_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["base_state_version_id", "character_id"],
+            ["character_state_versions.id", "character_state_versions.character_id"],
+            name="fk_character_state_delta_base_character",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["identity_version_id", "character_id"],
+            ["character_identity_versions.id", "character_identity_versions.character_id"],
+            name="fk_character_state_delta_identity_character",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_character_state_delta_scope",
+            "project_id",
+            "character_id",
+            "timeline_scope_key",
+            "created_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    timeline_scope_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    base_state_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    identity_version_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    input_timeline_state_id: Mapped[str] = mapped_column(
+        ForeignKey("timeline_states.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    planned_output_timeline_state_id: Mapped[str] = mapped_column(
+        ForeignKey("timeline_states.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    proposal_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    supersedes_delta_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_state_deltas.id", ondelete="RESTRICT"), index=True
+    )
+    proposal_kind: Mapped[str] = mapped_column(
+        String(40), default=CharacterStateProposalKind.NARRATIVE.value, nullable=False
+    )
+    source_kind: Mapped[str] = mapped_column(
+        String(40), default=CharacterStateProposalSource.RULES.value, nullable=False
+    )
+    patch_format: Mapped[str] = mapped_column(String(40), default="JSON_PATCH_V1", nullable=False)
+    patch_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    changed_paths_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    proposed_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    base_state_hash: Mapped[str | None] = mapped_column(String(64))
+    target_state_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    input_timeline_state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    planned_output_timeline_state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    state_schema_version: Mapped[str] = mapped_column(
+        String(80), default="character-state-v1", nullable=False
+    )
+    policy_version: Mapped[str] = mapped_column(
+        String(80), default="character-state-policy-v1", nullable=False
+    )
+    model_execution_record_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_execution_records.id", ondelete="RESTRICT"), index=True
+    )
+    proposed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class CharacterStateValidation(Base, TimestampMixin):
+    """Immutable policy, visual, or human evidence about one proposed delta."""
+
+    __tablename__ = "character_state_validations"
+    __table_args__ = (
+        UniqueConstraint(
+            "state_delta_id",
+            "stage",
+            "attempt",
+            name="uq_character_state_validation_stage_attempt",
+        ),
+        CheckConstraint("attempt > 0", name="ck_character_state_validation_attempt_positive"),
+        CheckConstraint(
+            "stage IN ('POLICY', 'VISUAL', 'HUMAN_OVERRIDE')",
+            name="ck_character_state_validation_stage",
+        ),
+        CheckConstraint(
+            "decision IN ('PASS', 'REJECT', 'REVIEW_REQUIRED')",
+            name="ck_character_state_validation_decision",
+        ),
+        CheckConstraint(
+            "validator_kind IN ('RULE_ENGINE', 'VLM', 'HUMAN')",
+            name="ck_character_state_validation_validator",
+        ),
+        CheckConstraint(
+            "length(validated_target_hash) = 64 AND length(evidence_hash) = 64",
+            name="ck_character_state_validation_hash_lengths",
+        ),
+        CheckConstraint(
+            "validator_kind != 'VLM' OR model_execution_record_id IS NOT NULL",
+            name="ck_character_state_validation_model_provenance",
+        ),
+        CheckConstraint(
+            "validator_kind != 'HUMAN' OR validated_by_user_id IS NOT NULL",
+            name="ck_character_state_validation_human_provenance",
+        ),
+        CheckConstraint(
+            "stage != 'POLICY' OR validator_kind = 'RULE_ENGINE'",
+            name="ck_character_state_validation_policy_rules",
+        ),
+        CheckConstraint(
+            "stage != 'HUMAN_OVERRIDE' OR validator_kind = 'HUMAN'",
+            name="ck_character_state_validation_override_human",
+        ),
+        Index("ix_character_state_validation_delta", "state_delta_id", "stage", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    state_delta_id: Mapped[str] = mapped_column(
+        ForeignKey("character_state_deltas.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    stage: Mapped[str] = mapped_column(String(40), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    decision: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    validator_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    model_execution_record_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_execution_records.id", ondelete="RESTRICT"), index=True
+    )
+    qa_result_id: Mapped[str | None] = mapped_column(
+        ForeignKey("qa_results.id", ondelete="RESTRICT"), index=True
+    )
+    evidence_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
+    validated_target_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    violations_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    policy_version: Mapped[str] = mapped_column(
+        String(80), default="character-state-policy-v1", nullable=False
+    )
+    validated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+
+
+class CharacterStateCommit(Base, TimestampMixin):
+    """Append-only adoption record connecting validated evidence to a new state."""
+
+    __tablename__ = "character_state_commits"
+    __table_args__ = (
+        UniqueConstraint("state_delta_id", name="uq_character_state_commit_delta"),
+        UniqueConstraint("to_state_version_id", name="uq_character_state_commit_to_version"),
+        UniqueConstraint(
+            "candidate_id", "character_id", name="uq_character_state_commit_candidate_character"
+        ),
+        CheckConstraint("expected_head_version >= 0", name="ck_character_state_commit_head_nonnegative"),
+        CheckConstraint(
+            "from_state_version_id IS NULL OR from_state_version_id != to_state_version_id",
+            name="ck_character_state_commit_distinct_versions",
+        ),
+        CheckConstraint("length(commit_hash) = 64", name="ck_character_state_commit_hash_length"),
+        CheckConstraint("length(trim(reason)) > 0", name="ck_character_state_commit_reason_nonempty"),
+        CheckConstraint(
+            "commit_actor IN ('SYSTEM', 'HUMAN')",
+            name="ck_character_state_commit_actor",
+        ),
+        CheckConstraint(
+            "commit_actor != 'HUMAN' OR committed_by_user_id IS NOT NULL",
+            name="ck_character_state_commit_human_provenance",
+        ),
+        ForeignKeyConstraint(
+            ["character_id", "project_id"],
+            ["characters.id", "characters.project_id"],
+            name="fk_character_state_commit_character_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["from_state_version_id", "character_id"],
+            ["character_state_versions.id", "character_state_versions.character_id"],
+            name="fk_character_state_commit_from_character",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["to_state_version_id", "character_id"],
+            ["character_state_versions.id", "character_state_versions.character_id"],
+            name="fk_character_state_commit_to_character",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_character_state_commit_scope",
+            "project_id",
+            "character_id",
+            "timeline_scope_key",
+            "created_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    timeline_scope_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    state_delta_id: Mapped[str] = mapped_column(
+        ForeignKey("character_state_deltas.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    from_state_version_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    to_state_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    policy_validation_id: Mapped[str] = mapped_column(
+        ForeignKey("character_state_validations.id", ondelete="RESTRICT"), nullable=False
+    )
+    visual_validation_id: Mapped[str] = mapped_column(
+        ForeignKey("character_state_validations.id", ondelete="RESTRICT"), nullable=False
+    )
+    human_validation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("character_state_validations.id", ondelete="RESTRICT")
+    )
+    expected_head_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    commit_actor: Mapped[str] = mapped_column(
+        String(40), default=CharacterStateCommitActor.SYSTEM.value, nullable=False
+    )
+    committed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    commit_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class CharacterStateHead(Base, TimestampMixin):
+    """Mutable CAS projection; version and commit rows remain authoritative."""
+
+    __tablename__ = "character_state_heads"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "character_id",
+            "timeline_scope_key",
+            name="uq_character_state_head_scope",
+        ),
+        CheckConstraint("lock_version > 0", name="ck_character_state_head_version_positive"),
+        CheckConstraint("length(timeline_scope_key) > 0", name="ck_character_state_head_scope_nonempty"),
+        ForeignKeyConstraint(
+            ["character_id", "project_id"],
+            ["characters.id", "characters.project_id"],
+            name="fk_character_state_head_character_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["state_version_id", "character_id"],
+            ["character_state_versions.id", "character_state_versions.character_id"],
+            name="fk_character_state_head_version_character",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_character_state_head_scope",
+            "project_id",
+            "character_id",
+            "timeline_scope_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    timeline_scope_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    state_version_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    lock_version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class Location(Base, TimestampMixin):
@@ -835,7 +1303,7 @@ def _install_asset_registry_integrity_ddl() -> None:
         """CREATE OR REPLACE FUNCTION enforce_asset_registry_append_only()
         RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-            RAISE EXCEPTION '% is append-only', TG_TABLE_NAME
+            RAISE EXCEPTION '%% is append-only', TG_TABLE_NAME
             USING ERRCODE = '23000';
             RETURN OLD;
         END; $$""",
@@ -1951,3 +2419,672 @@ class AuthLoginThrottle(Base, TimestampMixin):
     failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+def _install_character_state_integrity_ddl() -> None:
+    """Install the create-all equivalent of migration 0028's state ledger guards."""
+
+    # Metadata-level DDL runs only after every table is available.  This is
+    # required because the head/commit guards deliberately inspect each other.
+    anchor = Base.metadata
+    protected_tables = (
+        "character_identity_versions",
+        "character_state_versions",
+        "character_state_deltas",
+        "character_state_validations",
+        "character_state_commits",
+    )
+    for table_name in protected_tables:
+        for operation in ("UPDATE", "DELETE"):
+            trigger_name = f"trg_{table_name}_immutable_{operation.lower()}"
+            event.listen(
+                anchor,
+                "after_create",
+                DDL(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} BEFORE {operation} "
+                    f"ON {table_name} BEGIN SELECT RAISE(ABORT, '{table_name} is append-only'); END"
+                ).execute_if(dialect="sqlite"),
+            )
+
+    sqlite_statements = (
+        """CREATE TRIGGER IF NOT EXISTS trg_character_identity_pointer_insert
+        BEFORE INSERT ON characters WHEN NEW.current_identity_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM character_identity_versions AS identity
+            WHERE identity.id = NEW.current_identity_version_id
+              AND identity.character_id = NEW.id AND identity.status = 'LOCKED'
+        ) BEGIN SELECT RAISE(ABORT, 'current identity must be a locked version of the character'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_identity_pointer_update
+        BEFORE UPDATE OF id, current_identity_version_id ON characters
+        WHEN NEW.current_identity_version_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM character_identity_versions AS identity
+            WHERE identity.id = NEW.current_identity_version_id
+              AND identity.character_id = NEW.id AND identity.status = 'LOCKED'
+        ) BEGIN SELECT RAISE(ABORT, 'current identity must be a locked version of the character'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_canonical_facts_frozen
+        BEFORE UPDATE OF canonical_facts ON characters
+        WHEN OLD.current_identity_version_id IS NOT NULL
+          AND NEW.canonical_facts IS NOT OLD.canonical_facts
+        BEGIN SELECT RAISE(ABORT, 'confirmed canonical facts are immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_version_consistency
+        BEFORE INSERT ON character_state_versions WHEN
+            json_type(NEW.narrative_state_json) != 'object'
+            OR json_type(NEW.narrative_state_json, '$.identity') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.canonical_identity') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.face') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.body_proportions') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.canonical_hair') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.canonical_outfit') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.identity_embedding_id') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.canonical_asset_id') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.face') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.hair') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.body') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.body_proportions') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.canonical_hair') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.canonical_outfit') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.outfit.type') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.outfit.design') IS NOT NULL
+            OR json_type(NEW.narrative_state_json, '$.appearance.outfit.color') IS NOT NULL
+            OR NOT EXISTS (
+                SELECT 1 FROM character_identity_versions AS identity
+                WHERE identity.id = NEW.identity_version_id
+                  AND identity.character_id = NEW.character_id AND identity.status = 'LOCKED'
+            )
+            OR (NEW.previous_state_version_id IS NULL AND NEW.version != 1)
+            OR (NEW.previous_state_version_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM character_state_versions AS previous
+                WHERE previous.id = NEW.previous_state_version_id
+                  AND previous.character_id = NEW.character_id
+                  AND previous.state_hash = NEW.previous_state_hash
+                  AND ((previous.timeline_scope_key = NEW.timeline_scope_key
+                        AND NEW.version = previous.version + 1)
+                       OR (previous.timeline_scope_key != NEW.timeline_scope_key AND NEW.version = 1))
+            ))
+            OR (NEW.source_candidate_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM generation_candidates AS candidate
+                JOIN shots AS shot ON shot.id = candidate.shot_id
+                JOIN scenes AS scene ON scene.id = shot.scene_id
+                JOIN episodes AS episode ON episode.id = scene.episode_id
+                WHERE candidate.id = NEW.source_candidate_id
+                  AND shot.id = NEW.source_shot_id AND episode.project_id = NEW.project_id
+            ))
+        BEGIN SELECT RAISE(ABORT, 'character state version is inconsistent'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_delta_consistency
+        BEFORE INSERT ON character_state_deltas WHEN
+            json_type(NEW.patch_json) != 'array'
+            OR json_type(NEW.changed_paths_json) != 'array'
+            OR json_type(NEW.proposed_state_json) != 'object'
+            OR json_type(NEW.proposed_state_json, '$.identity') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.canonical_identity') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.face') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.body_proportions') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.canonical_hair') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.canonical_outfit') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.identity_embedding_id') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.canonical_asset_id') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.face') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.hair') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.body') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.body_proportions') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.canonical_hair') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.canonical_outfit') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.outfit.type') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.outfit.design') IS NOT NULL
+            OR json_type(NEW.proposed_state_json, '$.appearance.outfit.color') IS NOT NULL
+            OR EXISTS (
+                SELECT 1 FROM json_each(NEW.patch_json) AS patch
+                WHERE CASE
+                   WHEN patch.type != 'object' THEN 1
+                   WHEN json_type(patch.value, '$.path') IS NOT 'text' THEN 1
+                   WHEN json_extract(patch.value, '$.path') = ''
+                   OR json_extract(patch.value, '$.path') = '/'
+                   OR json_extract(patch.value, '$.path') NOT LIKE '/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance'
+                   OR json_extract(patch.value, '$.path') = '/appearance/outfit'
+                   OR json_extract(patch.value, '$.path') = '/identity'
+                   OR json_extract(patch.value, '$.path') LIKE '/identity/%%'
+                   OR json_extract(patch.value, '$.path') = '/canonical_identity'
+                   OR json_extract(patch.value, '$.path') LIKE '/canonical_identity/%%'
+                   OR json_extract(patch.value, '$.path') = '/face'
+                   OR json_extract(patch.value, '$.path') LIKE '/face/%%'
+                   OR json_extract(patch.value, '$.path') = '/body_proportions'
+                   OR json_extract(patch.value, '$.path') LIKE '/body_proportions/%%'
+                   OR json_extract(patch.value, '$.path') = '/canonical_hair'
+                   OR json_extract(patch.value, '$.path') LIKE '/canonical_hair/%%'
+                   OR json_extract(patch.value, '$.path') = '/canonical_outfit'
+                   OR json_extract(patch.value, '$.path') LIKE '/canonical_outfit/%%'
+                   OR json_extract(patch.value, '$.path') = '/identity_embedding_id'
+                   OR json_extract(patch.value, '$.path') LIKE '/identity_embedding_id/%%'
+                   OR json_extract(patch.value, '$.path') = '/canonical_asset_id'
+                   OR json_extract(patch.value, '$.path') LIKE '/canonical_asset_id/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/face'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/face/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/hair'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/hair/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/body'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/body/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/body_proportions'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/body_proportions/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/canonical_hair'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/canonical_hair/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/canonical_outfit'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/canonical_outfit/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/outfit/type'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/outfit/type/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/outfit/design'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/outfit/design/%%'
+                   OR json_extract(patch.value, '$.path') = '/appearance/outfit/color'
+                   OR json_extract(patch.value, '$.path') LIKE '/appearance/outfit/color/%%'
+                   THEN 1 ELSE 0 END
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM generation_candidates AS candidate
+                JOIN shots AS shot ON shot.id = candidate.shot_id
+                JOIN scenes AS scene ON scene.id = shot.scene_id
+                JOIN episodes AS episode ON episode.id = scene.episode_id
+                WHERE candidate.id = NEW.candidate_id AND shot.id = NEW.shot_id
+                  AND episode.project_id = NEW.project_id
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM timeline_states AS input_state
+                WHERE input_state.id = NEW.input_timeline_state_id
+                  AND input_state.project_id = NEW.project_id
+                  AND input_state.state_kind = 'SHOT_INPUT'
+                  AND (input_state.shot_id IS NULL OR input_state.shot_id = NEW.shot_id)
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM timeline_states AS output_state
+                WHERE output_state.id = NEW.planned_output_timeline_state_id
+                  AND output_state.project_id = NEW.project_id
+                  AND output_state.state_kind = 'SHOT_OUTPUT'
+                  AND (output_state.shot_id IS NULL OR output_state.shot_id = NEW.shot_id)
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM shots AS shot WHERE shot.id = NEW.shot_id
+                  AND shot.input_state_id = NEW.input_timeline_state_id
+                  AND shot.output_state_id = NEW.planned_output_timeline_state_id
+            )
+            OR (NEW.proposal_kind NOT IN ('INITIALIZE', 'IDENTITY_REBASE') AND NOT EXISTS (
+                SELECT 1 FROM character_state_versions AS base
+                WHERE base.id = NEW.base_state_version_id
+                  AND base.identity_version_id = NEW.identity_version_id
+                  AND base.state_hash = NEW.base_state_hash
+            ))
+            OR (NEW.supersedes_delta_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM character_state_deltas AS prior
+                WHERE prior.id = NEW.supersedes_delta_id
+                  AND prior.project_id = NEW.project_id
+                  AND prior.character_id = NEW.character_id
+                  AND prior.candidate_id = NEW.candidate_id
+                  AND prior.proposal_revision < NEW.proposal_revision
+            ))
+            OR (NEW.model_execution_record_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM model_execution_records AS execution
+                WHERE execution.id = NEW.model_execution_record_id
+                  AND execution.project_id = NEW.project_id
+            ))
+        BEGIN SELECT RAISE(ABORT, 'character state delta is inconsistent'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_validation_consistency
+        BEFORE INSERT ON character_state_validations WHEN
+            json_type(NEW.observed_state_json) != 'object'
+            OR json_type(NEW.evidence_json) != 'object'
+            OR json_type(NEW.violations_json) != 'array'
+            OR NOT EXISTS (
+                SELECT 1 FROM character_state_deltas AS delta
+                WHERE delta.id = NEW.state_delta_id AND delta.project_id = NEW.project_id
+                  AND delta.target_state_hash = NEW.validated_target_hash
+            )
+            OR (NEW.qa_result_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM qa_results AS qa
+                JOIN character_state_deltas AS delta ON delta.id = NEW.state_delta_id
+                WHERE qa.id = NEW.qa_result_id AND qa.candidate_id = delta.candidate_id
+            ))
+            OR (NEW.evidence_asset_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM media_assets AS asset
+                WHERE asset.id = NEW.evidence_asset_id AND asset.project_id = NEW.project_id
+            ))
+            OR (NEW.model_execution_record_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM model_execution_records AS execution
+                WHERE execution.id = NEW.model_execution_record_id
+                  AND execution.project_id = NEW.project_id
+            ))
+        BEGIN SELECT RAISE(ABORT, 'character state validation is inconsistent'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_commit_consistency
+        BEFORE INSERT ON character_state_commits WHEN
+            NOT EXISTS (
+                SELECT 1 FROM character_state_deltas AS delta
+                WHERE delta.id = NEW.state_delta_id AND delta.project_id = NEW.project_id
+                  AND delta.character_id = NEW.character_id
+                  AND delta.timeline_scope_key = NEW.timeline_scope_key
+                  AND delta.shot_id = NEW.shot_id AND delta.candidate_id = NEW.candidate_id
+                  AND delta.base_state_version_id IS NEW.from_state_version_id
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM character_state_deltas AS delta
+                JOIN character_state_versions AS target ON target.id = NEW.to_state_version_id
+                WHERE delta.id = NEW.state_delta_id AND target.project_id = NEW.project_id
+                  AND target.character_id = NEW.character_id
+                  AND target.timeline_scope_key = NEW.timeline_scope_key
+                  AND target.version = delta.target_version
+                  AND target.previous_state_version_id IS NEW.from_state_version_id
+                  AND target.identity_version_id = delta.identity_version_id
+                  AND target.source_shot_id = NEW.shot_id
+                  AND target.source_candidate_id = NEW.candidate_id
+                  AND target.state_hash = delta.target_state_hash
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM character_state_validations AS validation
+                WHERE validation.id = NEW.policy_validation_id
+                  AND validation.state_delta_id = NEW.state_delta_id
+                  AND validation.stage = 'POLICY' AND validation.decision = 'PASS'
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM character_state_validations AS visual
+                WHERE visual.id = NEW.visual_validation_id
+                  AND visual.state_delta_id = NEW.state_delta_id
+                  AND visual.stage = 'VISUAL'
+                  AND (visual.decision = 'PASS' OR (
+                      visual.decision = 'REVIEW_REQUIRED'
+                      AND NEW.human_validation_id IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1 FROM character_state_validations AS human
+                          WHERE human.id = NEW.human_validation_id
+                            AND human.state_delta_id = NEW.state_delta_id
+                            AND human.stage = 'HUMAN_OVERRIDE' AND human.decision = 'PASS'
+                      )
+                  ))
+            )
+            OR (NEW.human_validation_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM character_state_validations AS validation
+                WHERE validation.id = NEW.human_validation_id
+                  AND validation.state_delta_id = NEW.state_delta_id
+                  AND validation.stage = 'HUMAN_OVERRIDE' AND validation.decision = 'PASS'
+            ))
+            OR NOT EXISTS (
+                SELECT 1 FROM generation_candidates AS candidate
+                JOIN shots AS shot ON shot.id = candidate.shot_id
+                WHERE candidate.id = NEW.candidate_id AND candidate.status = 'COMMITTED'
+                  AND shot.id = NEW.shot_id AND shot.committed_candidate_id = NEW.candidate_id
+            )
+            OR ((SELECT COUNT(*) FROM character_state_heads AS head
+                 WHERE head.project_id = NEW.project_id AND head.character_id = NEW.character_id
+                   AND head.timeline_scope_key = NEW.timeline_scope_key) = 0
+                AND NEW.expected_head_version != 0)
+            OR ((SELECT COUNT(*) FROM character_state_heads AS head
+                 WHERE head.project_id = NEW.project_id AND head.character_id = NEW.character_id
+                   AND head.timeline_scope_key = NEW.timeline_scope_key) > 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM character_state_heads AS head
+                    WHERE head.project_id = NEW.project_id AND head.character_id = NEW.character_id
+                      AND head.timeline_scope_key = NEW.timeline_scope_key
+                      AND head.state_version_id IS NEW.from_state_version_id
+                      AND head.lock_version = NEW.expected_head_version
+                ))
+        BEGIN SELECT RAISE(ABORT, 'character state commit is inconsistent'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_head_insert
+        BEFORE INSERT ON character_state_heads WHEN
+            NEW.lock_version != 1 OR NOT EXISTS (
+                SELECT 1 FROM character_state_versions AS version
+                JOIN character_state_commits AS commit_row
+                  ON commit_row.to_state_version_id = version.id
+                WHERE version.id = NEW.state_version_id
+                  AND version.project_id = NEW.project_id
+                  AND version.character_id = NEW.character_id
+                  AND version.timeline_scope_key = NEW.timeline_scope_key
+                  AND version.version = 1
+                  AND commit_row.expected_head_version = 0
+            )
+        BEGIN SELECT RAISE(ABORT, 'character state head requires an initial commit'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_head_update
+        BEFORE UPDATE ON character_state_heads WHEN
+            NEW.id != OLD.id OR NEW.project_id != OLD.project_id
+            OR NEW.character_id != OLD.character_id
+            OR NEW.timeline_scope_key != OLD.timeline_scope_key
+            OR NEW.lock_version != OLD.lock_version + 1
+            OR NOT EXISTS (
+                SELECT 1 FROM character_state_versions AS version
+                JOIN character_state_commits AS commit_row
+                  ON commit_row.to_state_version_id = version.id
+                WHERE version.id = NEW.state_version_id
+                  AND version.project_id = NEW.project_id
+                  AND version.character_id = NEW.character_id
+                  AND version.timeline_scope_key = NEW.timeline_scope_key
+                  AND version.version = NEW.lock_version
+                  AND commit_row.from_state_version_id = OLD.state_version_id
+                  AND commit_row.expected_head_version = OLD.lock_version
+            )
+        BEGIN SELECT RAISE(ABORT, 'character state head update requires a fresh commit'); END""",
+        """CREATE TRIGGER IF NOT EXISTS trg_character_state_head_delete
+        BEFORE DELETE ON character_state_heads
+        BEGIN SELECT RAISE(ABORT, 'character state heads cannot be deleted'); END""",
+    )
+    for statement in sqlite_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="sqlite"))
+
+    postgres_statements = (
+        """CREATE OR REPLACE FUNCTION enforce_character_state_append_only()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION '%% is append-only', TG_TABLE_NAME USING ERRCODE = '23000';
+            RETURN OLD;
+        END; $$""",
+        """CREATE OR REPLACE FUNCTION enforce_character_identity_boundary()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'UPDATE' AND OLD.current_identity_version_id IS NOT NULL
+               AND NEW.canonical_facts::jsonb IS DISTINCT FROM OLD.canonical_facts::jsonb THEN
+                RAISE EXCEPTION 'confirmed canonical facts are immutable' USING ERRCODE = '23514';
+            END IF;
+            IF NEW.current_identity_version_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM character_identity_versions AS identity
+                WHERE identity.id = NEW.current_identity_version_id
+                  AND identity.character_id = NEW.id AND identity.status = 'LOCKED'
+            ) THEN
+                RAISE EXCEPTION 'current identity must be a locked version of the character'
+                USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END; $$""",
+        """CREATE OR REPLACE FUNCTION enforce_character_state_consistency()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        DECLARE head_count integer;
+        BEGIN
+            IF TG_TABLE_NAME = 'character_state_versions' THEN
+                IF json_typeof(NEW.narrative_state_json) <> 'object'
+                   OR NEW.narrative_state_json::jsonb ?| ARRAY[
+                       'identity', 'canonical_identity', 'face', 'body_proportions',
+                       'canonical_hair', 'canonical_outfit', 'identity_embedding_id',
+                       'canonical_asset_id'
+                   ]
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,face}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,hair}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,body}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,body_proportions}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,canonical_hair}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,canonical_outfit}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,outfit,type}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,outfit,design}' IS NOT NULL
+                   OR NEW.narrative_state_json::jsonb #> '{appearance,outfit,color}' IS NOT NULL
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_identity_versions AS identity
+                       WHERE identity.id = NEW.identity_version_id
+                         AND identity.character_id = NEW.character_id AND identity.status = 'LOCKED'
+                   )
+                   OR (NEW.previous_state_version_id IS NULL AND NEW.version <> 1)
+                   OR (NEW.previous_state_version_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM character_state_versions AS previous
+                       WHERE previous.id = NEW.previous_state_version_id
+                         AND previous.character_id = NEW.character_id
+                         AND previous.state_hash = NEW.previous_state_hash
+                         AND ((previous.timeline_scope_key = NEW.timeline_scope_key
+                               AND NEW.version = previous.version + 1)
+                              OR (previous.timeline_scope_key <> NEW.timeline_scope_key
+                                  AND NEW.version = 1))
+                   ))
+                   OR (NEW.source_candidate_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM generation_candidates AS candidate
+                       JOIN shots AS shot ON shot.id = candidate.shot_id
+                       JOIN scenes AS scene ON scene.id = shot.scene_id
+                       JOIN episodes AS episode ON episode.id = scene.episode_id
+                       WHERE candidate.id = NEW.source_candidate_id
+                         AND shot.id = NEW.source_shot_id AND episode.project_id = NEW.project_id
+                   )) THEN
+                    RAISE EXCEPTION 'character state version is inconsistent' USING ERRCODE = '23514';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'character_state_deltas' THEN
+                IF json_typeof(NEW.patch_json) <> 'array'
+                   OR json_typeof(NEW.changed_paths_json) <> 'array'
+                   OR json_typeof(NEW.proposed_state_json) <> 'object'
+                   OR NEW.proposed_state_json::jsonb ?| ARRAY[
+                       'identity', 'canonical_identity', 'face', 'body_proportions',
+                       'canonical_hair', 'canonical_outfit', 'identity_embedding_id',
+                       'canonical_asset_id'
+                   ]
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,face}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,hair}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,body}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,body_proportions}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,canonical_hair}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,canonical_outfit}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,outfit,type}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,outfit,design}' IS NOT NULL
+                   OR NEW.proposed_state_json::jsonb #> '{appearance,outfit,color}' IS NOT NULL
+                   OR EXISTS (
+                       SELECT 1 FROM json_array_elements(NEW.patch_json) AS patch
+                       WHERE json_typeof(patch) <> 'object'
+                           OR COALESCE(json_typeof(patch->'path'), '') <> 'string'
+                           OR COALESCE(patch->>'path', '') IN ('', '/', '/appearance', '/appearance/outfit')
+                           OR COALESCE(patch->>'path', '') !~ '^/'
+                           OR COALESCE(patch->>'path', '') ~
+                           '^/(identity|canonical_identity|face|body_proportions|canonical_hair|canonical_outfit|identity_embedding_id|canonical_asset_id)(/|$)'
+                           OR COALESCE(patch->>'path', '') ~
+                           '^/appearance/(face|hair|body|body_proportions|canonical_hair|canonical_outfit)(/|$)'
+                           OR COALESCE(patch->>'path', '') ~
+                           '^/appearance/outfit/(type|design|color)(/|$)'
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM generation_candidates AS candidate
+                       JOIN shots AS shot ON shot.id = candidate.shot_id
+                       JOIN scenes AS scene ON scene.id = shot.scene_id
+                       JOIN episodes AS episode ON episode.id = scene.episode_id
+                       WHERE candidate.id = NEW.candidate_id AND shot.id = NEW.shot_id
+                         AND episode.project_id = NEW.project_id
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM timeline_states AS input_state
+                       WHERE input_state.id = NEW.input_timeline_state_id
+                         AND input_state.project_id = NEW.project_id
+                         AND input_state.state_kind = 'SHOT_INPUT'
+                         AND (input_state.shot_id IS NULL OR input_state.shot_id = NEW.shot_id)
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM timeline_states AS output_state
+                       WHERE output_state.id = NEW.planned_output_timeline_state_id
+                         AND output_state.project_id = NEW.project_id
+                         AND output_state.state_kind = 'SHOT_OUTPUT'
+                         AND (output_state.shot_id IS NULL OR output_state.shot_id = NEW.shot_id)
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM shots AS shot WHERE shot.id = NEW.shot_id
+                         AND shot.input_state_id = NEW.input_timeline_state_id
+                         AND shot.output_state_id = NEW.planned_output_timeline_state_id
+                   )
+                   OR (NEW.proposal_kind NOT IN ('INITIALIZE', 'IDENTITY_REBASE') AND NOT EXISTS (
+                       SELECT 1 FROM character_state_versions AS base
+                       WHERE base.id = NEW.base_state_version_id
+                         AND base.identity_version_id = NEW.identity_version_id
+                         AND base.state_hash = NEW.base_state_hash
+                   ))
+                   OR (NEW.supersedes_delta_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM character_state_deltas AS prior
+                       WHERE prior.id = NEW.supersedes_delta_id
+                         AND prior.project_id = NEW.project_id
+                         AND prior.character_id = NEW.character_id
+                         AND prior.candidate_id = NEW.candidate_id
+                         AND prior.proposal_revision < NEW.proposal_revision
+                   ))
+                   OR (NEW.model_execution_record_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM model_execution_records AS execution
+                       WHERE execution.id = NEW.model_execution_record_id
+                         AND execution.project_id = NEW.project_id
+                   )) THEN
+                    RAISE EXCEPTION 'character state delta is inconsistent' USING ERRCODE = '23514';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'character_state_validations' THEN
+                IF json_typeof(NEW.observed_state_json) <> 'object'
+                   OR json_typeof(NEW.evidence_json) <> 'object'
+                   OR json_typeof(NEW.violations_json) <> 'array'
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_state_deltas AS delta
+                       WHERE delta.id = NEW.state_delta_id AND delta.project_id = NEW.project_id
+                         AND delta.target_state_hash = NEW.validated_target_hash
+                   )
+                   OR (NEW.qa_result_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM qa_results AS qa
+                       JOIN character_state_deltas AS delta ON delta.id = NEW.state_delta_id
+                       WHERE qa.id = NEW.qa_result_id AND qa.candidate_id = delta.candidate_id
+                   ))
+                   OR (NEW.evidence_asset_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM media_assets AS asset
+                       WHERE asset.id = NEW.evidence_asset_id AND asset.project_id = NEW.project_id
+                   ))
+                   OR (NEW.model_execution_record_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM model_execution_records AS execution
+                       WHERE execution.id = NEW.model_execution_record_id
+                         AND execution.project_id = NEW.project_id
+                   )) THEN
+                    RAISE EXCEPTION 'character state validation is inconsistent' USING ERRCODE = '23514';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'character_state_commits' THEN
+                IF NOT EXISTS (
+                       SELECT 1 FROM character_state_deltas AS delta
+                       WHERE delta.id = NEW.state_delta_id AND delta.project_id = NEW.project_id
+                         AND delta.character_id = NEW.character_id
+                         AND delta.timeline_scope_key = NEW.timeline_scope_key
+                         AND delta.shot_id = NEW.shot_id AND delta.candidate_id = NEW.candidate_id
+                         AND delta.base_state_version_id IS NOT DISTINCT FROM NEW.from_state_version_id
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_state_deltas AS delta
+                       JOIN character_state_versions AS target ON target.id = NEW.to_state_version_id
+                       WHERE delta.id = NEW.state_delta_id AND target.project_id = NEW.project_id
+                         AND target.character_id = NEW.character_id
+                         AND target.timeline_scope_key = NEW.timeline_scope_key
+                         AND target.version = delta.target_version
+                         AND target.previous_state_version_id IS NOT DISTINCT FROM NEW.from_state_version_id
+                         AND target.identity_version_id = delta.identity_version_id
+                         AND target.source_shot_id = NEW.shot_id
+                         AND target.source_candidate_id = NEW.candidate_id
+                         AND target.state_hash = delta.target_state_hash
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_state_validations AS validation
+                       WHERE validation.id = NEW.policy_validation_id
+                         AND validation.state_delta_id = NEW.state_delta_id
+                         AND validation.stage = 'POLICY' AND validation.decision = 'PASS'
+                   )
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_state_validations AS visual
+                       WHERE visual.id = NEW.visual_validation_id
+                         AND visual.state_delta_id = NEW.state_delta_id
+                         AND visual.stage = 'VISUAL'
+                         AND (visual.decision = 'PASS' OR (
+                             visual.decision = 'REVIEW_REQUIRED'
+                             AND NEW.human_validation_id IS NOT NULL
+                             AND EXISTS (
+                                 SELECT 1 FROM character_state_validations AS human
+                                 WHERE human.id = NEW.human_validation_id
+                                   AND human.state_delta_id = NEW.state_delta_id
+                                   AND human.stage = 'HUMAN_OVERRIDE' AND human.decision = 'PASS'
+                             )
+                         ))
+                   )
+                   OR (NEW.human_validation_id IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM character_state_validations AS validation
+                       WHERE validation.id = NEW.human_validation_id
+                         AND validation.state_delta_id = NEW.state_delta_id
+                         AND validation.stage = 'HUMAN_OVERRIDE' AND validation.decision = 'PASS'
+                   ))
+                   OR NOT EXISTS (
+                       SELECT 1 FROM generation_candidates AS candidate
+                       JOIN shots AS shot ON shot.id = candidate.shot_id
+                       WHERE candidate.id = NEW.candidate_id AND candidate.status = 'COMMITTED'
+                         AND shot.id = NEW.shot_id AND shot.committed_candidate_id = NEW.candidate_id
+                   ) THEN
+                    RAISE EXCEPTION 'character state commit is inconsistent' USING ERRCODE = '23514';
+                END IF;
+                SELECT COUNT(*) INTO head_count FROM character_state_heads AS head
+                WHERE head.project_id = NEW.project_id AND head.character_id = NEW.character_id
+                  AND head.timeline_scope_key = NEW.timeline_scope_key;
+                IF (head_count = 0 AND NEW.expected_head_version <> 0)
+                   OR (head_count > 0 AND NOT EXISTS (
+                       SELECT 1 FROM character_state_heads AS head
+                       WHERE head.project_id = NEW.project_id AND head.character_id = NEW.character_id
+                         AND head.timeline_scope_key = NEW.timeline_scope_key
+                         AND head.state_version_id IS NOT DISTINCT FROM NEW.from_state_version_id
+                         AND head.lock_version = NEW.expected_head_version
+                   )) THEN
+                    RAISE EXCEPTION 'character state commit head fence is stale' USING ERRCODE = '40001';
+                END IF;
+            ELSIF TG_TABLE_NAME = 'character_state_heads' THEN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'character state heads cannot be deleted' USING ERRCODE = '23000';
+                ELSIF TG_OP = 'INSERT' THEN
+                    IF NEW.lock_version <> 1 OR NOT EXISTS (
+                        SELECT 1 FROM character_state_versions AS version
+                        JOIN character_state_commits AS commit_row
+                          ON commit_row.to_state_version_id = version.id
+                        WHERE version.id = NEW.state_version_id
+                          AND version.project_id = NEW.project_id
+                          AND version.character_id = NEW.character_id
+                          AND version.timeline_scope_key = NEW.timeline_scope_key
+                          AND version.version = 1 AND commit_row.expected_head_version = 0
+                    ) THEN
+                        RAISE EXCEPTION 'character state head requires an initial commit'
+                        USING ERRCODE = '23514';
+                    END IF;
+                ELSIF NEW.id IS DISTINCT FROM OLD.id
+                   OR NEW.project_id IS DISTINCT FROM OLD.project_id
+                   OR NEW.character_id IS DISTINCT FROM OLD.character_id
+                   OR NEW.timeline_scope_key IS DISTINCT FROM OLD.timeline_scope_key
+                   OR NEW.lock_version <> OLD.lock_version + 1
+                   OR NOT EXISTS (
+                       SELECT 1 FROM character_state_versions AS version
+                       JOIN character_state_commits AS commit_row
+                         ON commit_row.to_state_version_id = version.id
+                       WHERE version.id = NEW.state_version_id
+                         AND version.project_id = NEW.project_id
+                         AND version.character_id = NEW.character_id
+                         AND version.timeline_scope_key = NEW.timeline_scope_key
+                         AND version.version = NEW.lock_version
+                         AND commit_row.from_state_version_id = OLD.state_version_id
+                         AND commit_row.expected_head_version = OLD.lock_version
+                   ) THEN
+                    RAISE EXCEPTION 'character state head update requires a fresh commit'
+                    USING ERRCODE = '40001';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END; $$""",
+        """CREATE OR REPLACE TRIGGER trg_character_identity_boundary
+        BEFORE INSERT OR UPDATE OF id, current_identity_version_id, canonical_facts ON characters
+        FOR EACH ROW EXECUTE FUNCTION enforce_character_identity_boundary()""",
+    )
+    for statement in postgres_statements:
+        event.listen(anchor, "after_create", DDL(statement).execute_if(dialect="postgresql"))
+    for table_name in protected_tables:
+        event.listen(
+            anchor,
+            "after_create",
+            DDL(
+                f"CREATE OR REPLACE TRIGGER trg_{table_name}_immutable "
+                f"BEFORE UPDATE OR DELETE ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_character_state_append_only()"
+            ).execute_if(dialect="postgresql"),
+        )
+    for table_name in (
+        "character_state_versions",
+        "character_state_deltas",
+        "character_state_validations",
+        "character_state_commits",
+    ):
+        event.listen(
+            anchor,
+            "after_create",
+            DDL(
+                f"CREATE OR REPLACE TRIGGER trg_{table_name}_consistency BEFORE INSERT ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_character_state_consistency()"
+            ).execute_if(dialect="postgresql"),
+        )
+    event.listen(
+        anchor,
+        "after_create",
+        DDL(
+            "CREATE OR REPLACE TRIGGER trg_character_state_heads_consistency "
+            "BEFORE INSERT OR UPDATE OR DELETE "
+            "ON character_state_heads FOR EACH ROW EXECUTE FUNCTION enforce_character_state_consistency()"
+        ).execute_if(dialect="postgresql"),
+    )
+
+
+_install_character_state_integrity_ddl()

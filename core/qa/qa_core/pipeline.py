@@ -259,6 +259,91 @@ class QAPipeline:
     def identity_sample_positions(self) -> tuple[float, ...]:
         return self.identity_qa.sample_positions()
 
+    @staticmethod
+    def _validated_character_state_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+        raw = evidence.get("character_state_evidence")
+        if raw is None:
+            return {}
+        if evidence.get("_trusted_source") != "INTERNAL_QC":
+            raise ValueError("character state evidence requires the trusted internal QA boundary")
+        if not isinstance(raw, dict) or len(raw) > 20:
+            raise ValueError("character state evidence must be a bounded character map")
+        result: dict[str, Any] = {}
+        for character_id, payload in raw.items():
+            if not isinstance(character_id, str) or not character_id or not isinstance(payload, dict):
+                raise ValueError("character state evidence entries are invalid")
+            allowed = {
+                "source",
+                "authority_level",
+                "producer_version",
+                "model_execution_record_id",
+                "observations",
+                "evidence_asset_id",
+            }
+            if set(payload) - allowed:
+                raise ValueError("character state evidence contains unsupported fields")
+            authority = str(payload.get("authority_level", "")).upper()
+            if authority not in {"ADVISORY", "FACT_OBSERVATION"}:
+                raise ValueError("character state evidence authority is invalid")
+            execution_id = payload.get("model_execution_record_id")
+            if execution_id is not None and (
+                not isinstance(execution_id, str) or not 1 <= len(execution_id) <= 36
+            ):
+                raise ValueError("character state evidence execution provenance is invalid")
+            observations = payload.get("observations", [])
+            if not isinstance(observations, list) or len(observations) > 100:
+                raise ValueError("character state observations must be a bounded array")
+            normalized_observations: list[dict[str, Any]] = []
+            for observation in observations:
+                if not isinstance(observation, dict) or set(observation) - {
+                    "path",
+                    "value",
+                    "confidence",
+                    "sample_times",
+                }:
+                    raise ValueError("character state observation contains unsupported fields")
+                path = observation.get("path")
+                confidence = observation.get("confidence")
+                if not isinstance(path, str) or not path or len(path) > 320:
+                    raise ValueError("character state observation path is invalid")
+                if (
+                    isinstance(confidence, bool)
+                    or not isinstance(confidence, (int, float))
+                    or not math.isfinite(float(confidence))
+                    or not 0 <= float(confidence) <= 1
+                ):
+                    raise ValueError("character state observation confidence is invalid")
+                sample_times = observation.get("sample_times", [])
+                if not isinstance(sample_times, list) or len(sample_times) > 100:
+                    raise ValueError("character state observation sample_times are invalid")
+                normalized_times: list[float] = []
+                for item in sample_times:
+                    if (
+                        isinstance(item, bool)
+                        or not isinstance(item, (int, float))
+                        or not math.isfinite(float(item))
+                        or float(item) < 0
+                    ):
+                        raise ValueError("character state observation sample time is invalid")
+                    normalized_times.append(float(item))
+                normalized_observations.append(
+                    {
+                        "path": path,
+                        "value": observation.get("value"),
+                        "confidence": float(confidence),
+                        "sample_times": normalized_times,
+                    }
+                )
+            result[character_id] = {
+                "source": str(payload.get("source", ""))[:120],
+                "authority_level": authority,
+                "producer_version": str(payload.get("producer_version", ""))[:120],
+                "model_execution_record_id": execution_id,
+                "observations": normalized_observations,
+                "evidence_asset_id": payload.get("evidence_asset_id"),
+            }
+        return result
+
     def produce_character_evidence(
         self,
         candidate_id: str,
@@ -499,6 +584,7 @@ class QAPipeline:
         character_evidence: CharacterEvidenceReport | None = None,
     ) -> QAResult:
         evidence = dict(evidence or {})
+        character_state_evidence = self._validated_character_state_evidence(evidence)
         if character_evidence is not None:
             if character_evidence.candidate_id != candidate_id:
                 raise ValueError("character evidence belongs to a different candidate")
@@ -694,6 +780,7 @@ class QAPipeline:
                     "character_evidence": (
                         character_evidence.to_dict() if character_evidence is not None else None
                     ),
+                    "character_state_evidence": character_state_evidence,
                 },
                 summary=(
                     f"{decision}: {', '.join(sorted(set(hard_failures))) or 'weighted profile decision'}"

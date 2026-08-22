@@ -39,6 +39,73 @@ def _complete_scores(value: float = 0.95) -> dict[str, float]:
     }
 
 
+def _mira_expectation(project_id: str) -> EvaluationExpectation:
+    return EvaluationExpectation(
+        project_id=project_id,
+        expected_state={
+            "characters": {
+                "mira": {
+                    "identity": {"identity_version_id": "mira-identity-v1"},
+                    "appearance": {
+                        "injury": {
+                            "location": "right_eyebrow",
+                            "status": "unhealed",
+                            "blood_state": "dried",
+                        },
+                        "outfit": {"left_sleeve": "torn"},
+                    },
+                    "props": {"flare": {"state": "unlit"}},
+                }
+            },
+            "lighting": {"time_of_day": "dusk", "palette": "cold_blue_gray"},
+            "required_state_paths": [
+                "characters.mira.identity.identity_version_id",
+                "characters.mira.appearance.injury.status",
+                "characters.mira.appearance.injury.blood_state",
+                "characters.mira.appearance.outfit.left_sleeve",
+                "lighting.time_of_day",
+                "lighting.palette",
+            ],
+            "continuity_constraints": [
+                {
+                    "id": "flare_must_remain_unlit",
+                    "path": "characters.mira.props.flare.state",
+                    "rule": "MUST_EQUAL",
+                    "value": "unlit",
+                    "evidence_required": True,
+                }
+            ],
+        },
+    )
+
+
+def _mira_state_observations() -> dict[str, dict[str, object]]:
+    return {
+        "characters.mira.identity.identity_version_id": {
+            "value": "mira-identity-v1",
+            "confidence": 0.99,
+        },
+        "characters.mira.appearance.injury.status": {
+            "value": "unhealed",
+            "confidence": 0.93,
+        },
+        "characters.mira.appearance.injury.blood_state": {
+            "value": "dried",
+            "confidence": 0.91,
+        },
+        "characters.mira.appearance.outfit.left_sleeve": {
+            "value": "torn",
+            "confidence": 0.95,
+        },
+        "characters.mira.props.flare.state": {
+            "value": "unlit",
+            "confidence": 0.98,
+        },
+        "lighting.time_of_day": {"value": "dusk", "confidence": 0.9},
+        "lighting.palette": {"value": "cold_blue_gray", "confidence": 0.9},
+    }
+
+
 def test_evaluator_accepts_only_complete_high_scoring_evidence(project):
     result = GenerationEvaluator().evaluate(
         _expectation(project.id),
@@ -50,6 +117,118 @@ def test_evaluator_accepts_only_complete_high_scoring_evidence(project):
     )
     assert result.decision == EvaluationDecision.ACCEPT
     assert result.critical_failure is False
+
+
+def test_required_state_paths_pass_only_with_matching_confident_observations(project):
+    result = GenerationEvaluator().evaluate(
+        _mira_expectation(project.id),
+        EvaluationEvidence(
+            scores=_complete_scores(),
+            state_observations=_mira_state_observations(),
+            evidence_complete=True,
+            judge_provider="trusted-state-judge",
+        ),
+    )
+
+    assert result.decision == EvaluationDecision.ACCEPT
+    assert result.state_decision == "PASS"
+    assert result.checks["state"]["passed"] is True
+    assert all(item["status"] == "PASS" for item in result.checks["state"]["details"])
+
+
+def test_legacy_nested_state_evidence_and_path_aliases_remain_supported(project):
+    legacy_observations = [
+        {
+            "state_path": f"/{path.replace('.', '/')}",
+            "observed_value": observation["value"],
+            "confidence": observation["confidence"],
+        }
+        for path, observation in _mira_state_observations().items()
+    ]
+    result = GenerationEvaluator().evaluate(
+        _mira_expectation(project.id),
+        EvaluationEvidence(
+            scores=_complete_scores(),
+            observations={"state_paths": legacy_observations},
+            evidence_complete=True,
+            judge_provider="legacy-state-judge",
+        ),
+    )
+
+    assert result.decision == EvaluationDecision.ACCEPT
+    assert result.state_decision == "PASS"
+
+
+def test_missing_or_low_confidence_required_state_evidence_requires_review(project):
+    observations = _mira_state_observations()
+    observations.pop("characters.mira.props.flare.state")
+    observations["lighting.palette"] = {
+        "value": "cold_blue_gray",
+        "confidence": 0.2,
+    }
+    result = GenerationEvaluator().evaluate(
+        _mira_expectation(project.id),
+        EvaluationEvidence(
+            scores=_complete_scores(),
+            state_observations=observations,
+            evidence_complete=True,
+            judge_provider="trusted-state-judge",
+        ),
+    )
+
+    assert result.decision == EvaluationDecision.REJECT
+    assert result.state_decision == "REVIEW"
+    assert result.evidence_complete is False
+    assert "state_evidence_review_required" in result.retry_reasons
+    reasons = {item["reason"] for item in result.checks["state"]["details"]}
+    assert {"MISSING_OBSERVATION", "LOW_CONFIDENCE"}.issubset(reasons)
+
+
+def test_continuity_constraint_mismatch_is_an_observed_state_rejection(project):
+    observations = _mira_state_observations()
+    observations["characters.mira.props.flare.state"] = {
+        "value": "lit",
+        "confidence": 0.99,
+    }
+    result = GenerationEvaluator().evaluate(
+        _mira_expectation(project.id),
+        EvaluationEvidence(
+            scores=_complete_scores(),
+            state_observations=observations,
+            evidence_complete=True,
+            judge_provider="trusted-state-judge",
+        ),
+    )
+
+    assert result.decision == EvaluationDecision.RETRY_SAME_MODEL
+    assert result.state_decision == "REJECT"
+    assert result.evidence_complete is True
+    assert result.critical_failure is False
+    assert "state_continuity_mismatch" in result.retry_reasons
+    assert "flare_must_remain_unlit" in result.retry_reasons
+
+
+def test_identity_path_mismatch_is_always_a_hard_failure(project):
+    observations = _mira_state_observations()
+    observations["characters.mira.identity.identity_version_id"] = {
+        "value": "different-character-v4",
+        "confidence": 0.99,
+    }
+    result = GenerationEvaluator().evaluate(
+        _mira_expectation(project.id),
+        EvaluationEvidence(
+            scores=_complete_scores(),
+            state_observations=observations,
+            evidence_complete=True,
+            judge_provider="trusted-state-judge",
+        ),
+    )
+
+    assert result.decision == EvaluationDecision.RETRY_REWRITE_PROMPT
+    assert result.state_decision == "REJECT"
+    assert result.critical_failure is True
+    assert "state_identity_mismatch" in result.retry_reasons
+    assert "Never change an identity path" in result.retry_patch
 
 
 def test_direct_camera_gaze_is_critical_and_generates_specific_patch(project):

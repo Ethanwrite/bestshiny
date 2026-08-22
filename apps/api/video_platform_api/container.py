@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from agent_runtime import AgentRuntime, SkillRegistry
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
-from character_core import CharacterIdentityService
+from character_core import CharacterIdentityService, PersistentCharacterStateService
 from continuity_core import ContinuityDecisionEngine
 from cost_core import CostEngine, CreditPricingEngine
 from deepseek_provider import DeepSeekProvider
@@ -110,6 +110,7 @@ class Container:
     agents: AgentRuntime
     narrative: NarrativeCompiler
     characters: CharacterIdentityService
+    character_states: PersistentCharacterStateService
     continuity_decision: ContinuityDecisionEngine
     capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
@@ -460,6 +461,7 @@ def build_container(settings: Settings | None = None) -> Container:
     agents = AgentRuntime(production, gateway, media, skills)
     narrative = NarrativeCompiler(database)
     characters = CharacterIdentityService(database)
+    character_states = PersistentCharacterStateService(database)
     continuity_decision = ContinuityDecisionEngine(database)
     capabilities = model_registry
     capability_resolver = CapabilityResolver(database, model_registry)
@@ -539,6 +541,7 @@ def build_container(settings: Settings | None = None) -> Container:
         continuity,
         visual_runtime=visual_runtime,
         generation_admission=generation_admission,
+        character_states=character_states,
     )
     orchestrator = AgentOrchestrator(narrative, characters, continuity_decision, prompts, candidates)
     return Container(
@@ -561,6 +564,7 @@ def build_container(settings: Settings | None = None) -> Container:
         agents=agents,
         narrative=narrative,
         characters=characters,
+        character_states=character_states,
         continuity_decision=continuity_decision,
         capabilities=capabilities,
         capability_resolver=capability_resolver,

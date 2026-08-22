@@ -5,6 +5,13 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from character_core import (
+    CharacterStateError,
+    PersistentCharacterStateService,
+    canonical_json_hash,
+    preview_character_state_transition,
+    required_visual_state_paths,
+)
 from cost_core import CostEngine
 from evaluation_core import EvaluationDecision, EvaluationEvidence
 from generation_gateway import GenerationGateway
@@ -14,7 +21,12 @@ from generation_policy_core import (
     GenerationPolicyEngine,
 )
 from narrative_core import AuthoritativeTimelineStateEngine
-from platform_contracts import GenerationRequest
+from platform_contracts import (
+    TIMELINE_FENCE_METADATA_KEY,
+    AuthoritativeTimelineFence,
+    GenerationRequest,
+    authoritative_timeline_state_hash,
+)
 from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import (
@@ -23,6 +35,9 @@ from production_domain.models import (
     AssetVersion,
     BillingEvidenceSource,
     CandidateStatus,
+    CharacterStateDecision,
+    CharacterStateDelta,
+    CharacterStateProposalSource,
     ContinuityMode,
     CostRecord,
     DecisionOutcomeRecord,
@@ -62,6 +77,9 @@ class CandidateNotCommittable(RuntimeError):
     pass
 
 
+_CHARACTER_STATE_PROPOSAL_SET_HASH_KEY = "character_state_proposal_set_hash"
+
+
 class CandidatePipeline:
     def __init__(
         self,
@@ -74,6 +92,7 @@ class CandidatePipeline:
         continuity: ShotContinuityService,
         visual_runtime: VisualProductionRuntime | None = None,
         generation_admission: GenerationAdmissionService | None = None,
+        character_states: PersistentCharacterStateService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -84,6 +103,7 @@ class CandidatePipeline:
         self.continuity = continuity
         self.visual_runtime = visual_runtime
         self.generation_admission = generation_admission
+        self.character_states = character_states or PersistentCharacterStateService(database)
         self.timeline = AuthoritativeTimelineStateEngine(database)
         self.policy = GenerationPolicyEngine(database)
 
@@ -91,6 +111,82 @@ class CandidatePipeline:
     def _embedding(value: str) -> list[float]:
         digest = hashlib.sha256(value.encode("utf-8")).digest()
         return [round(byte / 255, 6) for byte in digest[:16]]
+
+    @staticmethod
+    def _dot_state_path(path: str) -> str:
+        normalized = path.strip()
+        if normalized.startswith("/"):
+            return ".".join(part.replace("~1", "/").replace("~0", "~") for part in normalized.split("/")[1:])
+        return normalized.strip(".")
+
+    def _state_evidence_from_evaluation(
+        self,
+        candidate_id: str,
+        evidence: EvaluationEvidence,
+    ) -> dict[str, dict[str, object]]:
+        """Translate trusted evaluator facts; embedding output remains advisory."""
+
+        with self.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            shot = session.get(Shot, candidate.shot_id) if candidate else None
+            if candidate is None or shot is None:
+                raise LookupError("candidate shot not found during state evidence translation")
+            rows = list(
+                session.scalars(
+                    select(CharacterStateDelta)
+                    .where(CharacterStateDelta.candidate_id == candidate.id)
+                    .order_by(
+                        CharacterStateDelta.character_id,
+                        CharacterStateDelta.proposal_revision.desc(),
+                    )
+                )
+            )
+            latest: dict[str, CharacterStateDelta] = {}
+            for row in rows:
+                latest.setdefault(row.character_id, row)
+            output_asset_id = candidate.output_asset_id
+            scene_sequence = shot.scene.sequence
+        result: dict[str, dict[str, object]] = {}
+        only_character_id = next(iter(latest)) if len(latest) == 1 else None
+        for character_id, delta in latest.items():
+            required = set(
+                required_visual_state_paths(
+                    delta.proposed_state_json,
+                    scene_sequence=scene_sequence,
+                    changed_paths=delta.changed_paths_json,
+                )
+            )
+            observations: list[dict[str, object]] = []
+            advisory = "voyage" in f"{evidence.judge_provider} {evidence.judge_model}".casefold()
+            for raw in evidence.state_observations:
+                path = self._dot_state_path(raw.path)
+                prefix = f"characters.{character_id}.narrative_state."
+                if path.startswith(prefix):
+                    relative_path = path[len(prefix) :]
+                elif only_character_id == character_id and path in required:
+                    relative_path = path
+                else:
+                    continue
+                if relative_path not in required:
+                    continue
+                advisory = advisory or "voyage" in raw.source.casefold()
+                observations.append(
+                    {
+                        "path": relative_path,
+                        "value": raw.value,
+                        "confidence": raw.confidence if raw.observable else 0.0,
+                        "sample_times": [],
+                    }
+                )
+            result[character_id] = {
+                "source": f"VISUAL_EVALUATOR:{evidence.judge_provider}:{evidence.judge_model}"[:120],
+                "authority_level": "ADVISORY" if advisory else "FACT_OBSERVATION",
+                "producer_version": "evaluation-state-observation-v1",
+                "model_execution_record_id": evidence.model_execution_record_id,
+                "observations": observations,
+                "evidence_asset_id": output_asset_id,
+            }
+        return result
 
     def _assert_commit_provider_trust(
         self,
@@ -118,6 +214,71 @@ class CandidatePipeline:
                     "low-trust generation output cannot enter the committed timeline"
                 ) from exc
 
+    @staticmethod
+    def _assert_candidate_timeline_fence(
+        session,  # type: ignore[no-untyped-def]
+        candidate: GenerationCandidate,
+        shot: Shot,
+    ) -> None:
+        raw_fence = (candidate.metadata_json or {}).get(TIMELINE_FENCE_METADATA_KEY)
+        if candidate.generation_job_id:
+            job = session.get(GenerationJob, candidate.generation_job_id)
+            if job is None:
+                raise CandidateNotCommittable("candidate generation provenance is missing")
+            metadata = (job.request_json or {}).get("metadata") or {}
+            raw_fence = metadata.get(TIMELINE_FENCE_METADATA_KEY) or raw_fence
+        if raw_fence is None:
+            return
+        try:
+            fence = AuthoritativeTimelineFence.model_validate(raw_fence)
+        except ValueError as exc:
+            raise CandidateNotCommittable("candidate timeline fence is invalid") from exc
+        input_state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
+        output_state = session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
+        if (
+            fence.shot_id != shot.id
+            or fence.input_state_id != shot.input_state_id
+            or fence.output_state_id != shot.output_state_id
+            or input_state is None
+            or output_state is None
+            or authoritative_timeline_state_hash(
+                input_state.state_json,
+                previous_state_id=input_state.previous_state_id,
+            )
+            != fence.input_state_hash
+            or authoritative_timeline_state_hash(
+                output_state.state_json,
+                previous_state_id=output_state.previous_state_id,
+            )
+            != fence.output_state_hash
+        ):
+            raise CandidateNotCommittable(
+                "authoritative timeline changed after generation; regenerate the candidate"
+            )
+
+    @staticmethod
+    def _assert_character_state_proposal_fence(
+        session,  # type: ignore[no-untyped-def]
+        candidate: GenerationCandidate,
+    ) -> None:
+        """Bind the frozen state proposal set to the dispatched generation job."""
+
+        proposal_hash = (candidate.metadata_json or {}).get(_CHARACTER_STATE_PROPOSAL_SET_HASH_KEY)
+        if proposal_hash is None:
+            return
+        if not candidate.generation_job_id:
+            raise CandidateNotCommittable("character state proposals are not bound to a generation job")
+        job = session.get(GenerationJob, candidate.generation_job_id)
+        job_metadata = ((job.request_json or {}).get("metadata") or {}) if job else {}
+        if (
+            job is None
+            or job.candidate_id != candidate.id
+            or job_metadata.get(_CHARACTER_STATE_PROPOSAL_SET_HASH_KEY) != proposal_hash
+        ):
+            raise CandidateNotCommittable(
+                "character state proposals changed after generation dispatch; regenerate the candidate"
+            )
+
     def create_candidate(
         self,
         shot_id: str,
@@ -128,6 +289,9 @@ class CandidatePipeline:
         reference_asset_ids: list[str] | None = None,
         estimated_cost: float = 0.0,
         enforce_entitlements: bool = True,
+        state_deltas: list[dict[str, object]] | None = None,
+        proposed_by_user_id: str | None = None,
+        state_delta_source: str = CharacterStateProposalSource.RULES.value,
     ) -> tuple[GenerationCandidate, bool]:
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
@@ -138,11 +302,36 @@ class CandidatePipeline:
             preferred = shot.preferred_provider or shot.provider
             model = shot.preferred_model or shot.model
             shot_type = shot.shot_type
+            scene_sequence = shot.scene.sequence
             duration = shot.duration
             aspect_ratio = shot.scene.episode.project.default_aspect_ratio
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             continuity_mode = shot.continuity_mode
+            planning_input_state = (
+                session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
+            )
+            planning_output_state = (
+                session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
+            )
+            candidate_timeline_fence = (
+                AuthoritativeTimelineFence(
+                    shot_id=shot.id,
+                    shot_status=shot.status,
+                    input_state_id=planning_input_state.id,
+                    input_state_hash=authoritative_timeline_state_hash(
+                        planning_input_state.state_json,
+                        previous_state_id=planning_input_state.previous_state_id,
+                    ),
+                    output_state_id=planning_output_state.id,
+                    output_state_hash=authoritative_timeline_state_hash(
+                        planning_output_state.state_json,
+                        previous_state_id=planning_output_state.previous_state_id,
+                    ),
+                ).model_dump(mode="json")
+                if planning_input_state is not None and planning_output_state is not None
+                else None
+            )
             previous_end_frame_context_id = None
             if shot.previous_shot_id:
                 previous_shot = session.get(Shot, shot.previous_shot_id)
@@ -169,6 +358,132 @@ class CandidatePipeline:
                 )
                 if media_id
             )
+        effective_character_bindings = deepcopy(character_bindings or [])
+        bindings_by_character = {
+            str(binding.get("character_id")): binding for binding in effective_character_bindings
+        }
+        seen_preview_characters: set[str] = set()
+        for raw_delta in state_deltas or []:
+            if not isinstance(raw_delta, dict):
+                raise ValueError("character state deltas must be objects")
+            character_id = str(raw_delta.get("character_id") or "")
+            if not character_id or character_id in seen_preview_characters:
+                raise ValueError("each character may have one state delta per generation attempt")
+            seen_preview_characters.add(character_id)
+            binding = bindings_by_character.get(character_id)
+            if binding is None or not binding.get("narrative_state_version_id"):
+                raise ValueError("state delta character has no authoritative narrative-state binding")
+            if str(raw_delta.get("base_state_version_id") or "") != binding.get("narrative_state_version_id"):
+                raise ValueError("state delta base does not match the generated character binding")
+            patch_json = raw_delta.get("patch")
+            if not isinstance(patch_json, dict):
+                raise ValueError("state delta patch must be an object")
+            preview = preview_character_state_transition(
+                binding.get("narrative_state") or {},
+                patch_json,
+                scene_sequence=scene_sequence,
+            )
+            binding.update(
+                {
+                    "proposed_narrative_state": preview.target_state,
+                    "proposed_narrative_state_hash": canonical_json_hash(preview.target_state),
+                    "proposed_state_patch": preview.normalized_patch,
+                    "proposed_state_changed_paths": list(preview.changed_paths),
+                    "proposed_state_required_visual_paths": list(preview.required_visual_paths),
+                }
+            )
+        for binding in effective_character_bindings:
+            target_state = binding.get("proposed_narrative_state") or binding.get("narrative_state")
+            if not isinstance(target_state, dict):
+                continue
+            binding["generation_required_visual_state_paths"] = list(
+                required_visual_state_paths(
+                    target_state,
+                    scene_sequence=scene_sequence,
+                    changed_paths=binding.get("proposed_state_changed_paths") or [],
+                )
+            )
+        character_bindings = effective_character_bindings
+        character_state_context = [
+            {
+                "character_id": binding.get("character_id"),
+                "narrative_state_version_id": binding.get("narrative_state_version_id"),
+                "narrative_state_version": binding.get("narrative_state_version"),
+                "narrative_state_hash": binding.get("narrative_state_hash"),
+                "timeline_scope_key": binding.get("timeline_scope_key"),
+            }
+            for binding in (character_bindings or [])
+            if binding.get("narrative_state_version_id")
+        ]
+
+        def initialize_character_state(
+            session,  # type: ignore[no-untyped-def]
+            candidate: GenerationCandidate,
+        ) -> None:
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "character_state_context": character_state_context,
+                **(
+                    {TIMELINE_FENCE_METADATA_KEY: candidate_timeline_fence}
+                    if candidate_timeline_fence is not None
+                    else {}
+                ),
+            }
+            bindings_by_character = {
+                str(binding.get("character_id")): binding for binding in (character_bindings or [])
+            }
+            seen_characters: set[str] = set()
+            persisted_proposals: list[dict[str, object]] = []
+            for raw_delta in state_deltas or []:
+                if not isinstance(raw_delta, dict):
+                    raise ValueError("character state deltas must be objects")
+                character_id = str(raw_delta.get("character_id") or "")
+                if not character_id or character_id in seen_characters:
+                    raise ValueError("each character may have one state delta per generation attempt")
+                seen_characters.add(character_id)
+                binding = bindings_by_character.get(character_id)
+                if binding is None or not binding.get("narrative_state_version_id"):
+                    raise ValueError("state delta character has no authoritative narrative-state binding")
+                base_state_version_id = str(raw_delta.get("base_state_version_id") or "")
+                if base_state_version_id != binding.get("narrative_state_version_id"):
+                    raise ValueError("state delta base does not match the generated character binding")
+                patch_json = raw_delta.get("patch")
+                if not isinstance(patch_json, dict):
+                    raise ValueError("state delta patch must be an object")
+                delta_key = hashlib.sha256(
+                    f"{idempotency_key}:{candidate.id}:{character_id}".encode()
+                ).hexdigest()
+                persisted = self.character_states.propose_for_candidate_in_session(
+                    session,
+                    candidate=candidate,
+                    character_id=character_id,
+                    base_state_version_id=base_state_version_id,
+                    patch_json=patch_json,
+                    idempotency_key=f"candidate-state:{delta_key}",
+                    source_kind=state_delta_source,
+                    proposed_by_user_id=proposed_by_user_id,
+                    model_execution_record_id=(
+                        str(raw_delta["model_execution_record_id"])
+                        if raw_delta.get("model_execution_record_id")
+                        else None
+                    ),
+                )
+                persisted_proposals.append(
+                    {
+                        "character_id": persisted.character_id,
+                        "state_delta_id": persisted.id,
+                        "base_state_version_id": persisted.base_state_version_id,
+                        "target_version": persisted.target_version,
+                        "target_state_hash": persisted.target_state_hash,
+                        "changed_paths": persisted.changed_paths_json,
+                    }
+                )
+            if persisted_proposals:
+                candidate.metadata_json = {
+                    **candidate.metadata_json,
+                    "character_state_proposals": persisted_proposals,
+                }
+
         policy_assets: AvailableGenerationAssets | None = None
         effective_reference_asset_ids = list(dict.fromkeys(reference_asset_ids or []))
         if continuity_mode in {
@@ -315,6 +630,21 @@ class CandidatePipeline:
                 )
                 session.add(candidate)
                 session.flush([candidate])
+                # Runtime trace rows already reference this job. Persist the job
+                # after its candidate FK exists and before state-service queries
+                # can trigger an autoflush of those audit rows.
+                session.add(job)
+                session.flush([job])
+                initialize_character_state(session, candidate)
+                proposal_hash = candidate.metadata_json.get(_CHARACTER_STATE_PROPOSAL_SET_HASH_KEY)
+                if proposal_hash is not None:
+                    job.request_json = {
+                        **job.request_json,
+                        "metadata": {
+                            **(job.request_json.get("metadata") or {}),
+                            _CHARACTER_STATE_PROPOSAL_SET_HASH_KEY: proposal_hash,
+                        },
+                    }
                 locked_shot.generation_policy = prepared.request.generation_policy
                 locked_shot.preferred_provider = prepared.request.provider
                 locked_shot.preferred_model = prepared.request.model
@@ -412,6 +742,18 @@ class CandidatePipeline:
             )
             session.add(candidate)
             session.flush([candidate])
+            session.add(job)
+            session.flush([job])
+            initialize_character_state(session, candidate)
+            proposal_hash = candidate.metadata_json.get(_CHARACTER_STATE_PROPOSAL_SET_HASH_KEY)
+            if proposal_hash is not None:
+                job.request_json = {
+                    **job.request_json,
+                    "metadata": {
+                        **(job.request_json.get("metadata") or {}),
+                        _CHARACTER_STATE_PROPOSAL_SET_HASH_KEY: proposal_hash,
+                    },
+                }
             locked_shot.generation_policy = plan.policy
             locked_shot.preferred_provider = plan.provider
 
@@ -428,10 +770,12 @@ class CandidatePipeline:
             return candidate, replayed
 
     def sync_candidate(self, candidate_id: str, evidence: dict | None = None) -> GenerationCandidate:
+        validation_evidence = dict(evidence or {})
         with self.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate:
                 raise LookupError("candidate not found")
+            self._assert_character_state_proposal_fence(session, candidate)
             if candidate.status in {
                 CandidateStatus.COMMITTED.value,
                 CandidateStatus.REJECTED.value,
@@ -470,15 +814,22 @@ class CandidatePipeline:
             )
             evaluation_evidence: EvaluationEvidence | None = None
             if auto_evaluation_enabled:
-                evaluation_payload = (evidence or {}).get("evaluation_evidence")
+                evaluation_payload = validation_evidence.get("evaluation_evidence")
                 evaluation_evidence = (
                     EvaluationEvidence.model_validate(evaluation_payload)
                     if evaluation_payload is not None
                     else None
                 )
+                if evaluation_evidence is not None:
+                    derived_state_evidence = self._state_evidence_from_evaluation(
+                        candidate_id,
+                        evaluation_evidence,
+                    )
+                    if derived_state_evidence:
+                        validation_evidence["character_state_evidence"] = derived_state_evidence
             legacy_qa = self.qa.validate_candidate(
                 candidate_id,
-                evidence,
+                validation_evidence,
                 profile=shot_type or "DIALOGUE",
                 defer_pass=auto_evaluation_enabled,
             )
@@ -507,6 +858,17 @@ class CandidatePipeline:
                             )
                             qa_result.summary = "HARD_FAIL: visual evaluation could not complete"
                     raise
+                runtime_state_evidence = self._state_evidence_from_evaluation(
+                    candidate_id,
+                    EvaluationEvidence(
+                        scores=visual_result.scores,
+                        state_observations=visual_result.state_observations,
+                        evidence_complete=visual_result.evidence_complete,
+                        judge_provider=visual_result.judge_provider,
+                        judge_model=visual_result.judge_model,
+                        model_execution_record_id=(visual_result.model_execution_record_id),
+                    ),
+                )
                 with self.database.session() as session:
                     next_status = (
                         CandidateStatus.PASSED.value
@@ -526,6 +888,11 @@ class CandidatePipeline:
                         raise LookupError("candidate validation was superseded before visual QA finished")
                     candidate = session.get(GenerationCandidate, candidate_id)
                     qa_result = session.get(QAResult, legacy_qa.id)
+                    if qa_result is not None and runtime_state_evidence:
+                        qa_result.metrics_json = {
+                            **qa_result.metrics_json,
+                            "character_state_evidence": runtime_state_evidence,
+                        }
                     candidate.metadata_json = {
                         **candidate.metadata_json,
                         "visual_evaluation": visual_result.model_dump(mode="json"),
@@ -542,6 +909,48 @@ class CandidatePipeline:
                                 "visual_evaluation": visual_result.model_dump(mode="json"),
                             }
                             qa_result.summary = f"HARD_FAIL: visual evaluation {visual_result.decision.value}"
+        with self.database.session() as session:
+            state_candidate = session.get(GenerationCandidate, candidate_id)
+            state_qa_id = state_candidate.qa_result_id if state_candidate else None
+            should_validate_state = bool(
+                state_candidate and state_qa_id and state_candidate.status == CandidateStatus.PASSED.value
+            )
+        if should_validate_state and state_qa_id:
+            state_validation = self.character_states.validate_candidate(candidate_id, state_qa_id)
+            if state_validation.delta_ids:
+                with self.database.session() as session:
+                    candidate_for_state = session.get(GenerationCandidate, candidate_id)
+                    qa_for_state = session.get(QAResult, state_qa_id)
+                    if (
+                        candidate_for_state is not None
+                        and qa_for_state is not None
+                        and candidate_for_state.qa_result_id == qa_for_state.id
+                        and candidate_for_state.status == CandidateStatus.PASSED.value
+                    ):
+                        qa_for_state.metrics_json = {
+                            **qa_for_state.metrics_json,
+                            "character_state_validation": {
+                                "decision": state_validation.decision,
+                                "delta_ids": list(state_validation.delta_ids),
+                                "reason_codes": list(state_validation.reason_codes),
+                            },
+                        }
+                        if state_validation.decision == CharacterStateDecision.REJECT.value:
+                            candidate_for_state.status = CandidateStatus.HARD_FAILED.value
+                            qa_for_state.decision = QADecision.HARD_FAIL.value
+                            qa_for_state.hard_failures = list(
+                                dict.fromkeys(
+                                    [
+                                        *qa_for_state.hard_failures,
+                                        "CHARACTER_STATE_EVIDENCE_MISMATCH",
+                                    ]
+                                )
+                            )
+                            qa_for_state.summary = "HARD_FAIL: character state evidence mismatch"
+                        elif state_validation.decision == CharacterStateDecision.REVIEW_REQUIRED.value:
+                            candidate_for_state.status = CandidateStatus.USER_REVIEW_REQUIRED.value
+                            qa_for_state.decision = QADecision.USER_REVIEW_REQUIRED.value
+                            qa_for_state.summary = "USER_REVIEW_REQUIRED: character state evidence incomplete"
         with self.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
             if candidate is None:
@@ -583,6 +992,8 @@ class CandidatePipeline:
             qa = session.get(QAResult, candidate.qa_result_id)
             if not qa or qa.decision != QADecision.PASS.value:
                 raise CandidateNotCommittable("only candidates with PASS validation can be committed")
+            self._assert_candidate_timeline_fence(session, candidate, shot)
+            self._assert_character_state_proposal_fence(session, candidate)
             asset = session.get(MediaAsset, candidate.output_asset_id)
             if not asset or asset.project_id != shot.scene.episode.project_id:
                 raise CandidateNotCommittable("candidate output does not belong to the shot project")
@@ -633,6 +1044,8 @@ class CandidatePipeline:
                 raise CandidateNotCommittable("candidate output disappeared before adoption")
             if asset.id != asset_id or asset.project_id != shot.scene.episode.project_id:
                 raise CandidateNotCommittable("candidate output changed before adoption")
+            self._assert_candidate_timeline_fence(session, candidate, shot)
+            self._assert_character_state_proposal_fence(session, candidate)
             self._assert_commit_provider_trust(session, candidate, asset)
             output_state = session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
             if not output_state:
@@ -669,6 +1082,17 @@ class CandidatePipeline:
                 asset,
                 current_end_frame,
             )
+            try:
+                self.character_states.commit_candidate_in_session(
+                    session,
+                    candidate=candidate,
+                    shot=shot,
+                    qa=qa,
+                    output_state=output_state,
+                    committed_by_user_id=accepted_by,
+                )
+            except CharacterStateError as exc:
+                raise CandidateNotCommittable(str(exc)) from exc
             state_json = deepcopy(output_state.state_json if output_state else {})
             state_json["committed_candidate_id"] = candidate.id
             state_json["output_asset_id"] = asset.id

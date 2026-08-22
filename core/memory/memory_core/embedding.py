@@ -87,7 +87,13 @@ class LocalTestEmbeddingProvider:
         values = self.embed(content, input_type=input_type)
         return EmbeddingVector(
             values,
-            self.provenance.model_copy(update={"input_type": input_type}),
+            self.provenance.model_copy(
+                update={
+                    "input_type": input_type,
+                    "evidence_purpose": content.evidence_purpose,
+                    "authority_level": content.authority_level,
+                }
+            ),
         )
 
 
@@ -165,7 +171,13 @@ class VoyageMultimodalEmbeddingProvider:
         values = self.embed(content, input_type=input_type)
         return EmbeddingVector(
             values,
-            self.provenance.model_copy(update={"input_type": input_type}),
+            self.provenance.model_copy(
+                update={
+                    "input_type": input_type,
+                    "evidence_purpose": content.evidence_purpose,
+                    "authority_level": content.authority_level,
+                }
+            ),
         )
 
 
@@ -201,6 +213,11 @@ class ModelRoleEmbeddingProvider:
         input_type: EmbeddingInputType,
         project_id: str,
     ) -> EmbeddingVector:
+        if content.video_urls:
+            raise MemoryEmbeddingUnavailable(
+                "direct video_url embedding is not verified for the ModelRole/OpenRouter path; "
+                "extract bounded timestamped image frames before embedding"
+            )
         pieces: list[dict[str, str]] = []
         if content.text:
             pieces.append({"type": "text", "text": content.text})
@@ -229,6 +246,8 @@ class ModelRoleEmbeddingProvider:
             model=execution.resolved_model.provider_model_id,
             dimension=len(values),
             input_type=input_type,
+            evidence_purpose=content.evidence_purpose,
+            authority_level=content.authority_level,
         )
         input_hash = hashlib.sha256(
             json.dumps(

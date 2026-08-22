@@ -9,8 +9,11 @@ from .embedding import (
 )
 from .engine import MultimodalMemoryEngine, cosine_similarity
 from .schemas import (
+    ADVISORY_EVIDENCE_PURPOSES,
+    AuthorityLevel,
     ContextBudget,
     EmbeddingProvenance,
+    EvidencePurpose,
     GenerationContext,
     MemoryLayer,
     MemoryQuery,
@@ -20,11 +23,14 @@ from .schemas import (
 )
 
 __all__ = [
+    "ADVISORY_EVIDENCE_PURPOSES",
+    "AuthorityLevel",
     "ContextAssembler",
     "ContextBudget",
     "EmbeddingProvider",
     "EmbeddingProvenance",
     "EmbeddingVector",
+    "EvidencePurpose",
     "GenerationContext",
     "LocalTestEmbeddingProvider",
     "MemoryEmbeddingUnavailable",

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import pytest
 from memory_core import (
+    AuthorityLevel,
     ContextAssembler,
     ContextBudget,
+    EvidencePurpose,
     MemoryLayer,
     MemoryQuery,
     MultimodalContent,
     ShotMemoryInput,
 )
+from production_domain.models import ShotMemory
 
 
 def test_memory_filters_entities_before_vector_ranking(container, project):
@@ -101,3 +105,86 @@ def test_context_budget_applies_to_mandatory_sections_too():
     assert "CANONICAL_ASSETS" in context.assembled_text
     assert "CURRENT_TEMPORAL_STATE" in context.assembled_text
     assert "CURRENT_SHOT_REQUIREMENT" in context.assembled_text
+
+
+@pytest.mark.parametrize(
+    "purpose",
+    [
+        EvidencePurpose.IDENTITY_VERDICT,
+        EvidencePurpose.STATE_FACT_ASSERTION,
+        EvidencePurpose.STATE_DELTA_APPROVAL,
+        EvidencePurpose.COMMIT_AUTHORIZATION,
+    ],
+)
+def test_embedding_content_rejects_decision_authority_purposes(purpose: EvidencePurpose):
+    with pytest.raises(ValueError, match="embedding evidence is advisory"):
+        MultimodalContent(text="a similarity hint", evidence_purpose=purpose)
+
+
+def test_embedding_content_rejects_authoritative_label():
+    with pytest.raises(ValueError, match="cannot be authoritative"):
+        MultimodalContent(
+            text="a similarity hint",
+            authority_level=AuthorityLevel.AUTHORITATIVE,
+        )
+
+
+def test_current_state_is_compatibility_alias_for_advisory_retrieval_hint(container, project):
+    indexed = container.memory.index(
+        ShotMemoryInput(
+            project_id=project.id,
+            layer=MemoryLayer.TEMPORAL,
+            memory_type="SHOT_STATE_HINT",
+            content=MultimodalContent(
+                text="Mira is at platform three with an unlit flare",
+                evidence_purpose=EvidencePurpose.SUPPORTING_SIMILARITY,
+            ),
+            entity_ids=["mira"],
+            metadata={
+                "authority_level": AuthorityLevel.AUTHORITATIVE.value,
+                "evidence_purpose": EvidencePurpose.COMMIT_AUTHORIZATION.value,
+            },
+        )
+    )
+
+    hint = container.memory.retrieval_hint(project.id)
+    compatibility = container.memory.current_state(project.id)
+
+    assert hint is not None and compatibility is not None
+    assert hint.id == indexed.id == compatibility.id
+    assert hint.authority_level is AuthorityLevel.ADVISORY
+    assert hint.evidence_purpose is EvidencePurpose.SUPPORTING_SIMILARITY
+    assert compatibility.authority_level is AuthorityLevel.ADVISORY
+    assert hint.metadata["authority_level"] == AuthorityLevel.ADVISORY.value
+    assert hint.metadata["evidence_purpose"] == EvidencePurpose.SUPPORTING_SIMILARITY.value
+
+
+def test_search_rejects_persisted_embedding_that_claims_authority(container, project):
+    with container.database.session() as session:
+        session.add(
+            ShotMemory(
+                project_id=project.id,
+                layer=MemoryLayer.TEMPORAL.value,
+                memory_type="UNTRUSTED_STATE_CLAIM",
+                text_content="Mira's flare is lit",
+                image_urls=[],
+                video_urls=[],
+                entity_ids=["mira"],
+                asset_version_ids=[],
+                canonical=False,
+                embedding=[0.0] * 512,
+                embedding_dimension=512,
+                embedding_provider="local_test",
+                embedding_model="deterministic-token-hash-v1",
+                metadata_json={
+                    "evidence_purpose": EvidencePurpose.RETRIEVAL_HINT.value,
+                    "authority_level": AuthorityLevel.AUTHORITATIVE.value,
+                },
+            )
+        )
+
+    results = container.memory.search(
+        MemoryQuery(project_id=project.id, text="Mira flare", layers=[MemoryLayer.TEMPORAL])
+    )
+
+    assert results == []

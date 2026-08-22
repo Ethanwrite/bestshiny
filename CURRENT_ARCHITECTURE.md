@@ -1,18 +1,20 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-21
+Snapshot date: 2026-08-22
 Repository: `ai-director-platform`
 Branch: `main`
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0027_production_evidence_core`
+Migration head: `0028_persistent_character_state`
 Release posture: **NOT PRODUCTION-READY**
 
-This document describes the Phase III offline evidence checkpoint. The offline baseline was frozen after the historical
-`348 passed, 39 warnings` gate. Phase III currently passes `406 passed, 57 warnings in 71.58s`, Mypy over 121
-source files, Ruff lint, Ruff format (226 files), Node syntax and `git diff --check`. The warnings are principally known
-Alembic/SQLite/Starlette deprecations and a SQLAlchemy foreign-key cycle warning. The checkpoint is recoverable from
-Git, but it is explicitly offline evidence rather than a production release; no real Provider call was executed.
+This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
+development checkpoint. The offline baseline was frozen after the historical `348 passed, 39 warnings` gate. The tagged
+Phase III checkpoint passed `406 passed, 57 warnings in 71.58s`, Mypy over 121 source files, Ruff lint, Ruff format
+(226 files), Node syntax and `git diff --check`. Those numbers are historical tag evidence, not a test count for every
+later working-tree edit. The current working tree passes `446 passed, 61 warnings in 89.79s`, Ruff format/check,
+Mypy over 122 source files and `git diff --check`. The checkpoint remains offline evidence rather than a production
+release; no real Provider call was executed, and this state milestone adds no Provider.
 
 ## Truth labels
 
@@ -42,6 +44,7 @@ flowchart TB
   Roles["ModelRoleRuntime\nrole + plan + trust + live permit"]
   Registry["Persistent Model Registry\nModelDefinition + ModelCapabilityProfile"]
   Memory["Narrative Memory\nSQL timeline + runtime embedding"]
+  State["Persistent Character State\nversion + delta + validation + commit + CAS head"]
   QA["CharacterEvidence + QA\nlocal frames + confidence + review"]
   Visual["VisualProductionRuntime\ncontext + routing + prompt adapters"]
   Gateway["GenerationGateway\njob + paid boundary + billing evidence"]
@@ -57,9 +60,12 @@ flowchart TB
   API --> Director
   API --> Visual
   Director --> Memory
+  Director --> State
   Director --> QA
   Director --> Evidence
   Memory --> Roles
+  State --> QA
+  State --> Director
   Roles --> Registry
   Visual --> Registry
   Visual --> Gateway
@@ -71,6 +77,7 @@ flowchart TB
   Gateway --> Providers
   Roles --> Providers
   Director --> DB
+  State --> DB
   Registry --> DB
   FlowAffinity --> DB
   Ledger --> DB
@@ -89,9 +96,9 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Web | `apps/web/` | WIP implemented; cookie/CSRF client path and 4-second starter default connected |
 | API | `apps/api/video_platform_api/` | WIP implemented; auth/quota/canary/evidence routes added |
 | Browser worker | `apps/browser-worker-extension/`, `services/browser-runtime/` | Frozen baseline; no current Flow live validation |
-| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migrations `0025`–`0027` |
+| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0028`; persistent character-state rows are schema-backed |
 | Model infrastructure | `core/model-registry/`, `core/entitlements/`, `config/model-registry/` | Persistent single capability truth and role runtime |
-| Director/QA/cost | `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests |
+| Director/QA/cost | `core/character/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state transition/commit/propagation |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
 | Skills | `skills/` | Existing guidance retained; no broad Phase III expansion |
@@ -170,6 +177,95 @@ Editing an earlier committed-state input marks later shots `downstream_state_sta
 Planning-only recompute stops at active/committed shots and never mutates committed media. The public committed-shot
 revision experience is not claimed complete.
 
+## Persistent narrative character state
+
+`PersistentCharacterStateService` adds the missing state-transition loop without turning model output into truth.
+It maintains two deliberately separate layers:
+
+| Layer | Examples | Mutation rule |
+| --- | --- | --- |
+| Immutable identity | locked identity version, canonical assets, face/body proportions, canonical hair and outfit design/color | ordinary shot deltas are rejected; identity changes belong to a separate explicit identity-version/rebase workflow, which the ordinary state-delta API does not perform |
+| Mutable narrative state | injury and blood state, outfit damage/contamination/wetness, held props and their state, location, time, lighting and emotional beat | may change only through a candidate-bound delta that passes policy and evidence before commit |
+
+The mutable state is a fully materialized, hash-chained `CharacterStateVersion` scoped by
+`(project_id, character_id, timeline_scope_key)`. A candidate proposes an append-only RFC 6902-style
+`CharacterStateDelta` against the exact current version, identity fingerprint, branch head and input/planned-output
+`TimelineState` hashes. The target state is injected into the generation specification and prompt as **proposed** state,
+so the renderer receives the intended end state while SQL still keeps the previous version authoritative.
+
+A proposal may be written only while the Candidate is exactly `CREATED` and generation has not been dispatched. It is
+inserted by the Candidate/Generation Job allocation callback inside the same admission/reservation transaction. The
+complete proposal-set hash is stored on the Candidate and copied to the Generation Job request in that transaction;
+validate and commit rederive and compare both bindings. A late or altered proposal therefore cannot inherit evidence
+from the bytes generated for a different proposal set.
+
+```mermaid
+flowchart LR
+  Identity["Locked identity version"] --> Base["Committed state vN"]
+  Base --> Delta["Candidate state delta"]
+  Delta --> Policy["Deterministic state policy"]
+  Policy --> Generate["Generate candidate with proposed target"]
+  Generate --> Evidence["Output-bound visual observation"]
+  Evidence --> Decision{"PASS / REVIEW / REJECT"}
+  Decision -->|PASS| Adopt["Candidate adoption transaction"]
+  Decision -->|REVIEW| Human["Explicit authenticated human review"]
+  Human --> Adopt
+  Decision -->|REJECT| Stop["Reject; head stays at vN"]
+  Adopt --> Version["Append state vN+1 + commit"]
+  Version --> Head["CAS branch head"]
+  Head --> Timeline["Write output ref and propagate to next shot"]
+```
+
+The deterministic policy currently supports `MUST_EQUAL`, `MUST_EXIST` and `LOCK_UNTIL_SCENE`, rejects identity
+paths including ancestor replacements, rejects duplicate constraint IDs, and requires observations for changed visual
+paths and active visual constraints. Replacing a mutable object expands to its changed leaf paths before evidence is
+calculated, so replacing `appearance.injury` or `appearance.outfit.damage` cannot hide a changed visual fact. A
+high-confidence mismatch is a reject. Missing, low-confidence, advisory or untrusted evidence becomes
+`REVIEW_REQUIRED`; it never silently passes. The authenticated human-review path is separate from automatic evidence
+and records actor and reason. Narrative-state input/target JSON is bounded to 256 KiB, 5,000 nodes and 12 levels of
+depth; a state may contain at most 200 continuity constraints.
+
+Persistence across the normal non-initial workflow is deliberately ordered:
+
+```text
+existing append-only Delta
+-> append POLICY / VISUAL / optional HUMAN_OVERRIDE validations
+-> append materialized CharacterStateVersion
+-> append CharacterStateCommit
+-> compare-and-swap CharacterStateHead
+-> write the committed version/hash into the shot output TimelineState
+-> snapshot and authoritative future-shot propagation
+```
+
+The Delta is created atomically with the candidate-generation admission callback; visual validation is appended after
+output evaluation. Once those rows exist, candidate adoption, new Version, Commit, head advancement, output-state
+update and downstream propagation occur in one database transaction. A stale base/head, identity fingerprint,
+candidate ownership or Timeline input/output hash rolls back the operation. Unchanged character bindings are also
+rechecked against their current branch head before carry-forward. Version, delta, validation and commit rows are
+append-only; only the head projection advances. Initial state v1 is accepted only from an already committed candidate
+with explicit confirmation by an authenticated user, and its constraints are checked against the actual source-scene
+sequence before the baseline is committed. Baseline initialization updates the typed character-state reference in the
+authoritative output `TimelineState` and propagates it; it does not append a second untyped `ShotStateSnapshot` for the
+already committed Candidate.
+
+An explicit `TimelineTransition.branch_key` may fork from the immutable state version selected by the shot input. If
+the target scope has no head, the first accepted transition is materialized as that independent scope's v1/head while
+retaining the selected version/hash as its ancestor fence. The main-scope head is not advanced, and unchanged main or
+historical bindings are not silently copied into the new branch scope.
+
+The API surface is:
+
+- `POST /v1/characters/{character_id}/narrative-state/initialize` for the explicit committed v1 baseline;
+- `POST /v1/shots/{shot_id}/generate` with optional per-character `state_deltas` for a candidate proposal;
+- the existing candidate validate/human-review/commit routes for the evidence and adoption stages;
+- `GET /v1/projects/{project_id}/characters/{character_id}/narrative-state` for the current scoped head;
+- `GET /v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions` for delta/validation/commit audit.
+
+The Mira offline fixture exercises shot 12 committed baseline, shot 13 injury blood drying/flare relocation/location
+delta, deterministic locks, trusted visual observation, v2 commit and shot 14 propagation. It also rejects immutable
+hair mutation and early flare ignition, routes Voyage evidence to review, rejects confident state mismatch, and blocks
+stale base/timeline commits. This proves the data and transaction contract, not production VLM accuracy.
+
 ## Model capability and role runtime
 
 `ModelDefinition`, `ModelRoleBinding` and the one-to-one persistent `ModelCapabilityProfile` now form the
@@ -204,6 +300,13 @@ Narrative Memory no longer calls a Voyage client directly. It requests `MULTIMOD
 writes `EmbeddingEvidence` containing input/vector hashes and dimension rather than the full vector, and degrades to
 structured SQL timeline with `MEMORY_VECTOR_DEGRADED` when vector execution is unavailable.
 
+Embedding provenance is now typed by `EvidencePurpose` and `AuthorityLevel`. Voyage, including
+`voyage-multimodal-3.5`, is always `ADVISORY` and may be used only for retrieval hints, supporting similarity and
+evidence-frame ranking. The memory boundary rejects attempts to use an embedding for `IDENTITY_VERDICT`,
+`STATE_FACT_ASSERTION`, `STATE_DELTA_APPROVAL` or `COMMIT_AUTHORIZATION`. A legacy or directly inserted vector row
+claiming authoritative use is excluded from retrieval. Direct video-URL embedding on the unverified runtime path also
+fails closed; callers must first extract bounded timestamped frames.
+
 ## Provider status and Flow affinity
 
 No provider below was called live during Phase III.
@@ -216,7 +319,7 @@ No provider below was called live during Phase III.
 | Wan 2.7 | OpenAI-compatible chat and DashScope T2V/I2V/R2V surfaces | Offline/Mock only; no live schema/job |
 | RunAPI | Typed low-trust Edge tasks, fact lock, budget and benchmark record | Offline/Mock only; prompt canary not executed |
 | DeepSeek | Compatible chat adapter | Adapter only; no default verified product deployment |
-| Voyage | Runtime embedding role | Offline/Mock/degraded tests only; no multimodal canary |
+| Voyage | Runtime embedding role for advisory retrieval/frame ranking only | Offline/Mock/degraded tests only; no multimodal canary and no state/identity authority |
 | Veo/Grok/Kling direct/Omni/Runway | Honest not-configured slots where applicable | Not deployed |
 
 For Google Flow, `FlowProjectAllocator` owns first-use affinity. Active-state partial unique indexes enforce:
@@ -251,6 +354,14 @@ rather than learned from the current small sample.
 
 Tracking ambiguity emits `TRACKING_UNCERTAIN` and requires semantic/VLM review. Hair and costume remain
 `UNAVAILABLE`; no weak proxy is presented as high-confidence evidence.
+
+For mutable-state facts, a trusted automatic observation must be linked to the exact candidate output asset and to a
+successful same-project `ModelExecutionRecord` whose role is `VLM_REVIEWER` and whose metadata declares
+`CHARACTER_STATE_FACT_OBSERVATION`. Voyage providers are explicitly excluded even if a caller relabels their result.
+Missing execution provenance, a different evidence asset, advisory/low-confidence output or an unavailable reviewer
+goes to authenticated human review; a confident contradiction rejects the state transition. A real production VLM
+reviewer has not yet been deployed or calibrated, so the current trusted-VLM tests use controlled execution/evidence
+fixtures.
 
 Evidence validation currently uses a self-generated non-user MP4 and deterministic injected detector/tracker/
 encoder implementations. FFmpeg reads real video bytes, but concrete production inference models are not bundled,
@@ -330,6 +441,7 @@ Phase III extends the existing table groups with:
 | Canary | `live_canary_permits`, `live_canary_usages` |
 | Auth | `password_reset_tokens`, `auth_login_throttles`; credential status/fingerprint fields |
 | Storage | workspace max/used/reserved bytes, `storage_reservations`, `media_assets.size_bytes` |
+| Persistent character state | append-only `character_state_versions`, `character_state_deltas`, `character_state_validations`, `character_state_commits`; mutable CAS projection `character_state_heads` |
 
 The migration chain is single-head through:
 
@@ -338,13 +450,17 @@ The migration chain is single-head through:
 -> 0025_flow_project_affinity
 -> 0026_model_capability_registry
 -> 0027_production_evidence_core
+-> 0028_persistent_character_state
 ```
 
 PostgreSQL 17.10 + pgvector 0.8.6 was validated on temporary databases for fresh and populated paths, supported
 round trips, `vector(16)`, indexes/unique constraints/foreign keys, credit reservation transactions, generation
-enqueue transactions and current head `0027`. SQLite migration and assetless historical guards remain in the
-offline suite. The ignored `data/platform.db` is not used as production migration evidence and must not be blindly
-stamped or upgraded.
+enqueue transactions and the tagged Phase III head `0027`. Migration `0028` adds database checks/triggers for project,
+character, identity, candidate, timeline, validation and commit ownership; immutable history; forbidden identity keys;
+commit evidence; and head fencing on both SQLite and PostgreSQL code paths. Dedicated SQLite schema/migration cases and
+positive/negative trigger cases on a fresh temporary PostgreSQL 17 instance pass for `0028`. This is development
+evidence, not proof that the historical Compose volume or an existing production database has been upgraded. The
+ignored `data/platform.db` is not used as production migration evidence and must not be blindly stamped or upgraded.
 
 ## Internal observability
 
@@ -355,6 +471,10 @@ references are fingerprinted; prompt bodies, vectors, raw Provider responses and
 
 `POST/GET /internal/live-canary-permits` creates explicitly confirmed, idempotent permits and lists permit/usage
 state. These are development/operator APIs, not a redesigned analytics dashboard.
+
+Authenticated narrative-state read and audit APIs expose state hashes, lineage, patches and validation decisions but
+never grant callers the ability to mark embedding output authoritative. State initialization and human confirmation
+reject the development-auth bypass so actor provenance cannot be fabricated.
 
 ## Deployment evidence
 
@@ -370,21 +490,26 @@ Docker Desktop 29.5.3 was used for an offline production-like smoke with develop
   warning, and pgvector reported 0.8.6;
 - no Provider key was supplied and no live Provider call was possible.
 
-The stack is shut down after the smoke without deleting volumes. This is local deployment evidence, not evidence
-for managed secrets, HTTPS, backups, external observability or a public production environment.
+The stack is shut down after the smoke without deleting volumes. This is local deployment evidence for the tagged
+`0027` checkpoint, not evidence that `0028` has run in that Compose stack, and not evidence for managed secrets,
+HTTPS, backups, external observability or a public production environment.
 
 ## Current release posture
 
 The Phase III checkpoint is not ready for production despite offline, PostgreSQL and Docker gates passing. Remaining
 blockers include:
 
-1. deploy and calibrate concrete character detection/tracking/face/appearance inference and a trusted uncertain-
-   evidence review path;
+1. deploy and calibrate concrete character detection/tracking/face/appearance inference and a trusted
+   `VLM_REVIEWER` state-observation path; keep absent/untrusted provenance fail-closed to human review;
 2. execute separately authorized Provider canaries and collect real billing/credit evidence;
 3. keep the single paid video canary at **NOT EXECUTED** until a precise bounded permit is intentionally created;
 4. complete email verification, MFA/invitations/device sessions, production HTTPS/secrets, backup/restore,
    monitoring/alerts and operations policy;
 5. implement purchases/grant lifecycle/expiry/admin adjustments before claiming a complete commercial wallet.
+
+No further Provider integration is required for the persistent-state milestone. The remaining visual blocker is a
+trusted, calibrated implementation behind the existing reviewer contract, not permission to treat Voyage embeddings
+or another retrieval provider as state authority.
 
 Credential values remain outside the repository. The operator explicitly decided that the current Provider keys
 do not require rotation. This decision removes rotation as a blocking action but does not authorize committing,

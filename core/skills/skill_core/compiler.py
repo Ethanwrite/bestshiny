@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -47,11 +48,45 @@ class PromptCompilerService:
             user_prompt = shot.user_prompt or shot.prompt
             approved_action = self._normalize_approved_action(user_prompt)
             state_json = state.state_json if state else {}
-            identity_lines = [
-                f"Character identity {binding['identity_version_id']} must remain unchanged; "
-                f"canonical assets: {', '.join(binding.get('canonical_assets', []))}."
-                for binding in character_bindings
-            ]
+            identity_lines: list[str] = []
+            for binding in character_bindings:
+                identity_lines.append(
+                    f"Character identity {binding['identity_version_id']} must remain unchanged; "
+                    f"canonical assets: {', '.join(binding.get('canonical_assets', []))}."
+                )
+                if binding.get("narrative_state_version_id"):
+                    current_state = binding.get("narrative_state", {})
+                    proposed_state = binding.get("proposed_narrative_state")
+                    identity_lines.append(
+                        "Persistent narrative state "
+                        f"{binding['narrative_state_version_id']} "
+                        f"(hash={binding.get('narrative_state_hash')}): "
+                        + json.dumps(
+                            current_state,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "."
+                    )
+                    if proposed_state is not None:
+                        identity_lines.append(
+                            "Approved mutable narrative-state target for this shot "
+                            f"(hash={binding.get('proposed_narrative_state_hash')}; "
+                            f"changed_paths={binding.get('proposed_state_changed_paths', [])}): "
+                            + json.dumps(
+                                proposed_state,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + ". Render this target exactly; it remains proposed until visual QA and commit."
+                        )
+                    else:
+                        identity_lines.append(
+                            "No state delta is approved for this character; preserve the persistent "
+                            "narrative state and every active continuity constraint exactly."
+                        )
             scene_line = (
                 f"Scene references: {', '.join(scene_bindings)}."
                 if scene_bindings
@@ -88,7 +123,7 @@ class PromptCompilerService:
                     "director": "v2",
                     "cinematography": "v2",
                     "continuity": "v2",
-                    "prompt-compiler": "v2",
+                    "prompt-compiler": "v4-character-state-target",
                 },
                 diff_json={
                     "changes": (

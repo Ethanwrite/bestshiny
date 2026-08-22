@@ -1,8 +1,93 @@
 # AI Director Platform — 开发交接文档
 
-快照日期：2026-08-21（文件名保留初始交接日期）
+快照日期：2026-08-22（文件名保留初始交接日期）
 仓库：`ai-director-platform`
-当前结论：**Phase III Production Evidence Core 已完成离线、PostgreSQL 与 Docker 门禁并形成可恢复检查点，但没有真实 Provider/生产视觉 QA/账单证据，因此不可发布或开启商用 live。**
+当前结论：**Phase III tag 保留了离线、PostgreSQL 与 Docker 证据；当前开发检查点又完成了 Persistent Narrative Character State 的代码、数据库和离线回归闭环。没有真实 Provider/生产视觉 QA/账单证据，因此仍不可发布或开启商用 live。**
+
+## 2026-08-22 Persistent Narrative Character State 交接（优先于后文所有历史段落）
+
+### 本轮范围与结论
+
+- 当前工作树实测 `446 passed, 61 warnings in 89.79s`；Ruff format/check、Mypy
+  122 source files 和 `git diff --check` 全绿。专项 SQLite schema/migration 回归以及新临时
+  PostgreSQL 17 的 `0028` trigger 正/反例通过。
+- 按产品决策，本轮**没有继续堆 Provider**，而是补齐平台自有的
+  `Persistent State -> Proposed Delta -> Policy -> Generate -> Visual Evidence -> Commit -> Future Propagation`
+  闭环。
+- 已将 `Canonical Identity` 与 `Mutable Narrative State` 硬隔离。脸、身体比例、canonical hair、
+  canonical outfit 设计/颜色和锁定 identity version 不能由普通镜头 delta 修改；伤口、血迹、
+  衣物破损/污渍/湿润、道具状态/位置、站位、时间、灯光和情绪可随叙事修改。
+- 普通镜头不直接改写 Character 或旧状态。候选只提交显式 `ADD / REPLACE / REMOVE`
+  路径操作；服务端校验 from 前置值、身份路径、continuity constraints、当前 branch head、
+  identity fingerprint 与 input/planned-output Timeline hash，然后持久为 RFC 6902-style JSON Patch。
+- proposed target 在生成前进入 character binding、Video Shot Prompt 和 required state paths，但仍标记为
+  proposed；在候选通过 QA 并被采用前，数据库 head 不前移。
+- proposal 只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于
+  Candidate/Generation Job 分配事务内写入。proposal-set hash 同时绑定 Candidate 与
+  Generation Job request，validate/commit 均重算并复核；生成后新增/替换 delta 必须重建候选。
+- 已实现 `MUST_EQUAL`、`MUST_EXIST`、`LOCK_UNTIL_SCENE` 规则。例如“信号弹到场景 14 之前
+  必须未点燃”会在场景 13 阻断点燃 delta。重复 constraint ID 被拒绝；整个可变对象替换
+  会先展开为 base→target 变化的叶子路径，不能借此绕过可视证据。
+- 状态 JSON 从入口到 target 都有资源上限：256 KiB、5,000 节点、12 层深度、
+  200 条 continuity constraints，超限 fail closed。
+- 已实现 append-only Version/Delta/Validation/Commit 与每个 timeline scope 的 CAS Head。历史版本、来源
+  shot/candidate、base/target hash、policy/visual/human evidence 和 commit hash 全部保留。
+- 正式持久顺序是 `Delta -> POLICY/VISUAL/optional HUMAN_OVERRIDE Validations -> Version -> Commit ->
+  CAS Head -> Timeline output ref/snapshot -> future-shot propagation`。Delta 随 candidate admission 持久，视觉验证在输出
+  evaluation 后追加；Version/Commit/Head/Timeline/传播与 candidate adoption 在同一数据库事务中完成。
+- 已把 committed state ref 写入 `TimelineState.state_json.character_state_refs`，并让
+  `AuthoritativeTimelineStateEngine` 把它传播给下一镜。未变更角色也必须在 commit 时重新核对当前
+  scope head，防止过期 context 被夹带。
+- 显式 `TimelineTransition.branch_key` 可从 input TimelineState 选定的不可变状态版本创建
+  独立 scope v1/head，保留选定版本/hash 作为祖先 fence，且不推进 main head。新分支
+  不会默默夹带未在该 scope 建立的 main/历史角色引用。
+
+### 数据库与 API
+
+- 单一 Alembic head 现为 `0028_persistent_character_state`。新表：
+  `character_state_versions`、`character_state_deltas`、`character_state_validations`、
+  `character_state_commits`、`character_state_heads`。
+- SQLite/PostgreSQL 迁移路径都定义了项目/角色/identity/candidate/timeline 所有权、身份路径隔离、
+  append-only 历史、验证证据与 commit/head fence 触发器。Head 是唯一可变投影，且只能每次
+  `lock_version + 1`。
+- `POST /v1/characters/{character_id}/narrative-state/initialize`：仅接受已采用候选与真实登录用户
+  的显式确认，建立 v1。它更新 authoritative output TimelineState 的有类型状态引用并传播，
+  不为该已采用候选额外写第二个无类型 `ShotStateSnapshot`。
+- `POST /v1/shots/{shot_id}/generate`：可携带每角色一个 `state_deltas`，必须引用当前状态版本；
+  development auth bypass 不得写入人工状态来源。
+- `GET /v1/projects/{project_id}/characters/{character_id}/narrative-state`：返回 identity 与当前 scoped state
+  head；`GET /v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions` 返回 delta、验证和 commit 审计。
+
+### Voyage / VLM 权限边界
+
+- `voyage-multimodal-3.5` 只能作为 `ADVISORY` 多模态 embedding，用于 retrieval hint、supporting
+  similarity 和 evidence-frame ranking。类型系统明确拒绝将它用于 identity verdict、state fact
+  assertion、delta approval 或 commit authorization。
+- 自动 state `FACT_OBSERVATION` 必须来自同项目且成功的 `VLM_REVIEWER` ModelExecutionRecord，其
+  metadata 必须是 `evidence_purpose=CHARACTER_STATE_FACT_OBSERVATION` 并绑定当前 candidate
+  `output_asset_id`。Voyage provider 即使被调用方重新标签也不能通过这个门禁。
+- 缺失/无法核验 provenance、素材不匹配、ADVISORY 或低置信证据全部 fail closed 到
+  `USER_REVIEW_REQUIRED`；高置信证据与 target 矛盾则 `REJECT`。人工复核需要真实登录用户、
+  显式确认和理由，不是自动证据的伪装。
+
+### 离线证据与不声称的事
+
+- 米拉 fixture 建立镜头 12 的 committed v1，在镜头 13 以 delta 把伤口血迹从 fresh 改为
+  dried、信号弹从 hand 移到 waist、位置移到 tunnel edge，保留破损左袖、未点燃信号弹和
+  冷蓝灰黄昏灯光；通过后产生 v2 并传播给镜头 14。
+- 回归同时覆盖不可变 hair 路径、场景 14 前提前点燃、Voyage 降级人工、高置信视觉错配拒绝、
+  stale base/head 与 Timeline hash fence、proposal 冻结及 Candidate/Job hash 绑定、显式分支 v1/head。
+- 这些是离线 SQL/服务/事务证据。具体生产 VLM Reviewer、视觉精度校准、真实用户视频与
+  Provider canary 仍未部署/执行；无可信证据时系统应继续转人工，不得降低门禁。
+
+### 接手后的下一顺序
+
+1. 先保持当前 character-state schema/service/pipeline/API 和 Mira 回归不回归。
+2. 保留已通过的临时 SQLite/PostgreSQL 17 `0028` schema/trigger 门禁，后续修改迁移时必须复跑；
+   部署前另做含真实历史数据的 production-like Compose populated upgrade/rollback 演练。不要盲目升级已知混合
+   `data/platform.db`。
+3. 将具体、可校准的 VLM Reviewer 接到已有 `FACT_OBSERVATION` 合同；在此之前保持人工复核。
+4. 不要用增加 Provider 或将 Voyage 改成“裁判器”来替代上述工作。
 
 ## 2026-08-21 Phase III 当前交接（优先于下文所有 Phase II 历史段落）
 
@@ -313,7 +398,7 @@ Ruff format 当前报告的 4 个文件：
 | `claude-sonnet-5-openrouter` | OpenRouter | enabled，live disabled；无真实调用证据 |
 | `doubao-free-reasoner` | Ark/Seedance adapter | 默认是占位 ID 且 disabled；需显式运行时配置 |
 | `runapi-prompt-refiner-edge` | RunAPI | 默认是占位 ID 且 disabled |
-| `voyage-multimodal-3.5-openrouter` | OpenRouter | 逻辑定义存在；实际记忆路径仍是 Voyage 官方直连客户端 |
+| `voyage-multimodal-3.5-openrouter` | OpenRouter | 逻辑定义存在；Phase II 时 Memory 曾直连 Voyage，当前已收口为 `ModelRoleRuntime -> MULTIMODAL_EMBEDDING` 且只有 `ADVISORY` 权限 |
 | `kling-3-standard-openrouter` | OpenRouter | 有 reviewed capability/pricing alias，Mock 通路已测 |
 | `kling-3-pro-openrouter` | OpenRouter | 有 reviewed capability/pricing alias，Mock 通路已测 |
 | `flow-veo-3.1-internal` | Google Flow | 浏览器 Worker 路径，未配置时语义仍有不一致 |
@@ -566,7 +651,7 @@ Autopilot 在准备前后比对服务端 `AuthoritativeTimelineFence`（Shot sta
 
 ### 6.6 OpenRouter 映射
 
-已建立 GPT/Claude/Kling/Voyage 逻辑定义，Kling std/pro 有评审过的能力/价格 alias。`ModelRoleRuntime` 可执行 chat/embedding/refine primitive，但产品只真正使用了角色列表和 Passenger resolve；导演/副导演/摄影/提示词工作流没有调用这些 execution methods。Memory 仍直连 Voyage client，不走 OpenRouter embedding role。
+已建立 GPT/Claude/Kling/Voyage 逻辑定义，Kling std/pro 有评审过的能力/价格 alias。本段保留的 Phase II 事实是：当时 `ModelRoleRuntime` 可执行 chat/embedding/refine primitive，但 Memory 仍直连 Voyage。该记忆路径已在 Phase III 收口到 `ModelRoleRuntime -> MULTIMODAL_EMBEDDING`；当前权限边界以文档顶部 2026-08-22 部分为准。
 
 ### 6.7 Google Flow 账号池
 
@@ -690,7 +775,7 @@ workspace + plan
 2. **ModelRole 执行未进入产品。** `execute_chat/execute_embeddings/refine_prompt` 只有测试调用；Free Doubao 不得宣称已用于导演、编剧或提示词流程。
 3. **configured 语义不一致。** 原始 Seedance resolver 会在无 Adapter 配置时返回 Free binding；Flow 的 `capability_configured` 与 Gateway `configured` 不同步，可能创建后必然失败的 job。
 4. **Veo/Grok 官方 Provider 不完整。** 当前只有 stub，不得在 UI/API 宣称可用。
-5. **OpenRouter/Voyage 策略未完整。** Memory 还是 Voyage 官方直连；OpenRouter 无 live model listing/schema smoke。Voyage 只能做跨模态检索/排序，不能当人脸身份验证系统。
+5. **OpenRouter/Voyage 策略（Phase II 历史阻断）。** “Memory 直连 Voyage”已在 Phase III 解决；OpenRouter 仍无 live model listing/schema smoke。Voyage 只能做 `ADVISORY` 跨模态检索/排序，不能当人脸 identity 或叙事状态事实的裁判系统。
 6. **Wan 模式 ID 未收口。** I2V/R2V env IDs 没有完整进入 role/pricing/router；request model 优先语义可能让 I2V/R2V 误用 T2V ID。
    另外，用户提供的 Alibaba workspace-specific API host 目前作为非密钥默认值出现在配置辅助代码中。它必须被当成环境配置，而不是全局官方端点事实，部署前要独立验证/替换。
 7. **Flow project affinity/migration 不完整。** submit/poll 已复用同一持久 project context，但仍需首次项目自动绑定固定账号/Provider Project、限制性迁移与完整审计。当前还没有强制每个本地项目/provider 只能有一个 READY binding，也未阻止同一远端 project 被多个本地项目复用；provider job ID 冲突时的 poll 定位也需更强的组合标识。
@@ -739,8 +824,13 @@ workspace + plan
 | `0022_free_plan_provider_budget` | `plan_tier` + Provider budget | RunAPI 10 USD 预算 + `UNCERTAIN` 内部对账；真实账单自动对接待完成 |
 | `0023_workspace_credit_wallet` | starter credits + legacy workspace charge | SQLite fresh/historical recovery 已修复 |
 | `0024_workspace_credit_lifecycle` | reserve/settle/refund/reconcile + append-only events | SQLite populated round trip 已验证；真实 PostgreSQL 待验证 |
+| `0025_flow_project_affinity` | Flow sticky account/project、唯一所有权与迁移计划 | Phase III tag 已通过 SQLite/PostgreSQL/Docker 检查 |
+| `0026_model_capability_registry` | 持久单一 ModelCapabilityProfile | Phase III tag 已通过 SQLite/PostgreSQL/Docker 检查 |
+| `0027_production_evidence_core` | model/billing/outcome/timeline/live-canary/auth/storage 证据 | Phase III tag 与 Docker smoke 的历史 head |
+| `0028_persistent_character_state` | version/delta/validation/commit/CAS head 与 identity/state 数据库边界 | 当前代码 head；SQLite 专项回归与临时 PostgreSQL 17 trigger 正/反例通过，不代表 Compose/生产库已升级 |
 
-新迁移不得继续编号，直到 `0023` 的语义、回填、降级与历史 snapshot 契约被修复并验证。
+“在 `0023` 修复前不得续号”是 2026-08-20 的历史阻断，已被后续修复和 `0024`–`0028`
+取代。下一个迁移只能在 `0028` 单 head 上协调续号，且不得用 ORM `create_all` 代替迁移。
 
 ### 8.1 本地开发库的特别风险
 
@@ -976,11 +1066,15 @@ Compose 定义 Web、API、Worker、PostgreSQL/pgvector、MinIO 和 bucket init�
 - `services/generation-gateway/generation_gateway/providers.py`
 - `services/production-engine/production_engine/runtime.py`
 - `core/production/director_production/pipeline.py`
+- `core/character/character_core/state.py`
+- `core/evaluation/evaluation_core/evaluator.py`
+- `core/qa/qa_core/pipeline.py`
+- `core/memory/memory_core/`
 - `core/model-registry/model_registry_core/`
 - `config/model-registry/defaults.json`
 - `config/video-models/*.json`
 - `apps/web/app.js`
-- `migrations/versions/0021_*` 至 `0024_*`
+- `migrations/versions/0021_*` 至 `0028_*`
 
 建议单一负责人先修迁移/Admission/credits，其他 Provider 或 UI 工作在独立文件范围进行。新迁移号必须先协调，不要并发占用同一 revision。
 

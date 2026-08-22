@@ -19,6 +19,9 @@ from sqlalchemy.orm import Session
 
 from .embedding import EmbeddingProvider, MemoryEmbeddingUnavailable
 from .schemas import (
+    ADVISORY_EVIDENCE_PURPOSES,
+    AuthorityLevel,
+    EvidencePurpose,
     MemoryLayer,
     MemoryQuery,
     MultimodalContent,
@@ -99,6 +102,11 @@ class MultimodalMemoryEngine:
             # Revalidate after the external embedding call so deleted or reassigned
             # associations cannot be persisted through the JSON version references.
             self._validate_project_links(session, value)
+            metadata = dict(value.metadata)
+            # These keys are server-owned policy facts. Caller metadata cannot
+            # relabel an advisory similarity vector as decision authority.
+            metadata["evidence_purpose"] = provenance.evidence_purpose.value
+            metadata["authority_level"] = provenance.authority_level.value
             memory = ShotMemory(
                 project_id=value.project_id,
                 layer=value.layer.value,
@@ -116,7 +124,7 @@ class MultimodalMemoryEngine:
                 embedding_dimension=len(vector),
                 embedding_provider=provenance.provider,
                 embedding_model=provenance.model,
-                metadata_json=value.metadata,
+                metadata_json=metadata,
             )
             session.add(memory)
             session.flush()
@@ -131,6 +139,8 @@ class MultimodalMemoryEngine:
                     text=query.text,
                     image_urls=query.image_urls,
                     video_urls=query.video_urls,
+                    evidence_purpose=query.evidence_purpose,
+                    authority_level=query.authority_level,
                 ),
                 input_type="query",
                 project_id=query.project_id,
@@ -169,6 +179,27 @@ class MultimodalMemoryEngine:
         now = datetime.now(UTC)
         ranked: list[RetrievedMemory] = []
         for item in candidates:
+            metadata = dict(item.metadata_json or {})
+            try:
+                evidence_purpose = EvidencePurpose(
+                    metadata.get("evidence_purpose", EvidencePurpose.RETRIEVAL_HINT.value)
+                )
+                authority_level = AuthorityLevel(
+                    metadata.get("authority_level", AuthorityLevel.ADVISORY.value)
+                )
+            except (TypeError, ValueError):
+                # Unknown policy labels are not legacy defaults; they are an
+                # untrusted attempt to cross the evidence boundary.
+                continue
+            if (
+                evidence_purpose not in ADVISORY_EVIDENCE_PURPOSES
+                or authority_level is not AuthorityLevel.ADVISORY
+            ):
+                # Fail closed for legacy/directly-inserted rows that claim a
+                # forbidden purpose or authority. They are not retrieval evidence.
+                continue
+            metadata["evidence_purpose"] = evidence_purpose.value
+            metadata["authority_level"] = AuthorityLevel.ADVISORY.value
             similarity = max(0.0, cosine_similarity(query_vector, list(item.embedding or [])))
             entity_match = (
                 len(set(query.entity_ids).intersection(item.entity_ids)) / len(set(query.entity_ids))
@@ -215,7 +246,9 @@ class MultimodalMemoryEngine:
                     canonical=item.canonical,
                     score=round(score, 6),
                     score_components={key: round(value, 6) for key, value in components.items()},
-                    metadata=item.metadata_json,
+                    metadata=metadata,
+                    evidence_purpose=evidence_purpose,
+                    authority_level=AuthorityLevel.ADVISORY,
                 )
             )
         ranked.sort(key=lambda item: (-item.score, item.layer.value, item.id))
@@ -235,13 +268,36 @@ class MultimodalMemoryEngine:
                 )
             )
 
-    def current_state(self, project_id: str, *, scene_id: str | None = None) -> RetrievedMemory | None:
+    def retrieval_hint(
+        self,
+        project_id: str,
+        *,
+        scene_id: str | None = None,
+    ) -> RetrievedMemory | None:
+        """Return an advisory temporal-memory hint, never authoritative state.
+
+        The result is similarity-ranked historical context. Authoritative shot
+        generation and state propagation must continue to read TimelineState or
+        another committed state-version store.
+        """
+
         query = MemoryQuery(
             project_id=project_id,
-            text="current temporal production state",
+            text="advisory temporal production retrieval hint",
             scene_id=scene_id,
             layers=[MemoryLayer.TEMPORAL],
             top_k=1,
+            evidence_purpose=EvidencePurpose.RETRIEVAL_HINT,
+            authority_level=AuthorityLevel.ADVISORY,
         )
         values = self.search(query)
         return values[0] if values else None
+
+    def current_state(self, project_id: str, *, scene_id: str | None = None) -> RetrievedMemory | None:
+        """Compatibility alias for :meth:`retrieval_hint`.
+
+        Despite the legacy name, this method has never returned authoritative
+        narrative state. The returned object is explicitly marked ADVISORY.
+        """
+
+        return self.retrieval_hint(project_id, scene_id=scene_id)

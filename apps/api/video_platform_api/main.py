@@ -6,9 +6,13 @@ import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from asset_registry_core import VersionMediaInput
+from character_core import (
+    CharacterStateConflict,
+    CharacterStatePolicyViolation,
+)
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
 from entitlement_core import (
@@ -156,14 +160,59 @@ class CharacterConfirm(BaseModel):
     costume_signature: str = ""
 
 
+class CharacterStatePatchOperation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["ADD", "REPLACE", "REMOVE"]
+    path: str = Field(min_length=1, max_length=320)
+    from_value: Any | None = Field(default=None, alias="from")
+    to: Any | None = None
+
+    def as_patch_operation(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"op": self.op, "path": self.path}
+        if "from_value" in self.model_fields_set:
+            payload["from"] = self.from_value
+        if "to" in self.model_fields_set:
+            payload["to"] = self.to
+        return payload
+
+
+class CandidateCharacterStateDelta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    character_id: str = Field(min_length=1, max_length=36)
+    base_state_version_id: str = Field(min_length=1, max_length=36)
+    operations: list[CharacterStatePatchOperation] = Field(min_length=1, max_length=100)
+
+    def as_service_delta(self) -> dict[str, object]:
+        return {
+            "character_id": self.character_id,
+            "base_state_version_id": self.base_state_version_id,
+            "patch": {"operations": [item.as_patch_operation() for item in self.operations]},
+        }
+
+
+class CharacterStateInitialize(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    shot_id: str = Field(min_length=1, max_length=36)
+    candidate_id: str = Field(min_length=1, max_length=36)
+    timeline_scope_key: str = Field(default="main", min_length=1, max_length=120)
+    narrative_state: dict[str, Any]
+    reason: str = Field(min_length=1, max_length=2000)
+    explicit_confirmation: Literal[True]
+
+
 class CandidateGenerate(BaseModel):
     idempotency_key: str = Field(min_length=3, max_length=250)
     fallback_providers: list[str] = Field(
         default_factory=lambda: ["google_flow", "seedance", "veo_official", "kling", "grok"]
     )
-    character_ids: list[str] = Field(default_factory=list)
-    reference_asset_ids: list[str] = Field(default_factory=list)
+    character_ids: list[str] = Field(default_factory=list, max_length=20)
+    reference_asset_ids: list[str] = Field(default_factory=list, max_length=100)
     estimated_cost: float = Field(default=0.0, ge=0)
+    state_deltas: list[CandidateCharacterStateDelta] = Field(default_factory=list, max_length=20)
 
 
 class CandidateValidate(BaseModel):
@@ -645,6 +694,8 @@ def create_app(container: Container | None = None) -> FastAPI:
             scene = session.get(Scene, shot.scene_id)
             episode = session.get(Episode, scene.episode_id)
             auth.require_project(principal, episode.project_id, write=True)
+            project_id = episode.project_id
+            input_state_id = shot.input_state_id
             if body.character_ids:
                 owned_character_ids = set(
                     session.scalars(
@@ -656,8 +707,22 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
                 if owned_character_ids != set(body.character_ids):
                     raise HTTPException(404, "character not found in shot project")
+            delta_character_ids = [item.character_id for item in body.state_deltas]
+            if len(delta_character_ids) != len(set(delta_character_ids)):
+                raise HTTPException(422, "each character may have only one state delta")
+            if not set(delta_character_ids).issubset(set(body.character_ids)):
+                raise HTTPException(422, "state delta characters must be included in character_ids")
+            if delta_character_ids and principal.development_bypass:
+                raise HTTPException(403, "角色状态变更需要真实登录用户确认来源")
         try:
-            bindings = [container.characters.binding(character_id) for character_id in body.character_ids]
+            bindings = [
+                container.characters.binding(
+                    character_id,
+                    project_id=project_id,
+                    timeline_state_id=input_state_id,
+                )
+                for character_id in body.character_ids
+            ]
             candidate, replayed = container.candidates.create_candidate(
                 shot_id,
                 idempotency_key=body.idempotency_key,
@@ -666,6 +731,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                 reference_asset_ids=body.reference_asset_ids,
                 estimated_cost=body.estimated_cost,
                 enforce_entitlements=not principal.development_bypass,
+                state_deltas=[item.as_service_delta() for item in body.state_deltas],
+                proposed_by_user_id=(None if principal.development_bypass else principal.user_id),
+                state_delta_source="HUMAN",
             )
             return {**_candidate_view(candidate), "replayed": replayed}
         except LookupError as exc:
@@ -675,6 +743,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (CharacterStateConflict, CharacterStatePolicyViolation, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @app.get("/v1/shots/{shot_id}/candidates")
@@ -968,6 +1038,105 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/v1/characters/{character_id}/narrative-state/initialize", status_code=201)
+    def initialize_character_narrative_state(
+        character_id: str,
+        body: CharacterStateInitialize,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        if principal.development_bypass:
+            raise HTTPException(403, "角色状态初始化需要真实登录用户确认")
+        auth.require_project(principal, body.project_id, write=True)
+        with container.database.session() as session:
+            character = session.get(Character, character_id)
+            if character is None or character.project_id != body.project_id:
+                raise HTTPException(404, "character not found in project")
+        try:
+            version = container.character_states.initialize_from_committed_candidate(
+                project_id=body.project_id,
+                character_id=character_id,
+                shot_id=body.shot_id,
+                candidate_id=body.candidate_id,
+                narrative_state=body.narrative_state,
+                timeline_scope_key=body.timeline_scope_key,
+                committed_by_user_id=principal.user_id,
+                reason=body.reason,
+            )
+            return {
+                "id": version.id,
+                "character_id": version.character_id,
+                "timeline_scope_key": version.timeline_scope_key,
+                "version": version.version,
+                "previous_state_version_id": version.previous_state_version_id,
+                "identity_version_id": version.identity_version_id,
+                "source_shot_id": version.source_shot_id,
+                "source_candidate_id": version.source_candidate_id,
+                "state_hash": version.state_hash,
+                "narrative_state": version.narrative_state_json,
+            }
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (CharacterStateConflict, CharacterStatePolicyViolation, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/v1/projects/{project_id}/characters/{character_id}/narrative-state")
+    def current_character_narrative_state(
+        project_id: str,
+        character_id: str,
+        timeline_scope_key: str = "main",
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
+        try:
+            version = container.character_states.current(
+                project_id,
+                character_id,
+                timeline_scope_key=timeline_scope_key,
+            )
+            if version is None:
+                raise HTTPException(404, "character narrative state is not initialized")
+            binding = container.characters.binding(
+                character_id,
+                project_id=project_id,
+                timeline_scope_key=timeline_scope_key,
+            )
+            return {
+                "character_id": character_id,
+                "identity": {
+                    "identity_version_id": binding["identity_version_id"],
+                    "identity_version": binding["version"],
+                    "hair_signature": binding["hair_signature"],
+                    "costume_signature": binding["costume_signature"],
+                    "canonical_assets": binding["canonical_assets"],
+                },
+                "narrative_state": {
+                    "id": version.id,
+                    "version": version.version,
+                    "previous_state_version_id": version.previous_state_version_id,
+                    "timeline_scope_key": version.timeline_scope_key,
+                    "state_hash": version.state_hash,
+                    "source_shot_id": version.source_shot_id,
+                    "source_candidate_id": version.source_candidate_id,
+                    "value": version.narrative_state_json,
+                },
+            }
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions")
+    def list_candidate_state_transitions(
+        shot_id: str,
+        candidate_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None or candidate.shot_id != shot_id:
+                raise HTTPException(404, "candidate not found for shot")
+            shot = session.get(Shot, shot_id)
+            auth.require_project(principal, shot.scene.episode.project_id)
+        return container.character_states.transition_view(candidate_id)
 
     @app.post("/v1/prompts/refine")
     async def refine_prompt(

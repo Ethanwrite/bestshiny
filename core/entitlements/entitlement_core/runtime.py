@@ -477,6 +477,14 @@ class ModelRoleRuntime:
                     "reported_actual_cost_ignored": (
                         reported_actual_cost is not None and self.provider_mode is not ProviderMode.LIVE
                     ),
+                    **(
+                        {
+                            "evidence_purpose": (parameters or {}).get("evidence_purpose"),
+                            "evidence_asset_id": (parameters or {}).get("evidence_asset_id"),
+                        }
+                        if selected.role is ModelRole.VLM_REVIEWER
+                        else {}
+                    ),
                 },
             )
             record = DecisionRecord(

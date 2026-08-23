@@ -36,7 +36,7 @@ def test_adapters_generate_distinct_provider_payloads():
     value = AdapterInput(shot=SHOT, context=CONTEXT)
     kling = registry.get("kling").compile("kling-3.0", value)
     veo = registry.get("veo").compile("veo-3.1-quality", value)
-    seedance = registry.get("seedance").compile("seedance-2.5", value)
+    seedance = registry.get("seedance").compile("doubao-seedance-2-5-260628", value)
     assert kling.payload["tail_image_url"] == "frame-02"
     assert veo.payload["last_frame"] == "frame-02"
     assert seedance.payload["first_frame_image"] == "frame-01"

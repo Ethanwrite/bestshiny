@@ -1,40 +1,54 @@
 ---
 name: cinematography
-description: Design production-ready framing, lens behavior, subject placement, eyelines, lighting, and camera movement for an approved image or video shot without changing its story action. Use when a scene or shot needs photographic language, visual blocking, lens/perspective decisions, or a cinematography quality check.
+description: Design production-ready framing, lens behaviour, subject placement, eyelines, lighting and camera movement for one approved shot without changing its story action. Use when a scene or shot needs photographic language, visual blocking, lens and perspective decisions, or a cinematography quality check before prompt compilation.
+metadata:
+  category: cinematography
 ---
 
 # Cinematography
 
-Preserve approved story actions. Treat character, product, environment, prop, wardrobe, and continuity assets as
-invariants; cinematography is the variable layer.
+## Position in the pipeline
+
+After the action is approved and decomposed, before the specification is compiled. Story facts arrive fixed;
+the photographic treatment of them is the variable this stage owns.
+
+Character, product, environment, prop, wardrobe and continuity bindings are invariants here. Cinematography
+changes how an approved moment is seen, never what happens in it.
 
 ## Build the shot
 
-1. State the subject and approved dominant action.
-2. State the context: location, time, weather, atmosphere, and continuity state.
-3. Choose shot size, camera angle, camera height, subject screen position, and explicit gaze target.
-4. Choose lens behavior from the visual goal: spatial exaggeration, natural perspective, compression, macro
-   detail, or facial-proportion preservation. Never assign a focal length from genre alone.
-5. Choose exactly one dominant camera movement for video. Specify its start, path, speed, and end.
-6. State motivated lighting direction, softness, contrast, color temperature, and subject-background separation.
-7. State depth of field, focus target or focus transition, palette, and texture only when they materially support
-   the approved intent.
+Order matters. Deciding light before framing, or framing before knowing the action, produces decisions that
+have to be undone.
 
-Use a stable build order: subject, context, lens/framing, camera, atmosphere, mood/color, then output constraints.
-This prevents prestige adjectives from replacing actual visual decisions.
+1. **Subject and approved action.** State `dominant_action` as given. If it contains two actions, stop: that is
+   a decomposition problem, not a coverage problem.
+2. **Context.** Location, time, weather, atmosphere, inherited continuity state.
+3. **Framing.** Shot size, camera angle, camera height, each subject's screen position, and an explicit gaze
+   target for every subject.
+4. **Lens behaviour from intent.** Spatial exaggeration, natural perspective, compression, macro detail or
+   facial-proportion preservation. Derive it from what the frame must communicate - never assign a focal length
+   because a genre is associated with one.
+5. **One camera movement.** For video, exactly one dominant move, with its start, path, speed and end.
+6. **Motivated light.** Direction, softness, contrast, colour temperature, subject-background separation, and
+   the source in the scene that justifies them.
+7. **Selective refinement.** Depth of field, focus transitions, palette and texture only where they materially
+   serve the approved intent.
 
 ## Validate
 
-- Keep the camera move physically possible and compatible with the framing and lens behavior.
-- Keep screen direction, eyelines, and the established camera axis coherent across connected shots.
-- Keep every subject's gaze on a named person, object, or off-screen location; never default to the lens.
-- Keep one visible action and one dominant camera movement per generation shot.
-- Preserve product shape, label, logo, material response, and readable hierarchy in commercial shots.
-- Prefer concrete blocking, light, distance, and material language over `cinematic`, camera brands, or resolution
-  slogans.
+- The move must be physically possible and compatible with the chosen framing and lens behaviour. A push-in that
+  the stated lens cannot produce is a contradiction the renderer will resolve arbitrarily.
+- Screen direction, eyelines and the established axis stay coherent with connected shots.
+- Every gaze lands on a named person, object or off-screen location. Defaulting to the lens is a decision nobody
+  made.
+- One visible action, one dominant camera movement.
+- In commercial work, product shape, label, logo, material response and readable hierarchy survive the treatment.
+- Concrete blocking, distance, light and material language only. `cinematic`, camera brands and resolution
+  slogans occupy space without constraining anything.
 
 ## Output
 
-Return framing, angle, height, subject positions, gaze targets, lens behavior, focus behavior, camera movement,
-lighting, start composition, end composition, continuity checks, and any unresolved constraint. Do not emit a
-provider-specific API payload.
+Return framing, angle, height, subject positions, gaze targets, lens behaviour, focus behaviour, camera movement,
+lighting, start composition, end composition, continuity checks and any unresolved constraint. Never emit a
+provider-specific payload - protocol mapping belongs to the adapter, and a payload written here would encode a
+model choice this stage does not make.

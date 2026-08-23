@@ -11,6 +11,9 @@ class ModelRole(StrEnum):
     DIRECTOR = "DIRECTOR"
     ASSISTANT_DIRECTOR = "ASSISTANT_DIRECTOR"
     CINEMATOGRAPHY_REASONING = "CINEMATOGRAPHY_REASONING"
+    CAMERA_MOVEMENT = "CAMERA_MOVEMENT"
+    CAMERA_OPERATOR = "CAMERA_OPERATOR"
+    USER_QA = "USER_QA"
     PROMPT_COMPILER = "PROMPT_COMPILER"
     PROMPT_REFINER = "PROMPT_REFINER"
     PROMPT_REFINER_LOW_COST = "PROMPT_REFINER_LOW_COST"
@@ -20,6 +23,8 @@ class ModelRole(StrEnum):
     GENERATION_POLICY_REASONER = "GENERATION_POLICY_REASONER"
     VLM_REVIEWER = "VLM_REVIEWER"
     MULTIMODAL_EMBEDDING = "MULTIMODAL_EMBEDDING"
+    STYLE_SEMANTIC_EMBEDDING = "STYLE_SEMANTIC_EMBEDDING"
+    IMAGE_GENERATION = "IMAGE_GENERATION"
     VIDEO_KLING_STANDARD = "VIDEO_KLING_STANDARD"
     VIDEO_KLING_PRO = "VIDEO_KLING_PRO"
     VIDEO_FLOW = "VIDEO_FLOW"
@@ -38,6 +43,9 @@ ROLE_CAPABILITY: dict[ModelRole, str] = {
     ModelRole.DIRECTOR: "director_reasoning",
     ModelRole.ASSISTANT_DIRECTOR: "assistant_director",
     ModelRole.CINEMATOGRAPHY_REASONING: "cinematography_reasoning",
+    ModelRole.CAMERA_MOVEMENT: "camera_movement_reasoning",
+    ModelRole.CAMERA_OPERATOR: "camera_operation_reasoning",
+    ModelRole.USER_QA: "user_qa",
     ModelRole.PROMPT_COMPILER: "prompt_compilation",
     ModelRole.PROMPT_REFINER: "prompt_refinement",
     ModelRole.PROMPT_REFINER_LOW_COST: "prompt_refinement",
@@ -47,6 +55,8 @@ ROLE_CAPABILITY: dict[ModelRole, str] = {
     ModelRole.GENERATION_POLICY_REASONER: "generation_policy_reasoning",
     ModelRole.VLM_REVIEWER: "multimodal_review",
     ModelRole.MULTIMODAL_EMBEDDING: "multimodal_embedding",
+    ModelRole.STYLE_SEMANTIC_EMBEDDING: "style_semantic_embedding",
+    ModelRole.IMAGE_GENERATION: "image_generation",
     ModelRole.VIDEO_KLING_STANDARD: "video_generation",
     ModelRole.VIDEO_KLING_PRO: "video_generation",
     ModelRole.VIDEO_FLOW: "video_generation",

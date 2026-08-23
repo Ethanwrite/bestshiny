@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from memory_core import (
     AuthorityLevel,
     ContextAssembler,
     ContextBudget,
+    EpisodeScope,
     EvidencePurpose,
     MemoryLayer,
     MemoryQuery,
     MultimodalContent,
     ShotMemoryInput,
 )
-from production_domain.models import ShotMemory
+from production_domain.models import Episode, Scene, ShotMemory
 
 
 def test_memory_filters_entities_before_vector_ranking(container, project):
@@ -188,3 +191,180 @@ def test_search_rejects_persisted_embedding_that_claims_authority(container, pro
     )
 
     assert results == []
+
+
+# --- Episode-scoped retrieval -----------------------------------------------
+#
+# A 60-episode series is the case these guard. Episodic recall used to be
+# narrowed to the current *scene*, so the layer whose whole purpose is "what
+# happened before" could not see anything before the shot being planned.
+
+
+def _episode_with_scene(container, project_id: str, number: int) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        episode = Episode(project_id=project_id, title=f"Episode {number}", episode_number=number)
+        session.add(episode)
+        session.flush()
+        scene = Scene(episode_id=episode.id, sequence=1, description=f"scene of episode {number}")
+        session.add(scene)
+        session.flush()
+        return episode.id, scene.id
+
+
+def test_episodic_recall_is_no_longer_fenced_off_by_the_current_scene(container, project):
+    """L2 exists to recall earlier work; a scene fence made that impossible."""
+
+    _episode_one, scene_one = _episode_with_scene(container, project.id, 1)
+    _episode_two, scene_two = _episode_with_scene(container, project.id, 2)
+    earlier = container.memory.index(
+        ShotMemoryInput(
+            project_id=project.id,
+            layer=MemoryLayer.EPISODIC,
+            memory_type="SHOT_HISTORY",
+            content=MultimodalContent(text="Lin Jin promised to return the letter"),
+            entity_ids=["lin"],
+            scene_id=scene_one,
+        )
+    )
+
+    results = container.memory.search(
+        MemoryQuery(
+            project_id=project.id,
+            text="Lin Jin promised to return the letter",
+            entity_ids=["lin"],
+            scene_id=scene_two,
+            top_k=5,
+        )
+    )
+
+    assert earlier.id in [item.id for item in results]
+
+
+def test_temporal_state_is_still_fenced_to_the_current_scene(container, project):
+    """L1 is current state. Inheriting another scene's would be wrong."""
+
+    _episode_one, scene_one = _episode_with_scene(container, project.id, 3)
+    _episode_two, scene_two = _episode_with_scene(container, project.id, 4)
+    container.memory.index(
+        ShotMemoryInput(
+            project_id=project.id,
+            layer=MemoryLayer.TEMPORAL,
+            memory_type="SCENE_STATE",
+            content=MultimodalContent(text="Lin Jin is holding the letter"),
+            entity_ids=["lin"],
+            scene_id=scene_one,
+        )
+    )
+
+    results = container.memory.search(
+        MemoryQuery(
+            project_id=project.id,
+            text="Lin Jin is holding the letter",
+            entity_ids=["lin"],
+            scene_id=scene_two,
+            top_k=5,
+        )
+    )
+
+    assert results == []
+
+
+def test_episode_scope_confines_retrieval_to_the_current_episode(container, project):
+    episode_one, scene_one = _episode_with_scene(container, project.id, 5)
+    episode_two, scene_two = _episode_with_scene(container, project.id, 6)
+    for scene_id in (scene_one, scene_two):
+        container.memory.index(
+            ShotMemoryInput(
+                project_id=project.id,
+                layer=MemoryLayer.EPISODIC,
+                memory_type="SHOT_HISTORY",
+                content=MultimodalContent(text="the lantern-lit alley after rain"),
+                entity_ids=["lin"],
+                scene_id=scene_id,
+            )
+        )
+
+    scoped = container.memory.search(
+        MemoryQuery(
+            project_id=project.id,
+            text="the lantern-lit alley after rain",
+            entity_ids=["lin"],
+            episode_id=episode_two,
+            episode_scope=EpisodeScope.EPISODE,
+            top_k=10,
+        )
+    )
+
+    assert scoped, "episode scope must not empty the result set"
+    assert {item.episode_id for item in scoped} == {episode_two}
+    assert episode_one not in {item.episode_id for item in scoped}
+
+
+def test_series_scope_reaches_earlier_episodes_but_ranks_the_current_one_first(container, project):
+    episode_one, scene_one = _episode_with_scene(container, project.id, 7)
+    episode_two, scene_two = _episode_with_scene(container, project.id, 8)
+    for scene_id in (scene_one, scene_two):
+        container.memory.index(
+            ShotMemoryInput(
+                project_id=project.id,
+                layer=MemoryLayer.EPISODIC,
+                memory_type="SHOT_HISTORY",
+                content=MultimodalContent(text="the lantern-lit alley after rain"),
+                entity_ids=["lin"],
+                scene_id=scene_id,
+            )
+        )
+
+    series = container.memory.search(
+        MemoryQuery(
+            project_id=project.id,
+            text="the lantern-lit alley after rain",
+            entity_ids=["lin"],
+            episode_id=episode_two,
+            episode_scope=EpisodeScope.SERIES,
+            top_k=10,
+        )
+    )
+
+    episodes = [item.episode_id for item in series]
+    assert set(episodes) == {episode_one, episode_two}
+    # Identical text, so only the episode signal can separate them.
+    assert episodes[0] == episode_two
+    assert series[0].score_components["episode_match"] == 1.0
+    assert series[-1].score_components["episode_match"] == 0.0
+
+
+def test_series_scope_without_an_episode_is_rejected_rather_than_silently_unscoped():
+    with pytest.raises(ValueError, match="episode_scope=SERIES requires episode_id"):
+        MemoryQuery(project_id="project", episode_scope=EpisodeScope.SERIES)
+
+
+def test_recency_half_life_is_configurable_per_query(container, project):
+    """A series that ran for a year is poorly served by a fixed 30-day decay."""
+
+    memory = container.memory.index(
+        ShotMemoryInput(
+            project_id=project.id,
+            layer=MemoryLayer.EPISODIC,
+            memory_type="SHOT_HISTORY",
+            content=MultimodalContent(text="the lantern-lit alley after rain"),
+            entity_ids=["lin"],
+        )
+    )
+    with container.database.session() as session:
+        row = session.get(ShotMemory, memory.id)
+        row.created_at = row.created_at - timedelta(days=180)
+
+    def recency(half_life: float) -> float:
+        results = container.memory.search(
+            MemoryQuery(
+                project_id=project.id,
+                text="the lantern-lit alley after rain",
+                entity_ids=["lin"],
+                recency_half_life_days=half_life,
+                top_k=5,
+            )
+        )
+        return results[0].score_components["temporal_relevance"]
+
+    assert recency(365.0) > recency(30.0)

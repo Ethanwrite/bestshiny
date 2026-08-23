@@ -1,60 +1,92 @@
-# AI Director Platform 文档导航
+# AI Director Platform — Documentation Index
 
-快照日期：2026-08-22
-当前发布结论：**NOT PRODUCTION-READY**
+Snapshot: 2026-08-22
+Release verdict: **NOT PRODUCTION-READY**
 
-仓库已将 Phase II 离线算法核心冻结为 commit `0a74d31`、tag
-`v0.2.0-algorithm-core-offline`。Phase III 实现提交为 `99f9c60`，离线证据快照 tag 为
-`v0.3.0-production-evidence-core-offline`；该 tag 不是生产发布证明。当前未发布工作树又增加了
-`0028_persistent_character_state`、`0029_project_style_lock` 与项目级锁定画风闭环，没有新增 Provider。
+The Phase II offline algorithm core is frozen at commit `0a74d31`, tag
+`v0.2.0-algorithm-core-offline`. Phase III was implemented at `99f9c60` with the offline
+evidence snapshot tag `v0.3.0-production-evidence-core-offline`; that tag is not proof of a
+production release. The current unreleased working tree adds migrations
+`0028_persistent_character_state` through `0034_narrative_ledger`, a project-level style lock,
+the fixed 30 USDC DePay / Base Native USDC shared payment link, and the series narrative
+ledger. No new visual-generation Provider was added.
 
-## 首先阅读
+## Read first
 
-1. [生产证据报告](PRODUCTION_EVIDENCE.md)
-   - 区分代码证据、离线 fixture 证据和真实 Provider 证据。
-   - 记录 PostgreSQL、Docker、Live Canary、实际支出和剩余阻断。
-2. [生产就绪检查表](PRODUCTION_READINESS_CHECKLIST.md)
-   - 只勾选有客观证据的项目。
-   - 明确保留未执行的 Provider canary 与运营/安全缺口。
-3. [开发交接文档](DEVELOPMENT_HANDOFF_2026-08-20.md)
-   - 顶部 Phase III 更新是当前事实；后文保留 Phase II/2026-08-20 历史冻结证据。
-   - 包含高冲突文件、Runbook、迁移图与不可破坏约束。
-4. [当前完整架构](../CURRENT_ARCHITECTURE.md)
-   - 当前系统分层、核心数据流、Provider 安全边界、数据表和验证边界。
-   - 包含 immutable identity / mutable narrative state 分层、delta/policy/evidence/commit/head CAS/未来镜传播合同。
-5. [产品决策与需求台账](PRODUCT_REQUIREMENTS_LEDGER.md)
-   - 保留五份原始工程简报的 hash、产品目标、模型偏好、积分和学习政策。
-   - 它是需求台账，不是实现完成声明。
+1. [HANDOFF.md — current handoff](../HANDOFF.md)
+   - Gate state, what changed this session, and the Git facts to read before committing.
+   - Supersedes the 2026-08-20 and 2026-08-22 handoffs; both described states the code no
+     longer has and have been deleted.
+2. [OPEN_ISSUES.md — everything unresolved](OPEN_ISSUES.md)
+   - **Section 1 is the list of things only you can do**: the live-call gates,
+     `PUBLIC_BASE_URL`, the Flow model key, the Omni Flash transport, key rotation, and two
+     product decisions (deterministic fallback, Chinese-to-English scope).
+   - Sections 2–4 are known defects, incomplete work and P2 release blockers. No decision
+     needed from you.
+3. [CURRENT_ARCHITECTURE.md — the architecture](../CURRENT_ARCHITECTURE.md)
+   - Current layering, core data flow, Provider safety boundary, tables and validation
+     boundaries. Includes the immutable-identity / mutable-narrative-state split, the
+     delta/policy/evidence/commit/head-CAS contract, and the series narrative ledger.
+4. [Production evidence report](PRODUCTION_EVIDENCE.md)
+   - Separates code evidence, offline fixture evidence and real Provider evidence.
+   - Records PostgreSQL, Docker, live canary, actual spend and remaining blockers.
+5. [Production readiness checklist](PRODUCTION_READINESS_CHECKLIST.md)
+   - An item is ticked only when the cited evidence actually exists.
+6. [Product requirements ledger](PRODUCT_REQUIREMENTS_LEDGER.md)
+   - Hashes of the five original briefs, product goals, model preferences, credit and
+     learning policy. A requirements ledger, not a claim of completion.
 
-## 实施、安全与研究记录
+## Implementation, security and research records
 
-- [Secret Audit](security/secret-audit.md)
-  - 仓库/Git/本地路径扫描的脱敏记录。
-  - 用户已明确决定当前 Provider Key 无需轮换；这不改变“不落库、不提交、不记日志、默认不 live”边界。
-- [Visual Runtime 实施记录](VISUAL_RUNTIME_IMPLEMENTATION.md)
-  - Passenger/Autopilot 共享运行时、Prompt 分离、Asset Registry、Memory/Evaluation/Trace 等 Phase I 实施历史。
-- [Skill 研究与许可证记录](skill-research.md)
-  - 公开摄影、运镜、故事板、Provider prompt 和打光资料的研究与边界。
-- [源码/依赖审计](source-audit.md)
-  - 实现来源、许可证与可依赖性记录。
+- [Secret audit](security/secret-audit.md)
+  - Redacted record of repository, Git and local-path scans. The operator decided the
+    Provider keys in place at that time did not need rotation; that does not change the
+    "never persisted, never committed, never logged, never live by default" boundary.
+    **Keys pasted into chat on 2026-08-22 are a separate case — see OPEN_ISSUES §1.5.**
+- [Skill research and licensing record](skill-research.md)
+- [Source and dependency audit](source-audit.md)
 
-## 当前验证摘要
+## Current verification summary
 
-- 历史离线基线：`348 passed, 39 warnings`，冻结于 `0a74d31`。
-- Phase III tag 全仓：`406 passed, 57 warnings in 71.58s`；Mypy 121 source files、Ruff lint、Node syntax 和
-  `git diff --check` 通过。warning 主要是已知 Alembic/SQLite/Starlette 弃用项和 SQLAlchemy FK cycle。
-- 2026-08-22 当前工作树：`451 passed, 61 warnings in 88.91s`；Ruff format/check、Mypy 122
-  source files、Node syntax、Alembic 单 head 与 `git diff --check` 通过。
-- PostgreSQL 17.10 + pgvector 0.8.6：fresh/populated、`vector(16)`、约束与事务验证通过，head
-  为当时的 `0027_production_evidence_core`。当前代码 head 是 `0029_project_style_lock`；
-  专项 SQLite schema/migration 与新临时 PostgreSQL 17 trigger 正/反例已通过，但不等于生产库已升级。
-- Docker Desktop 29.5.3：Compose config/build/up/health、HTTP 200 smoke 与容器内 Alembic
-  `0027` head/check 通过；仅使用假 development 凭据，未传入 Provider Key。
-- Live Provider：RunAPI/OpenRouter/Voyage/Flow/单视频全部 **NOT EXECUTED**；已知支出 **USD 0**。
-- Persistent Narrative Character State：已有米拉镜头 12→13→14 离线事务 fixture，覆盖身份硬隔离、规则锁、可视证据、版本/commit/head CAS、传播、Voyage 降级人工、错配拒绝与 stale fence。proposal 只能在 Candidate `CREATED`/pre-dispatch 分配事务写入，proposal-set hash 绑定 Candidate/Generation Job 并在 validate/commit 复核；显式 `branch_key` 可从 input 选定的不可变版本分叉为独立 scope v1/head，不推进 main head。
-- 角色状态 JSON 上限为 256 KiB/5,000 节点/12 层/200 条 constraints；baseline initialize 不为已采用候选额外写入第二个无类型 `ShotStateSnapshot`。
-- STYLE 版本必须先显式提升为 Canonical，再由真实用户一次性锁定到项目；锁定版本绑定不可变 embedding，自动进入每镜参考图、Prompt/Adapter payload，并以相似度和漂移证据阻断不合格 Candidate Commit。当前 64-D 本地 descriptor 是离线确定性证据，不是生产学习型 encoder 或 Provider canary。
+- Historical offline baseline: `348 passed, 39 warnings`, frozen at `0a74d31`.
+- Phase III tag, whole repository: `406 passed, 57 warnings in 71.58s`; Mypy over 121 source
+  files, Ruff lint, Node syntax and `git diff --check` passed. Warnings are mostly known
+  Alembic/SQLite/Starlette deprecations and the SQLAlchemy FK cycle.
+- **Current working tree (2026-08-22): `521 passed, 61 warnings`**; Ruff check, Mypy over 131
+  source files, Web production build, npm audit, and a single Alembic head
+  `0034_narrative_ledger`. The count rose from 473 to 521 with Provider payload/reference
+  contracts, the Flow and Wan model-key mappings, the routing-integrity gate, the structural
+  gate over all twelve installed Skills, and the narrative-ledger regressions.
+- PostgreSQL 17.10 + pgvector 0.8.6: historical fresh/populated runs, `vector(16)`,
+  constraints and transactions all passed when the head was `0027_production_evidence_core`.
+  `0032_depay_payment_links` later passed a fresh upgrade and `alembic check` on a disposable
+  PostgreSQL 17 + pgvector database. The current head `0034_narrative_ledger` still needs
+  PostgreSQL verification, and none of this means a production database or an older Compose
+  volume has been upgraded.
+- Docker Desktop 29.5.3: Compose config/build/up/health, HTTP 200 smoke and in-container
+  Alembic head/check passed at head `0027`, using fake development credentials only, with no
+  Provider key supplied.
+- Live Provider: RunAPI, OpenRouter, Voyage, Flow and the single video shot are all
+  **NOT EXECUTED**. Known spend: **USD 0**.
+- Persistent narrative character state: the Mira shot 12→13→14 offline transaction fixture
+  covers identity isolation, rule locks, visual evidence, version/commit/head CAS,
+  propagation, Voyage degradation to human review, mismatch rejection and the stale fence. A
+  proposal may be written only inside the Candidate `CREATED` / pre-dispatch allocation
+  transaction; the proposal-set hash binds the Candidate and Generation Job and is rechecked
+  at validate and commit. An explicit `branch_key` forks an independent scope v1/head from the
+  immutable version chosen by the input, without advancing the main head.
+- Character-state JSON is bounded to 256 KiB / 5,000 nodes / 12 levels / 200 constraints.
+- A STYLE version must be explicitly promoted to Canonical and then locked to the project once
+  by a real user. The locked version binds an immutable embedding, enters every shot's
+  reference set, prompt and Adapter payload, and blocks a failing Candidate commit on
+  similarity and drift evidence. The current 64-D local descriptor is deterministic offline
+  evidence, not a production learned encoder and not a Provider capability claim.
+- Series narrative ledger (`0034`): facts, per-holder disclosure and setup/payoff obligations
+  are append-only. A character may act on a fact only if it was disclosed to them; audience
+  knowledge alone never authorises a character.
 
-主要阻断是具体生产视觉检测/跟踪/编码模型部署与校准、具有可核验 provenance 的
-`VLM_REVIEWER`、真实 Provider/账单 canary、剩余公网认证/运营控制与备份恢复。
-`voyage-multimodal-3.5` 只是 `ADVISORY` 检索/证据帧排序工具，不是 identity/state 事实裁判器，不能批准 delta 或 commit。
+The main blockers are deploying and calibrating the production visual detection/tracking/
+encoding models and a `VLM_REVIEWER` with verifiable provenance, real Provider and billing
+canaries, the remaining public authentication and operational controls, and backup/restore.
+`voyage-multimodal-3.5` is an `ADVISORY` retrieval and evidence-frame ranking tool only. It is
+not an arbiter of identity or state facts and cannot approve a delta or a commit.

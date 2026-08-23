@@ -33,6 +33,7 @@ class CreditEstimate:
     estimated_total_usd: float
     credits: int
     usd_per_credit: float
+    image_count: int = 1
 
 
 class CreditPricingEngine:
@@ -60,14 +61,21 @@ class CreditPricingEngine:
         duration: float = 1.0,
         resolution: str = "720p",
         reference_count: int = 0,
+        image_count: int = 1,
     ) -> CreditEstimate:
         profile = self.registry.get(model, provider)
         if profile is None or f"{media_type}_generation" not in profile.supported_operations:
             raise ValueError(f"selected {media_type} model is not registered for this provider")
+        images = max(1, int(image_count))
         if media_type == "video":
+            if images != 1:
+                raise ValueError("image_count applies to image generation only")
             provider_cost = profile.cost.get("estimated_per_second", 0.0) * max(1.0, duration)
         else:
-            provider_cost = profile.cost.get("estimated_per_image", 0.0)
+            # Every image in the batch is generated and billed, so every image
+            # is reserved before the call. Charging for one and delivering four
+            # would make the workspace balance a fiction.
+            provider_cost = profile.cost.get("estimated_per_image", 0.0) * images
         resolution_multiplier = {"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}.get(
             resolution.lower(), 1.0
         )
@@ -82,6 +90,7 @@ class CreditPricingEngine:
             estimated_total_usd=round(total, 4),
             credits=credits,
             usd_per_credit=self.usd_per_credit,
+            image_count=images,
         )
 
 

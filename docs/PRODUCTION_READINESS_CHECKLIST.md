@@ -22,10 +22,12 @@ a live Provider result. The authoritative evidence narrative is
 ## Data and deployment
 
 - [x] Phase III full test result recorded: `406 passed, 57 warnings in 71.58s`.
-- [x] Current `0029` offline working tree passes `451 passed, 61 warnings in 88.91s`; Ruff format/check,
-  Mypy 122 source files, Node syntax, Alembic single-head and `git diff --check` pass.
+- [x] Current `0032` offline working tree passes `465 passed, 61 warnings in 109.98s`; Ruff check,
+  Mypy 132 source files, Web production build, npm audit and Alembic single-head pass.
 - [x] Ruff lint, Ruff format (226 files already formatted), Mypy (121 files), Node syntax and `git diff --check` pass.
 - [x] PostgreSQL 17.10 + pgvector 0.8.6 fresh, populated and supported round-trip migrations validated through head `0027`.
+- [x] A disposable PostgreSQL 17 + pgvector database passed fresh upgrade to `0032_depay_payment_links` and
+  `alembic check` with no new upgrade operations.
 - [x] PostgreSQL constraints, vector/index creation, credit transactions and generation enqueue transactions
   validated with recorded evidence.
 - [x] Docker Desktop 29.5.3 Compose config/build/up/health passes for Web, API, worker, PostgreSQL and MinIO with no crash loop.
@@ -86,6 +88,11 @@ a live Provider result. The authoritative evidence narrative is
 - [x] Upload validation and atomic workspace storage reserve/settle/release are active.
 - [ ] Email verification, MFA, invitation/member administration and device-session controls are production-ready.
 - [ ] Purchases, recurring grants, expiry and admin credit adjustments are implemented and reconciled.
+- [x] DePay shared-link checkout, hashed session token, RSA-PSS callback verification, Base Native USDC filtering,
+  transaction idempotency and append-only purchase ledger pass offline regressions.
+- [x] Alchemy remains an authenticated independent chain/reorg evidence source and reuses DePay-created canonical
+  payments without issuing credits twice.
+- [ ] Real low-value USDC evidence and populated/rollback/Compose `0032` validation are complete.
 - [ ] Production HTTPS, managed secrets, storage retention, monitoring and alerting are configured.
 
 ## Live evidence

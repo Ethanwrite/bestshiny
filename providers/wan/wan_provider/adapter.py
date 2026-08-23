@@ -10,6 +10,7 @@ from provider_sdk import (
     ProviderHealth,
     ProviderJob,
     ProviderPollIdentity,
+    ProviderReferenceMode,
     ProviderSubmission,
     ProviderTrustLevel,
 )
@@ -21,11 +22,81 @@ from provider_sdk.transport import (
     create_provider_transport,
 )
 
+# Reviewed "<logical model>[:<mode>]=<dashscope model>" pairs, mirroring the
+# Google Flow mapping so one mechanism covers every logical -> runtime model
+# translation. Modes are t2v, i2v and r2v. An entry without a mode applies to
+# every mode of that logical model, which is what single-model families such as
+# Wan 3.0 need.
+DEFAULT_VIDEO_MODEL_KEYS: dict[str, str] = {
+    "wan-2.7:t2v": "wan2.7-t2v",
+    "wan-2.7:i2v": "wan2.7-i2v",
+    "wan-2.7:r2v": "wan2.7-r2v-2026-06-12",
+    "wan-3.0": "wan3.0-video",
+}
+
+
+def parse_video_model_keys(configured: str) -> dict[str, str]:
+    """Parse the operator-reviewed logical-to-DashScope model declaration.
+
+    Only operator entries are returned. They must stay distinguishable from the
+    built-in defaults so an explicit WAN2_7_*_MODEL_ID setting can outrank a
+    default without outranking a deliberate declaration.
+    """
+
+    mapping: dict[str, str] = {}
+    for entry in str(configured or "").split(","):
+        item = entry.strip()
+        if not item:
+            continue
+        logical, separator, dashscope_model = item.partition("=")
+        if not separator or not logical.strip() or not dashscope_model.strip():
+            raise ValueError(f"WAN_VIDEO_MODEL_KEYS entry must be model[:mode]=dashscope_model: {item}")
+        mapping[logical.strip()] = dashscope_model.strip()
+    return mapping
+
+
+def resolve_video_model(
+    requested: str,
+    mode: str,
+    model_keys: dict[str, str],
+    mode_default: str = "",
+) -> str:
+    """Resolve one logical model plus its mode to a DashScope model ID.
+
+    A logical registry name such as ``wan-2.7`` is not a DashScope model, and a
+    mode-scoped setting alone cannot distinguish Wan versions. The mapping is
+    consulted first for ``model:mode`` and then for ``model``; an operator's
+    mode-specific setting remains an explicit override, and an unmapped model
+    is rejected rather than posted to DashScope as an unknown model.
+    """
+
+    selected = str(requested or "").strip()
+    keys = (f"{selected}:{mode}", selected)
+    # 1. an explicit operator declaration always wins;
+    for key in keys:
+        if selected and key in model_keys:
+            return model_keys[key]
+    # 2. then the operator's mode-specific setting;
+    if mode_default.strip():
+        return mode_default.strip()
+    # 3. then the reviewed built-in default for a known family.
+    for key in keys:
+        if selected and key in DEFAULT_VIDEO_MODEL_KEYS:
+            return DEFAULT_VIDEO_MODEL_KEYS[key]
+    if not selected:
+        raise _invalid("a Wan video model is required for this mode")
+    raise _invalid(
+        f"Wan has no reviewed DashScope model for {selected!r} in {mode} mode; "
+        "declare it in WAN_VIDEO_MODEL_KEYS"
+    )
+
 
 class WanProvider(GenerationProvider, ChatCapability):
     """Alibaba workspace adapter for OpenAI-compatible chat and Wan 2.7 async video."""
 
     name = "wan"
+    # Wan requires fetchable URLs; DashScope never ingests an upload.
+    reference_mode = ProviderReferenceMode.FETCHABLE_URL
     trust_level = ProviderTrustLevel.PRODUCTION
 
     def __init__(
@@ -38,6 +109,7 @@ class WanProvider(GenerationProvider, ChatCapability):
         t2v_model_id: str = "",
         i2v_model_id: str = "",
         r2v_model_id: str = "",
+        video_model_keys: str = "",
         timeout_seconds: float = 120,
         transport_settings: LiveProviderSettings | None = None,
         chat_transport: ProviderTransport | None = None,
@@ -67,6 +139,7 @@ class WanProvider(GenerationProvider, ChatCapability):
         self.t2v_model_id = t2v_model_id.strip()
         self.i2v_model_id = i2v_model_id.strip()
         self.r2v_model_id = r2v_model_id.strip()
+        self.video_model_keys = parse_video_model_keys(video_model_keys)
         self.configured = bool(self.t2v_model_id or self.i2v_model_id or self.r2v_model_id) and (
             (bool(api_key.strip()) and self.dashscope_base_configured) or video_transport_injected
         )
@@ -133,14 +206,21 @@ class WanProvider(GenerationProvider, ChatCapability):
     def _video_payload(self, request: dict[str, Any]) -> dict[str, Any]:
         reference_video = request.get("reference_video") or request.get("reference_video_url")
         first_frame = (
-            request.get("first_frame") or request.get("first_frame_image") or request.get("start_frame")
+            request.get("first_frame")
+            or request.get("first_frame_image")
+            or request.get("start_frame")
+            or request.get("start_frame_url")
         )
-        configured_model = (
+        mode = "r2v" if reference_video else "i2v" if first_frame else "t2v"
+        mode_default = (
             self.r2v_model_id if reference_video else self.i2v_model_id if first_frame else self.t2v_model_id
         )
-        model = str(request.get("model") or configured_model).strip()
-        if not model:
-            raise _invalid("a WAN2_7_*_MODEL_ID is required for this video mode")
+        model = resolve_video_model(
+            str(request.get("model") or ""),
+            mode,
+            self.video_model_keys,
+            mode_default,
+        )
         existing_input = request.get("input")
         if isinstance(existing_input, dict):
             input_value = dict(existing_input)
@@ -151,8 +231,11 @@ class WanProvider(GenerationProvider, ChatCapability):
             input_value = {"prompt": prompt}
             if first_frame:
                 input_value["img_url"] = first_frame
-            if request.get("last_frame") or request.get("end_frame"):
-                input_value["last_frame_url"] = request.get("last_frame") or request.get("end_frame")
+            last_frame = (
+                request.get("last_frame") or request.get("end_frame") or request.get("end_frame_url")
+            )
+            if last_frame:
+                input_value["last_frame_url"] = last_frame
             if reference_video:
                 input_value["video_url"] = reference_video
         existing_parameters = request.get("parameters")

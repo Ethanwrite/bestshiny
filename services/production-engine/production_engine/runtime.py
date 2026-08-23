@@ -18,7 +18,13 @@ from evaluation_core import (
     RetryPlan,
 )
 from generation_gateway import GenerationGateway, TimelineGenerationPlanStale
-from memory_core import ContextAssembler, GenerationContext, MemoryQuery, MultimodalMemoryEngine
+from memory_core import (
+    ContextAssembler,
+    EpisodeScope,
+    GenerationContext,
+    MemoryQuery,
+    MultimodalMemoryEngine,
+)
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
 from model_registry_core import RouterDecision, ShotRequirements, VideoModelRouter
 from platform_contracts import (
@@ -42,10 +48,10 @@ from production_domain.models import (
     TimelineState,
 )
 from runtime_control_core import FeatureFlagService
+from skill_core import PromptCompilerService
 from sqlalchemy import func, select
 from style_core import ProjectStyleService
 from video_adapter_core import AdapterInput, ModelGenerationRequest, VideoAdapterRegistry
-from video_prompt_core import VideoShotPromptCompiler
 
 
 @dataclass(frozen=True)
@@ -77,7 +83,7 @@ class VisualProductionRuntime:
         context: ContextAssembler,
         router: VideoModelRouter,
         adapters: VideoAdapterRegistry,
-        compiler: VideoShotPromptCompiler,
+        compiler: PromptCompilerService,
         evaluator: GenerationEvaluator,
         retry: RetryEngine,
         metrics: ModelMetricsService,
@@ -251,6 +257,7 @@ class VisualProductionRuntime:
             if not shot:
                 raise LookupError("shot not found")
             project_id = shot.scene.episode.project_id
+            episode_id = shot.scene.episode_id
             scene_id = shot.scene_id
             state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             temporal_state = dict(state.state_json) if state else {}
@@ -272,6 +279,11 @@ class VisualProductionRuntime:
                     project_id=project_id,
                     text=shot.user_prompt or shot.prompt,
                     entity_ids=entity_ids,
+                    # Series scope: a long-running show establishes facts in
+                    # earlier episodes that the current shot still depends on.
+                    # The current episode is ranked up rather than fenced off.
+                    episode_id=episode_id,
+                    episode_scope=EpisodeScope.SERIES,
                     scene_id=scene_id,
                     top_k=8,
                 )
@@ -353,10 +365,10 @@ class VisualProductionRuntime:
             idempotency_key=idempotency_key,
             generation_policy=compiled.spec.generation_policy,
             cost_estimate=estimated_cost,
+            provider_payload=model_request.payload,
             metadata={
                 "mode": "AUTOPILOT",
                 "canonical_shot_spec": compiled.spec.model_dump(mode="json"),
-                "adapter_payload": model_request.payload,
                 "router": decision.model_dump(mode="json"),
                 "style_lock": style_control.prompt_view() if style_control else None,
                 "style_control": style_control.provider_view() if style_control else None,
@@ -411,7 +423,7 @@ class VisualProductionRuntime:
         job, replayed = self.submit(
             prepared.request,
             mode="AUTOPILOT",
-            prompt_version=VideoShotPromptCompiler.version,
+            prompt_version=PromptCompilerService.version,
             context_asset_ids=prepared.context.canonical_asset_ids,
             retrieved_memory_ids=[item.id for item in prepared.context.episodic_memories],
             router_scores=candidates,
@@ -582,12 +594,28 @@ class VisualProductionRuntime:
         next_model = plan.next_model or str(request["model"])
         prompt = str(request["prompt"])
         negative_prompt = str(request.get("negative_prompt") or "")
-        if next_model != request["model"] and spec_data:
-            profile = self.router.registry.get(next_model, next_provider)
+        # References must be final before the Adapter payload is compiled; the
+        # payload embeds them and a payload built from the previous attempt's
+        # references would contradict the request the Gateway resolves.
+        reference_asset_ids = list(request.get("reference_asset_ids") or [])
+        if plan.inject_stronger_references:
+            _canonical_assets, canonical_reference_ids = self._canonical_assets(str(request["project_id"]))
+            reference_asset_ids = list(dict.fromkeys([*reference_asset_ids, *canonical_reference_ids]))[:20]
+        target_changed = next_model != request["model"] or next_provider != request["provider"]
+        references_changed = reference_asset_ids != list(request.get("reference_asset_ids") or [])
+        provider_payload = dict(request.get("provider_payload") or {})
+        if target_changed or references_changed:
+            # The persisted Adapter payload describes the previous attempt: it was
+            # shaped for the previous model and embeds the previous reference list.
+            # Reusing it here would submit transport parameters that contradict this
+            # retry, so it is recompiled for the actual target and dropped when it
+            # cannot be recompiled.
+            provider_payload = {}
+            profile = self.router.registry.get(next_model, next_provider) if spec_data else None
             if profile:
                 context = {
-                    "reference_images": list(request.get("reference_asset_ids") or []),
-                    "canonical_asset_ids": list(request.get("reference_asset_ids") or []),
+                    "reference_images": list(reference_asset_ids),
+                    "canonical_asset_ids": list(reference_asset_ids),
                     "start_frame": request.get("start_frame_asset_id"),
                     "end_frame": request.get("end_frame_asset_id"),
                     "style_control": metadata.get("style_control") or metadata.get("style_lock"),
@@ -596,14 +624,18 @@ class VisualProductionRuntime:
                     next_model,
                     AdapterInput(shot=CanonicalShotSpec.model_validate(spec_data), context=context),
                 )
-                prompt = adapted.prompt
-                negative_prompt = adapted.negative_prompt
+                provider_payload = dict(adapted.payload)
+                if target_changed:
+                    # Only a different model justifies replacing the approved prompt;
+                    # a reference refresh keeps the prompt this shot was admitted with.
+                    prompt = adapted.prompt
+                    negative_prompt = adapted.negative_prompt
         if plan.prompt_patch:
             prompt = f"{prompt}\nREPAIR CONSTRAINT: {plan.prompt_patch}"
-        reference_asset_ids = list(request.get("reference_asset_ids") or [])
-        if plan.inject_stronger_references:
-            _canonical_assets, canonical_reference_ids = self._canonical_assets(str(request["project_id"]))
-            reference_asset_ids = list(dict.fromkeys([*reference_asset_ids, *canonical_reference_ids]))[:20]
+        if "prompt" in provider_payload:
+            # The payload carries its own copy of the prompt. Only the final
+            # canonical prompt of this retry may reach the provider.
+            provider_payload["prompt"] = prompt
         retry_metadata = {
             **metadata,
             "retry_of": original_job_id,
@@ -621,6 +653,7 @@ class VisualProductionRuntime:
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,
                 "reference_asset_ids": reference_asset_ids,
+                "provider_payload": provider_payload,
                 "idempotency_key": retry_key,
                 "metadata": retry_metadata,
             }

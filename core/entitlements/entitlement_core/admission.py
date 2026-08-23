@@ -76,10 +76,20 @@ class GenerationAdmissionService:
                     "FREE image generation is unavailable until a server-configured image role is enabled"
                 )
             else:
-                # The current registry has no image ModelRole. Keep the paid
-                # image surface narrow and server-owned until that role exists.
-                admitted.provider = "google_flow"
-                admitted.model = "NARWHAL"
+                # The image target is server-owned, resolved through the same
+                # registry role as video rather than named here.
+                image_role = ModelRole(requested_role) if requested_role else ModelRole.IMAGE_GENERATION
+                selected, _capability, _implementation = self.model_roles.resolve(
+                    admitted.project_id,
+                    image_role,
+                    asset_criticality=AssetCriticality.STANDARD,
+                    require_live=False,
+                )
+                if selected.modality != "image":
+                    raise ValueError(f"model role {image_role.value} does not provide image generation")
+                admitted.provider = selected.provider
+                admitted.model = selected.provider_model_id
+                role_value = image_role.value
 
         try:
             estimate = self.pricing.estimate(
@@ -89,6 +99,7 @@ class GenerationAdmissionService:
                 duration=admitted.duration or 1,
                 resolution=resolution,
                 reference_count=len(admitted.reference_asset_ids),
+                image_count=admitted.image_count,
             )
         except ValueError:
             if context.workspace_id is not None and enforce_plan:
@@ -102,8 +113,9 @@ class GenerationAdmissionService:
                 reference_multiplier=1.0,
                 service_multiplier=1.0,
                 estimated_total_usd=0.0,
-                credits=1,
+                credits=max(1, admitted.image_count),
                 usd_per_credit=self.pricing.usd_per_credit,
+                image_count=max(1, admitted.image_count),
             )
         admitted.cost_estimate = estimate.estimated_total_usd
         return AdmittedGeneration(admitted, estimate, role_value, context.plan_tier)
@@ -130,6 +142,14 @@ class GenerationAdmissionService:
                 asset_criticality=AssetCriticality.STANDARD,
                 require_live=False,
             )
+            if (admitted.provider, admitted.model) != (
+                selected.provider,
+                selected.provider_model_id,
+            ):
+                # The Adapter payload was compiled for the target the router
+                # picked. Re-routing the plan invalidates it, so it is dropped
+                # rather than carried onto a different model's transport.
+                admitted.provider_payload = {}
             admitted.provider = selected.provider
             admitted.model = selected.provider_model_id
             admitted.asset_criticality = AssetCriticality.STANDARD

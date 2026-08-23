@@ -1,20 +1,20 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-22
+Snapshot date: 2026-08-23
 Repository: `ai-director-platform`
 Branch: `main`
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0029_project_style_lock`
+Migration head: `0037_direct_uploads`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
 development checkpoint. The offline baseline was frozen after the historical `348 passed, 39 warnings` gate. The tagged
 Phase III checkpoint passed `406 passed, 57 warnings in 71.58s`, Mypy over 121 source files, Ruff lint, Ruff format
 (226 files), Node syntax and `git diff --check`. Those numbers are historical tag evidence, not a test count for every
-later working-tree edit. The current working tree passes `451 passed, 61 warnings in 88.91s`, Ruff format/check,
-Mypy over 122 source files and `git diff --check`. The checkpoint remains offline evidence rather than a production
-release; no real Provider call was executed, and this state milestone adds no Provider.
+later working-tree edit. The current working tree passes `610 passed, 2 skipped, 61 warnings`, Ruff check,
+Mypy over 133 source files, Web production build and npm audit; the two skipped are opt-in live image tests. The checkpoint remains offline evidence rather than a production
+release; no real Provider or chain call was executed, and this checkpoint adds no visual-generation Provider.
 
 ## Truth labels
 
@@ -101,12 +101,44 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Web | `apps/web/` | WIP implemented; cookie/CSRF client path and 4-second starter default connected |
 | API | `apps/api/video_platform_api/` | WIP implemented; auth/quota/canary/evidence routes added |
 | Browser worker | `apps/browser-worker-extension/`, `services/browser-runtime/` | Frozen baseline; no current Flow live validation |
-| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0029`; persistent character-state and project-style rows are schema-backed |
+| Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0033`; DePay checkout sessions, callback receipts and payment-ledger rows are schema-backed |
+| Payments | `core/payments/`, `apps/web/wallet.js` | DePay shared-link QR checkout, signed callback posting and authenticated Alchemy purchase/reorg reconciliation are implemented offline; real payment is not yet executed |
 | Model infrastructure | `core/model-registry/`, `core/entitlements/`, `config/model-registry/` | Persistent single capability truth and role runtime |
 | Director/QA/cost | `core/character/`, `core/style/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state and locked-style generation/commit gates |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
-| Skills | `skills/` | Existing guidance retained; no broad Phase III expansion |
+| Skills | `skills/`, `core/skills/` | Shared filesystem Registry and content-hash versions implemented; all twelve Skill bodies rewritten against the current contracts, none yet executed by a model |
+
+## Unified Prompt and Skill boundary
+
+The current working tree has one Prompt Compiler implementation and one filesystem-authoritative Skill Registry:
+
+```text
+CanonicalShotSpec
+-> PromptCompilerInput { shot_spec, asset_bindings, continuity_context }
+-> PromptCompilerService + SkillRegistry.resolve("prompt-compiler")
+-> PromptCompilerOutput (exactly eight fields)
+-> Model Router -> Video Adapter
+-> GenerationRequest.provider_payload
+-> GenerationGateway asset resolution
+-> Provider adapter
+```
+
+`core/skills/skill_core/compiler.py` is only a compatibility import and `VideoShotPromptCompiler` is only an alias;
+neither is a second implementation. The Container constructs a single `prompts` service. Skill versions are derived
+from the SHA-256 hash of the complete `SKILL.md`, and PromptCompilation records the resolved hash plus typed input and
+output. The database `Skill`/`SkillVersion` models are not synchronized or consumed and must not be treated as a second
+active registry.
+
+Prompt compilation is still deterministic. `skill_contract()` exposes the installed Skill text and JSON Schemas
+but does not invoke `ModelRoleRuntime`, so no Skill body currently reaches a model. All twelve bodies were
+rewritten on 2026-08-22 against the contracts in force: the installed `prompt-compiler` Skill now describes the
+`PromptCompilerInput` envelope, the real `CanonicalShotSpec` field names, the eight `PromptCompilerOutput` fields
+and the `COMPILED`/`NOT_COMPILABLE` invariants, and it emits no Provider or model selection.
+`scripts/review_skill_contract.py` checks a candidate against those criteria without installing anything, and
+`tests/test_installed_skills.py` keeps the structural invariants green. Enabling model-backed compilation
+remains a separate, undecided step: it requires an explicit product decision on fallback behaviour, recorded in
+`HANDOFF.md` section 8.
 
 ## Product entry modes and accounting
 
@@ -125,8 +157,8 @@ authenticated request
 
 When Passenger video duration is omitted it defaults to 4 seconds. Under the current Seedance pricing snapshot this
 is about 44 credits, allowing one request against the 50-credit starter grant. An explicit 8-second request remains
-about 87 credits and fails before Job/Provider creation if the balance cannot be reserved. Purchases, recurring
-grants, expiry and administrator adjustments are not implemented.
+about 87 credits and fails before Job/Provider creation if the balance cannot be reserved. Fixed-offer purchases are
+implemented; recurring grants, expiry and administrator adjustments are not.
 
 The workspace wallet is authoritative only for user credits:
 
@@ -139,6 +171,17 @@ RECONCILIATION_REQUIRED --evidence decision--> SETTLED | REFUNDED
 
 Workspace credits, generation supplier USD/credit evidence, Flow account credits and RunAPI's edge budget are
 separate accounting domains.
+
+Base Native USDC purchases form another explicit evidence domain. One reusable DePay Payment Link is fixed at 30
+Native USDC with quantity disabled. Every authenticated click creates a separate `OnchainPaymentIntent` for 3,000
+credits, plus a hashed checkout token, and injects both `order_ref` and the opaque token into the shared link. A DePay
+callback must pass RSA-PSS verification over the raw body and match the PaymentIntent, configured link ID, Base
+network, Circle Native USDC contract, treasury address and exact 30 USDC. The same transaction then changes a FREE
+workspace to PRO when needed and appends 3,000 credits; an existing PRO workspace receives only the credits. Business
+entitlements come from the PaymentIntent snapshot, not an amount-to-credit calculation. There is no subscription,
+renewal, user-wallet binding or per-order unique amount. Alchemy remains an independent authenticated chain observer:
+it attaches canonical log evidence and can post append-only reorg reversal entries when the available balance permits;
+otherwise the payment becomes `RECONCILIATION_REQUIRED`. Real-wallet payment evidence remains outside this checkpoint.
 
 ## Authentication, tenancy and storage
 
@@ -271,6 +314,44 @@ delta, deterministic locks, trusted visual observation, v2 commit and shot 14 pr
 hair mutation and early flare ignition, routes Voyage evidence to review, rejects confident state mismatch, and blocks
 stale base/timeline commits. This proves the data and transaction contract, not production VLM accuracy.
 
+## Series-level narrative ledger
+
+`TimelineState` carries physical state and `CharacterStateVersion` carries appearance and condition. Neither
+carries **knowledge**, and neither records what the series still **owes** the viewer. Migration `0034` adds three
+append-only tables plus `core/narrative-ledger/narrative_ledger_core`:
+
+| Table | Contents |
+| --- | --- |
+| `narrative_facts` | A story fact, hashed, with the episode and shot that established it |
+| `narrative_disclosures` | One row per (fact, holder). `holder_key` is a character ID or `AUDIENCE` |
+| `narrative_obligations` | A setup and whether it is `OPEN`, `SETTLED` or `ABANDONED` |
+
+Establishing a fact discloses it to the audience only; a character must be disclosed to separately, and
+`assert_may_act_on()` fails closed when a shot would let a character act on something never disclosed to them.
+Audience knowledge alone never authorises a character — that gap is what dramatic irony is, and collapsing it is
+the classic long-form failure.
+
+Obligations exist because an obligation is *owed*, not *similar*: episode 60's payoff shares no vocabulary with
+episode 7's promise, so embedding retrieval can never surface it. They are carried explicitly instead.
+
+`series_context(project_id, episode=N)` returns known facts per holder, audience-only facts and open obligations
+through one bounded query. It is **O(1) in episode count** — heads, not history — which is what keeps a
+60-episode arc tractable. Its output renders directly into `PromptCompilerInput.continuity_context.facts`, and
+since the compiler contract admits nothing into `continuity_assertions` that was not supplied there, an
+undisclosed fact cannot reach a prompt by accident.
+
+`MemoryQuery` carries `episode_id`, an `EpisodeScope` of `EPISODE` or `SERIES`, and a per-query
+`recency_half_life_days`. Scoping is applied per layer, because the layers answer different questions: L0
+canonical truth is series-wide and never narrowed; L1 is *current state* and stays fenced to the current scene,
+since inheriting another scene's would be wrong; L2 is "what happened before" and is scoped to the episode or
+to the series. L2 was previously fenced to the current scene, which left the layer whose purpose is recalling
+earlier work unable to see any of it — the reason the 60-episode case did not work. Under `SERIES` the current
+episode is ranked up through an `episode_match` component rather than left to compete on cosine similarity
+alone. `prepare_autopilot` retrieves with `SERIES` scope against the shot's own episode.
+
+Known gap: retrieval is still keyed on the current shot's prompt text, so *which* earlier beat matters is
+decided by similarity. Obligations are covered by the ledger; episodic callbacks are not.
+
 ## Model capability and role runtime
 
 `ModelDefinition`, `ModelRoleBinding` and the one-to-one persistent `ModelCapabilityProfile` now form the
@@ -319,13 +400,161 @@ No provider below was called live during Phase III.
 | Provider path | Implemented surface | Current truth |
 | --- | --- | --- |
 | Google Flow | BrowserRuntime, account scheduler, automatic project affinity, upload/submit/poll/download, migration plan | Offline only; default project provisioner fails closed; no real account/project operation |
-| OpenRouter | Chat/responses/embeddings/video adapter and logical GPT/Claude/Kling roles | Offline/Mock only; no role canary |
+| OpenRouter | Chat/responses/embeddings, the synchronous Image API (`openai/gpt-image-2`), video adapter, and logical GPT/Claude/Kling roles | Offline/Mock only; no role canary. An opt-in live image test exists but has never been run. |
 | Ark / Seedance | Doubao-compatible chat and asynchronous Seedance video adapter | Offline/Mock only; no video canary |
 | Wan 2.7 | OpenAI-compatible chat and DashScope T2V/I2V/R2V surfaces | Offline/Mock only; no live schema/job |
 | RunAPI | Typed low-trust Edge tasks, fact lock, budget and benchmark record | Offline/Mock only; prompt canary not executed |
 | DeepSeek | Compatible chat adapter | Adapter only; no default verified product deployment |
 | Voyage | Runtime embedding role for advisory retrieval/frame ranking only | Offline/Mock/degraded tests only; no multimodal canary and no state/identity authority |
 | Veo/Grok/Kling direct/Omni/Runway | Honest not-configured slots where applicable | Not deployed |
+
+### Provider reference and payload boundary
+
+A provider declares how it accepts local media through `GenerationProvider.reference_mode`:
+
+| Mode | Providers | Gateway behaviour |
+| --- | --- | --- |
+| `PROVIDER_MEDIA_ID` | Google Flow, and the default for any provider that ingests uploads | `resolve_provider_media()` uploads once per asset/provider/account tuple and emits `start_frame_provider_media_id`, `end_frame_provider_media_id` and `reference_provider_media_ids` |
+| `FETCHABLE_URL` | Seedance/Ark, Wan, OpenRouter, RunAPI | No upload boundary is crossed; the Gateway resolves a short-lived **object-storage** URL and emits `start_frame_url`, `end_frame_url` and `reference_urls` |
+
+### The application is not in the media path
+
+A `FETCHABLE_URL` reference is a presigned credential issued by the storage backend, computed
+per submission and never persisted. It is deliberately *not* `MediaAsset.public_url`: that field
+addresses `/v1/storage/{key}` on this service, behind `Depends(auth.current_user)`. An external
+provider cannot authenticate to it, and if it could, every reference byte would be read from
+object storage into the API process and streamed back out — a dozen concurrent 4K reference
+edits would make the control plane an image CDN.
+
+```text
+client ──presigned PUT──► object storage ◄──presigned GET── provider
+                               ▲
+                               │ authorize, presign, orchestrate, bill
+                            this API
+```
+
+Both directions are presigned. Writes go through `POST /v1/assets/uploads`, which authorizes the
+project and asset type, takes a quota hold on the declared size, chooses a content-addressed key
+and returns a presigned PUT; the client transfers; `POST /v1/assets/uploads/{id}/complete` adopts
+the object. A `direct_uploads` row (migration `0037`) holds the server's decisions in between, so
+the completion call carries only a row id and cannot retarget the upload.
+
+The presigned PUT binds `x-amz-checksum-sha256`, so the object store rejects bytes that do not
+hash to the declared digest — that is what makes a client-declared SHA-256 safe to
+content-address a key with, and it is why this service never reads the body to learn the hash.
+Size at completion comes from `HEAD`, never from the client. Validation reads a bounded 64 KB
+header: magic bytes, declared format, and dimensions for the decompression-bomb bound. The full
+decode the multipart path performs is deliberately given up; a truncated file fails at first use,
+where `RenditionResolver` already decodes. `POST /v1/assets` remains for deployments with no
+object storage, and `POST /v1/assets/uploads` answers `501` there rather than inventing a URL.
+
+`StorageProvider.presigned_reference_url()` returns a real presign on S3-compatible storage and
+`None` on local disk. `None` is treated as "no fetchable reference" and fails closed before the
+submission boundary; it is never a reason to proxy. `LOCAL_REFERENCE_SIGNING_KEY` enables a
+signed, expiring, unauthenticated route for local development, which *does* proxy and is
+documented as a development affordance rather than a deployment shape.
+
+### Original and derivative
+
+The user's original bytes are immutable. A provider's upload cap is a fact about that provider,
+not about the asset — a character's face, a product's label and a fabric's weave only ever exist
+at the resolution they arrived at, and re-encoding on the way in destroys the only copy the
+project will have.
+
+```text
+MediaAsset
+├── ORIGINAL             7680x4320  PNG   38 MB   (never re-encoded)
+├── PROVIDER_REFERENCE   3840x2160  JPEG   6 MB   (per constraint set, lazy, cached)
+└── THUMBNAIL            512px                    (schema only; nothing generates one yet)
+```
+
+`GenerationProvider.reference_constraints` declares max pixels, max bytes and accepted formats.
+`RenditionResolver` returns the original when it already fits, and otherwise derives a copy
+stored as a `media_renditions` row keyed by a digest of those constraints — so a provider that
+lowers its limits gets a new rendition instead of silently reusing one built for the old ones.
+Derivation compresses before it downscales, refuses below 256x256 rather than shipping a
+reference that no longer carries identity, and under a byte cap re-encodes a lossless original
+to a lossy format on purpose: a 2048px face with mild compression carries identity a pristine
+400px face does not. Constraints that declare no bounds mean limits nobody has established, so
+the original is sent unchanged rather than guessed at. Video is reported as unadaptable rather
+than transcoded.
+
+Mixing the two modes would submit a reference the provider cannot resolve, so a `FETCHABLE_URL` provider is
+never asked to upload and never receives a local asset ID or provider media ID. When no absolute `http(s)`
+URL exists — or when live mode would require the provider to fetch a non-HTTPS URL — resolution fails closed
+with `PROVIDER_REFERENCE_URL_UNAVAILABLE` before the submission boundary, and the credit reservation is
+released. Both modes rewrite the same identifiers inside the flattened Adapter payload, and the resolved
+reference fields are protected from Adapter-payload overrides alongside the canonical routing and billing
+fields.
+
+The Adapter payload is only valid for the exact target, prompt and reference list it was compiled from. An
+automatic retry that switches model or provider, applies a repair patch, or strengthens references recompiles
+the payload for the actual target; when it cannot be recompiled — no capability profile, or no canonical shot
+spec — the payload is dropped and the canonical request fields alone reach the provider. Plan admission
+applies the same rule: re-routing a FREE workspace to another model discards a payload compiled for the
+router's original choice.
+
+Logical model names are translated to runtime model IDs by one mechanism shared across providers:
+`FLOW_VIDEO_MODEL_KEYS` for Google Flow and `WAN_VIDEO_MODEL_KEYS` for Wan, both fail-closed. Wan resolves the
+model family *and* the mode (`t2v`/`i2v`/`r2v`) together, so a version cannot be silently swapped by a
+mode-scoped setting. `tests/test_model_routing_integrity.py` enforces that every role binding resolves to a
+registered model that declares the role's capability, that no PRIMARY binding targets a transportless stub or a
+disabled model, that no enabled model carries a configuration placeholder, that each role has exactly one
+PRIMARY, and that fallbacks rank after their primary.
+
+Google Flow maps a selected model to a runtime video model key through an explicitly reviewed table. An
+`abra_*` value is an explicit runtime key and passes through; every other ID must be declared in
+`FLOW_VIDEO_MODEL_KEYS` (`model=runtime_key`, with `{duration}` expanded to the requested seconds). Only the
+legacy `veo` alias ships with a reviewed key, so `flow-veo-3.1` is rejected with `FLOW_MODEL_KEY_NOT_MAPPED`
+until an operator declares its key; an undeclared model no longer degrades silently to `abra_t2v_{duration}s`.
+The Flow image path is bounded the same way: `imageModelName` comes from a reviewed set rather than an
+implicit `NARWHAL` default, so an unset or unreviewed image model fails closed instead of rendering as a
+model nobody selected. OpenRouter's Image API follows the same rule through a reviewed *execution envelope*
+per model rather than a model-key table, because what must not be guessed there is the model's limits rather
+than its ID.
+
+Provider request bodies are built from explicit allowlists rather than by dropping underscore-prefixed keys.
+OpenRouter video, RunAPI image/video and Ark image forward only their documented transport fields; tenancy,
+routing, accounting, idempotency, style embeddings, canonical shot spec and other internal audit metadata
+never leave the platform. Each fetchable-URL adapter also reads the Gateway-resolved `start_frame_url`,
+`end_frame_url` and `reference_urls` directly, so a Passenger request without an Adapter payload keeps its
+references instead of silently dropping them.
+
+### Image generation
+
+`openai/gpt-image-2` on OpenRouter is the project's image model, bound as the `IMAGE_GENERATION` role's
+PRIMARY with `seedream-5.0-ark` and `flow-narwhal-image-internal` as fallbacks. `POST /v1/images/generations`
+resolves that role rather than naming a model, so the choice lives in the registry and nowhere else; an
+explicit `provider` and `model` in the request still override it.
+
+The API is `POST /images` and it is **synchronous**: it answers with the finished images as base64 in the
+response body. There is no remote job to poll and no URL to download, which neither end of the submit-poll
+Gateway matched. Three additions reconcile it without a second completion path:
+
+| Addition | Purpose |
+| --- | --- |
+| `ProviderSubmission.result` | A provider whose generation call is synchronous returns its terminal `ProviderJob` with the submission |
+| `ProviderJob.outputs` | Inline artefacts (`ProviderInlineOutput`: bytes plus MIME type) in place of `output_url` |
+| `MediaRegistry.register_provider_bytes()` | Stores inline bytes through the same content validation a downloaded artefact passes |
+
+The confirmation transaction skips the poll delay when a result is already in hand, then claims the poll and
+runs the existing completion path, so billing evidence, credit settlement, candidate and shot status,
+idempotency and canary settlement are not duplicated. Batch images beyond the first are registered as project
+media bound to the shot but not to the candidate — the workspace paid for them, and a candidate may own only
+one artefact.
+
+The result is held in the Gateway process between confirmation and poll, both inside one `process()` call.
+Process death in that window loses the artefact but not the accounting: `get_job` for an image reports
+`OPENROUTER_IMAGE_RESULT_NOT_RETRIEVABLE` with `submitted=True`, so the credit moves to
+`RECONCILIATION_REQUIRED` rather than being silently refunded or reported as success.
+
+Each image model carries a reviewed execution envelope, recorded from its own OpenRouter capability
+descriptor: for `openai/gpt-image-2`, 10 images per request, 16 reference images, the published aspect-ratio,
+quality and background enums, and a 400K context. A request outside the envelope is rejected locally, before
+the paid call; a model with no reviewed envelope is rejected outright. Reference images become
+`input_references` entries, and the Gateway-resolved `start_frame_url`, `end_frame_url` and `reference_urls`
+are read directly so a Passenger request without an Adapter payload still performs an edit rather than
+silently degrading to text-to-image.
 
 For Google Flow, `FlowProjectAllocator` owns first-use affinity. Active-state partial unique indexes enforce:
 
@@ -353,6 +582,39 @@ is placed ahead of the bounded image context; the exact version/hash and constra
 neutral/model prompt, Generation Job metadata, and each model adapter's `style_control` payload. The current offline
 descriptor is a deterministic normalized 64-D color/tonal/saturation/edge/spatial vector, not a calibrated learned
 model and not a Provider capability claim.
+
+### Two layers, and why one is not enough
+
+The 64-D descriptor is a histogram of colour, tonal, saturation, edge and spatial statistics. It
+is a reliable detector for what it was built for — a grade shift, a contrast collapse, a palette
+walking away across an episode — and it is deterministic, free and offline, which is why it
+stays. It is also blind in a specific way: rendering *medium* barely moves those statistics. Oil
+paint and a 3D render of the same scene under the same palette score near 1.0, as do 35mm and a
+phone camera. A series can drift from illustrated to photographic with every frame passing.
+
+`ModelRole.STYLE_SEMANTIC_EMBEDDING` (`google/gemini-embedding-2` through the existing OpenRouter
+credential) supplies the second layer, which sees medium, brushwork and photographic language and
+is correspondingly weak where the descriptor is strong — a regrade that preserves the medium
+reads as "same style" to it. Neither subsumes the other.
+
+Migration `0036` binds a second reference embedding to the lock itself, so the two layers can
+never describe different frames, and records each layer's verdict separately on
+`CandidateStyleEvaluation`. The combined status is the **worse** of the two, never an average:
+one layer's confidence must not cover the other's objection. An unavailable semantic model, or a
+lock that carries a semantic reference evaluated by a process without an embedder, yields
+`REVIEW_REQUIRED` — a missing second opinion is not a passing one, and a gate cannot quietly
+weaken itself. A project locked before layer 2 was enabled carries no semantic reference and
+keeps the single gate rather than acquiring one retroactively. The layer is a deployment-wide
+switch (`FEATURE_SEMANTIC_STYLE_LOCK`, default off), not a per-project flag: it is a paid call
+per candidate, and a gate that is quietly stronger on some projects than others is not a gate.
+
+Enforcement lives in `PromptCompilerService`, which resolves the lock from `ProjectStyleService` itself. It used to
+live in `prepare_autopilot`, which merged a `style_lock` key into the canonical assets the compiler read — so exactly
+one caller produced style-locked prompts and every other caller of `compile()` silently produced prompts with none,
+a wrong look rather than an error. A caller-supplied `style_lock` is now only a fallback for a compiler constructed
+without a style source; it can never override the authoritative lock, because a prompt compiled against a superseded
+style would satisfy every downstream check while rendering the wrong thing. `scripts/simulate_short_story.py` calls
+`compile()` plainly and asserts the lock arrives, so the guarantee has a runnable proof.
 
 After generation, `ProjectStyleService.evaluate_candidate()` samples video positions
 `0, 0.2, 0.4, 0.6, 0.8, 0.98` (or evaluates a still), persists average/minimum/p10 similarity, low-score fraction and
@@ -468,6 +730,7 @@ Phase III extends the existing table groups with:
 | Storage | workspace max/used/reserved bytes, `storage_reservations`, `media_assets.size_bytes` |
 | Persistent character state | append-only `character_state_versions`, `character_state_deltas`, `character_state_validations`, `character_state_commits`; mutable CAS projection `character_state_heads` |
 | Project visual style | `projects.canonical_style_version_id`; append-only `style_embeddings`, `project_style_locks`, `candidate_style_evaluations` |
+| Base USDC payments | `depay_checkout_sessions`, append-only `depay_webhook_deliveries`, `alchemy_webhook_deliveries`, `onchain_payments`, append-only `workspace_credit_ledger_entries`; legacy wallet-binding/intent tables remain for compatibility |
 
 The migration chain is single-head through:
 
@@ -478,6 +741,11 @@ The migration chain is single-head through:
 -> 0027_production_evidence_core
 -> 0028_persistent_character_state
 -> 0029_project_style_lock
+-> 0030_alchemy_usdc_credit_ledger
+-> 0031_wallet_binding_payment_intents
+-> 0032_depay_payment_links
+-> 0033_fixed_depay_pro_offer
+-> 0034_narrative_ledger
 ```
 
 PostgreSQL 17.10 + pgvector 0.8.6 was validated on temporary databases for fresh and populated paths, supported
@@ -489,10 +757,16 @@ positive/negative trigger cases on a fresh temporary PostgreSQL 17 instance pass
 evidence, not proof that the historical Compose volume or an existing production database has been upgraded. The
 ignored `data/platform.db` is not used as production migration evidence and must not be blindly stamped or upgraded.
 
-Migration `0029` is the current code head and adds a one-time, exact-version project style pointer plus immutable
+Migration `0029` adds a one-time, exact-version project style pointer plus immutable
 embedding, lock, and candidate evaluation rows. SQLite migration/schema regression is covered. No PostgreSQL 17,
 Compose populated-upgrade, real learned style encoder, or Provider style-control canary evidence is claimed for
 `0029` yet.
+
+Migration `0033` is the current code head. It permits provider-managed PaymentIntents without a pre-bound payer wallet,
+binds each DePay checkout to exactly one intent, and makes FREE→PRO plus the 3,000-credit append atomic. Fresh SQLite
+migration, metadata parity and focused API/service regressions pass offline. A disposable PostgreSQL 17 + pgvector
+database passed fresh upgrade only through `0032`; PostgreSQL `0033`, populated/rollback/Compose validation and a real
+Base USDC transfer have not been executed.
 
 ## Internal observability
 
@@ -537,7 +811,15 @@ blockers include:
 3. keep the single paid video canary at **NOT EXECUTED** until a precise bounded permit is intentionally created;
 4. complete email verification, MFA/invitations/device sessions, production HTTPS/secrets, backup/restore,
    monitoring/alerts and operations policy;
-5. implement purchases/grant lifecycle/expiry/admin adjustments before claiming a complete commercial wallet.
+5. save and verify the DePay Base Native USDC link/callback, execute one explicitly authorized low-value real payment,
+   then validate Alchemy reorg/reconciliation operations; grant lifecycle/expiry/admin adjustments also remain;
+6. decide the fallback policy for model-backed prompt compilation, then enforce typed JSON output and
+   fact-lock validation through `ModelRoleRuntime`; the twelve Skill bodies are rewritten and installed, but
+   none has yet been executed by a model;
+7. supply the reviewed `FLOW_VIDEO_MODEL_KEYS` entry for `flow-veo-3.1` and an HTTPS `PUBLIC_BASE_URL` the
+   fetchable-URL providers can actually reach; the retry/admission payload recompilation, the reference-mode
+   split, the fail-closed Flow key mapping and the OpenRouter/Ark payload allowlists are implemented and
+   covered by Mock payload contract tests, but no live canary has exercised them.
 
 No further Provider integration is required for the persistent-state milestone. The remaining visual blocker is a
 trusted, calibrated implementation behind the existing reviewer contract, not permission to treat Voyage embeddings

@@ -14,6 +14,7 @@ from provider_sdk import (
     ProviderHealth,
     ProviderJob,
     ProviderPollIdentity,
+    ProviderReferenceMode,
     ProviderSubmission,
     ProviderTrustLevel,
 )
@@ -32,11 +33,52 @@ from provider_sdk.transport import (
     create_provider_transport,
 )
 
+# Only these fields may reach a RunAPI edge image/video task. Tenancy, routing, accounting,
+# idempotency and internal audit metadata never leave the platform.
+GENERATION_REQUEST_FIELDS = frozenset(
+    {
+        "model",
+        "prompt",
+        "negative_prompt",
+        "duration",
+        "aspect_ratio",
+        "resolution",
+        "seed",
+        "image_url",
+        "tail_image_url",
+        "reference_images",
+        "reference_video",
+        "generate_audio",
+        "watermark",
+    }
+)
+
+# Gateway-resolved reference URLs mapped onto the transport fields above.
+GENERATION_REFERENCE_ALIASES = {
+    "start_frame_url": "image_url",
+    "end_frame_url": "tail_image_url",
+    "reference_urls": "reference_images",
+}
+
+
+def _edge_payload(
+    request: dict[str, Any],
+    allowed: frozenset[str],
+    aliases: dict[str, str],
+) -> dict[str, Any]:
+    payload = {key: value for key, value in request.items() if key in allowed and value is not None}
+    for resolved, target in aliases.items():
+        if request.get(resolved) and not payload.get(target):
+            payload[target] = request[resolved]
+    return payload
+
 
 class RunAPIEdgeProvider(GenerationProvider, ChatCapability):
     """Low-trust adapter that cannot execute without edge policy and budget approval."""
 
     name = "runapi"
+    # Edge tasks stay temporary; references must already be fetchable URLs.
+    reference_mode = ProviderReferenceMode.FETCHABLE_URL
     trust_level = ProviderTrustLevel.EDGE
 
     def __init__(
@@ -270,7 +312,7 @@ class RunAPIEdgeProvider(GenerationProvider, ChatCapability):
     ) -> ProviderSubmission:
         del account_id, worker_id
         task = self._task(request, generation=True)
-        payload = {key: value for key, value in request.items() if not key.startswith("_")}
+        payload = _edge_payload(request, GENERATION_REQUEST_FIELDS, GENERATION_REFERENCE_ALIASES)
         payload["model"] = str(payload.get("model") or self.model_id).strip()
         if not payload["model"]:
             raise _invalid("RUNAPI_MODEL_ID is not configured")
@@ -288,7 +330,7 @@ class RunAPIEdgeProvider(GenerationProvider, ChatCapability):
     ) -> ProviderSubmission:
         del account_id, worker_id
         task = self._task(request, generation=True)
-        payload = {key: value for key, value in request.items() if not key.startswith("_")}
+        payload = _edge_payload(request, GENERATION_REQUEST_FIELDS, GENERATION_REFERENCE_ALIASES)
         payload["model"] = str(payload.get("model") or self.model_id).strip()
         if not payload["model"]:
             raise _invalid("RUNAPI_MODEL_ID is not configured")

@@ -1,5 +1,5 @@
 {
-  "version": "phase2-model-infrastructure-v2",
+  "version": "phase2-model-infrastructure-v4",
   "models": [
     {
       "logical_name": "gpt-5.6-sol-openrouter",
@@ -9,6 +9,7 @@
       "capabilities": [
         "director_reasoning",
         "cinematography_reasoning",
+        "camera_operation_reasoning",
         "prompt_compilation",
         "prompt_refinement",
         "narrative_compilation",
@@ -19,10 +20,52 @@
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
-      "metadata_json": {"transport": "openrouter", "credential_required": true}
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true
+      }
+    },
+    {
+      "logical_name": "claude-opus-5-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "anthropic/claude-opus-5",
+      "modality": "text_multimodal",
+      "capabilities": [
+        "director_reasoning",
+        "assistant_director",
+        "narrative_compilation",
+        "continuity_reasoning",
+        "generation_policy_reasoning",
+        "prompt_refinement",
+        "multimodal_review"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "PREMIUM",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true
+      }
     },
     {
       "logical_name": "claude-sonnet-5-openrouter",
@@ -39,10 +82,247 @@
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
-      "metadata_json": {"transport": "openrouter", "credential_required": true}
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true
+      }
+    },
+    {
+      "logical_name": "qwen3.8-max-dashscope",
+      "provider": "wan",
+      "provider_model_id": "qwen3.8-max",
+      "modality": "text_multimodal",
+      "capabilities": [
+        "prompt_compilation",
+        "prompt_refinement",
+        "cinematography_reasoning",
+        "continuity_reasoning",
+        "narrative_compilation"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "metadata_json": {
+        "transport": "dashscope_compatible_mode",
+        "credential_required": true,
+        "shares_credential_with": "wan"
+      }
+    },
+    {
+      "logical_name": "glm-5.2-ark",
+      "provider": "seedance",
+      "provider_model_id": "glm-5.2",
+      "modality": "text_multimodal",
+      "capabilities": [
+        "camera_movement_reasoning",
+        "user_qa",
+        "continuity_reasoning",
+        "narrative_compilation",
+        "prompt_refinement"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "metadata_json": {
+        "transport": "ark_third_party",
+        "credential_required": true,
+        "shares_credential_with": "seedance",
+        "context_window": 1000000
+      }
+    },
+    {
+      "logical_name": "gpt-image-2-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "openai/gpt-image-2",
+      "modality": "image",
+      "capabilities": [
+        "image_generation"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "PREMIUM",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "context_window": 400000,
+      "supported_aspect_ratios": [
+        "1:1",
+        "3:2",
+        "2:3",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16",
+        "21:9"
+      ],
+      "metadata_json": {
+        "transport": "openrouter",
+        "api_surface": "POST /images",
+        "supports_image_editing": true,
+        "max_batch_images": 10,
+        "capability_source": "openrouter GET /api/v1/images/models, reviewed 2026-08-22"
+      },
+      "capability_profile": {
+        "profile_version": "gpt-image-2-manual-v1",
+        "supported_operations": [
+          "image_generation"
+        ],
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_text_rendering": true,
+        "max_reference_images": 16,
+        "supported_aspect_ratios": [
+          "1:1",
+          "3:2",
+          "2:3",
+          "4:3",
+          "3:4",
+          "16:9",
+          "9:16",
+          "21:9"
+        ],
+        "supported_resolutions": [
+          "1024p",
+          "2048p"
+        ],
+        "render_prior": 0.94,
+        "identity_prior": 0.9,
+        "text_render_prior": 0.95,
+        "provider_metadata": {
+          "adapter": "openrouter",
+          "cost": {
+            "normalized": 0.75,
+            "estimated_per_image": 0.1248
+          }
+        },
+        "source": "MANUAL_PRIOR"
+      }
+    },
+    {
+      "logical_name": "seedream-5.0-ark",
+      "provider": "seedance",
+      "provider_model_id": "seedream-5-0",
+      "modality": "image",
+      "capabilities": [
+        "image_generation"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "ark",
+        "credential_required": true,
+        "shares_credential_with": "seedance"
+      },
+      "capability_profile": {
+        "profile_version": "seedream-5.0-manual-v1",
+        "supported_operations": [
+          "image_generation"
+        ],
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "max_reference_images": 6,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "1024p",
+          "2048p"
+        ],
+        "render_prior": 0.9,
+        "identity_prior": 0.84,
+        "text_render_prior": 0.86,
+        "provider_metadata": {
+          "adapter": "seedance",
+          "cost": {
+            "normalized": 0.35,
+            "estimated_per_image": 0.03
+          }
+        },
+        "source": "MANUAL_PRIOR"
+      }
+    },
+    {
+      "logical_name": "deepseek-v4-flash",
+      "provider": "deepseek",
+      "provider_model_id": "deepseek-v4-flash",
+      "modality": "text_multimodal",
+      "capabilities": [
+        "cinematography_reasoning",
+        "camera_movement_reasoning",
+        "continuity_reasoning",
+        "prompt_refinement",
+        "generation_policy_reasoning"
+      ],
+      "quality_tier": "STANDARD",
+      "cost_class": "LOW",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "metadata_json": {
+        "transport": "deepseek",
+        "credential_required": true
+      }
     },
     {
       "logical_name": "doubao-free-reasoner",
@@ -63,7 +343,14 @@
       "quality_tier": "STANDARD",
       "cost_class": "LOW",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": false,
       "live_enabled": false,
       "metadata_json": {
@@ -76,47 +363,129 @@
       "provider": "runapi",
       "provider_model_id": "CONFIGURE_RUNAPI_PROMPT_MODEL_ID",
       "modality": "text",
-      "capabilities": ["prompt_refinement"],
+      "capabilities": [
+        "prompt_refinement"
+      ],
       "quality_tier": "EDGE",
       "cost_class": "LOW",
       "provider_trust_level": "EDGE",
-      "criticality_allowed": ["EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": false,
       "live_enabled": false,
-      "metadata_json": {"configuration_required": true, "budget_guard_required": true}
+      "metadata_json": {
+        "configuration_required": true,
+        "budget_guard_required": true
+      }
+    },
+    {
+      "logical_name": "gemini-embedding-2-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "google/gemini-embedding-2",
+      "modality": "embedding",
+      "capabilities": [
+        "style_semantic_embedding",
+        "multimodal_embedding"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "context_window": 8192,
+      "metadata_json": {
+        "transport": "openrouter",
+        "api_surface": "POST /embeddings",
+        "natively_multimodal": true,
+        "capability_source": "openrouter GET /api/v1/models/google/gemini-embedding-2/endpoints, reviewed 2026-08-23"
+      },
+      "capability_profile": {
+        "profile_version": "gemini-embedding-2-manual-v1",
+        "supported_operations": [
+          "style_semantic_embedding",
+          "multimodal_embedding"
+        ],
+        "provider_metadata": {
+          "adapter": "openrouter",
+          "cost": {
+            "normalized": 0.2,
+            "estimated_per_image": 0.00045
+          }
+        },
+        "source": "MANUAL_PRIOR"
+      }
     },
     {
       "logical_name": "voyage-multimodal-3.5-openrouter",
       "provider": "openrouter",
       "provider_model_id": "voyageai/voyage-multimodal-3.5",
       "modality": "multimodal_embedding",
-      "capabilities": ["multimodal_embedding"],
+      "capabilities": [
+        "multimodal_embedding"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "STANDARD",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
-      "metadata_json": {"transport": "openrouter", "not_for_face_identity_verification": true}
+      "metadata_json": {
+        "transport": "openrouter",
+        "not_for_face_identity_verification": true
+      }
     },
     {
       "logical_name": "kling-3-standard-openrouter",
       "provider": "openrouter",
       "provider_model_id": "kwaivgi/kling-v3.0-std",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "STANDARD",
       "cost_class": "STANDARD",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 15,
-      "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "openrouter"},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "openrouter"
+      },
       "capability_profile": {
         "profile_version": "kling-3.0-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_reference_image": true,
@@ -131,9 +500,16 @@
         "max_reference_images": 4,
         "min_duration": 1,
         "max_duration": 15,
-        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-        "supported_resolutions": ["720p", "1080p"],
-        "physics_prior": 0.90,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.9,
         "identity_prior": 0.88,
         "camera_prior": 0.88,
         "render_prior": 0.82,
@@ -142,9 +518,17 @@
         "text_render_prior": 0.82,
         "provider_metadata": {
           "adapter": "kling",
-          "cost": {"normalized": 0.58, "estimated_per_second": 0.10},
-          "latency": {"normalized": 0.55, "expected_seconds": 150},
-          "failure_priors": {"identity_drift_long_take": 0.18}
+          "cost": {
+            "normalized": 0.58,
+            "estimated_per_second": 0.1
+          },
+          "latency": {
+            "normalized": 0.55,
+            "expected_seconds": 150
+          },
+          "failure_priors": {
+            "identity_drift_long_take": 0.18
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -154,19 +538,36 @@
       "provider": "openrouter",
       "provider_model_id": "kwaivgi/kling-v3.0-pro",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 15,
-      "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "openrouter"},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "openrouter"
+      },
       "capability_profile": {
         "profile_version": "kling-3.0-pro-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_reference_image": true,
@@ -181,20 +582,123 @@
         "max_reference_images": 4,
         "min_duration": 1,
         "max_duration": 15,
-        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-        "supported_resolutions": ["720p", "1080p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
         "physics_prior": 0.92,
-        "identity_prior": 0.90,
-        "camera_prior": 0.90,
+        "identity_prior": 0.9,
+        "camera_prior": 0.9,
         "render_prior": 0.88,
         "action_prior": 0.93,
-        "dialogue_prior": 0.80,
+        "dialogue_prior": 0.8,
         "text_render_prior": 0.84,
         "provider_metadata": {
           "adapter": "kling",
-          "cost": {"normalized": 0.72, "estimated_per_second": 0.14},
-          "latency": {"normalized": 0.62, "expected_seconds": 180},
-          "failure_priors": {"identity_drift_long_take": 0.15}
+          "cost": {
+            "normalized": 0.72,
+            "estimated_per_second": 0.14
+          },
+          "latency": {
+            "normalized": 0.62,
+            "expected_seconds": 180
+          },
+          "failure_priors": {
+            "identity_drift_long_take": 0.15
+          }
+        },
+        "source": "MANUAL_PRIOR"
+      }
+    },
+    {
+      "logical_name": "grok-imagine-video-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "x-ai/grok-imagine-video",
+      "modality": "video",
+      "capabilities": [
+        "video_generation"
+      ],
+      "quality_tier": "STANDARD",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "max_duration": 15,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1",
+        "4:3",
+        "3:4",
+        "3:2",
+        "2:3"
+      ],
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true
+      },
+      "capability_profile": {
+        "profile_version": "grok-imagine-video-manual-v1",
+        "supported_operations": [
+          "video_generation"
+        ],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": false,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 7,
+        "min_duration": 1,
+        "max_duration": 15,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1",
+          "4:3",
+          "3:4",
+          "3:2",
+          "2:3"
+        ],
+        "supported_resolutions": [
+          "480p",
+          "720p"
+        ],
+        "physics_prior": 0.7,
+        "identity_prior": 0.68,
+        "camera_prior": 0.62,
+        "render_prior": 0.82,
+        "action_prior": 0.7,
+        "dialogue_prior": 0.6,
+        "text_render_prior": 0.8,
+        "provider_metadata": {
+          "adapter": "grok",
+          "cost": {
+            "normalized": 0.45,
+            "estimated_per_second": 0.07
+          },
+          "latency": {
+            "normalized": 0.4,
+            "expected_seconds": 90
+          },
+          "failure_priors": {
+            "end_frame_direct_gaze": 0.62,
+            "multi_trajectory_compression": 0.45
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -204,23 +708,39 @@
       "provider": "google_flow",
       "provider_model_id": "flow-veo-3.1",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 8,
-      "supported_aspect_ratios": ["9:16", "16:9"],
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9"
+      ],
       "metadata_json": {
         "transport": "internal_flow_gateway",
         "account_affinity_required": true,
-        "legacy_execution_aliases": ["veo"]
+        "legacy_execution_aliases": [
+          "veo"
+        ]
       },
       "capability_profile": {
         "profile_version": "flow-veo-3.1-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_v2v": true,
@@ -236,20 +756,34 @@
         "max_reference_images": 3,
         "min_duration": 1,
         "max_duration": 8,
-        "supported_aspect_ratios": ["9:16", "16:9"],
-        "supported_resolutions": ["720p", "1080p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
         "physics_prior": 0.89,
         "identity_prior": 0.84,
-        "camera_prior": 0.90,
+        "camera_prior": 0.9,
         "render_prior": 0.94,
         "action_prior": 0.81,
         "dialogue_prior": 0.75,
         "text_render_prior": 0.54,
         "provider_metadata": {
           "adapter": "veo",
-          "cost": {"normalized": 0.82, "estimated_per_second": 0.20},
-          "latency": {"normalized": 0.76, "expected_seconds": 250},
-          "failure_priors": {"browser_user_action": 0.18}
+          "cost": {
+            "normalized": 0.82,
+            "estimated_per_second": 0.2
+          },
+          "latency": {
+            "normalized": 0.76,
+            "expected_seconds": 250
+          },
+          "failure_priors": {
+            "browser_user_action": 0.18
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -259,27 +793,54 @@
       "provider": "google_flow",
       "provider_model_id": "NARWHAL",
       "modality": "image",
-      "capabilities": ["image_generation"],
+      "capabilities": [
+        "image_generation"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
-      "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "internal_flow_gateway", "account_affinity_required": true},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "internal_flow_gateway",
+        "account_affinity_required": true
+      },
       "capability_profile": {
         "profile_version": "flow-narwhal-manual-v1",
-        "supported_operations": ["image_generation"],
+        "supported_operations": [
+          "image_generation"
+        ],
         "supports_reference_image": true,
         "supports_multi_reference": true,
         "max_reference_images": 4,
-        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-        "supported_resolutions": ["1024p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "1024p"
+        ],
         "render_prior": 0.85,
         "provider_metadata": {
           "adapter": "veo",
-          "cost": {"normalized": 0.50, "estimated_per_image": 0.04}
+          "cost": {
+            "normalized": 0.5,
+            "estimated_per_image": 0.04
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -287,21 +848,36 @@
     {
       "logical_name": "seedance-2.5-official",
       "provider": "seedance",
-      "provider_model_id": "seedance-2.5",
+      "provider_model_id": "doubao-seedance-2-5-260628",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "STANDARD",
       "provider_trust_level": "STANDARD",
-      "criticality_allowed": ["STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 15,
-      "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "official_api",
+        "credential_required": true
+      },
       "capability_profile": {
         "profile_version": "seedance-2.5-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_v2v": true,
@@ -313,20 +889,35 @@
         "max_reference_images": 4,
         "min_duration": 1,
         "max_duration": 15,
-        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-        "supported_resolutions": ["720p", "1080p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
         "physics_prior": 0.84,
         "identity_prior": 0.82,
-        "camera_prior": 0.90,
+        "camera_prior": 0.9,
         "render_prior": 0.86,
         "action_prior": 0.88,
         "dialogue_prior": 0.88,
         "text_render_prior": 0.58,
         "provider_metadata": {
           "adapter": "seedance",
-          "cost": {"normalized": 0.50, "estimated_per_second": 0.09},
-          "latency": {"normalized": 0.48, "expected_seconds": 130},
-          "failure_priors": {"compressed_multi_action": 0.28}
+          "cost": {
+            "normalized": 0.5,
+            "estimated_per_second": 0.09
+          },
+          "latency": {
+            "normalized": 0.48,
+            "expected_seconds": 130
+          },
+          "failure_priors": {
+            "compressed_multi_action": 0.28
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -336,19 +927,37 @@
       "provider": "veo_official",
       "provider_model_id": "veo-3.1-quality",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "PREMIUM",
       "cost_class": "PREMIUM",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 8,
-      "supported_aspect_ratios": ["9:16", "16:9"],
-      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9"
+      ],
+      "metadata_json": {
+        "transport": "official_api",
+        "credential_required": true,
+        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT"
+      },
       "capability_profile": {
         "profile_version": "veo-3.1-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_reference_image": true,
@@ -362,20 +971,34 @@
         "max_reference_images": 3,
         "min_duration": 1,
         "max_duration": 8,
-        "supported_aspect_ratios": ["9:16", "16:9"],
-        "supported_resolutions": ["720p", "1080p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
         "physics_prior": 0.88,
         "identity_prior": 0.82,
         "camera_prior": 0.88,
         "render_prior": 0.96,
-        "action_prior": 0.80,
+        "action_prior": 0.8,
         "dialogue_prior": 0.76,
         "text_render_prior": 0.55,
         "provider_metadata": {
           "adapter": "veo",
-          "cost": {"normalized": 0.90, "estimated_per_second": 0.22},
-          "latency": {"normalized": 0.72, "expected_seconds": 240},
-          "failure_priors": {"duration_over_8s": 0.80}
+          "cost": {
+            "normalized": 0.9,
+            "estimated_per_second": 0.22
+          },
+          "latency": {
+            "normalized": 0.72,
+            "expected_seconds": 240
+          },
+          "failure_priors": {
+            "duration_over_8s": 0.8
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -385,19 +1008,37 @@
       "provider": "grok",
       "provider_model_id": "grok-video",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "STANDARD",
       "cost_class": "STANDARD",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 10,
-      "supported_aspect_ratios": ["9:16", "16:9"],
-      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9"
+      ],
+      "metadata_json": {
+        "transport": "official_api",
+        "credential_required": true,
+        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT"
+      },
       "capability_profile": {
         "profile_version": "grok-video-manual-v1",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_i2v": true,
         "supports_start_frame": true,
@@ -406,8 +1047,13 @@
         "supports_text_rendering": true,
         "min_duration": 1,
         "max_duration": 10,
-        "supported_aspect_ratios": ["9:16", "16:9"],
-        "supported_resolutions": ["720p"],
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9"
+        ],
+        "supported_resolutions": [
+          "720p"
+        ],
         "physics_prior": 0.66,
         "identity_prior": 0.66,
         "camera_prior": 0.62,
@@ -417,9 +1063,100 @@
         "text_render_prior": 0.88,
         "provider_metadata": {
           "adapter": "grok",
-          "cost": {"normalized": 0.25, "estimated_per_second": 0.04},
-          "latency": {"normalized": 0.20, "expected_seconds": 55},
-          "failure_priors": {"end_frame_direct_gaze": 0.80, "identity_drift": 0.32}
+          "cost": {
+            "normalized": 0.25,
+            "estimated_per_second": 0.04
+          },
+          "latency": {
+            "normalized": 0.2,
+            "expected_seconds": 55
+          },
+          "failure_priors": {
+            "end_frame_direct_gaze": 0.8,
+            "identity_drift": 0.32
+          }
+        },
+        "source": "MANUAL_PRIOR"
+      }
+    },
+    {
+      "logical_name": "wan-3.0-official",
+      "provider": "wan",
+      "provider_model_id": "wan-3.0",
+      "modality": "video",
+      "capabilities": [
+        "video_generation"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "PREMIUM",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "max_duration": 30,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "dashscope",
+        "credential_required": true
+      },
+      "capability_profile": {
+        "profile_version": "wan-3.0-manual-v1",
+        "supported_operations": [
+          "video_generation"
+        ],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_v2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_audio": true,
+        "supports_camera_instruction": true,
+        "supports_video_extension": true,
+        "max_reference_images": 8,
+        "min_duration": 2,
+        "max_duration": 30,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.86,
+        "identity_prior": 0.82,
+        "camera_prior": 0.78,
+        "render_prior": 0.88,
+        "action_prior": 0.88,
+        "dialogue_prior": 0.72,
+        "text_render_prior": 0.55,
+        "provider_metadata": {
+          "adapter": "wan",
+          "cost": {
+            "normalized": 0.8,
+            "estimated_per_second": 0.18
+          },
+          "latency": {
+            "normalized": 0.8,
+            "expected_seconds": 300
+          },
+          "failure_priors": {
+            "long_narrative_compression": 0.12
+          }
         },
         "source": "MANUAL_PRIOR"
       }
@@ -429,76 +1166,338 @@
       "provider": "wan",
       "provider_model_id": "wan-2.7",
       "modality": "video",
-      "capabilities": ["video_generation"],
+      "capabilities": [
+        "video_generation"
+      ],
       "quality_tier": "STANDARD",
       "cost_class": "LOW",
       "provider_trust_level": "PRODUCTION",
-      "criticality_allowed": ["CANONICAL", "HERO", "IMPORTANT", "STANDARD", "EDGE", "TEMPORARY"],
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
       "enabled": true,
       "live_enabled": false,
       "max_duration": 15,
-      "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-      "metadata_json": {"transport": "official_api", "credential_required": true},
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "official_api",
+        "credential_required": true
+      },
       "capability_profile": {
         "profile_version": "wan-2.7-manual-v1",
         "confidence_level": "initial",
-        "supported_operations": ["video_generation"],
+        "supported_operations": [
+          "video_generation"
+        ],
         "supports_t2v": true,
         "supports_camera_instruction": true,
         "min_duration": 1,
         "max_duration": 15,
-        "supported_aspect_ratios": ["9:16", "16:9", "1:1"],
-        "supported_resolutions": ["720p", "1080p"],
-        "physics_prior": 0.50,
-        "identity_prior": 0.50,
-        "camera_prior": 0.50,
-        "render_prior": 0.50,
-        "action_prior": 0.50,
-        "dialogue_prior": 0.50,
-        "text_render_prior": 0.50,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.5,
+        "identity_prior": 0.5,
+        "camera_prior": 0.5,
+        "render_prior": 0.5,
+        "action_prior": 0.5,
+        "dialogue_prior": 0.5,
+        "text_render_prior": 0.5,
         "provider_metadata": {
           "adapter": "wan",
           "evidence": "adapter_contract_only_no_live_capability_verification",
-          "cost": {"normalized": 0.42, "estimated_per_second": 0.07},
-          "latency": {"normalized": 0.58, "expected_seconds": 170}
+          "cost": {
+            "normalized": 0.42,
+            "estimated_per_second": 0.07
+          },
+          "latency": {
+            "normalized": 0.58,
+            "expected_seconds": 170
+          }
         },
         "source": "MANUAL_PRIOR"
       }
     }
   ],
   "role_bindings": [
-    {"role": "DIRECTOR", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "ASSISTANT_DIRECTOR", "model_logical_name": "claude-sonnet-5-openrouter", "priority": 0},
-    {"role": "CINEMATOGRAPHY_REASONING", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "PROMPT_COMPILER", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "PROMPT_REFINER", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "PROMPT_REFINER_LOW_COST", "model_logical_name": "runapi-prompt-refiner-edge", "priority": 0},
-    {"role": "PROMPT_REFINER_FALLBACK", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "NARRATIVE_COMPILER", "model_logical_name": "claude-sonnet-5-openrouter", "priority": 0},
-    {"role": "NARRATIVE_COMPILER", "model_logical_name": "gpt-5.6-sol-openrouter", "binding_kind": "FALLBACK", "priority": 10},
-    {"role": "CONTINUITY_REASONER", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "GENERATION_POLICY_REASONER", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "VLM_REVIEWER", "model_logical_name": "gpt-5.6-sol-openrouter", "priority": 0},
-    {"role": "MULTIMODAL_EMBEDDING", "model_logical_name": "voyage-multimodal-3.5-openrouter", "priority": 0},
-    {"role": "VIDEO_KLING_STANDARD", "model_logical_name": "kling-3-standard-openrouter", "priority": 0},
-    {"role": "VIDEO_KLING_PRO", "model_logical_name": "kling-3-pro-openrouter", "priority": 0},
-    {"role": "VIDEO_FLOW", "model_logical_name": "flow-veo-3.1-internal", "priority": 0},
-    {"role": "VIDEO_SEEDANCE", "model_logical_name": "seedance-2.5-official", "priority": 0},
-    {"role": "VIDEO_VEO", "model_logical_name": "veo-3.1-quality-official", "priority": 0},
-    {"role": "VIDEO_GROK", "model_logical_name": "grok-video-official", "priority": 0},
-    {"role": "VIDEO_WAN", "model_logical_name": "wan-2.7-official", "priority": 0},
-
-    {"role": "DIRECTOR", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "ASSISTANT_DIRECTOR", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "CINEMATOGRAPHY_REASONING", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "PROMPT_COMPILER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "PROMPT_REFINER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "PROMPT_REFINER_LOW_COST", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "PROMPT_REFINER_FALLBACK", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "NARRATIVE_COMPILER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "CONTINUITY_REASONER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "GENERATION_POLICY_REASONER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "VLM_REVIEWER", "model_logical_name": "doubao-free-reasoner", "plan_tier": "FREE", "priority": 0},
-    {"role": "VIDEO_SEEDANCE", "model_logical_name": "seedance-2.5-official", "plan_tier": "FREE", "priority": 0}
+    {
+      "role": "DIRECTOR",
+      "model_logical_name": "claude-opus-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "DIRECTOR",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "ASSISTANT_DIRECTOR",
+      "model_logical_name": "claude-sonnet-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "ASSISTANT_DIRECTOR",
+      "model_logical_name": "claude-opus-5-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "CINEMATOGRAPHY_REASONING",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "CAMERA_MOVEMENT",
+      "model_logical_name": "deepseek-v4-flash",
+      "priority": 0
+    },
+    {
+      "role": "CAMERA_MOVEMENT",
+      "model_logical_name": "glm-5.2-ark",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "CAMERA_OPERATOR",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "USER_QA",
+      "model_logical_name": "glm-5.2-ark",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_COMPILER",
+      "model_logical_name": "qwen3.8-max-dashscope",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_COMPILER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "PROMPT_REFINER",
+      "model_logical_name": "qwen3.8-max-dashscope",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_REFINER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "PROMPT_REFINER_LOW_COST",
+      "model_logical_name": "runapi-prompt-refiner-edge",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_REFINER_FALLBACK",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "NARRATIVE_COMPILER",
+      "model_logical_name": "claude-sonnet-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "NARRATIVE_COMPILER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "CONTINUITY_REASONER",
+      "model_logical_name": "claude-sonnet-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "CONTINUITY_REASONER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "GENERATION_POLICY_REASONER",
+      "model_logical_name": "claude-opus-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "GENERATION_POLICY_REASONER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "VLM_REVIEWER",
+      "model_logical_name": "claude-opus-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "VLM_REVIEWER",
+      "model_logical_name": "gpt-5.6-sol-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "MULTIMODAL_EMBEDDING",
+      "model_logical_name": "voyage-multimodal-3.5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_KLING_STANDARD",
+      "model_logical_name": "kling-3-standard-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_KLING_PRO",
+      "model_logical_name": "kling-3-pro-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_FLOW",
+      "model_logical_name": "flow-veo-3.1-internal",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_SEEDANCE",
+      "model_logical_name": "seedance-2.5-official",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_VEO",
+      "model_logical_name": "flow-veo-3.1-internal",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_GROK",
+      "model_logical_name": "grok-imagine-video-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_WAN",
+      "model_logical_name": "wan-2.7-official",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_WAN",
+      "model_logical_name": "wan-3.0-official",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "IMAGE_GENERATION",
+      "model_logical_name": "gpt-image-2-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "IMAGE_GENERATION",
+      "model_logical_name": "seedream-5.0-ark",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
+      "role": "IMAGE_GENERATION",
+      "model_logical_name": "flow-narwhal-image-internal",
+      "binding_kind": "FALLBACK",
+      "priority": 20
+    },
+    {
+      "role": "STYLE_SEMANTIC_EMBEDDING",
+      "model_logical_name": "gemini-embedding-2-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "DIRECTOR",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "ASSISTANT_DIRECTOR",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "CINEMATOGRAPHY_REASONING",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_COMPILER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_REFINER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_REFINER_LOW_COST",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "PROMPT_REFINER_FALLBACK",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "NARRATIVE_COMPILER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "CONTINUITY_REASONER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "GENERATION_POLICY_REASONER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "VLM_REVIEWER",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "VIDEO_SEEDANCE",
+      "model_logical_name": "seedance-2.5-official",
+      "plan_tier": "FREE",
+      "priority": 0
+    }
   ]
 }

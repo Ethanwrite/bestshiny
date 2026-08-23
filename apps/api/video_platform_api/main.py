@@ -43,6 +43,9 @@ from generation_gateway import (
 from generation_gateway.gateway import UnsafeRetry
 from image_prompt_core import ImagePromptCorrectRequest
 from media_service import (
+    DirectUploadConflict,
+    DirectUploadNotFinished,
+    DirectUploadUnsupported,
     ProviderMediaReconciliationConflict,
     ProviderMediaValidationFailed,
     StorageReservationConflict,
@@ -50,7 +53,17 @@ from media_service import (
     WorkspaceStorageQuotaExceeded,
 )
 from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
-from model_registry_core import ShotRequirements
+from model_registry_core import ModelRole, ShotRequirements
+from payment_core import (
+    AlchemyWebhookAuthenticationError,
+    AlchemyWebhookConfigurationError,
+    AlchemyWebhookConflict,
+    AlchemyWebhookPayloadError,
+    DePayAuthenticationError,
+    DePayConfigurationError,
+    DePayConflict,
+    DePayPayloadError,
+)
 from platform_contracts import (
     EpisodeCreate,
     GenerationRequest,
@@ -65,6 +78,7 @@ from platform_shared import (
     StorageLimitExceeded,
     UnsafeMediaUpload,
     validate_user_media_upload,
+    verify_local_reference_signature,
 )
 from production_domain.models import (
     BrowserWorker,
@@ -72,10 +86,12 @@ from production_domain.models import (
     CharacterIdentityVersion,
     CostRecord,
     DecisionRecord,
+    DirectUploadStatus,
     Episode,
     GenerationCandidate,
     MediaAsset,
     MediaProviderBinding,
+    MediaRendition,
     Project,
     PromptCompilation,
     PromptRevision,
@@ -97,9 +113,23 @@ from sqlalchemy import select
 
 from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
 from .container import Container, build_container
+from .payment_routes import register_payment_routes
 from .request_limits import UploadSizeLimitMiddleware
 from .runtime_routes import register_runtime_routes
 from .worker_auth import WorkerAuthenticationError, WorkerCredentialService, WorkerPrincipal
+
+
+class DirectUploadAuthorize(BaseModel):
+    """What a client declares before it is allowed to transfer anything."""
+
+    project_id: str
+    asset_type: str
+    filename: str
+    mime_type: str
+    sha256: str = Field(min_length=64, max_length=64)
+    size_bytes: int = Field(gt=0)
+    shot_id: str | None = None
+    character_id: str | None = None
 
 
 class AccountCreate(BaseModel):
@@ -358,6 +388,42 @@ def create_app(container: Container | None = None) -> FastAPI:
         max_file_bytes=container.settings.max_upload_bytes,
         multipart_overhead_bytes=container.settings.max_upload_request_overhead_bytes,
     )
+
+    @app.post("/v1/webhooks/alchemy")
+    async def receive_alchemy_webhook(request: Request):
+        raw_body = await request.body()
+        try:
+            result = container.alchemy_webhooks.handle(
+                raw_body,
+                request.headers.get("x-alchemy-signature"),
+            )
+        except AlchemyWebhookConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except AlchemyWebhookAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except AlchemyWebhookPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except AlchemyWebhookConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return result.as_dict()
+
+    @app.post("/v1/webhooks/depay")
+    async def receive_depay_webhook(request: Request):
+        raw_body = await request.body()
+        try:
+            result = container.depay_payments.handle_callback(
+                raw_body,
+                request.headers.get("x-signature"),
+            )
+        except DePayConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except DePayAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except DePayPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except DePayConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return result.as_dict()
 
     def verify_api_key(authorization: str | None = Header(default=None)) -> None:
         expected = container.settings.platform_api_key
@@ -1446,6 +1512,185 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(422, str(exc)) from exc
         return ProviderMediaReconcileView(**asdict(result))
 
+    def _asset_view(asset: MediaAsset, *, reused: bool) -> dict[str, Any]:
+        return {
+            "id": asset.id,
+            "sha256": asset.sha256,
+            "asset_type": asset.asset_type,
+            "storage_key": asset.storage_key,
+            "public_url": asset.public_url,
+            "reused": reused,
+        }
+
+    def _upload_lineage(shot_id: str | None, character_id: str | None) -> str:
+        parts = []
+        if shot_id:
+            parts.append(f"shot:{shot_id}")
+        if character_id:
+            parts.append(f"character:{character_id}")
+        return "|".join(parts) or "shared"
+
+    def _upload_scope(principal: AuthPrincipal, body: DirectUploadAuthorize) -> str | None:
+        auth.require_project(principal, body.project_id, write=True)
+        with container.database.session() as session:
+            project = session.get(Project, body.project_id)
+            if not project:
+                raise HTTPException(404, "project not found")
+            if body.character_id:
+                character = session.get(Character, body.character_id)
+                if not character or character.project_id != body.project_id:
+                    raise HTTPException(404, "character not found in project")
+            if body.shot_id:
+                shot = session.get(Shot, body.shot_id)
+                if not shot:
+                    raise HTTPException(404, "shot not found")
+                scene = session.get(Scene, shot.scene_id)
+                episode = session.get(Episode, scene.episode_id)
+                if episode.project_id != body.project_id:
+                    raise HTTPException(409, "shot does not belong to project")
+            return project.workspace_id
+
+    @app.post("/v1/assets/uploads", status_code=201)
+    def authorize_direct_upload(
+        request: Request,
+        body: DirectUploadAuthorize,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Authorize an upload the client sends straight to object storage.
+
+        The response contains a presigned PUT. The bytes never traverse this
+        service: it decides *whether* and *where*, storage does the transfer.
+        """
+
+        workspace_id = _upload_scope(principal, body)
+        idempotency_key = request.headers.get("Idempotency-Key") or (
+            f"direct-upload-{secrets.token_urlsafe(24)}"
+        )
+        lineage_key = _upload_lineage(body.shot_id, body.character_id)
+        reservation_id: str | None = None
+        try:
+            # The quota hold is taken on the *declared* size before the client
+            # is allowed to transfer, so a workspace cannot exceed its capacity
+            # by uploading first and being counted afterwards.
+            duplicate = container.media.find_by_content(
+                project_id=body.project_id,
+                sha256=body.sha256.lower(),
+                asset_type=body.asset_type.strip().upper(),
+                lineage_key=lineage_key,
+            )
+            if workspace_id and duplicate is None:
+                reservation = storage_quota.reserve(
+                    workspace_id=workspace_id,
+                    project_id=body.project_id,
+                    byte_count=body.size_bytes,
+                    idempotency_key=idempotency_key,
+                )
+                reservation_id = reservation.id
+            authorized = container.direct_uploads.authorize(
+                project_id=body.project_id,
+                workspace_id=workspace_id,
+                created_by_user_id=principal.user_id,
+                asset_type=body.asset_type,
+                filename=body.filename,
+                mime_type=body.mime_type,
+                sha256=body.sha256,
+                size_bytes=body.size_bytes,
+                idempotency_key=idempotency_key,
+                lineage_key=lineage_key,
+                shot_id=body.shot_id,
+                character_id=body.character_id,
+                reservation_id=reservation_id,
+            )
+        except DirectUploadUnsupported as exc:
+            raise HTTPException(501, str(exc)) from exc
+        except DirectUploadConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except WorkspaceStorageQuotaExceeded as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except StorageReservationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StorageLimitExceeded as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {
+            "upload_id": authorized.upload_id,
+            "url": authorized.presigned.url,
+            "method": authorized.presigned.method,
+            "headers": authorized.presigned.headers,
+            "storage_key": authorized.presigned.storage_key,
+            "expires_at": authorized.expires_at.isoformat(),
+            # When set, this content is already held for the project: complete
+            # immediately and skip the transfer.
+            "existing_asset_id": authorized.existing_asset_id,
+        }
+
+    @app.post("/v1/assets/uploads/{upload_id}/complete")
+    def complete_direct_upload(
+        upload_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Adopt an object the client already put in storage.
+
+        Size comes from the store's `HEAD` and the digest was enforced by the
+        store on write, so neither is taken on the client's word. Validation
+        reads a bounded header prefix, never the whole object.
+        """
+
+        try:
+            upload = container.direct_uploads.pending(upload_id)
+        except LookupError as exc:
+            raise HTTPException(404, "upload not found") from exc
+        auth.require_project(principal, upload.project_id, write=True)
+        if upload.status == DirectUploadStatus.COMPLETED.value and upload.media_asset_id:
+            asset = container.media.get(upload.media_asset_id)
+            if asset is not None:
+                return _asset_view(asset, reused=True)
+        if upload.status != DirectUploadStatus.PENDING.value:
+            raise HTTPException(409, "this upload can no longer be completed")
+
+        adopted: MediaAsset | None = None
+        reused = False
+        try:
+            size_bytes, mime_type = container.direct_uploads.verify_object(upload)
+            adopted, reused = container.media.adopt_stored_object(
+                upload.project_id,
+                upload.asset_type,
+                upload.storage_key,
+                sha256=upload.sha256,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                shot_id=upload.shot_id,
+                character_id=upload.character_id,
+                metadata={"upload_id": upload.id},
+            )
+            with container.database.session() as session:
+                container.direct_uploads.mark_completed(
+                    session, upload.id, media_asset_id=adopted.id
+                )
+            if upload.storage_reservation_id:
+                storage_quota.settle(
+                    upload.storage_reservation_id,
+                    asset_id=adopted.id,
+                    storage_key=adopted.storage_key,
+                    used_bytes=0 if reused else size_bytes,
+                )
+        except DirectUploadNotFinished as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StorageLimitExceeded as exc:
+            raise HTTPException(413, str(exc)) from exc
+        except UnsafeMediaUpload as exc:
+            raise HTTPException(415, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        finally:
+            # A rejected object leaves no asset, so the hold must not survive as
+            # unaccounted capacity.
+            if adopted is None and upload.storage_reservation_id:
+                storage_quota.release(upload.storage_reservation_id)
+                container.direct_uploads.abandon(upload.id)
+        return _asset_view(adopted, reused=reused)
+
     @app.post("/v1/assets")
     async def upload_asset(
         request: Request,
@@ -1630,6 +1875,47 @@ def create_app(container: Container | None = None) -> FastAPI:
             "provider_media_id": asset.provider_media_id,
             "public_url": asset.public_url,
         }
+
+    @app.get("/v1/media/reference/{storage_key:path}")
+    def serve_signed_reference(storage_key: str, request: Request):
+        """A signed, expiring, unauthenticated object read for external fetchers.
+
+        This route exists only because local disk cannot issue an
+        object-storage URL, and an external provider cannot present a session
+        cookie. **It proxies bytes through this process**, which is what
+        presigned object-storage URLs exist to avoid — so it stays off unless an
+        operator sets `LOCAL_REFERENCE_SIGNING_KEY`, and production configures
+        S3-compatible storage instead. The signature is over the exact key and
+        expiry, so it grants one object for one bounded window and nothing else.
+        """
+
+        signing_key = container.settings.local_reference_signing_key
+        if not signing_key:
+            raise HTTPException(404, "signed media references are not enabled")
+        if not verify_local_reference_signature(
+            storage_key,
+            expires=request.query_params.get("expires", ""),
+            signature=request.query_params.get("signature", ""),
+            signing_key=signing_key,
+        ):
+            raise HTTPException(403, "invalid or expired media reference signature")
+        with container.database.session() as session:
+            asset = session.scalar(select(MediaAsset).where(MediaAsset.storage_key == storage_key))
+            rendition = session.scalar(
+                select(MediaRendition).where(MediaRendition.storage_key == storage_key)
+            )
+        if asset is None and rendition is None:
+            raise HTTPException(404, "stored object not found")
+        media_type = (
+            rendition.mime_type if rendition is not None else asset.mime_type if asset else None
+        ) or "application/octet-stream"
+        try:
+            path = container.storage.path_for(storage_key)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(404, "stored object not found")
+        return FileResponse(path, media_type=media_type)
 
     @app.get("/v1/storage/{storage_key:path}")
     def serve_storage(
@@ -1838,7 +2124,15 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.get("/v1/skills")
     def list_skills(_principal: AuthPrincipal = Depends(auth.current_user)):
-        return [{"name": skill.name, "category": skill.category} for skill in container.skills.list_skills()]
+        return [
+            {
+                "name": skill.name,
+                "category": skill.category,
+                "description": skill.description,
+                "version": skill.version,
+            }
+            for skill in container.skills.list_skills()
+        ]
 
     @app.get("/v1/providers/{provider}/health")
     async def provider_health(
@@ -2110,14 +2404,31 @@ def create_app(container: Container | None = None) -> FastAPI:
         key = request.headers.get("Idempotency-Key") or body.get("idempotency_key")
         if not key:
             raise HTTPException(400, "Idempotency-Key is required")
+        # The default image target is the server-owned IMAGE_GENERATION role, not
+        # a constant in this handler: the registry is the single place where the
+        # project's image model is chosen.
+        requested_provider, requested_model = body.get("provider"), body.get("model")
+        if requested_provider and requested_model:
+            provider_name, model_name = str(requested_provider), str(requested_model)
+        else:
+            try:
+                resolved_image = container.model_infrastructure.resolve_role(ModelRole.IMAGE_GENERATION)
+            except LookupError as exc:
+                raise HTTPException(503, f"no image model is available: {exc}") from exc
+            provider_name = str(requested_provider or resolved_image.provider)
+            model_name = str(requested_model or resolved_image.provider_model_id)
         generation = GenerationRequest(
             project_id=body["project_id"],
             type="image",
-            provider=body.get("provider", "google_flow"),
-            model=body.get("model", "NARWHAL"),
+            provider=provider_name,
+            model=model_name,
             prompt=body["prompt"],
             aspect_ratio=body.get("aspect_ratio", "1:1"),
             reference_asset_ids=body.get("reference_asset_ids", []),
+            # Opt-in batch. Every extra image is generated and billed, so the
+            # whole batch is priced and reserved before the call, and each image
+            # comes back as its own selectable candidate.
+            image_count=int(body.get("n") or body.get("image_count") or 1),
             idempotency_key=key,
         )
         try:
@@ -2144,7 +2455,14 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {"id": job.id, "object": "image.generation", "status": job.status, "replayed": replayed}
+        return {
+            "id": job.id,
+            "object": "image.generation",
+            "status": job.status,
+            "replayed": replayed,
+            "image_count": generation.image_count,
+            "estimated_credits": admitted.estimate.credits,
+        }
 
     @app.post("/v1/videos/generations", status_code=202)
     def openai_video_adapter(
@@ -2196,6 +2514,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         return {"id": job.id, "object": "video.generation", "status": job.status, "replayed": replayed}
 
     auth.register_routes(app, verify_api_key)
+    register_payment_routes(app, container, auth)
     register_runtime_routes(app, container, verify_api_key, auth)
     return app
 

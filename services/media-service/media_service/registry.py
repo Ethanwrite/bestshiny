@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import ipaddress
 import socket
 import subprocess
@@ -16,6 +17,7 @@ import httpx
 from PIL import Image
 from platform_database import Database
 from platform_shared import (
+    MEDIA_HEADER_BYTES,
     StorageLimitExceeded,
     StorageProvider,
     UnsafeMediaUpload,
@@ -30,10 +32,12 @@ from production_domain.models import (
     new_id,
     utcnow,
 )
-from provider_sdk import GenerationProvider
+from provider_sdk import GenerationProvider, ProviderReferenceConstraints
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from .renditions import RenditionDerivationFailed, RenditionResolver
 
 
 class RemoteMediaSecurityError(ValueError):
@@ -54,6 +58,10 @@ class ProviderMediaReconciliationConflict(RuntimeError):
 
 class ProviderMediaValidationFailed(RuntimeError):
     """The provider could not validate the media identifier supplied by an operator."""
+
+
+class ProviderReferenceUrlUnavailable(RuntimeError):
+    """A fetchable reference URL does not exist for a provider that requires one."""
 
 
 @dataclass(frozen=True)
@@ -94,9 +102,12 @@ class MediaRegistry:
         provider_upload_claim_seconds: float = 120.0,
         provider_upload_wait_seconds: float | None = None,
         provider_upload_poll_seconds: float = 0.05,
+        reference_url_ttl_seconds: int = 900,
     ):
         self.database = database
         self.storage = storage
+        self.renditions = RenditionResolver(storage, max_derived_bytes=max_download_bytes)
+        self.reference_url_ttl_seconds = max(60, reference_url_ttl_seconds)
         self.provider_media_hosts = provider_media_hosts or {}
         self.max_download_bytes = max(1, max_download_bytes)
         self.max_image_pixels = max(1, max_image_pixels)
@@ -589,6 +600,73 @@ class MediaRegistry:
                 action=action,
             )
 
+    def reference_url(
+        self,
+        asset_id: str,
+        *,
+        project_id: str,
+        provider: str,
+        require_https: bool,
+        constraints: ProviderReferenceConstraints | None = None,
+    ) -> str:
+        """Resolve one fetchable reference URL for a provider that never ingests uploads.
+
+        Two things happen here, and both exist to keep the application out of the
+        media path:
+
+        1. The encoding the provider gets is chosen against its declared
+           constraints. The user's original is never re-encoded to satisfy a
+           provider; a derived rendition is, and only when the original does not
+           already fit.
+        2. The URL is a short-lived credential issued by *object storage*, not a
+           route on this service. The provider fetches the bytes directly. When
+           the backend cannot issue one this fails closed before the submission
+           boundary rather than falling back to streaming the object through the
+           API, which is how a control plane becomes an image CDN.
+        """
+
+        bounds = constraints or ProviderReferenceConstraints()
+        with self.database.session() as session:
+            asset = session.get(MediaAsset, asset_id)
+            if asset is None:
+                raise LookupError(f"media asset not found: {asset_id}")
+            if asset.project_id != project_id:
+                raise LookupError("media asset does not belong to the generation project")
+            try:
+                rendition = self.renditions.resolve(session, asset, bounds)
+            except RenditionDerivationFailed as exc:
+                raise ProviderReferenceUrlUnavailable(
+                    f"{provider} cannot be given a usable reference for media asset "
+                    f"{asset_id}: {exc}"
+                ) from exc
+            session.flush()
+
+        reference = (
+            self.storage.presigned_reference_url(
+                rendition.storage_key,
+                expires_in=self.reference_url_ttl_seconds,
+                mime_type=rendition.mime_type,
+            )
+            or ""
+        ).strip()
+        if not reference:
+            raise ProviderReferenceUrlUnavailable(
+                f"{provider} requires a fetchable reference URL but the storage backend "
+                f"cannot issue one for media asset {asset_id}. Configure S3-compatible "
+                f"storage so the provider fetches from object storage directly; the API "
+                f"must not proxy reference media."
+            )
+        scheme = urlsplit(reference).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ProviderReferenceUrlUnavailable(
+                f"{provider} reference URL for media asset {asset_id} is not an http(s) URL"
+            )
+        if require_https and scheme != "https":
+            raise ProviderReferenceUrlUnavailable(
+                f"{provider} cannot fetch the non-HTTPS reference URL for media asset {asset_id}"
+            )
+        return reference
+
     async def resolve_provider_media(
         self,
         asset_id: str,
@@ -888,6 +966,167 @@ class MediaRegistry:
                 pass
             raise
         return provider_media_id, False
+
+    # Extensions the platform accepts for provider-returned raster output. The
+    # suffix must agree with the MIME type or upload validation rejects it.
+    _INLINE_IMAGE_EXTENSIONS = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+    }
+
+    def find_by_content(
+        self,
+        *,
+        project_id: str,
+        sha256: str,
+        asset_type: str,
+        lineage_key: str,
+    ) -> MediaAsset | None:
+        """The existing asset for this exact content, if the project already holds it."""
+
+        with self.database.session() as session:
+            return session.scalar(
+                select(MediaAsset).where(
+                    MediaAsset.project_id == project_id,
+                    MediaAsset.sha256 == sha256,
+                    MediaAsset.asset_type == asset_type,
+                    MediaAsset.lineage_key == lineage_key,
+                )
+            )
+
+    def adopt_stored_object(
+        self,
+        project_id: str,
+        asset_type: str,
+        storage_key: str,
+        *,
+        sha256: str,
+        mime_type: str,
+        size_bytes: int,
+        shot_id: str | None = None,
+        character_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> tuple[MediaAsset, bool]:
+        """Register an object the client already uploaded straight to storage.
+
+        Deliberately not a `put`: the bytes are in the bucket and must stay
+        there. This only records what they are. Dimensions are read from a
+        bounded header prefix rather than by opening the whole object, for the
+        same reason the upload skipped this process in the first place.
+        """
+
+        width, height = self._dimensions_from_header(storage_key, mime_type)
+        lineage_key = self._lineage_key(
+            character_id=character_id,
+            scene_id=None,
+            shot_id=shot_id,
+            parent_asset_id=None,
+            generation_candidate_id=None,
+        )
+        with self.database.session() as session:
+            asset = MediaAsset(
+                project_id=project_id,
+                asset_type=asset_type,
+                sha256=sha256,
+                lineage_key=lineage_key,
+                storage_key=storage_key,
+                local_path=None,
+                public_url=None,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                width=width,
+                height=height,
+                duration=None,
+                shot_id=shot_id,
+                character_id=character_id,
+                metadata_json={"source": "direct_upload", **(metadata or {})},
+            )
+            try:
+                with session.begin_nested():
+                    session.add(asset)
+                    session.flush()
+            except IntegrityError:
+                winner = session.scalar(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project_id,
+                        MediaAsset.sha256 == sha256,
+                        MediaAsset.asset_type == asset_type,
+                        MediaAsset.lineage_key == lineage_key,
+                    )
+                )
+                if winner is None:
+                    raise
+                return winner, True
+            return asset, False
+
+    def _dimensions_from_header(self, storage_key: str, mime_type: str) -> tuple[int | None, int | None]:
+        if not mime_type.startswith("image/"):
+            return None, None
+        try:
+            header = self.storage.read_prefix(storage_key, MEDIA_HEADER_BYTES)
+            with Image.open(io.BytesIO(header)) as image:
+                return image.width, image.height
+        except Exception:
+            return None, None
+
+    def register_provider_bytes(
+        self,
+        project_id: str,
+        asset_type: str,
+        content: bytes,
+        *,
+        stem: str,
+        mime_type: str,
+        provider: str,
+        provider_media_id: str,
+        shot_id: str | None = None,
+        generation_candidate_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> MediaAsset:
+        """Store one artefact a provider returned inside its response body.
+
+        Synchronous image APIs answer with bytes, so there is no URL to fetch.
+        The bytes still pass the same content validation a downloaded artefact
+        does — a provider is not a trusted source of decodable media.
+        """
+
+        normalized_mime = (mime_type or "").split(";", 1)[0].strip().lower()
+        extension = self._INLINE_IMAGE_EXTENSIONS.get(normalized_mime)
+        if extension is None:
+            raise RemoteMediaSecurityError(f"provider returned an unsupported media type: {mime_type}")
+        if len(content) > self.max_download_bytes:
+            raise StorageLimitExceeded(self.max_download_bytes)
+        filename = f"{stem}.{extension}"
+        with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as buffer:
+            buffer.write(content)
+            buffer.seek(0)
+            binary_content = cast(BinaryIO, buffer)
+            try:
+                validated = validate_user_media_upload(
+                    binary_content,
+                    filename=filename,
+                    declared_mime=normalized_mime,
+                    asset_type=asset_type,
+                    max_bytes=self.max_download_bytes,
+                    max_image_pixels=self.max_image_pixels,
+                )
+            except UnsafeMediaUpload as exc:
+                raise RemoteMediaSecurityError(str(exc)) from exc
+            binary_content.seek(0)
+            asset, _reused = self.register(
+                project_id,
+                asset_type,
+                binary_content,
+                filename=filename,
+                mime_type=validated.mime_type,
+                shot_id=shot_id,
+                generation_candidate_id=generation_candidate_id,
+                metadata={"source": "provider_inline_response", "provider": provider, **(metadata or {})},
+                provider=provider,
+                provider_media_id=provider_media_id,
+            )
+        return asset
 
     async def download_and_register(
         self,

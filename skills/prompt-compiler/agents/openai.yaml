@@ -1,4 +1,4 @@
 interface:
   display_name: "Prompt Compiler"
-  short_description: "Compile approved shots into provider-specific generation prompts"
-  default_prompt: "Use $prompt-compiler to compile this approved shot for the selected generation model."
+  short_description: "Compile an approved shot into a provider-neutral prompt package"
+  default_prompt: "Use $prompt-compiler to compile this approved shot specification into its provider-neutral prompt package."

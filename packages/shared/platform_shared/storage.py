@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import mimetypes
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol, cast
+from urllib.parse import quote, urlencode
 
 
 @dataclass(frozen=True)
@@ -14,6 +18,23 @@ class StoredObject:
     local_path: str
     public_url: str | None
     sha256: str
+    size: int
+    mime_type: str
+
+
+@dataclass(frozen=True)
+class PresignedUpload:
+    """Everything a client needs to PUT one object straight to storage."""
+
+    url: str
+    method: str
+    headers: dict[str, str]
+    storage_key: str
+    expires_in: int
+
+
+@dataclass(frozen=True)
+class StoredObjectStat:
     size: int
     mime_type: str
 
@@ -29,6 +50,59 @@ class StorageProvider(Protocol):
     def open(self, key: str, mode: str = "rb") -> BinaryIO: ...
     def path_for(self, key: str) -> Path: ...
 
+    def presigned_upload(
+        self,
+        key: str,
+        *,
+        sha256: str,
+        mime_type: str,
+        expires_in: int = 900,
+    ) -> PresignedUpload | None:
+        """A short-lived URL the client PUTs bytes to **directly**.
+
+        Reads already bypass this service; writes are the other half. A user
+        uploading a 38 MB plate should not stream it through the control plane
+        on the way to a bucket that could have received it directly.
+
+        The checksum is not advisory. It is bound into the presigned request so
+        the object store itself rejects bytes that do not hash to ``sha256``,
+        which is what makes a client-declared digest trustworthy enough to
+        content-address the key with — without this service reading the object.
+
+        ``None`` means this backend cannot accept a direct upload; callers must
+        fall back to the multipart endpoint rather than inventing a URL.
+        """
+        ...
+
+    def stat(self, key: str) -> StoredObjectStat | None:
+        """Size and content type as the *store* reports them, or None if absent."""
+        ...
+
+    def read_prefix(self, key: str, length: int) -> bytes:
+        """The first ``length`` bytes, for header validation without a full read."""
+        ...
+
+    def presigned_reference_url(
+        self,
+        key: str,
+        *,
+        expires_in: int = 900,
+        mime_type: str | None = None,
+    ) -> str | None:
+        """A short-lived URL an external provider can fetch **directly**.
+
+        The point is what is *not* in the path. An external provider fetching
+        through the application means every reference byte is read from object
+        storage into the API process and streamed out again; a handful of
+        concurrent 4K reference edits turns the API into an image CDN, and it is
+        the tier that can least afford to be one. Object storage serves the
+        bytes; the application only decides who may ask for them.
+
+        ``None`` means this backend cannot hand out a direct URL, which callers
+        must treat as "no fetchable reference", not as a reason to proxy.
+        """
+        ...
+
 
 class LocalStorage:
     def __init__(
@@ -37,11 +111,64 @@ class LocalStorage:
         public_base_url: str = "",
         *,
         max_object_bytes: int = 100 * 1024 * 1024,
+        reference_signing_key: str = "",
     ):
         self.root = root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.public_base_url = public_base_url.rstrip("/")
         self.max_object_bytes = max(1, max_object_bytes)
+        # Local disk has no origin an external provider can reach, so the only
+        # way to expose one is through the application — exactly the proxying
+        # object storage exists to avoid. It stays off unless an operator
+        # supplies a signing key, and then it is a bounded development
+        # affordance rather than the deployment shape.
+        self.reference_signing_key = reference_signing_key.strip()
+
+    def presigned_reference_url(
+        self,
+        key: str,
+        *,
+        expires_in: int = 900,
+        mime_type: str | None = None,
+    ) -> str | None:
+        del mime_type
+        if not (self.reference_signing_key and self.public_base_url):
+            return None
+        return signed_local_reference_url(
+            self.public_base_url,
+            key,
+            signing_key=self.reference_signing_key,
+            expires_in=expires_in,
+        )
+
+    def presigned_upload(
+        self,
+        key: str,
+        *,
+        sha256: str,
+        mime_type: str,
+        expires_in: int = 900,
+    ) -> PresignedUpload | None:
+        """Local disk has no origin a browser can PUT to. Say so."""
+
+        del key, sha256, mime_type, expires_in
+        return None
+
+    def stat(self, key: str) -> StoredObjectStat | None:
+        try:
+            path = self.path_for(key)
+        except ValueError:
+            return None
+        if not path.is_file():
+            return None
+        return StoredObjectStat(
+            size=path.stat().st_size,
+            mime_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+        )
+
+    def read_prefix(self, key: str, length: int) -> bytes:
+        with self.open(key, "rb") as stream:
+            return stream.read(max(0, length))
 
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject:
         safe_name = Path(filename).name or "asset.bin"
@@ -88,6 +215,43 @@ class LocalStorage:
 
     def open(self, key: str, mode: str = "rb") -> BinaryIO:
         return cast(BinaryIO, self.path_for(key).open(mode))
+
+def _reference_signature(key: str, expires_at: int, signing_key: str) -> str:
+    payload = f"{key}\n{expires_at}".encode()
+    digest = hmac.new(signing_key.encode(), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def signed_local_reference_url(
+    public_base_url: str,
+    key: str,
+    *,
+    signing_key: str,
+    expires_in: int = 900,
+) -> str:
+    expires_at = int(time.time()) + max(1, expires_in)
+    query = urlencode(
+        {"expires": expires_at, "signature": _reference_signature(key, expires_at, signing_key)}
+    )
+    return f"{public_base_url.rstrip('/')}/v1/media/reference/{quote(key)}?{query}"
+
+
+def verify_local_reference_signature(
+    key: str,
+    *,
+    expires: str | int,
+    signature: str,
+    signing_key: str,
+) -> bool:
+    if not signing_key:
+        return False
+    try:
+        expires_at = int(expires)
+    except (TypeError, ValueError):
+        return False
+    if expires_at < int(time.time()):
+        return False
+    return hmac.compare_digest(_reference_signature(key, expires_at, signing_key), signature)
 
 
 class S3CompatibleStorage:
@@ -164,3 +328,97 @@ class S3CompatibleStorage:
 
     def open(self, key: str, mode: str = "rb") -> BinaryIO:
         return cast(BinaryIO, self.path_for(key).open(mode))
+
+    def presigned_reference_url(
+        self,
+        key: str,
+        *,
+        expires_in: int = 900,
+        mime_type: str | None = None,
+    ) -> str | None:
+        """A direct, expiring object-storage URL. The application is not in this path.
+
+        This is the deployment shape the reference flow is designed around: the
+        provider fetches from object storage, and neither the upload nor the
+        fetch passes through the API process.
+        """
+
+        params: dict[str, str] = {"Bucket": self.bucket, "Key": key}
+        if mime_type:
+            params["ResponseContentType"] = mime_type
+        try:
+            url = self.client.generate_presigned_url(
+                "get_object",
+                Params=params,
+                ExpiresIn=max(1, expires_in),
+            )
+        except Exception:
+            # A presign failure is not a reason to fall back to proxying; the
+            # caller treats None as "no fetchable reference" and fails closed.
+            return None
+        return str(url) if url else None
+
+    def presigned_upload(
+        self,
+        key: str,
+        *,
+        sha256: str,
+        mime_type: str,
+        expires_in: int = 900,
+    ) -> PresignedUpload | None:
+        """A presigned PUT whose checksum the store enforces.
+
+        `x-amz-checksum-sha256` is the load-bearing part. Without it a client
+        could declare one digest and upload different bytes, and since the key
+        is content-addressed that would leave an object whose name lies about
+        its contents. With it, S3 rejects the mismatch and this service never
+        has to read the object to know its hash.
+        """
+
+        checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
+        try:
+            url = self.client.generate_presigned_url(
+                "put_object",
+                Params={
+                    "Bucket": self.bucket,
+                    "Key": key,
+                    "ContentType": mime_type,
+                    "ChecksumSHA256": checksum,
+                },
+                ExpiresIn=max(1, expires_in),
+            )
+        except Exception:
+            return None
+        if not url:
+            return None
+        return PresignedUpload(
+            url=str(url),
+            method="PUT",
+            headers={"Content-Type": mime_type, "x-amz-checksum-sha256": checksum},
+            storage_key=key,
+            expires_in=max(1, expires_in),
+        )
+
+    def stat(self, key: str) -> StoredObjectStat | None:
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=key)
+        except Exception:
+            return None
+        return StoredObjectStat(
+            size=int(head.get("ContentLength") or 0),
+            mime_type=str(head.get("ContentType") or "application/octet-stream").split(";", 1)[0],
+        )
+
+    def read_prefix(self, key: str, length: int) -> bytes:
+        """A bounded Range read. Never the whole object."""
+
+        if length <= 0:
+            return b""
+        try:
+            response = self.client.get_object(
+                Bucket=self.bucket, Key=key, Range=f"bytes=0-{length - 1}"
+            )
+        except Exception:
+            return b""
+        body = response.get("Body")
+        return bytes(body.read()) if body is not None else b""

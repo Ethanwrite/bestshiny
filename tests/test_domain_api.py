@@ -137,5 +137,9 @@ def test_generation_entrypoints_reject_unregistered_or_unavailable_targets(
 
 def test_director_and_prompt_compiler_skills_are_discoverable(container):
     with TestClient(create_app(container)) as client:
-        skills = {item["name"] for item in client.get("/v1/skills").json()}
+        payload = client.get("/v1/skills").json()
+        skills = {item["name"] for item in payload}
     assert {"director", "prompt-compiler"}.issubset(skills)
+    prompt_compiler = next(item for item in payload if item["name"] == "prompt-compiler")
+    assert prompt_compiler["version"].startswith("sha256:")
+    assert prompt_compiler["description"]

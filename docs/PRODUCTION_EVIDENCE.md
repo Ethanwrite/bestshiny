@@ -9,8 +9,8 @@ Release verdict: **NOT PRODUCTION-READY**
 This report distinguishes implemented evidence plumbing from evidence collected against a real Provider. The
 Phase III full-repository gate is `406 passed, 57 warnings in 71.58s`.
 
-The current working tree additionally contains migration `0028_persistent_character_state` and
-`0029_project_style_lock`. Their validation is reported separately below and does not retroactively extend the
+The current working tree additionally contains migrations `0028_persistent_character_state` through
+`0033_fixed_depay_pro_offer`. Their validation is reported separately below and does not retroactively extend the
 tagged Phase III PostgreSQL/Docker evidence.
 
 ## Executive truth
@@ -51,6 +51,7 @@ tagged Phase III PostgreSQL/Docker evidence.
 | Commercial auth | HttpOnly session cookie, Secure in production, SameSite=Lax, double-submit CSRF, durable login throttle and one-use password reset | Offline API regression | Email verification, MFA, invitations and device-session management remain outside this phase |
 | Storage quota | Workspace max/used/reserved bytes plus atomic reserve/settle/release and `MediaAsset.size_bytes` | Offline concurrency/API regression | Default quota and plan policy still need operations review |
 | Starter credits | Omitted Passenger video duration now defaults to 4 seconds, estimated at about 44 credits; explicit 8 seconds remains about 87 and fails closed against a 50-credit balance | Offline admission/wallet regression | Purchases, recurring grants, expiry and admin adjustments are not implemented |
+| Base USDC payment ingress | DePay reusable 1-USDC-unit link with quantity, hashed workspace checkout token, raw-body RSA-PSS callback verification, Base/Circle Native USDC/treasury/link filtering, transaction idempotency and append-only purchase ledger; Alchemy supplies independent log/reorg evidence | SQLite/API/service regression, Web production build, disposable PostgreSQL 17 fresh `0032` upgrade/check | No real USDC transfer; populated/rollback/Compose `0032` validation is not executed |
 | Observability | Internal, platform-key-only read API joins model execution, Provider jobs, Flow bindings, QA, decision outcomes, costs and timeline transitions; separate permit create/list API | Offline authorization/redaction regression | No operator dashboard redesign; project/model execution linkage is project-scoped where no job/shot FK exists |
 
 ## Flow affinity guarantees
@@ -121,16 +122,17 @@ Actual canary results for this phase:
 | --- | --- |
 | Historical offline-core freeze | `348 passed, 39 warnings`; Ruff, Mypy, Node and SQLite/Alembic checks passed before commit `0a74d31` |
 | Phase III full repository test | `406 passed, 57 warnings in 71.58s`; warnings are mainly known Alembic/SQLite/Starlette deprecations and SQLAlchemy FK-cycle warning |
-| Current `0029` offline working tree | `451 passed, 61 warnings in 88.91s`; Ruff format/check, Mypy 122 source files, Node syntax, Alembic single head and `git diff --check` passed |
+| Previous `0032` offline working tree | `465 passed, 61 warnings in 109.98s`; Ruff check, Mypy 132 source files, Web production build, npm audit and Alembic single head passed |
+| Current `0033` offline working tree | `468 passed, 61 warnings in 139.29s`; Ruff check, Mypy 132 source files, Web production build, npm audit, Compose config and Alembic single head passed |
 | Phase III Ruff / Mypy / Node | Ruff lint passed; Ruff format reports 226 files already formatted; Mypy passed over 121 source files; Node syntax and `git diff --check` passed |
 | Alembic head | `0027_production_evidence_core` |
-| PostgreSQL 17 + pgvector | PostgreSQL 17.10 + pgvector 0.8.6 fresh/populated/round-trip, `vector(16)`, constraints and credit/enqueue transactions passed |
+| PostgreSQL 17 + pgvector | Historical PostgreSQL 17.10 + pgvector 0.8.6 fresh/populated/round-trip through `0027`; current disposable PostgreSQL 17 fresh upgrade to `0032` and `alembic check` passed |
 | Docker build/up/health | Docker Desktop 29.5.3: config, three image builds, up, service health, HTTP 200 smoke and in-container migration check passed; fake credentials and no Provider keys |
 | Real Provider calls | NOT EXECUTED |
 
 ### Current working-tree style evidence
 
-Migration `0029_project_style_lock` is the current single code head. The implementation prevents a project style
+Migration `0029_project_style_lock` introduced the project-style checkpoint. The implementation prevents a project style
 pointer from being written directly, cleared or replaced; changing the asset library's Canonical version does not
 move an existing project lock. Autopilot carries the locked version, reference media and descriptor provenance into
 the compiled prompt and internal adapter contract. Image/video candidates retain immutable sampled style scores,
@@ -140,6 +142,12 @@ This is offline algorithm and database evidence only. The internal `style_contro
 Provider accepts a native embedding field; the externally meaningful controls currently remain locked reference
 media and prompt constraints. No user-work calibration, paid call, PostgreSQL `0029` run or Compose upgrade was
 performed for this checkpoint.
+
+Migration `0033_fixed_depay_pro_offer` is the current single code head. Its fixed 30 USDC PaymentIntent,
+FREE→PRO/3,000-credit atomic transaction, PRO top-up, amount mismatch, signed callback and replay paths are covered by
+focused SQLite fixtures and migration/metadata parity. The disposable PostgreSQL 17 + pgvector evidence still ends at
+`0032`; no real DePay callback, Base transaction, USDC spend, `0033` PostgreSQL run, populated/rollback upgrade or
+production Compose evidence is claimed yet.
 
 ## Remaining production blockers
 

@@ -1,3 +1,10 @@
-from .compiler import PromptCompilerService
+from .compiler import PromptCompilerResult, PromptCompilerService
+from .registry import SkillDefinition, SkillRegistry, SkillRegistryError
 
-__all__ = ["PromptCompilerService"]
+__all__ = [
+    "PromptCompilerResult",
+    "PromptCompilerService",
+    "SkillDefinition",
+    "SkillRegistry",
+    "SkillRegistryError",
+]

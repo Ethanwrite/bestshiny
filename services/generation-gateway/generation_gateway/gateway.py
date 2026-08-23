@@ -18,7 +18,7 @@ from entitlement_core import (
     WorkspaceCreditService,
     WorkspaceCreditTransition,
 )
-from media_service import MediaRegistry
+from media_service import MediaRegistry, ProviderReferenceUrlUnavailable
 from model_registry_core import ModelInfrastructureService, RuntimeModelState
 from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
@@ -60,10 +60,12 @@ from production_engine import ShotContinuityService
 from provider_sdk import (
     GenerationProvider,
     ProviderError,
+    ProviderJob,
     ProviderMode,
     ProviderPollIdentity,
+    ProviderReferenceMode,
 )
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -207,6 +209,13 @@ class GenerationGateway:
         self.model_infrastructure = model_infrastructure
         self.flow_affinity = flow_affinity or FlowProjectAllocator(database, scheduler)
         self.live_canary = live_canary
+        # Results from providers whose generation call is synchronous. The entry
+        # is written between a confirmed submission and the poll that consumes
+        # it, both inside one `process()` call. Losing it (process death) is not
+        # a silent success or refund: the poll then fails with the provider's
+        # own not-retrievable error while `submitted` stays true, so the paid
+        # call lands in RECONCILIATION_REQUIRED for review.
+        self._synchronous_results: dict[str, tuple[str, ProviderJob]] = {}
         try:
             self.provider_mode = ProviderMode(provider_mode)
         except ValueError as exc:
@@ -1378,6 +1387,32 @@ class GenerationGateway:
             session.flush()
             return transition
 
+    def _provider_reference_url(
+        self,
+        job: GenerationJob,
+        asset_id: str,
+        provider: GenerationProvider,
+    ) -> str:
+        """Resolve a fetchable URL for a provider that never ingests uploads."""
+
+        try:
+            return self.media.reference_url(
+                asset_id,
+                project_id=job.project_id,
+                provider=provider.name,
+                require_https=self.provider_mode is ProviderMode.LIVE,
+                # The provider's own declared limits decide which encoding it is
+                # given. Nothing here re-encodes the user's original.
+                constraints=getattr(provider, "reference_constraints", None),
+            )
+        except ProviderReferenceUrlUnavailable as exc:
+            raise ProviderError(
+                str(exc),
+                RetryCategory.INVALID_REQUEST,
+                code="PROVIDER_REFERENCE_URL_UNAVAILABLE",
+                submitted=False,
+            ) from exc
+
     async def _resolve_assets(
         self,
         job: GenerationJob,
@@ -1387,6 +1422,17 @@ class GenerationGateway:
         provider_project_id: str | None,
     ) -> dict[str, Any]:
         result = dict(request)
+        provider_payload = result.pop("provider_payload", None)
+        if not isinstance(provider_payload, dict):
+            provider_payload = {}
+        if not provider_payload:
+            # Compatibility for jobs created before provider_payload became a
+            # first-class generation-request field.
+            metadata = request.get("metadata")
+            legacy_payload = metadata.get("adapter_payload") if isinstance(metadata, dict) else None
+            if isinstance(legacy_payload, dict):
+                provider_payload = legacy_payload
+        resolved_asset_ids: dict[str, str] = {}
 
         def on_paid_boundary(session: Session, binding_id: str, asset_id: str) -> None:
             self._begin_asset_upload_boundary(
@@ -1398,33 +1444,71 @@ class GenerationGateway:
                 provider=provider.name,
             )
 
+        # A provider either ingests uploads and returns durable media IDs, or it
+        # fetches references itself and therefore needs a real URL. Sending one
+        # kind where the other is expected submits an unresolvable reference, so
+        # the mode decides how every asset in this request is resolved.
+        url_mode = (
+            getattr(provider, "reference_mode", ProviderReferenceMode.PROVIDER_MEDIA_ID)
+            is ProviderReferenceMode.FETCHABLE_URL
+        )
         pairs = [
-            ("start_frame_asset_id", "start_frame_provider_media_id"),
-            ("end_frame_asset_id", "end_frame_provider_media_id"),
+            ("start_frame_asset_id", "start_frame_provider_media_id", "start_frame_url"),
+            ("end_frame_asset_id", "end_frame_provider_media_id", "end_frame_url"),
         ]
-        for source, target in pairs:
-            if request.get(source):
-                media_id, reused = await self.media.resolve_provider_media(
-                    request[source],
-                    provider,
-                    project_id=job.project_id,
-                    account_id=job.account_id,
-                    worker_id=job.worker_id,
-                    provider_project_id=provider_project_id,
-                    on_paid_boundary=on_paid_boundary,
-                )
-                result[target] = media_id
+        for source, media_target, url_target in pairs:
+            if not request.get(source):
+                continue
+            asset_id = str(request[source])
+            if url_mode:
+                reference = self._provider_reference_url(job, asset_id, provider)
+                result[url_target] = reference
+                resolved_asset_ids[asset_id] = reference
                 with self.database.session() as session:
                     self._event(
                         session,
                         job.id,
-                        "ASSET_RESOLVED" if reused else "ASSET_UPLOADED",
-                        asset_id=request[source],
-                        provider_media_id=media_id,
-                        reused=reused,
+                        "ASSET_REFERENCE_URL_RESOLVED",
+                        asset_id=asset_id,
+                        provider=provider.name,
                     )
+                continue
+            media_id, reused = await self.media.resolve_provider_media(
+                asset_id,
+                provider,
+                project_id=job.project_id,
+                account_id=job.account_id,
+                worker_id=job.worker_id,
+                provider_project_id=provider_project_id,
+                on_paid_boundary=on_paid_boundary,
+            )
+            result[media_target] = media_id
+            resolved_asset_ids[asset_id] = media_id
+            with self.database.session() as session:
+                self._event(
+                    session,
+                    job.id,
+                    "ASSET_RESOLVED" if reused else "ASSET_UPLOADED",
+                    asset_id=asset_id,
+                    provider_media_id=media_id,
+                    reused=reused,
+                )
         provider_references = []
-        for asset_id in request.get("reference_asset_ids") or []:
+        for raw_asset_id in request.get("reference_asset_ids") or []:
+            asset_id = str(raw_asset_id)
+            if url_mode:
+                reference = self._provider_reference_url(job, asset_id, provider)
+                provider_references.append(reference)
+                resolved_asset_ids[asset_id] = reference
+                with self.database.session() as session:
+                    self._event(
+                        session,
+                        job.id,
+                        "ASSET_REFERENCE_URL_RESOLVED",
+                        asset_id=asset_id,
+                        provider=provider.name,
+                    )
+                continue
             media_id, reused = await self.media.resolve_provider_media(
                 asset_id,
                 provider,
@@ -1435,6 +1519,7 @@ class GenerationGateway:
                 on_paid_boundary=on_paid_boundary,
             )
             provider_references.append(media_id)
+            resolved_asset_ids[asset_id] = media_id
             with self.database.session() as session:
                 self._event(
                     session,
@@ -1444,7 +1529,57 @@ class GenerationGateway:
                     provider_media_id=media_id,
                     reused=reused,
                 )
-        result["reference_provider_media_ids"] = provider_references
+        if url_mode:
+            result["reference_urls"] = provider_references
+        else:
+            result["reference_provider_media_ids"] = provider_references
+
+        def resolve_payload_assets(value: Any) -> Any:
+            if isinstance(value, str):
+                return resolved_asset_ids.get(value, value)
+            if isinstance(value, list):
+                return [resolve_payload_assets(item) for item in value]
+            if isinstance(value, tuple):
+                return [resolve_payload_assets(item) for item in value]
+            if isinstance(value, dict):
+                return {key: resolve_payload_assets(item) for key, item in value.items()}
+            return value
+
+        # Routing, billing, ownership, and canonical prompt fields remain
+        # Gateway-authoritative. The adapter may only add provider transport
+        # parameters such as first-frame aliases, references, resolution, or
+        # audio controls.
+        protected_fields = {
+            "project_id",
+            "shot_id",
+            "candidate_id",
+            "type",
+            "provider",
+            "model",
+            "prompt",
+            "negative_prompt",
+            "duration",
+            "aspect_ratio",
+            "start_frame_asset_id",
+            "end_frame_asset_id",
+            "reference_asset_ids",
+            "start_frame_provider_media_id",
+            "end_frame_provider_media_id",
+            "reference_provider_media_ids",
+            "start_frame_url",
+            "end_frame_url",
+            "reference_urls",
+            "idempotency_key",
+            "priority",
+            "generation_policy",
+            "asset_criticality",
+            "cost_estimate",
+            "metadata",
+        }
+        resolved_provider_payload = resolve_payload_assets(provider_payload)
+        for key, value in resolved_provider_payload.items():
+            if key not in protected_fields and not key.startswith("_"):
+                result[key] = value
         result["_generation_job_id"] = job.id
         return result
 
@@ -1534,6 +1669,118 @@ class GenerationGateway:
             first_paid_boundary=first_boundary,
         )
         session.flush()
+
+    def _allocate_sibling_candidates(self, shot_id: str, count: int) -> list[tuple[str, int]]:
+        """Reserve one candidate row per extra image in a paid batch.
+
+        The workspace asked for N images and paid for N, so it gets N things it
+        can choose between. Reserving the rows before the media is registered
+        lets each image be bound to its own candidate from the moment it is
+        stored, rather than being relabelled afterwards — the lineage key that
+        deduplicates media includes the candidate, so a later rebind would be a
+        different row, not an edit.
+        """
+
+        allocated: list[tuple[str, int]] = []
+        with self.database.session() as session:
+            with session.no_autoflush:
+                session.execute(update(Shot).where(Shot.id == shot_id).values(updated_at=Shot.updated_at))
+                highest = int(
+                    session.scalar(
+                        select(func.coalesce(func.max(GenerationCandidate.attempt_number), 0)).where(
+                            GenerationCandidate.shot_id == shot_id
+                        )
+                    )
+                    or 0
+                )
+            for offset in range(1, count + 1):
+                candidate = GenerationCandidate(
+                    id=str(uuid.uuid4()),
+                    shot_id=shot_id,
+                    attempt_number=highest + offset,
+                    status=CandidateStatus.CREATED.value,
+                    metadata_json={"batch_index": offset},
+                )
+                session.add(candidate)
+                allocated.append((candidate.id, offset))
+            session.flush()
+        return allocated
+
+    def _register_batch_siblings(
+        self,
+        job_id: str,
+        project_id: str,
+        asset_type: str,
+        result: ProviderJob,
+        *,
+        provider_name: str,
+        provider_job_id: str,
+        shot_id: str | None,
+        candidate_id: str | None,
+    ) -> list[tuple[str, str]]:
+        """Turn the extra images of a paid batch into selectable candidates.
+
+        A job still owns exactly one output asset, so image 1 remains the job's
+        result. Images 2..n each become their own candidate on the same shot, so
+        the batch is a choice the user makes rather than loose media beside the
+        one result they were given. When the job is not shot-bound there is no
+        candidate to make, and the extras stay as project media.
+
+        Returns ``(candidate_id, asset_id)`` pairs for the caller to finalize
+        inside the completion transaction; an empty ``candidate_id`` means the
+        image was kept as media only.
+        """
+
+        extras = result.outputs[1:]
+        if not extras:
+            return []
+        reserved: list[tuple[str, int]] = []
+        if shot_id and candidate_id:
+            try:
+                reserved = self._allocate_sibling_candidates(shot_id, len(extras))
+            except Exception as exc:
+                # Losing the candidate rows must not lose the images. Fall back
+                # to keeping them as project media and say so.
+                with self.database.session() as session:
+                    self._event(session, job_id, "MEDIA_ERROR", stage="batch_candidates", error=str(exc))
+                reserved = []
+        registered: list[tuple[str, str]] = []
+        for index, output in enumerate(extras, start=1):
+            sibling_candidate_id = reserved[index - 1][0] if len(reserved) >= index else None
+            try:
+                sibling = self.media.register_provider_bytes(
+                    project_id,
+                    asset_type,
+                    output.content,
+                    stem=f"{job_id}-{index}",
+                    mime_type=output.mime_type,
+                    provider=provider_name,
+                    provider_media_id=f"{provider_job_id}#{index}",
+                    shot_id=shot_id,
+                    generation_candidate_id=sibling_candidate_id,
+                    metadata={"batch_index": index, "generation_job_id": job_id},
+                )
+            except Exception as exc:
+                # The job's own artefact is already stored; a rejected extra
+                # image must be recorded, never allowed to fail the generation.
+                with self.database.session() as session:
+                    self._event(
+                        session,
+                        job_id,
+                        "MEDIA_ERROR",
+                        stage="batch_sibling",
+                        batch_index=index,
+                        error=str(exc),
+                    )
+                continue
+            registered.append((sibling_candidate_id or "", sibling.id))
+        return registered
+
+    def _require_job(self, job_id: str) -> GenerationJob:
+        job = self.get(job_id)
+        if job is None:  # pragma: no cover - deleted concurrently by an administrator.
+            raise LookupError("generation job not found")
+        return job
 
     async def process(self, job_id: str) -> GenerationJob:
         with self.database.session() as session:
@@ -2205,7 +2452,9 @@ class GenerationGateway:
                         submission_state="CONFIRMED",
                         status=JobStatus.SUBMITTED.value,
                         safe_to_retry=False,
-                        next_retry_at=self._next_poll_at(),
+                        # A synchronous provider already holds the result, so
+                        # there is nothing to wait for before reading it.
+                        next_retry_at=None if submission.result else self._next_poll_at(),
                         claim_token=None,
                         claim_expires_at=None,
                         submitted_at=utcnow(),
@@ -2250,7 +2499,22 @@ class GenerationGateway:
                     session, job.id, "PROVIDER_JOB_STARTED", provider_job_id=submission.provider_job_id
                 )
                 session.flush()
-                return job
+            if submission.result is None:
+                return self._require_job(job_id)
+            # The provider answered synchronously and is already holding the
+            # finished artefact. Hand the result to the ordinary poll rather
+            # than duplicating completion, billing and settlement here.
+            poll_claim = self._claim_for_polling(job_id)
+            if poll_claim is None:
+                return self._require_job(job_id)
+            self._synchronous_results[job_id] = (submission.provider_job_id, submission.result)
+            try:
+                return await self._poll(job_id, poll_claim)
+            finally:
+                # The entry never outlives this call, whichever path the poll
+                # takes. A held result that survived into a later attempt would
+                # be a result for a submission that attempt did not make.
+                self._synchronous_results.pop(job_id, None)
         except GenerationTargetError as exc:
             self._release_live_generation_canary_before_boundary(
                 canary_reservation,
@@ -2382,8 +2646,13 @@ class GenerationGateway:
                 GenerationJob.account_id == poll_identity.provider_account_id,
                 GenerationJob.provider_project_id == poll_identity.provider_project_id,
             ]
+        # Consume unconditionally: a stale entry must never be reused by a later
+        # attempt against a different provider job.
+        held = self._synchronous_results.pop(job_id, None)
         try:
-            if poll_identity is None:
+            if held is not None and held[0] == provider_job_id:
+                result = held[1]
+            elif poll_identity is None:
                 result = await provider.get_job(
                     provider_job_id,
                     account_id=account_id,
@@ -2514,9 +2783,9 @@ class GenerationGateway:
                 if current is None:  # pragma: no cover - deleted concurrently by an administrator.
                     raise LookupError("generation job not found")
                 return current
-            if not result.output_url:
+            if not result.has_output:
                 raise ProviderError(
-                    "completed provider job has no output URL",
+                    "completed provider job returned no output",
                     RetryCategory.TRANSIENT_NETWORK,
                     code="OUTPUT_URL_MISSING",
                     submitted=True,
@@ -2553,17 +2822,42 @@ class GenerationGateway:
                     raise LookupError("generation job not found")
                 return latest
             asset_type = AssetType.VIDEO.value if capability == "video" else AssetType.IMAGE.value
-            suffix = "mp4" if capability == "video" else "png"
-            asset = await self.media.download_and_register(
-                project_id,
-                asset_type,
-                result.output_url,
-                filename=f"{job_id}.{suffix}",
-                provider=provider.name,
-                provider_media_id=provider_job_id,
-                shot_id=shot_id,
-                generation_candidate_id=candidate_id,
-            )
+            if result.outputs:
+                asset = self.media.register_provider_bytes(
+                    project_id,
+                    asset_type,
+                    result.outputs[0].content,
+                    stem=job_id,
+                    mime_type=result.outputs[0].mime_type,
+                    provider=provider.name,
+                    provider_media_id=provider_job_id,
+                    shot_id=shot_id,
+                    generation_candidate_id=candidate_id,
+                )
+                sibling_outputs = self._register_batch_siblings(
+                    job_id,
+                    project_id,
+                    asset_type,
+                    result,
+                    provider_name=provider.name,
+                    provider_job_id=provider_job_id,
+                    shot_id=shot_id,
+                    candidate_id=candidate_id,
+                )
+            else:
+                assert result.output_url is not None
+                sibling_outputs = []
+                suffix = "mp4" if capability == "video" else "png"
+                asset = await self.media.download_and_register(
+                    project_id,
+                    asset_type,
+                    result.output_url,
+                    filename=f"{job_id}.{suffix}",
+                    provider=provider.name,
+                    provider_media_id=provider_job_id,
+                    shot_id=shot_id,
+                    generation_candidate_id=candidate_id,
+                )
             finalized = False
             with self.database.session() as session:
                 completed = session.execute(
@@ -2626,7 +2920,26 @@ class GenerationGateway:
                     )
                     idem.status = "SUCCEEDED"
                     idem.result_asset_id = asset.id
+                    for sibling_candidate_id, sibling_asset_id in sibling_outputs:
+                        if not sibling_candidate_id:
+                            continue
+                        sibling = session.get(GenerationCandidate, sibling_candidate_id)
+                        if sibling is None:  # pragma: no cover - just inserted.
+                            continue
+                        sibling.generation_job_id = job.id
+                        sibling.output_asset_id = sibling_asset_id
+                        sibling.status = CandidateStatus.VALIDATING.value
                     self._event(session, job.id, "MEDIA_DOWNLOADED", asset_id=asset.id)
+                    if sibling_outputs:
+                        self._event(
+                            session,
+                            job.id,
+                            "MEDIA_BATCH_SIBLINGS_REGISTERED",
+                            asset_ids=[asset_id for _candidate, asset_id in sibling_outputs],
+                            candidate_ids=[
+                                candidate for candidate, _asset in sibling_outputs if candidate
+                            ],
+                        )
                     self._event(session, job.id, "VIDEO_GENERATED", candidate_id=candidate_id)
                     self._event(session, job.id, "DYNAMIC_QA_STARTED", candidate_id=candidate_id)
                     self._event(

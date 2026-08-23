@@ -73,10 +73,21 @@ def test_router_uses_dynamic_commercial_and_action_weights(container):
 
 
 def test_router_rejects_models_without_required_duration_or_features(container):
+    # 45s exceeds every registered envelope, including Wan 3.0's 30s maximum.
     with pytest.raises(LookupError, match="no active model"):
         container.video_router.rank(
-            ShotRequirements(duration=20, requires_end_frame=True, resolution="1080p")
+            ShotRequirements(duration=45, requires_end_frame=True, resolution="1080p")
         )
+
+
+def test_router_now_routes_the_long_end_frame_shot_wan_30_unlocked(container):
+    """20s + end frame + 1080p was unroutable before Wan 3.0 was registered."""
+
+    decision = container.video_router.rank(
+        ShotRequirements(duration=20, requires_end_frame=True, resolution="1080p")
+    )
+    assert decision.candidates
+    assert decision.candidates[0].model == "wan-3.0"
 
 
 @pytest.mark.parametrize("criticality", [AssetCriticality.CANONICAL, AssetCriticality.HERO])

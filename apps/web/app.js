@@ -1,4 +1,7 @@
-const API = window.AI_DIRECTOR_API || (location.port === "3000" ? "/api" : "http://127.0.0.1:18080");
+const API = window.AI_DIRECTOR_API
+  || (location.hostname === "127.0.0.1" && location.port === "18081"
+    ? "http://127.0.0.1:18080"
+    : "/api");
 const SUBMISSION_STORAGE_KEY = "aiDirectorPendingSubmissions";
 const CSRF_COOKIE_NAME = "ai_director_csrf";
 sessionStorage.removeItem("aiDirectorAccessToken");
@@ -129,6 +132,7 @@ function lockAuth() {
   $("appShell").classList.add("auth-locked");
   setAuthMode("login");
   $("authPassword").value = "";
+  window.dispatchEvent(new CustomEvent("ai-director:auth", { detail: null }));
 }
 
 function clearWorkspaceState() {
@@ -169,6 +173,7 @@ function unlockAuth(user) {
   $("accountName").textContent = user.display_name || user.email;
   $("authGate").classList.add("hidden");
   $("appShell").classList.remove("auth-locked");
+  window.dispatchEvent(new CustomEvent("ai-director:auth", { detail: user }));
 }
 
 function setAuthMode(mode) {
@@ -1027,6 +1032,14 @@ $("projectSelect").addEventListener("change", (event) => selectProject(event.tar
 $("authForm").addEventListener("submit", submitAuth);
 $("authModeBtn").addEventListener("click", () => setAuthMode(state.authMode === "login" ? "register" : "login"));
 $("logoutBtn").addEventListener("click", logout);
+window.addEventListener("ai-director:plan-changed", (event) => {
+  const workspace = state.authUser?.workspaces?.find(
+    (item) => item.id === event.detail?.workspaceId,
+  );
+  if (!workspace || !event.detail?.planTier) return;
+  workspace.plan_tier = event.detail.planTier;
+  renderPassengerModels();
+});
 
 document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => switchMode(button.dataset.mode)));
 document.querySelectorAll("[data-media]").forEach((button) => button.addEventListener("click", () => setPassengerMedia(button.dataset.media)));

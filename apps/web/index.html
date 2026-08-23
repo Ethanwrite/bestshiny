@@ -41,6 +41,7 @@
         <div class="top-actions">
           <span id="accountName" class="account-name"></span>
           <span id="systemStatus" class="status-pill"><i></i>系统检查中</span>
+          <button id="walletBtn" class="button secondary" type="button">Upgrade to Pro</button>
           <button id="newProjectBtn" class="button secondary">新建项目</button>
           <button id="logoutBtn" class="button secondary logout-button">退出</button>
           <button id="generateBtn" class="button primary hidden">生成 / 重做当前镜头</button>
@@ -223,8 +224,46 @@ EXT. 酒店雨棚 - NIGHT
           </div>
         </form>
       </dialog>
+      <dialog id="walletDialog" class="project-dialog wallet-dialog" aria-labelledby="walletTitle">
+        <div class="project-dialog-form">
+          <div class="project-dialog-heading">
+            <span class="eyebrow">DePay · Base USDC</span>
+            <h2 id="walletTitle">Upgrade to Pro</h2>
+            <p id="walletDescription">一次支付，解锁 Pro 并获得 3,000 Credits。没有订阅或自动续费。</p>
+          </div>
+          <div class="wallet-balance-card">
+            <span>工作空间积分</span>
+            <strong id="walletCreditBalance">—</strong>
+          </div>
+          <div class="wallet-state-grid">
+            <div><span>网络</span><strong id="walletNetwork">Base</strong></div>
+            <div><span>币种</span><strong>Native USDC</strong></div>
+            <div><span>结算服务</span><strong>DePay</strong></div>
+            <div><span>回调状态</span><strong id="walletCreditingStatus">检查中</strong></div>
+          </div>
+          <p id="walletStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
+          <p id="walletError" class="project-dialog-error" role="alert"></p>
+          <div class="wallet-payment-box">
+            <div class="wallet-offer"><span id="walletOfferLabel">Upgrade to Pro</span><strong id="walletOfferPrice">30 USDC</strong><p id="walletOfferBenefits">✓ Unlock Pro<br>✓ Includes 3,000 Credits</p></div>
+            <button id="payUsdcBtn" class="button primary full" type="button" disabled>升级 Pro</button>
+            <small>每次点击都会生成新的 PaymentIntent/order_ref；底层使用同一条固定 30 USDC Link。</small>
+          </div>
+          <div id="depayCheckout" class="depay-checkout" hidden>
+            <img id="depayQrCode" alt="DePay 收款二维码" width="220" height="220" />
+            <strong id="depayCheckoutSummary"></strong>
+            <div class="wallet-actions">
+              <button id="openDePayBtn" class="button primary" type="button">打开 DePay 付款</button>
+              <button id="copyDePayBtn" class="button secondary" type="button">复制付款链接</button>
+            </div>
+          </div>
+          <div class="project-dialog-actions">
+            <button id="closeWalletBtn" class="button secondary" type="button">关闭</button>
+          </div>
+        </div>
+      </dialog>
       <div id="toast" class="toast" role="status"></div>
     </div>
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
+    <script type="module" src="/wallet.js"></script>
   </body>
 </html>

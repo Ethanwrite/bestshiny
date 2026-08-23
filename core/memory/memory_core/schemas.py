@@ -91,18 +91,40 @@ class ShotMemoryInput(BaseModel):
         return self
 
 
+class EpisodeScope(StrEnum):
+    """How far a retrieval may reach across a series.
+
+    A 60-episode series makes the two directions genuinely different questions.
+    `EPISODE` answers "what happened in the episode I am shooting" and must not
+    surface a neighbouring episode's beat as if it were current. `SERIES`
+    answers "what has this series established", and needs the current episode to
+    outrank a distant one rather than being flattened by cosine similarity.
+    """
+
+    EPISODE = "EPISODE"
+    SERIES = "SERIES"
+
+
 class MemoryQuery(BaseModel):
     project_id: str
     text: str = ""
     image_urls: list[str] = Field(default_factory=list, max_length=8)
     video_urls: list[str] = Field(default_factory=list, max_length=2)
     entity_ids: list[str] = Field(default_factory=list, max_length=40)
+    episode_id: str | None = None
     scene_id: str | None = None
     shot_id: str | None = None
+    # Meaningful only together with `episode_id`; without one there is no
+    # current episode to scope to or to rank against.
+    episode_scope: EpisodeScope = EpisodeScope.EPISODE
     layers: list[MemoryLayer] = Field(
         default_factory=lambda: [MemoryLayer.CANONICAL, MemoryLayer.TEMPORAL, MemoryLayer.EPISODIC]
     )
     temporal_position: float | None = None
+    # Age at which an undated memory's recency contribution halves. Retrieval
+    # previously hard-coded 30 days, which is a reasonable single-episode shoot
+    # and a poor series that ran for a year.
+    recency_half_life_days: float = Field(default=30.0, gt=0, le=3_650)
     top_k: int = Field(default=8, ge=1, le=50)
     evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
     authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
@@ -110,6 +132,10 @@ class MemoryQuery(BaseModel):
     @model_validator(mode="after")
     def embeddings_are_advisory(self) -> MemoryQuery:
         _enforce_advisory_use(self.evidence_purpose, self.authority_level)
+        if self.episode_scope is EpisodeScope.SERIES and self.episode_id is None:
+            # Series scope ranks *relative to* a current episode. Without one it
+            # would silently behave like an unscoped query.
+            raise ValueError("episode_scope=SERIES requires episode_id")
         return self
 
 
@@ -122,6 +148,7 @@ class RetrievedMemory(BaseModel):
     image_urls: list[str]
     video_urls: list[str]
     entity_ids: list[str]
+    episode_id: str | None = None
     scene_id: str | None
     shot_id: str | None
     asset_version_ids: list[str]

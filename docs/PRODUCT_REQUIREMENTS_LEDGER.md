@@ -5,7 +5,7 @@ Snapshot date: 2026-08-22
 This file preserves the product decisions expressed across the project conversation and the five engineering
 briefs used to build the repository. It is a requirements ledger, not a claim that every item is implemented.
 Implementation truth is maintained in [`../CURRENT_ARCHITECTURE.md`](../CURRENT_ARCHITECTURE.md) and
-[`DEVELOPMENT_HANDOFF_2026-08-20.md`](DEVELOPMENT_HANDOFF_2026-08-20.md).
+[`../HANDOFF.md`](../HANDOFF.md).
 
 ## Source briefs
 
@@ -44,6 +44,10 @@ the attachment store is unavailable.
   choice must remain replaceable behind the state/evidence/commit system.
 - `voyage-multimodal-3.5` is an advisory embedding/retrieval component. It cannot assert identity or state facts,
   approve a state delta, or authorize a production commit.
+- Base Native USDC is the selected first purchase rail. DePay owns the reusable payment-link/wallet-handoff UX and
+  signed success callback; it does not own the credit balance. Base/Circle USDC is the payment fact, the platform's
+  append-only Credit Ledger owns issuance/reversal, and Alchemy remains an independent chain/reorg evidence source.
+  The product does not require payer-wallet binding or per-order unique USDC amounts.
 
 ## Highest-level product decision
 
@@ -442,11 +446,25 @@ Implemented on 2026-08-21 for generation usage:
 - Wallet lifecycle events and manual `DecisionRecord` rows are audit facts. Provider USD/invoice costs,
   `CostRecord`, Flow account credits and RunAPI budget remain separate accounting domains.
 
+Implemented on 2026-08-22 as the fixed-offer payment ingress:
+
+- One DePay link is fixed at 30 Base Native USDC with quantity disabled. Every authenticated click creates a separate
+  3,000-credit PaymentIntent and injects its `order_ref` plus a hashed opaque checkout token; the on-chain amount is
+  shared, but the order identity is not.
+- `POST /v1/webhooks/depay` verifies RSA-PSS over the raw body, restricts the callback to the configured link, Base,
+  official Circle Native USDC contract, treasury, exact intent and exact 30 USDC, and deduplicates by transaction hash
+  before atomically changing FREE to PRO when needed and posting an append-only 3,000-credit `USDC_PURCHASE` entry.
+- Existing PRO workspaces use the same offer and receive only 3,000 additional credits. There is no recurring grant,
+  renewal, subscription or second wallet charge.
+- `POST /v1/webhooks/alchemy` still verifies Alchemy HMAC and attaches canonical log/reorg evidence. Reorg logs
+  produce append-only debit reversals or reconciliation when credits are no longer available. A real low-value USDC
+  proof and operations reconciliation remain required before production release.
+
 Resolved starter experience: with the current static estimate (`$0.09/s`, service multiplier `1.20`,
 `$0.01/credit`), an omitted Passenger video duration defaults to four seconds and estimates about 44 credits, so a
 50-credit starter workspace can reserve one request. An explicit eight-second request still estimates about 87
-credits and fails before Job/Provider creation when the balance is insufficient. Purchases, recurring grants,
-expiry and administrator adjustments are not part of this milestone.
+credits and fails before Job/Provider creation when the balance is insufficient. Fixed 30-USDC purchases are part of
+this milestone; recurring grants, expiry and administrator adjustments are not.
 
 Keep four accounting concepts separate:
 

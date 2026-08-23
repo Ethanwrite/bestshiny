@@ -328,7 +328,7 @@ def test_free_passenger_video_is_server_routed_to_seedance_role(container, monke
     assert response.status_code == 202, response.text
     command = captured["command"]
     assert command.provider == "seedance"  # type: ignore[attr-defined]
-    assert command.model == "seedance-2.5"  # type: ignore[attr-defined]
+    assert command.model == "doubao-seedance-2-5-260628"  # type: ignore[attr-defined]
     assert command.model_role == "VIDEO_SEEDANCE"  # type: ignore[attr-defined]
 
 
@@ -370,7 +370,7 @@ def test_free_passenger_charge_job_and_cost_are_atomic_and_idempotent(container,
     container.settings.auth_required = True
     seedance = container.providers.get("seedance")
     monkeypatch.setattr(seedance, "configured", True)
-    container.providers.register_model("seedance", "seedance-2.5", "video")
+    container.providers.register_model("seedance", "doubao-seedance-2-5-260628", "video")
     monkeypatch.setattr(
         container.credit_pricing,
         "estimate",
@@ -441,7 +441,7 @@ def test_insufficient_free_credits_roll_back_job_cost_and_ledger(container, monk
     container.settings.auth_required = True
     seedance = container.providers.get("seedance")
     monkeypatch.setattr(seedance, "configured", True)
-    container.providers.register_model("seedance", "seedance-2.5", "video")
+    container.providers.register_model("seedance", "doubao-seedance-2-5-260628", "video")
     with TestClient(create_app(container)) as client:
         registered = client.post(
             "/api/auth/register",
@@ -485,7 +485,7 @@ def test_free_starter_default_video_fits_one_seedance_reservation(container, mon
     container.settings.auth_required = True
     seedance = container.providers.get("seedance")
     monkeypatch.setattr(seedance, "configured", True)
-    container.providers.register_model("seedance", "seedance-2.5", "video")
+    container.providers.register_model("seedance", "doubao-seedance-2-5-260628", "video")
 
     with TestClient(create_app(container)) as client:
         registered = client.post(

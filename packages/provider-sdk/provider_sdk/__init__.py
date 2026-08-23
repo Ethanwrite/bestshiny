@@ -1,8 +1,11 @@
 from .base import (
     GenerationProvider,
     ProviderHealth,
+    ProviderInlineOutput,
     ProviderJob,
     ProviderPollIdentity,
+    ProviderReferenceConstraints,
+    ProviderReferenceMode,
     ProviderSubmission,
 )
 from .budget import (
@@ -62,8 +65,11 @@ from .trust import (
 __all__ = [
     "GenerationProvider",
     "ProviderHealth",
+    "ProviderInlineOutput",
     "ProviderJob",
     "ProviderPollIdentity",
+    "ProviderReferenceConstraints",
+    "ProviderReferenceMode",
     "ProviderSubmission",
     "ProviderError",
     "RetryCategory",

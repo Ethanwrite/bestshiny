@@ -84,6 +84,11 @@ def container(tmp_path):
         auth_required=False,
         platform_api_key="test-platform-key",
         deployment_environment="test",
+        # Tests run on local disk, which cannot issue an object-storage URL. The
+        # signed local route is the development affordance that lets the
+        # reference path be exercised at all; a dedicated test covers the
+        # fail-closed behaviour when no key is configured.
+        local_reference_signing_key="test-reference-signing-key",
     )
     return build_container(settings)
 

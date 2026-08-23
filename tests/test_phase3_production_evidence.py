@@ -313,7 +313,7 @@ def test_router_observations_ramp_without_overwriting_manual_prior(container, pr
                 CostRecord(
                     project_id=project.id,
                     provider="seedance",
-                    model="seedance-2.5",
+                    model="doubao-seedance-2-5-260628",
                     estimated_cost=100,
                     accepted=False,
                     wasted=True,
@@ -415,6 +415,12 @@ def _live_media_container(tmp_path):  # type: ignore[no-untyped-def]
             allow_live_provider_calls=True,
             live_provider_confirmation=LIVE_PROVIDER_CONFIRMATION,
             openrouter_api_key="offline-placeholder-never-sent",
+            # OpenRouter fetches references itself, so live media must resolve
+            # to an HTTPS URL rather than an unusable provider media identifier.
+            public_base_url="https://media.invalid",
+            # Local disk cannot presign; the signed local route stands in for
+            # object storage so this offline test can reach the canary boundary.
+            local_reference_signing_key="live-canary-reference-key",
         )
     )
     live.model_infrastructure.configure_runtime_model(
@@ -441,6 +447,7 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
     provider = live.providers.get("openrouter")
     asset = register_bytes(live, project_id, "START_FRAME", b"synthetic-reference")
     calls = {"upload": 0, "submit": 0}
+    submitted_requests: list[dict[str, Any]] = []
     active_job_id = ""
 
     async def offline_upload(
@@ -450,15 +457,8 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
         worker_id: str,
     ) -> str:
         del payload, account_id, worker_id
-        with live.database.session() as session:
-            usage = session.scalar(
-                select(LiveCanaryUsage).where(
-                    LiveCanaryUsage.idempotency_key == f"generation:{active_job_id}"
-                )
-            )
-            assert usage is not None and usage.status == "UNCERTAIN"
         calls["upload"] += 1
-        return "offline-provider-media"
+        raise AssertionError("a FETCHABLE_URL provider must never be asked to ingest an upload")
 
     async def offline_submit(
         payload: dict[str, Any],
@@ -466,7 +466,7 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
         account_id: str,
         worker_id: str,
     ) -> ProviderSubmission:
-        del payload, account_id, worker_id
+        del account_id, worker_id
         with live.database.session() as session:
             usage = session.scalar(
                 select(LiveCanaryUsage).where(
@@ -475,6 +475,7 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
             )
             assert usage is not None and usage.status == "UNCERTAIN"
         calls["submit"] += 1
+        submitted_requests.append(dict(payload))
         return ProviderSubmission("offline-provider-job")
 
     monkeypatch.setattr(provider, "upload_asset", offline_upload)
@@ -527,7 +528,18 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
     submitted = await live.gateway.process(allowed_job.id)
     assert submitted.status == "SUBMITTED"
     assert submitted.provider_job_id == "offline-provider-job"
-    assert calls == {"upload": 1, "submit": 1}
+    assert calls == {"upload": 0, "submit": 1}
+    # The reference reached the provider as a fetchable URL, not a local asset
+    # ID and not a provider media ID the provider could never resolve. It is a
+    # short-lived signed URL, deliberately *not* the stored `public_url`: that
+    # one points at this service's authenticated route, which an external
+    # provider can neither authenticate to nor should be made to stream through.
+    start_frame_url = str(submitted_requests[0]["start_frame_url"])
+    assert start_frame_url.startswith("https://")
+    assert start_frame_url != asset.public_url
+    assert "/v1/storage/" not in start_frame_url
+    assert "signature=" in start_frame_url
+    assert "start_frame_provider_media_id" not in submitted_requests[0]
 
     replayed_job, replayed = live.gateway.create(allowed_request)
     assert replayed is True and replayed_job.id == allowed_job.id

@@ -30,6 +30,8 @@ from production_domain.models import (
 from qa_core import FFmpegFrameSampler
 from sqlalchemy import select
 
+from .semantic import SemanticStyleEmbedder, SemanticStyleUnavailable
+
 
 class StyleLockConflict(RuntimeError):
     pass
@@ -148,6 +150,28 @@ class LocalStyleDescriptor:
         return max(0.0, min(1.0, score))
 
 
+@dataclass(frozen=True)
+class SemanticReferenceAttempt:
+    """The layer-2 reference for a style version, or why there is not one."""
+
+    embedding: StyleEmbedding | None
+    reason: str | None
+
+
+def _worst_status(deterministic: str, semantic: str | None) -> str:
+    """Combine layer verdicts by severity. A missing layer is never a pass.
+
+    FAIL beats REVIEW_REQUIRED beats PASS, so a candidate is only committable
+    when every configured layer agreed it was.
+    """
+
+    order = {"PASS": 0, "REVIEW_REQUIRED": 1, "FAIL": 2}
+    worst = deterministic
+    if semantic is not None and order[semantic] > order[worst]:
+        worst = semantic
+    return worst
+
+
 class ProjectStyleService:
     evaluator_version = "project-style-qa-v1"
     sample_positions = (0.0, 0.2, 0.4, 0.6, 0.8, 0.98)
@@ -157,10 +181,14 @@ class ProjectStyleService:
         database: Database,
         storage: StorageProvider,
         descriptor: LocalStyleDescriptor | None = None,
+        semantic: SemanticStyleEmbedder | None = None,
     ):
         self.database = database
         self.storage = storage
         self.descriptor = descriptor or LocalStyleDescriptor()
+        # Layer 2. Absent means the deterministic gate runs alone, which is the
+        # pre-existing behaviour, not a weaker version of a two-layer gate.
+        self.semantic = semantic
         self.frame_sampler = FFmpegFrameSampler()
 
     @staticmethod
@@ -230,7 +258,7 @@ class ProjectStyleService:
                 )
             )
             if existing:
-                return existing
+                return SemanticReferenceAttempt(existing, None)
             embedding = StyleEmbedding(
                 project_id=project_id,
                 asset_version_id=style_version_id,
@@ -248,6 +276,92 @@ class ProjectStyleService:
             session.add(embedding)
             session.flush()
             return embedding
+
+    def ensure_semantic_embedding(self, style_version_id: str) -> StyleEmbedding | None:
+        return self.semantic_reference(style_version_id).embedding
+
+    def semantic_reference(self, style_version_id: str) -> SemanticReferenceAttempt:
+        """Extract the locked style's semantic reference, and say why if it cannot.
+
+        A missing layer 2 is not an error — a project may be locked before layer
+        2 is switched on, and it then keeps the deterministic gate rather than
+        acquiring a second gate whose reference was chosen after the fact. But
+        it must not be *silent*: with the feature enabled and the provider
+        transport in mock mode, every lock would quietly come out single-layer
+        and look identical to one made with the feature off. The reason is
+        returned so `lock()` can record it on the lock itself.
+        """
+
+        if self.semantic is None:
+            return SemanticReferenceAttempt(None, "SEMANTIC_EMBEDDER_NOT_CONFIGURED")
+        with self.database.session() as session:
+            existing = session.scalar(
+                select(StyleEmbedding).where(
+                    StyleEmbedding.asset_version_id == style_version_id,
+                    StyleEmbedding.model == self.semantic.model,
+                )
+            )
+            if existing:
+                return SemanticReferenceAttempt(existing, None)
+            version = session.get(AssetVersion, style_version_id)
+            asset = session.get(Asset, version.asset_id) if version else None
+            if not version or not asset:
+                raise LookupError("style asset version not found")
+            media = self._media_for_version(session, version)
+            project_id = asset.project_id
+
+        frames: list[bytes] = []
+        usable_media: list[MediaAsset] = []
+        for item in media:
+            item_frames = self._media_frames(item)
+            if item_frames:
+                usable_media.append(item)
+                frames.extend(item_frames)
+        if not frames:
+            return SemanticReferenceAttempt(None, "SEMANTIC_REFERENCE_MEDIA_UNREADABLE")
+        try:
+            vectors = self.semantic.embed_images(frames, project_id=project_id)
+        except SemanticStyleUnavailable as exc:
+            return SemanticReferenceAttempt(None, f"SEMANTIC_MODEL_UNAVAILABLE:{exc}"[:400])
+        vector = self.descriptor.aggregate(vectors)
+        embedding_hash = self._vector_hash(vector)
+        with self.database.session() as session:
+            existing = session.scalar(
+                select(StyleEmbedding).where(
+                    StyleEmbedding.asset_version_id == style_version_id,
+                    StyleEmbedding.model == self.semantic.model,
+                )
+            )
+            if existing:
+                return existing
+            embedding = StyleEmbedding(
+                project_id=project_id,
+                asset_version_id=style_version_id,
+                embedding=vector,
+                dimension=len(vector),
+                provider=self.semantic.provider,
+                model=self.semantic.model,
+                algorithm_version=getattr(self.semantic, "version", "semantic-style-v1"),
+                embedding_hash=embedding_hash,
+                source_media_ids=[item.id for item in usable_media],
+                source_media_hashes=[item.sha256 for item in usable_media],
+                evidence_kind="MODEL_SEMANTIC",
+                metadata_json={"frame_count": len(frames), "network_used": True},
+            )
+            session.add(embedding)
+            session.flush()
+            return SemanticReferenceAttempt(embedding, None)
+
+    def _media_frames(self, media: MediaAsset) -> list[bytes]:
+        """Raw frame bytes for a semantic embedder, which reads pixels not stats."""
+
+        if media.mime_type.startswith("image/"):
+            with self.storage.open(media.storage_key, "rb") as stream:
+                return [stream.read()]
+        if media.mime_type.startswith("video/"):
+            path = Path(media.local_path or self.storage.path_for(media.storage_key))
+            return [frame.image_png for frame in self.frame_sampler.sample(path, (0.0, 0.5, 0.98))]
+        return []
 
     def lock(
         self,
@@ -278,6 +392,12 @@ class ProjectStyleService:
         if any(not math.isfinite(value) or not 0 <= value <= 1 for value in thresholds):
             raise ValueError("style QA thresholds must be finite values between zero and one")
         embedding = self.ensure_embedding(style_version_id)
+        # Layer 2's reference is extracted at lock time, from the same version,
+        # so the two layers can never describe different frames.
+        semantic_attempt = self.semantic_reference(style_version_id)
+        semantic_embedding_id = (
+            semantic_attempt.embedding.id if semantic_attempt.embedding else None
+        )
         with self.database.session() as session:
             project = session.scalar(select(Project).where(Project.id == project_id).with_for_update())
             if not project:
@@ -306,13 +426,22 @@ class ProjectStyleService:
                 style_asset_id=asset.id,
                 style_version_id=version.id,
                 style_embedding_id=current_embedding.id,
+                semantic_style_embedding_id=semantic_embedding_id,
                 similarity_threshold=similarity_threshold,
                 minimum_similarity_threshold=minimum_similarity_threshold,
                 drift_limit=drift_limit,
                 max_low_score_fraction=max_low_score_fraction,
                 locked_by_user_id=locked_by_user_id,
                 reason=normalized_reason,
-                metadata_json={"explicit_confirmation": True, "lock_version": "project-style-lock-v1"},
+                metadata_json={
+                    "explicit_confirmation": True,
+                    "lock_version": "project-style-lock-v1",
+                    "style_layers": 2 if semantic_embedding_id else 1,
+                    # Present only when layer 2 was wanted and could not be
+                    # produced, so a single-layer lock is never indistinguishable
+                    # from one made before the layer existed.
+                    "semantic_layer_absent_reason": semantic_attempt.reason,
+                },
             )
             session.add(style_lock)
             session.flush()
@@ -387,24 +516,38 @@ class ProjectStyleService:
                 select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
             )
             embedding = session.get(StyleEmbedding, style_lock.style_embedding_id) if style_lock else None
+            semantic_embedding = (
+                session.get(StyleEmbedding, style_lock.semantic_style_embedding_id)
+                if style_lock and style_lock.semantic_style_embedding_id
+                else None
+            )
             output = session.get(MediaAsset, candidate.output_asset_id)
             if not style_lock or not embedding or not output:
                 raise StyleLockConflict("locked style or candidate output provenance is incomplete")
             output_asset_id = output.id
+            output_storage_key = output.storage_key
             output_mime_type = output.mime_type
             output_path = Path(output.local_path or self.storage.path_for(output.storage_key))
             target = [float(value) for value in embedding.embedding]
+            semantic_target = (
+                [float(value) for value in semantic_embedding.embedding] if semantic_embedding else None
+            )
+            semantic_threshold = style_lock.semantic_similarity_threshold
 
         positions: list[float] = []
         vectors: list[list[float]] = []
+        raw_frames: list[bytes] = []
         reason_codes: list[str] = []
         try:
             if output_mime_type.startswith("image/"):
-                with self.storage.open(output.storage_key, "rb") as stream:
-                    vectors = [self.descriptor.bytes_embedding(stream.read())]
+                with self.storage.open(output_storage_key, "rb") as stream:
+                    payload = stream.read()
+                raw_frames = [payload]
+                vectors = [self.descriptor.bytes_embedding(payload)]
                 positions = [0.0]
             elif output_mime_type.startswith("video/"):
                 frames = self.frame_sampler.sample(output_path, self.sample_positions)
+                raw_frames = [frame.image_png for frame in frames]
                 vectors = [self.descriptor.bytes_embedding(frame.image_png) for frame in frames]
                 positions = [frame.normalized_position for frame in frames]
             else:
@@ -435,7 +578,54 @@ class ProjectStyleService:
                 reason_codes.append("STYLE_DRIFT")
             if low_fraction is not None and low_fraction > style_lock.max_low_score_fraction:
                 reason_codes.append("STYLE_LOW_SCORE_FRACTION_EXCEEDED")
-        status = "REVIEW_REQUIRED" if not scores else ("FAIL" if reason_codes else "PASS")
+        deterministic_status = "REVIEW_REQUIRED" if not scores else ("FAIL" if reason_codes else "PASS")
+
+        # --- layer 2 -----------------------------------------------------
+        # Runs only when this lock carries a semantic reference. It answers a
+        # different question from layer 1 — medium, brushwork, photographic
+        # language — so its verdict is recorded separately and combined by
+        # taking the worst, never averaged into a single number that could let
+        # one layer's confidence cover the other's objection.
+        semantic_status: str | None = None
+        semantic_scores: list[float] = []
+        if semantic_target is not None:
+            if not raw_frames:
+                semantic_status = "REVIEW_REQUIRED"
+                reason_codes.append("STYLE_SEMANTIC_EVIDENCE_UNAVAILABLE")
+            elif self.semantic is None:
+                # The lock was made with a semantic reference and this process
+                # cannot produce one. Passing on layer 1 alone would silently
+                # weaken a gate the project was locked under.
+                semantic_status = "REVIEW_REQUIRED"
+                reason_codes.append("STYLE_SEMANTIC_EMBEDDER_NOT_CONFIGURED")
+            else:
+                try:
+                    semantic_vectors = self.semantic.embed_images(raw_frames, project_id=project_id)
+                    semantic_scores = [
+                        self.descriptor.similarity(semantic_target, vector)
+                        for vector in semantic_vectors
+                    ]
+                except SemanticStyleUnavailable:
+                    semantic_status = "REVIEW_REQUIRED"
+                    reason_codes.append("STYLE_SEMANTIC_MODEL_UNAVAILABLE")
+                else:
+                    semantic_average = mean(semantic_scores) if semantic_scores else None
+                    semantic_minimum = min(semantic_scores) if semantic_scores else None
+                    if semantic_average is None:
+                        semantic_status = "REVIEW_REQUIRED"
+                        reason_codes.append("STYLE_SEMANTIC_EVIDENCE_UNAVAILABLE")
+                    elif semantic_average < semantic_threshold:
+                        semantic_status = "FAIL"
+                        reason_codes.append("STYLE_SEMANTIC_SIMILARITY_TOO_LOW")
+                    elif semantic_minimum is not None and semantic_minimum < semantic_threshold * 0.85:
+                        semantic_status = "FAIL"
+                        reason_codes.append("STYLE_SEMANTIC_MINIMUM_TOO_LOW")
+                    else:
+                        semantic_status = "PASS"
+
+        semantic_average_similarity = mean(semantic_scores) if semantic_scores else None
+        semantic_minimum_similarity = min(semantic_scores) if semantic_scores else None
+        status = _worst_status(deterministic_status, semantic_status)
         with self.database.session() as session:
             existing = session.scalar(
                 select(CandidateStyleEvaluation).where(CandidateStyleEvaluation.candidate_id == candidate_id)
@@ -450,6 +640,17 @@ class ProjectStyleService:
                 style_version_id=style_lock.style_version_id,
                 style_embedding_id=style_lock.style_embedding_id,
                 status=status,
+                semantic_status=semantic_status,
+                semantic_average_similarity=(
+                    round(semantic_average_similarity, 6)
+                    if semantic_average_similarity is not None
+                    else None
+                ),
+                semantic_minimum_similarity=(
+                    round(semantic_minimum_similarity, 6)
+                    if semantic_minimum_similarity is not None
+                    else None
+                ),
                 average_similarity=round(average, 6) if average is not None else None,
                 minimum_similarity=round(minimum, 6) if minimum is not None else None,
                 p10_similarity=round(p10, 6) if p10 is not None else None,
@@ -459,15 +660,23 @@ class ProjectStyleService:
                 sample_scores=[round(value, 6) for value in scores],
                 reason_codes=list(dict.fromkeys(reason_codes)),
                 evaluator_version=self.evaluator_version,
-                evidence_kind="DETERMINISTIC_LOCAL",
+                evidence_kind=(
+                    "DETERMINISTIC_LOCAL" if semantic_status is None else "DETERMINISTIC_LOCAL+MODEL_SEMANTIC"
+                ),
                 metrics_json={
                     "embedding_model": embedding.model,
                     "embedding_hash": embedding.embedding_hash,
+                    "deterministic_status": deterministic_status,
+                    "semantic_embedding_model": (
+                        semantic_embedding.model if semantic_embedding else None
+                    ),
+                    "semantic_sample_scores": [round(value, 6) for value in semantic_scores],
                     "thresholds": {
                         "average": style_lock.similarity_threshold,
                         "minimum": style_lock.minimum_similarity_threshold,
                         "drift_limit": style_lock.drift_limit,
                         "max_low_score_fraction": style_lock.max_low_score_fraction,
+                        "semantic_average": semantic_threshold,
                     },
                 },
             )

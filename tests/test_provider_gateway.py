@@ -40,6 +40,7 @@ class FakeProvider(GenerationProvider):
         uncertain_category: RetryCategory = RetryCategory.WORKER_DISCONNECT,
     ):
         self.submit_count = 0
+        self.submitted_requests: list[dict[str, Any]] = []
         self.upload_count = 0
         self.validate_count = 0
         self.uploaded_assets: list[dict[str, Any]] = []
@@ -55,6 +56,7 @@ class FakeProvider(GenerationProvider):
 
     async def generate_video(self, request: dict[str, Any], *, account_id: str, worker_id: str):
         self.submit_count += 1
+        self.submitted_requests.append(dict(request))
         if self.fail_uncertain:
             raise ProviderError(
                 "timeout after send",
@@ -263,6 +265,48 @@ def test_concurrent_same_project_idempotency_returns_one_job(container, project)
     assert sorted(replayed for _job, replayed in results) == [False, True]
     with container.database.session() as session:
         assert session.scalar(select(func.count(GenerationJob.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_adapter_payload_reaches_provider_with_resolved_asset_ids(
+    container,
+    project,
+    register_bytes,
+):
+    provider = FakeProvider()
+    add_fake_route(container, provider)
+    reference = register_bytes(container, project.id, "CHARACTER_REFERENCE")
+    job, _ = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="video",
+            provider="fake",
+            model="fake-model",
+            prompt="Canonical prompt",
+            start_frame_asset_id=reference.id,
+            reference_asset_ids=[reference.id],
+            provider_payload={
+                "provider": "untrusted-provider-override",
+                "model": "untrusted-model-override",
+                "prompt": "untrusted prompt override",
+                "first_frame_image": reference.id,
+                "reference_images": [reference.id],
+                "resolution": "720p",
+            },
+            idempotency_key="adapter-payload-handoff",
+        )
+    )
+
+    await container.gateway.process(job.id)
+
+    submitted = provider.submitted_requests[0]
+    assert submitted["provider"] == "fake"
+    assert submitted["model"] == "fake-model"
+    assert submitted["prompt"] == "Canonical prompt"
+    assert submitted["first_frame_image"] == "provider-media-1"
+    assert submitted["reference_images"] == ["provider-media-1"]
+    assert submitted["resolution"] == "720p"
+    assert "provider_payload" not in submitted
 
 
 @pytest.mark.asyncio

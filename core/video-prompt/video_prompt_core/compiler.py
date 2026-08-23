@@ -5,32 +5,88 @@ import re
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from platform_contracts import (
     CanonicalCameraSpec,
     CanonicalLightingSpec,
     CanonicalShotSpec,
     CanonicalSubjectSpec,
+    PromptCompilerInput,
+    PromptCompilerOutput,
+    PromptContinuityContext,
 )
 from platform_database import Database
 from production_domain.models import PromptCompilation, Shot, TimelineState
+from pydantic import ValidationError
+
+
+class ResolvedSkill(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def version(self) -> str: ...
+
+    @property
+    def content_hash(self) -> str: ...
+
+    @property
+    def system_prompt(self) -> str: ...
+
+
+class PromptSkillRegistry(Protocol):
+    def resolve(self, name: str) -> ResolvedSkill: ...
+
+
+class LockedStyle(Protocol):
+    @property
+    def asset_id(self) -> str: ...
+
+    def prompt_view(self) -> dict[str, Any]: ...
+
+
+class ProjectStyleSource(Protocol):
+    """The authoritative project style lock, resolved by the compiler itself.
+
+    Style lock used to arrive as a `style_lock` key a caller had merged into its
+    `canonical_assets`. Exactly one caller did so, and every other path through
+    `compile()` produced a prompt with no style lock at all — a wrong image, not
+    an error. The compiler now reads the lock from this source, so the guarantee
+    holds for every caller rather than for one.
+    """
+
+    def generation_control(self, project_id: str) -> LockedStyle | None: ...
 
 
 @dataclass(frozen=True)
-class VideoPromptCompilation:
+class PromptCompilerResult:
     spec: CanonicalShotSpec
-    neutral_prompt: str
+    input: PromptCompilerInput
+    output: PromptCompilerOutput
     record_id: str
+    skill_name: str
+    skill_version: str
+
+    @property
+    def neutral_prompt(self) -> str:
+        return self.output.positive_prompt or ""
 
 
-class VideoShotPromptCompiler:
-    """Compiles approved shot facts into a provider-neutral canonical specification."""
+class PromptCompilerService:
+    """The single provider-neutral Prompt/Skill compilation boundary."""
 
-    version = "video-shot-prompt-compiler-v1"
+    version = "prompt-compiler-v3-unified"
 
-    def __init__(self, database: Database):
+    def __init__(
+        self,
+        database: Database,
+        skills: PromptSkillRegistry,
+        styles: ProjectStyleSource | None = None,
+    ):
         self.database = database
+        self.skills = skills
+        self.styles = styles
 
     @staticmethod
     def _single_action(value: str) -> str:
@@ -193,6 +249,35 @@ class VideoShotPromptCompiler:
             end["_validation"] = validation
         return start, end, constraint_lines
 
+    def _locked_style(
+        self,
+        project_id: str,
+        canonical_assets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve the project's locked style, authoritative source first.
+
+        A caller-supplied `style_lock` is only a fallback for callers that
+        already resolved the lock themselves; it can never *replace* the
+        authoritative one, because a prompt compiled against a stale style would
+        pass every check while rendering the wrong look.
+        """
+
+        if self.styles is not None:
+            control = self.styles.generation_control(project_id)
+            if control is not None:
+                return dict(control.prompt_view())
+            # A project with no lock has no style to preserve. Falling through to
+            # a caller's dict here would reintroduce the unenforceable path.
+            return {}
+        return next(
+            (
+                dict(asset.get("style_lock") or {})
+                for asset in canonical_assets
+                if asset.get("type") == "STYLE" and asset.get("style_lock")
+            ),
+            {},
+        )
+
     def compile(
         self,
         shot_id: str,
@@ -202,7 +287,7 @@ class VideoShotPromptCompiler:
         camera: dict[str, Any] | None = None,
         lighting: dict[str, Any] | None = None,
         resolution: str = "720p",
-    ) -> VideoPromptCompilation:
+    ) -> PromptCompilerResult:
         character_bindings = character_bindings or []
         canonical_assets = canonical_assets or []
         with self.database.session() as session:
@@ -356,14 +441,7 @@ class VideoShotPromptCompiler:
         constraints.extend(
             str(item) for asset in canonical_assets for item in asset.get("constraints", []) if item
         )
-        locked_style = next(
-            (
-                dict(asset.get("style_lock") or {})
-                for asset in canonical_assets
-                if asset.get("type") == "STYLE" and asset.get("style_lock")
-            ),
-            {},
-        )
+        locked_style = self._locked_style(project_id, canonical_assets)
         if locked_style:
             constraints.append(
                 "preserve the locked visual style across every frame; do not drift in palette, "
@@ -399,7 +477,45 @@ class VideoShotPromptCompiler:
             generation_policy=generation_policy,
             profile=self._profile(shot_type, dialogue),
         )
-        neutral_prompt = self.to_neutral_prompt(spec)
+        asset_bindings = list(
+            dict.fromkeys(
+                str(asset_id)
+                for asset_id in (
+                    *(
+                        item
+                        for binding in character_bindings
+                        for item in binding.get("canonical_assets", [])
+                    ),
+                    *(
+                        item
+                        for asset in canonical_assets
+                        for item in [
+                            *(asset.get("image_urls") or []),
+                            *(asset.get("video_urls") or []),
+                        ]
+                    ),
+                )
+                if asset_id
+            )
+        )
+        continuity_facts: list[str | dict[str, Any]] = [
+            {"name": "approved_start_state", "value": start_state},
+            {"name": "approved_end_state", "value": end_state},
+            *state_constraint_lines,
+        ]
+        compiler_input = PromptCompilerInput(
+            shot_spec=spec.model_dump(mode="json"),
+            asset_bindings=asset_bindings,
+            continuity_context=PromptContinuityContext(
+                transition=continuity_policy,
+                facts=continuity_facts,
+            ),
+        )
+        output = self.compile_input(compiler_input)
+        if output.status != "COMPILED":
+            raise ValueError(output.review_reason or "approved shot is not compilable")
+        skill = self.skills.resolve("prompt-compiler")
+        neutral_prompt = output.positive_prompt or ""
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
             record = PromptCompilation(
@@ -408,16 +524,12 @@ class VideoShotPromptCompiler:
                 user_prompt=raw_action,
                 compiled_prompt=neutral_prompt,
                 compiler_version=self.version,
-                skill_versions={
-                    "director": "v2",
-                    "cinematography": "v2",
-                    "camera-movement": "v2",
-                    "lighting": "v2",
-                    "character-consistency": "v2",
-                    "prompt-compiler": "v3-persistent-character-state",
-                },
+                skill_versions={"prompt-compiler": skill.version},
                 diff_json={
                     "canonical_shot_spec": spec.model_dump(mode="json"),
+                    "prompt_compiler_input": compiler_input.model_dump(mode="json"),
+                    "prompt_compiler_output": output.model_dump(mode="json"),
+                    "skill_content_hash": skill.content_hash,
                     "preserved_facts": [action],
                     "provider_specific": False,
                 },
@@ -425,7 +537,110 @@ class VideoShotPromptCompiler:
             session.add(record)
             shot.compiled_prompt = neutral_prompt
             session.flush()
-            return VideoPromptCompilation(spec=spec, neutral_prompt=neutral_prompt, record_id=record.id)
+            return PromptCompilerResult(
+                spec=spec,
+                input=compiler_input,
+                output=output,
+                record_id=record.id,
+                skill_name=skill.name,
+                skill_version=skill.version,
+            )
+
+    def compile_input(self, value: PromptCompilerInput) -> PromptCompilerOutput:
+        """Compile one typed envelope without leaking Skill instructions into the prompt.
+
+        The deterministic backend is authoritative until an approved model-backed
+        Skill executor is installed. Both backends must return this same contract.
+        """
+
+        self.skills.resolve("prompt-compiler")
+        try:
+            spec = CanonicalShotSpec.model_validate(value.shot_spec)
+        except ValidationError as exc:
+            missing_fields = sorted(
+                {
+                    str(error["loc"][0])
+                    for error in exc.errors()
+                    if error.get("type") == "missing" and error.get("loc")
+                }
+            )
+            return PromptCompilerOutput(
+                status="NOT_COMPILABLE",
+                missing_fields=missing_fields,
+                review_reason="CanonicalShotSpec failed validation: " + str(exc.errors(include_url=False)),
+            )
+        facts = [
+            item
+            if isinstance(item, str)
+            else json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for item in value.continuity_context.facts
+        ]
+        qc_checklist = [
+            f"dominant_action={spec.dominant_action}",
+            f"camera_movement={spec.camera.dominant_movement}",
+            "lighting="
+            + json.dumps(
+                spec.lighting.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            f"duration={spec.duration:g}s",
+            f"aspect_ratio={spec.aspect_ratio}",
+            *(
+                f"subject_identity={subject.name}:{subject.asset_version_id or subject.asset_id or 'unbound'}"
+                for subject in spec.subjects
+            ),
+        ]
+        return PromptCompilerOutput(
+            status="COMPILED",
+            positive_prompt=self.to_neutral_prompt(spec),
+            negative_prompt=(
+                "identity drift, visual style drift, changed wardrobe, changed props, extra subjects, "
+                "duplicate limbs, unintended cuts, text artifacts, unapproved direct gaze into the lens"
+            ),
+            asset_bindings=list(dict.fromkeys(value.asset_bindings)),
+            continuity_assertions=facts,
+            qc_checklist=qc_checklist,
+        )
+
+    def skill_contract(self) -> dict[str, Any]:
+        """Return the exact model-execution contract without invoking a model."""
+
+        skill = self.skills.resolve("prompt-compiler")
+        return {
+            "name": skill.name,
+            "version": skill.version,
+            "content_hash": skill.content_hash,
+            "system_prompt": skill.system_prompt,
+            "input_schema": PromptCompilerInput.model_json_schema(),
+            "output_schema": PromptCompilerOutput.model_json_schema(),
+        }
+
+    def compile_shot(
+        self,
+        shot_id: str,
+        *,
+        provider: str,
+        model: str,
+        character_bindings: list[dict[str, Any]] | None = None,
+        scene_bindings: list[str] | None = None,
+        camera: dict[str, Any] | None = None,
+        lighting: dict[str, Any] | None = None,
+    ) -> PromptCompilation:
+        """Compatibility facade backed by the same unified compiler implementation."""
+
+        del provider, model, scene_bindings
+        result = self.compile(
+            shot_id,
+            character_bindings=character_bindings,
+            camera=camera,
+            lighting=lighting,
+        )
+        with self.database.session() as session:
+            compilation = session.get(PromptCompilation, result.record_id)
+            if compilation is None:  # pragma: no cover - transaction integrity guard.
+                raise RuntimeError("prompt compilation record disappeared")
+            return compilation
 
     @staticmethod
     def to_neutral_prompt(spec: CanonicalShotSpec) -> str:
@@ -446,3 +661,8 @@ class VideoShotPromptCompiler:
             "constraints": payload["constraints"],
         }
         return json.dumps(ordered, ensure_ascii=False, indent=2)
+
+
+# Import compatibility only: both names resolve to the one implementation above.
+VideoShotPromptCompiler = PromptCompilerService
+VideoPromptCompilation = PromptCompilerResult

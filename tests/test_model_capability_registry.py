@@ -83,17 +83,21 @@ def test_manual_prior_and_admin_profile_survive_default_sync(container) -> None:
     assert container.model_registry.get("grok-video", "grok").physics_prior == 0.31
 
 
-def test_wan_registry_binding_and_config_are_consistently_27(container) -> None:
-    profile = container.model_registry.get("wan-2.7", "wan")
-    assert profile is not None
-    assert profile.logical_name == "wan-2.7-official"
-    assert profile.version == "wan-2.7-manual-v1"
-    assert profile.confidence_level == "initial"
-    assert profile.supports_t2v is True
-    assert profile.supports_i2v is False
-    assert container.model_registry.get("wan-3.0", "wan") is None
+def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
+    """Versions may coexist, but neither may borrow the other's priors."""
+
+    wan27 = container.model_registry.get("wan-2.7", "wan")
+    wan30 = container.model_registry.get("wan-3.0", "wan")
+    assert wan27 is not None and wan30 is not None
+    assert wan27.logical_name == "wan-2.7-official"
+    assert wan30.logical_name == "wan-3.0-official"
+    # Distinct profile versions: 3.0 is reviewed on its own evidence.
+    assert wan27.version == "wan-2.7-manual-v1"
+    assert wan30.version == "wan-3.0-manual-v1"
+    assert wan27.supports_t2v is True
+    assert wan27.supports_i2v is False
+    # 3.0's published envelope is materially different and must not be flattened.
+    assert wan30.max_duration == 30 and wan27.max_duration < 30
+    # 2.7 stays the primary route; 3.0 is an explicit fallback, not a silent swap.
     assert container.model_infrastructure.resolve_role(ModelRole.VIDEO_WAN).provider_model_id == "wan-2.7"
-    defaults = Path("config/model-registry/defaults.json").read_text(encoding="utf-8")
-    assert "wan-2.7" in defaults
-    assert "wan-3.0" not in defaults
     assert not Path("config/video-models").exists() or not list(Path("config/video-models").glob("*.json"))

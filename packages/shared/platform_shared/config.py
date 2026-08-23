@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
     public_base_url: str = "http://localhost:8080"
+    # How long a provider-facing reference URL stays valid. It is a short-lived
+    # object-storage credential, never a stored field on the asset row.
+    reference_url_ttl_seconds: int = 900
+    # Local disk cannot issue an object-storage URL. Setting this turns on a
+    # signed, expiring route on *this* service so local development can exercise
+    # reference edits — which means the API does proxy those bytes. It is a
+    # development affordance, not the deployment shape: configure S3-compatible
+    # storage in production and leave this empty.
+    local_reference_signing_key: str = ""
+    # How long an authorized direct upload stays open. It bounds both the
+    # presigned PUT and the quota hold taken against it.
+    direct_upload_ttl_seconds: int = 3600
     web_origins: str = "http://localhost:3000,http://127.0.0.1:18081"
     platform_api_key: str = ""
     deployment_environment: Literal["development", "test", "production"] = "production"
@@ -39,12 +51,21 @@ class Settings(BaseSettings):
     flow_api_base: str = "https://aisandbox-pa.googleapis.com"
     flow_api_key: str = ""
     flow_project_id: str = ""
+    # Reviewed "model=runtime_key" pairs; "{duration}" expands to the requested
+    # seconds. Undeclared models are rejected instead of silently degrading.
+    flow_video_model_keys: str = ""
     provider_mode: Literal["mock", "recorded", "live"] = "mock"
     allow_live_provider_calls: bool = False
     live_provider_confirmation: str = ""
     provider_http_timeout_seconds: float = 120
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # The project's image-generation model, served by POST /images.
+    openrouter_image_model_id: str = "openai/gpt-image-2"
+    # Optional operator-declared envelopes, "model=batch:references[:ratios]".
+    # Reviewed built-ins already cover the shipped image models; a model absent
+    # from the merged table is rejected instead of guessed at.
+    openrouter_image_model_keys: str = ""
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model_id: str = ""
@@ -56,6 +77,8 @@ class Settings(BaseSettings):
     wan2_7_t2v_model_id: str = ""
     wan2_7_i2v_model_id: str = ""
     wan2_7_r2v_model_id: str = ""
+    # Reviewed "model[:mode]=dashscope_model" pairs; modes are t2v, i2v, r2v.
+    wan_video_model_keys: str = ""
     runapi_api_key: str = ""
     runapi_base_url: str = ""
     runapi_model_id: str = ""
@@ -67,14 +90,33 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model_id: str = ""
+    alchemy_webhook_signing_key: str = ""
+    alchemy_webhook_id: str = ""
+    alchemy_network: Literal["BASE_MAINNET", "BASE_SEPOLIA"] = "BASE_MAINNET"
+    alchemy_treasury_address: str = ""
+    alchemy_crediting_enabled: bool = False
+    alchemy_usdc_microunits_per_credit: int = 10_000
+    reown_project_id: str = ""
+    legacy_wallet_payments_enabled: bool = False
+    wallet_challenge_ttl_seconds: int = 300
+    payment_intent_ttl_minutes: int = 30
+    depay_payment_link_url: str = ""
+    depay_link_id: str = ""
+    depay_callback_public_key: str = ""
+    depay_checkout_ttl_minutes: int = 1_440
+    depay_offer_amount_usdc: Decimal = Decimal("30")
+    depay_offer_credits: int = 3_000
+    depay_offer_upgrade_plan: Literal["PRO"] = "PRO"
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
+    # Layer 2 of the style lock. Off by default: it is a paid embedding call per
+    # locked style and per evaluated candidate, and it changes what "committable"
+    # means, so switching it on is a deliberate act.
+    feature_semantic_style_lock: bool = False
     feature_voyage_memory: bool = False
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False
     feature_auto_retry: bool = False
-    voyage_api_key: str = ""
-    voyage_multimodal_model: str = "voyage-multimodal-3.5"
     memory_embedding_dimension: int = 512
     memory_max_characters: int = 12_000
     memory_max_tokens: int = 3_000

@@ -21,7 +21,7 @@ from provider_sdk import (
 )
 from sqlalchemy import select
 
-from .mapper import image_payload, video_payload
+from .mapper import image_payload, parse_video_model_keys, video_payload
 
 
 class GoogleFlowProvider(GenerationProvider):
@@ -31,6 +31,7 @@ class GoogleFlowProvider(GenerationProvider):
         self.runtime = runtime
         self.settings = settings
         self.database = database
+        self.video_model_keys = parse_video_model_keys(settings.flow_video_model_keys)
         self.live_gate = LiveProviderGate(
             LiveProviderSettings(
                 provider_mode=settings.provider_mode,
@@ -208,7 +209,7 @@ class GoogleFlowProvider(GenerationProvider):
     ) -> ProviderSubmission:
         del account_id
         project_id = self._explicit_project_id(request)
-        endpoint, body = video_payload(request, project_id)
+        endpoint, body = video_payload(request, project_id, self.video_model_keys)
         data = await self._request(
             worker_id,
             endpoint,

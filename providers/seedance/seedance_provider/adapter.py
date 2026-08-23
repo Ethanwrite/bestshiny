@@ -10,6 +10,7 @@ from provider_sdk import (
     ProviderHealth,
     ProviderJob,
     ProviderPollIdentity,
+    ProviderReferenceMode,
     ProviderSubmission,
     ProviderTrustLevel,
 )
@@ -17,12 +18,34 @@ from provider_sdk.capabilities import ChatCapability
 from provider_sdk.http import ProviderJsonClient, provider_health_metadata
 from provider_sdk.transport import LiveProviderSettings, ProviderTransport, create_provider_transport
 
+# Only these fields may reach the Ark image API. Tenancy, routing, accounting,
+# idempotency and internal audit metadata never leave the platform.
+IMAGE_REQUEST_FIELDS = frozenset(
+    {
+        "model",
+        "prompt",
+        "negative_prompt",
+        "image",
+        "image_url",
+        "size",
+        "resolution",
+        "aspect_ratio",
+        "seed",
+        "guidance_scale",
+        "watermark",
+        "response_format",
+        "sequential_image_generation",
+    }
+)
+
 
 class ArkProvider(GenerationProvider, ChatCapability):
     """Volcengine Ark client shared by Doubao chat and Seedance video."""
 
     name = "seedance"
     trust_level = ProviderTrustLevel.PRODUCTION
+    # Ark never ingests uploads; every reference must already be fetchable.
+    reference_mode = ProviderReferenceMode.FETCHABLE_URL
 
     def __init__(
         self,
@@ -71,7 +94,11 @@ class ArkProvider(GenerationProvider, ChatCapability):
         self, request: dict[str, Any], *, account_id: str, worker_id: str
     ) -> ProviderSubmission:
         del account_id, worker_id
-        payload = {key: value for key, value in request.items() if not key.startswith("_")}
+        payload = {
+            key: value
+            for key, value in request.items()
+            if key in IMAGE_REQUEST_FIELDS and value is not None
+        }
         if not str(payload.get("model") or "").strip():
             raise _invalid("image model is required")
         if not str(payload.get("prompt") or "").strip():
@@ -171,8 +198,10 @@ def _seedance_payload(request: dict[str, Any], configured_model: str) -> dict[st
         if prompt:
             content.append({"type": "text", "text": prompt})
         references = [
-            request.get("first_frame_image") or request.get("start_frame"),
-            *(request.get("reference_images") or []),
+            request.get("first_frame_image")
+            or request.get("start_frame")
+            or request.get("start_frame_url"),
+            *(request.get("reference_images") or request.get("reference_urls") or []),
         ]
         for reference in dict.fromkeys(str(item) for item in references if item):
             content.append({"type": "image_url", "image_url": {"url": reference}})

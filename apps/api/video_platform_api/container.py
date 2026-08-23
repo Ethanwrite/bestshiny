@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agent_runtime import AgentRuntime, SkillRegistry
+from agent_runtime import AgentRuntime
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
 from character_core import CharacterIdentityService, PersistentCharacterStateService
@@ -31,7 +31,7 @@ from google_flow_provider import GoogleFlowProvider
 from grok_provider import GrokProvider
 from image_prompt_core import ImagePromptCorrector
 from kling_provider import KlingProvider
-from media_service import MediaRegistry
+from media_service import DirectUploadService, MediaRegistry
 from memory_core import (
     ContextAssembler,
     ContextBudget,
@@ -48,6 +48,7 @@ from model_registry_core import (
 from narrative_core import NarrativeCompiler
 from omni_provider import OmniProvider
 from openrouter_provider import OpenRouterProvider
+from payment_core import AlchemyUSDCWebhookService, DePayPaymentService, WalletPaymentService
 from platform_database import Database
 from platform_shared import (
     CredentialVault,
@@ -72,11 +73,10 @@ from runapi_provider import RunAPIEdgeProvider
 from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
-from skill_core import PromptCompilerService
-from style_core import ProjectStyleService
+from skill_core import PromptCompilerService, SkillRegistry
+from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
-from video_prompt_core import VideoShotPromptCompiler
 from wan_provider import WanProvider
 
 
@@ -96,6 +96,7 @@ class Container:
     database: Database
     storage: StorageProvider
     media: MediaRegistry
+    direct_uploads: DirectUploadService
     runtime: BrowserRuntime
     providers: ProviderRouter
     provider_capabilities: ProviderCapabilityCatalog
@@ -127,6 +128,9 @@ class Container:
     live_canary: LiveCanaryPermitService
     generation_admission: GenerationAdmissionService
     workspace_credits: WorkspaceCreditService
+    alchemy_webhooks: AlchemyUSDCWebhookService
+    wallet_payments: WalletPaymentService
+    depay_payments: DePayPaymentService
     video_router: VideoModelRouter
     video_adapters: VideoAdapterRegistry
     image_prompts: ImagePromptCorrector
@@ -135,13 +139,18 @@ class Container:
     feature_flags: FeatureFlagService
     memory: MultimodalMemoryEngine
     context: ContextAssembler
-    video_prompt_compiler: VideoShotPromptCompiler
     evaluator: GenerationEvaluator
     retry_engine: RetryEngine
     model_metrics: ModelMetricsService
     benchmarks: ModelBenchmarkSuite
     visual_runtime: VisualProductionRuntime
     credit_pricing: CreditPricingEngine
+
+    @property
+    def video_prompt_compiler(self) -> PromptCompilerService:
+        """Compatibility view of the single unified Prompt Compiler."""
+
+        return self.prompts
 
 
 def build_container(settings: Settings | None = None) -> Container:
@@ -156,6 +165,34 @@ def build_container(settings: Settings | None = None) -> Container:
             )
     database = Database(settings.database_url)
     database.create_all()
+    alchemy_webhooks = AlchemyUSDCWebhookService(
+        database,
+        signing_key=settings.alchemy_webhook_signing_key,
+        webhook_id=settings.alchemy_webhook_id,
+        network=settings.alchemy_network,
+        treasury_address=settings.alchemy_treasury_address,
+        crediting_enabled=settings.alchemy_crediting_enabled,
+        usdc_microunits_per_credit=settings.alchemy_usdc_microunits_per_credit,
+    )
+    wallet_payments = WalletPaymentService(
+        database,
+        network=settings.alchemy_network,
+        treasury_address=settings.alchemy_treasury_address,
+        usdc_microunits_per_credit=settings.alchemy_usdc_microunits_per_credit,
+        challenge_ttl_seconds=settings.wallet_challenge_ttl_seconds,
+        intent_ttl_minutes=settings.payment_intent_ttl_minutes,
+    )
+    depay_payments = DePayPaymentService(
+        database,
+        payment_link_url=settings.depay_payment_link_url,
+        link_id=settings.depay_link_id,
+        callback_public_key=settings.depay_callback_public_key,
+        treasury_address=settings.alchemy_treasury_address,
+        offer_amount_usdc=settings.depay_offer_amount_usdc,
+        offer_credits=settings.depay_offer_credits,
+        upgrade_plan_tier=settings.depay_offer_upgrade_plan,
+        checkout_ttl_minutes=settings.depay_checkout_ttl_minutes,
+    )
     storage: StorageProvider
     if settings.storage_backend.lower() == "s3":
         storage = S3CompatibleStorage(
@@ -173,6 +210,7 @@ def build_container(settings: Settings | None = None) -> Container:
             settings.storage_root,
             settings.public_base_url,
             max_object_bytes=settings.max_upload_bytes,
+            reference_signing_key=settings.local_reference_signing_key,
         )
     media = MediaRegistry(
         database,
@@ -180,6 +218,14 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_media_hosts=_parse_provider_media_hosts(settings.provider_media_allowed_hosts),
         max_download_bytes=min(settings.max_provider_download_bytes, settings.max_upload_bytes),
         max_image_pixels=settings.max_image_pixels,
+        reference_url_ttl_seconds=settings.reference_url_ttl_seconds,
+    )
+    direct_uploads = DirectUploadService(
+        database,
+        storage,
+        max_upload_bytes=settings.max_upload_bytes,
+        max_image_pixels=settings.max_image_pixels,
+        ttl_seconds=settings.direct_upload_ttl_seconds,
     )
     runtime = BrowserRuntime(database, heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds)
     live_provider_settings = LiveProviderSettings(
@@ -213,6 +259,7 @@ def build_container(settings: Settings | None = None) -> Container:
         api_key=settings.openrouter_api_key,
         base_url=settings.openrouter_base_url,
         timeout_seconds=settings.provider_http_timeout_seconds,
+        image_model_envelopes=settings.openrouter_image_model_keys,
         transport_settings=live_provider_settings,
     )
     wan = WanProvider(
@@ -223,6 +270,7 @@ def build_container(settings: Settings | None = None) -> Container:
         t2v_model_id=settings.wan2_7_t2v_model_id,
         i2v_model_id=settings.wan2_7_i2v_model_id,
         r2v_model_id=settings.wan2_7_r2v_model_id,
+        video_model_keys=settings.wan_video_model_keys,
         timeout_seconds=settings.provider_http_timeout_seconds,
         transport_settings=live_provider_settings,
     )
@@ -276,6 +324,7 @@ def build_container(settings: Settings | None = None) -> Container:
             ProviderCapability.CHAT.value,
             ProviderCapability.RESPONSES.value,
             ProviderCapability.EMBEDDINGS.value,
+            ProviderCapability.IMAGE.value,
             ProviderCapability.VIDEO.value,
         },
     )
@@ -400,11 +449,44 @@ def build_container(settings: Settings | None = None) -> Container:
         for provider_name, provider_model_id, enabled in runtime_video_routes
         if provider_name == "openrouter" and enabled
     }
-    if openrouter.configured and openrouter_video_models:
+    # The project's image model. Registered explicitly, like the Flow image
+    # model, so only a reviewed ID can reach a provider transport.
+    image_default = defaults_by_name["gpt-image-2-openrouter"]
+    if image_default.logical_name in newly_created_models and settings.openrouter_image_model_id.strip():
+        image_ready = bool(settings.openrouter_api_key.strip() and settings.openrouter_base_url.strip())
+        model_infrastructure.configure_runtime_model(
+            image_default.logical_name,
+            settings.openrouter_image_model_id,
+            enabled=image_ready,
+            live_enabled=bool(image_ready and live_gate_ready),
+            provider_trust_level=ProviderTrustLevel.PRODUCTION,
+            criticality_allowed=list(AssetCriticality),
+        )
+    openrouter_image_runtime = model_infrastructure.runtime_model(image_default.logical_name)
+    openrouter_image_available = openrouter_image_runtime.enabled and openrouter.configured
+    providers.register_model(
+        "openrouter",
+        openrouter_image_runtime.provider_model_id,
+        "image",
+        available=openrouter_image_available,
+    )
+    seedream_runtime = model_infrastructure.runtime_model("seedream-5.0-ark")
+    providers.register_model(
+        "seedance",
+        seedream_runtime.provider_model_id,
+        "image",
+        available=bool(seedream_runtime.enabled and seedance.configured),
+    )
+    openrouter_capabilities = {"video"} if openrouter_video_models else set()
+    openrouter_models = set(openrouter_video_models)
+    if openrouter_image_available:
+        openrouter_capabilities.add("image")
+        openrouter_models.add(openrouter_image_runtime.provider_model_id)
+    if openrouter.configured and openrouter_models:
         direct_api_resources.ensure_provider(
             "openrouter",
-            supported_models=openrouter_video_models,
-            capabilities={"video"},
+            supported_models=openrouter_models,
+            capabilities=openrouter_capabilities,
         )
     if seedance_available:
         direct_api_resources.ensure_provider(
@@ -469,7 +551,19 @@ def build_container(settings: Settings | None = None) -> Container:
     capability_resolver = CapabilityResolver(database, model_registry)
     qa = QAPipeline(database)
     cost = CostEngine(database)
-    prompts = PromptCompilerService(database, skills)
+    # The compiler owns style-lock enforcement, so it must hold the
+    # authoritative style service rather than trust a caller's context dict.
+    #
+    # Layer 2 is a deployment-wide switch rather than a per-project flag: it
+    # changes what "committable" means, and a gate that is quietly stronger on
+    # some projects than others is not a gate.
+    semantic_style = (
+        ModelRoleSemanticStyleEmbedder(model_roles)
+        if settings.feature_semantic_style_lock
+        else None
+    )
+    styles = ProjectStyleService(database, storage, semantic=semantic_style)
+    prompts = PromptCompilerService(database, skills, styles)
     credit_pricing = CreditPricingEngine(model_registry)
     generation_admission = GenerationAdmissionService(
         workspace_models,
@@ -480,7 +574,6 @@ def build_container(settings: Settings | None = None) -> Container:
     video_adapters = VideoAdapterRegistry()
     image_prompts = ImagePromptCorrector()
     asset_registry = AssetRegistry(database)
-    styles = ProjectStyleService(database, storage)
     feature_flags = FeatureFlagService(
         database,
         FeatureFlagDefaults(
@@ -513,7 +606,6 @@ def build_container(settings: Settings | None = None) -> Container:
             max_videos=settings.memory_max_videos,
         )
     )
-    video_prompt_compiler = VideoShotPromptCompiler(database)
     evaluator = GenerationEvaluator(database)
     retry_engine = RetryEngine(settings.max_auto_retries)
     model_metrics = ModelMetricsService(database)
@@ -526,7 +618,7 @@ def build_container(settings: Settings | None = None) -> Container:
         context,
         video_router,
         video_adapters,
-        video_prompt_compiler,
+        prompts,
         evaluator,
         retry_engine,
         model_metrics,
@@ -554,6 +646,7 @@ def build_container(settings: Settings | None = None) -> Container:
         database=database,
         storage=storage,
         media=media,
+        direct_uploads=direct_uploads,
         runtime=runtime,
         providers=providers,
         provider_capabilities=provider_capabilities,
@@ -585,6 +678,9 @@ def build_container(settings: Settings | None = None) -> Container:
         live_canary=live_canary,
         generation_admission=generation_admission,
         workspace_credits=workspace_credits,
+        alchemy_webhooks=alchemy_webhooks,
+        wallet_payments=wallet_payments,
+        depay_payments=depay_payments,
         video_router=video_router,
         video_adapters=video_adapters,
         image_prompts=image_prompts,
@@ -593,7 +689,6 @@ def build_container(settings: Settings | None = None) -> Container:
         feature_flags=feature_flags,
         memory=memory,
         context=context,
-        video_prompt_compiler=video_prompt_compiler,
         evaluator=evaluator,
         retry_engine=retry_engine,
         model_metrics=model_metrics,

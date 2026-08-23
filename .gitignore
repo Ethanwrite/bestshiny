@@ -5,8 +5,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-data/
-dist/
-references/
-output/
+# Anchored to the repository root. Unanchored, `references/` also matched
+# `skills/*/references/` and silently excluded the model-prompting and
+# image-prompt-corrector reference libraries that the Skills tell an agent to
+# read — they had never been committed.
+/data/
+/dist/
+apps/web/dist/
+/references/
+/output/
 .playwright-cli/
+node_modules/

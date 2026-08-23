@@ -21,6 +21,7 @@ from .embedding import EmbeddingProvider, MemoryEmbeddingUnavailable
 from .schemas import (
     ADVISORY_EVIDENCE_PURPOSES,
     AuthorityLevel,
+    EpisodeScope,
     EvidencePurpose,
     MemoryLayer,
     MemoryQuery,
@@ -159,18 +160,42 @@ class MultimodalMemoryEngine:
                 ShotMemory.embedding_model == provenance.model,
                 ShotMemory.embedding_dimension == len(query_vector),
             )
+            # Scoping is per layer, because the three layers answer different
+            # questions. L0 is series-wide entity truth and is never narrowed.
+            # L1 is *current state*, so inheriting another scene's would be
+            # wrong. L2 is "what happened before" — narrowing it to the current
+            # scene made episodic recall unable to see anything it exists to
+            # recall, which is why the 60-episode case never worked.
             if query.scene_id:
-                # Canonical entity truth can be global; temporal/episodic records
-                # must match the current scene before vector similarity is used.
                 statement = statement.where(
                     (ShotMemory.scene_id == query.scene_id)
-                    | (ShotMemory.layer == MemoryLayer.CANONICAL.value)
+                    | (ShotMemory.layer != MemoryLayer.TEMPORAL.value)
                 )
             if query.shot_id:
                 statement = statement.where(
-                    (ShotMemory.shot_id == query.shot_id) | (ShotMemory.layer == MemoryLayer.CANONICAL.value)
+                    (ShotMemory.shot_id == query.shot_id)
+                    | (ShotMemory.layer != MemoryLayer.TEMPORAL.value)
+                )
+            if query.episode_id and query.episode_scope is EpisodeScope.EPISODE:
+                statement = statement.where(
+                    ShotMemory.scene_id.in_(select(Scene.id).where(Scene.episode_id == query.episode_id))
+                    | (ShotMemory.layer == MemoryLayer.CANONICAL.value)
                 )
             candidates = list(session.scalars(statement))
+            # Episode is derived from the scene rather than stored on the row,
+            # so it can never drift from the scene the memory actually belongs
+            # to. Project-level memories have no scene and no episode.
+            scene_ids = {item.scene_id for item in candidates if item.scene_id}
+            episode_by_scene: dict[str, str] = (
+                {
+                    scene_id: episode_id
+                    for scene_id, episode_id in session.execute(
+                        select(Scene.id, Scene.episode_id).where(Scene.id.in_(scene_ids))
+                    ).all()
+                }
+                if scene_ids
+                else {}
+            )
 
         if query.entity_ids:
             requested = set(query.entity_ids)
@@ -213,21 +238,27 @@ class MultimodalMemoryEngine:
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=UTC)
                 age_days = max(0.0, (now - created).total_seconds() / 86_400)
-                temporal = 1.0 / (1.0 + age_days / 30.0)
+                temporal = 1.0 / (1.0 + age_days / query.recency_half_life_days)
+            item_episode_id = episode_by_scene.get(item.scene_id) if item.scene_id else None
             scene_match = 1.0 if query.scene_id and item.scene_id == query.scene_id else 0.0
+            # Under SERIES scope every episode is eligible, so the current one
+            # must be ranked up rather than left to compete on cosine alone.
+            episode_match = 1.0 if query.episode_id and item_episode_id == query.episode_id else 0.0
             canonical = 1.0 if item.canonical or item.layer == MemoryLayer.CANONICAL.value else 0.0
             components = {
                 "multimodal_similarity": similarity,
                 "entity_match": entity_match,
                 "temporal_relevance": temporal,
                 "scene_match": scene_match,
+                "episode_match": episode_match,
                 "canonical_priority": canonical,
             }
             score = (
-                0.45 * similarity
-                + 0.20 * entity_match
-                + 0.15 * temporal
-                + 0.10 * scene_match
+                0.40 * similarity
+                + 0.18 * entity_match
+                + 0.14 * temporal
+                + 0.09 * scene_match
+                + 0.09 * episode_match
                 + 0.10 * canonical
             )
             ranked.append(
@@ -240,6 +271,7 @@ class MultimodalMemoryEngine:
                     image_urls=item.image_urls,
                     video_urls=item.video_urls,
                     entity_ids=item.entity_ids,
+                    episode_id=item_episode_id,
                     scene_id=item.scene_id,
                     shot_id=item.shot_id,
                     asset_version_ids=item.asset_version_ids,

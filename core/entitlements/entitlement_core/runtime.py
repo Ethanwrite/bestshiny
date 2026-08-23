@@ -50,7 +50,7 @@ class ModelRoleExecution:
 
 def capability_for_model_role(role: ModelRole | str) -> ProviderCapability:
     requested = ModelRole(role)
-    if requested is ModelRole.MULTIMODAL_EMBEDDING:
+    if requested in {ModelRole.MULTIMODAL_EMBEDDING, ModelRole.STYLE_SEMANTIC_EMBEDDING}:
         return ProviderCapability.EMBEDDINGS
     if requested.value.startswith("VIDEO_"):
         return ProviderCapability.VIDEO

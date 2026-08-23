@@ -1,33 +1,48 @@
 ---
 name: composition
-description: Arrange visual hierarchy, subject and prop placement, depth layers, eyeline geometry, and negative space inside an approved still or keyframe. Use when a shot needs a readable frame layout, mobile-safe hierarchy, product visibility, or composition repair without changing story action, camera movement, lens behavior, lighting, or cross-shot continuity.
+description: Arrange visual hierarchy, subject and prop placement, depth layers, eyeline geometry and negative space inside one approved still or keyframe. Use when a frame needs a readable layout, mobile-safe hierarchy, product visibility or composition repair - without changing story action, camera movement, lens behaviour, lighting or cross-shot continuity.
+metadata:
+  category: composition
 ---
 
 # Composition
 
-Own spatial hierarchy inside the frame. Preserve the approved action, identity versions, environment, props,
-gaze targets, and product facts.
+## Position in the pipeline
+
+Inside a single frame, after the action and the camera are decided. This stage owns where things sit and what
+the eye reads first. It does not own what happens, how the camera behaves, or how the frame is lit.
+
+The narrow scope is deliberate. Composition problems and continuity problems look identical from inside one
+frame, and a composition fix applied to a continuity break makes the break harder to find.
 
 ## Arrange the frame
 
-1. Name the single primary visual focus and any supporting elements in priority order.
-2. Map each required subject and prop to screen left, center, or right and to foreground, midground, or
-   background. State scale and overlap only when they affect readability.
-3. Keep the approved gaze target explicit and make the eyeline connect geometrically to that person, object,
-   or off-screen location. Never redirect a gaze to the lens unless approved.
-4. Reserve negative space only for an approved purpose such as copy, movement room, or environmental context.
-5. Keep story-critical props, product shape, label, logo, and required text visible and unobstructed.
-6. Check the target aspect ratio and mobile preview. Do not hide the primary action or required text near crop
-   edges, overlays, or visually noisy areas.
-7. When given separate start and end keyframes, describe each layout independently and report any handoff risk
-   to the continuity skill.
+1. **Name the single primary focus.** Then supporting elements in priority order. A frame with two primary
+   focuses has none, and the renderer will pick one arbitrarily.
+2. **Map every required subject and prop** to screen left, centre or right, and to foreground, midground or
+   background. State scale and overlap only where they change what is readable.
+3. **Make the eyeline geometric.** The approved gaze target must be somewhere the subject could actually be
+   looking, given where both sit in the frame. An eyeline that does not resolve spatially reads as vacancy.
+   Never redirect a gaze to the lens.
+4. **Reserve negative space for a stated purpose** - copy, movement room, environmental context. Empty space
+   without a purpose is an unfinished frame, not a minimal one.
+5. **Protect required visibility.** Story-critical props, product silhouette, label, logo and required text stay
+   unobstructed.
+6. **Check the delivery crop.** At the target aspect ratio and at phone size, the primary action and any required
+   text must survive crop edges, overlays and visual noise. Vertical short-form is watched on a small screen in
+   motion; detail that needs a pause has already failed.
+7. **Treat start and end keyframes independently.** Describe each layout on its own terms, then report any
+   handoff risk rather than resolving it here.
 
 ## Boundaries
 
-- Do not add, remove, or reorder story actions.
-- Do not choose a lens, camera path, lighting plan, or new gaze target.
-- Do not resolve cross-shot axis or state conflicts; report them for continuity review.
-- Do not replace an approved asset to improve balance.
+- Never add, remove or reorder story actions.
+- Never choose a lens, camera path, lighting plan or new gaze target.
+- Never resolve a cross-shot axis or state conflict; that is a continuity verdict, and it needs both frames.
+- Never swap an approved asset to improve balance. A better-balanced frame containing the wrong product is worse
+  than an awkward frame containing the right one.
+
+## Output
 
 Return `visual_focus`, `hierarchy`, `frame_map`, `depth_layers`, `eyeline_geometry`, `negative_space`,
-`required_visibility`, `mobile_crop_check`, and `handoff_risks`.
+`required_visibility`, `mobile_crop_check` and `handoff_risks`.

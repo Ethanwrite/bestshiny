@@ -7,11 +7,13 @@ dependencies = [
   "alembic>=1.16,<2",
   "boto3>=1.40,<2",
   "cryptography>=45,<47",
+  "eth-account>=0.13,<1",
   "fastapi>=0.128,<1",
   "httpx>=0.28,<1",
   "pillow>=11,<13",
   "pgvector>=0.4,<1",
   "pydantic-settings>=2.10,<3",
+  "pyyaml>=6,<7",
   "psycopg[binary]>=3.2,<4",
   "python-multipart>=0.0.20,<1",
   "sqlalchemy>=2.0,<3",
@@ -59,6 +61,7 @@ packages = [
   "providers/wan/wan_provider",
   "providers/deepseek/deepseek_provider",
   "core/narrative/narrative_core",
+  "core/narrative-ledger/narrative_ledger_core",
   "core/character/character_core",
   "core/continuity/continuity_core",
   "core/generation-policy/generation_policy_core",
@@ -78,6 +81,7 @@ packages = [
   "core/model-metrics/model_metrics_core",
   "core/provider-budget/provider_budget_core",
   "core/entitlements/entitlement_core",
+  "core/payments/payment_core",
 ]
 
 [tool.pytest.ini_options]
@@ -98,10 +102,11 @@ pythonpath = [
   "core/image-prompt",
   "core/asset-registry",
   "core/style",
-  "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
+  "core/memory", "core/narrative-ledger", "core/runtime-control", "core/video-prompt", "core/evaluation",
   "core/model-metrics",
   "core/provider-budget",
   "core/entitlements",
+  "core/payments",
 ]
 
 [tool.ruff]
@@ -134,8 +139,9 @@ files = [
   "core/model-registry", "core/adapters",
   "core/image-prompt",
   "core/asset-registry",
-  "core/memory", "core/runtime-control", "core/video-prompt", "core/evaluation",
+  "core/memory", "core/narrative-ledger", "core/runtime-control", "core/video-prompt", "core/evaluation",
   "core/model-metrics",
   "core/provider-budget",
   "core/entitlements",
+  "core/payments",
 ]

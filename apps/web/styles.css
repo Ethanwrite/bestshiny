@@ -198,6 +198,24 @@ input[type="file"]::file-selector-button { margin-right: 8px; border: 0; border-
 .project-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 .project-dialog-actions .button { min-width: 112px; }
 @keyframes project-dialog-in { from { opacity: 0; transform: translateY(12px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.wallet-dialog { width: min(620px, calc(100vw - 32px)); }
+.wallet-balance-card { display: flex; align-items: end; justify-content: space-between; margin: 0 0 16px; padding: 18px 20px; border: 1px solid rgba(57,231,255,.18); border-radius: 16px; background: rgba(57,231,255,.06); }
+.wallet-balance-card span, .wallet-state-grid span { color: var(--muted); font-size: 11px; }
+.wallet-balance-card strong { color: var(--cyan); font-size: 28px; }
+.wallet-state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.wallet-state-grid > div { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.025); }
+.wallet-state-grid strong { display: block; overflow: hidden; margin-top: 5px; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.wallet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+.wallet-payment-box { display: grid; gap: 10px; margin-top: 18px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: rgba(0,0,0,.12); }
+.wallet-payment-box small { color: var(--muted); line-height: 1.55; }
+.wallet-offer { display: grid; grid-template-columns: 1fr auto; gap: 7px 16px; align-items: baseline; padding: 4px 2px 10px; }
+.wallet-offer span { color: #dce8f8; font-size: 15px; font-weight: 750; }
+.wallet-offer strong { color: var(--cyan); font-size: 21px; }
+.wallet-offer p { grid-column: 1 / -1; margin: 0; color: #aebed4; font-size: 12px; line-height: 1.8; }
+.depay-checkout { display: grid; justify-items: center; gap: 12px; margin-top: 16px; padding: 16px; border: 1px solid rgba(57,231,255,.2); border-radius: 16px; background: rgba(57,231,255,.045); text-align: center; }
+.depay-checkout[hidden] { display: none; }
+.depay-checkout img { width: min(220px, 70vw); height: auto; padding: 10px; border-radius: 14px; background: #fff; }
+.depay-checkout .wallet-actions { width: 100%; }
 .toast { position: fixed; right: 24px; bottom: 24px; max-width: 360px; padding: 13px 16px; border-radius: 12px; background: #1a2740; border: 1px solid rgba(57,231,255,.35); transform: translateY(20px); opacity: 0; pointer-events: none; transition: .2s; box-shadow: 0 16px 50px rgba(0,0,0,.4); font-size: 12px; z-index: 50; }.toast.show { transform: translateY(0); opacity: 1; }
 
 @media (max-width: 1280px) {
@@ -222,7 +240,7 @@ input[type="file"]::file-selector-button { margin-right: 8px; border: 0; border-
   .project-switcher { grid-column: 1 / -1; grid-row: 2; width: 100%; }
   .project-switcher select { min-width: 0; }
   .top-actions .status-pill, .top-actions .secondary { display: none; }
-  .top-actions .logout-button { display: inline-flex; padding: 8px 10px; }
+  .top-actions #walletBtn, .top-actions .logout-button { display: inline-flex; padding: 8px 10px; }
   .mode-switch { padding: 8px 14px; overflow-x: auto; }.mode-switch span { display: none; }
   .passenger-workspace { padding: 22px 14px 36px; }.passenger-hero { display: block; }.media-toggle { margin-top: 18px; width: fit-content; }
   .passenger-grid { grid-template-columns: 1fr; }.creation-card { min-height: auto; }.result-card { grid-column: auto; }.passenger-result { min-height: 190px; }

@@ -2,8 +2,78 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
-from production_domain.models import Episode, Scene, Shot, TimelineState
+import pytest
+from platform_contracts import PromptCompilerInput, PromptCompilerOutput, PromptContinuityContext
+from production_domain.models import Episode, PromptCompilation, Scene, Shot, TimelineState
+from skill_core import PromptCompilerService, SkillRegistry
+from video_prompt_core import VideoShotPromptCompiler
+
+
+def _write_skill(path: Path, body: str) -> None:
+    skill_dir = path / "prompt-compiler"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: prompt-compiler\n"
+        "description: Compile approved canonical shots.\n"
+        "---\n\n"
+        f"{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_skill_registry_parses_frontmatter_and_versions_content(tmp_path):
+    _write_skill(tmp_path, "# Prompt Compiler\n\nFirst approved contract.")
+    registry = SkillRegistry(tmp_path)
+    first = registry.resolve("prompt-compiler")
+
+    assert first.name == "prompt-compiler"
+    assert first.description == "Compile approved canonical shots."
+    assert first.system_prompt.startswith("# Prompt Compiler")
+    assert "name: prompt-compiler" not in first.system_prompt
+    assert first.version.startswith("sha256:")
+
+    _write_skill(tmp_path, "# Prompt Compiler\n\nSecond approved contract.")
+    second = registry.resolve("prompt-compiler")
+    assert second.version != first.version
+    assert second.content_hash != first.content_hash
+
+
+def test_prompt_compiler_output_rejects_partial_failed_prompt():
+    with pytest.raises(ValueError, match="cannot contain partial prompts"):
+        PromptCompilerOutput(
+            status="NOT_COMPILABLE",
+            positive_prompt="unsafe partial prompt",
+            review_reason="missing approved end state",
+        )
+
+
+def test_unified_compiler_returns_structured_failure_for_invalid_shot(container):
+    result = container.prompts.compile_input(
+        PromptCompilerInput(
+            shot_spec={"aspect_ratio": "9:16"},
+            asset_bindings=[],
+            continuity_context=PromptContinuityContext(),
+        )
+    )
+
+    assert result.status == "NOT_COMPILABLE"
+    assert result.positive_prompt is None
+    assert result.negative_prompt is None
+    assert result.missing_fields == ["dominant_action", "intent"]
+    assert result.review_reason
+
+
+def test_legacy_video_compiler_name_is_the_unified_service(container):
+    assert VideoShotPromptCompiler is PromptCompilerService
+    assert container.video_prompt_compiler is container.prompts
+    contract = container.prompts.skill_contract()
+    assert contract["version"] == container.skills.resolve("prompt-compiler").version
+    assert contract["input_schema"]["title"] == "PromptCompilerInput"
+    assert contract["output_schema"]["title"] == "PromptCompilerOutput"
+    assert contract["system_prompt"].startswith("# Prompt Compiler")
 
 
 def test_compiler_resolves_uuid_keyed_characters_and_preserves_prop_maps(container, project):
@@ -89,3 +159,10 @@ def test_compiler_resolves_uuid_keyed_characters_and_preserves_prop_maps(contain
         }
     ]
     assert json.loads(compiled.neutral_prompt)["props"] == compiled.spec.props
+    assert compiled.output.status == "COMPILED"
+    assert compiled.output.positive_prompt == compiled.neutral_prompt
+    assert compiled.skill_version == container.skills.resolve("prompt-compiler").version
+    with container.database.session() as session:
+        record = session.get(PromptCompilation, compiled.record_id)
+        assert record.skill_versions == {"prompt-compiler": compiled.skill_version}
+        assert record.diff_json["prompt_compiler_output"]["status"] == "COMPILED"

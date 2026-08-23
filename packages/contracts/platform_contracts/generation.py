@@ -57,11 +57,17 @@ class GenerationRequest(BaseModel):
     start_frame_asset_id: str | None = None
     end_frame_asset_id: str | None = None
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=20)
+    # How many images this request asks the model for. The caller opts in
+    # explicitly, because each extra image is a real charge: an image request
+    # for 4 costs four images' worth of credits, reserved up front, and yields
+    # four selectable candidates rather than one result and three spares.
+    image_count: int = Field(default=1, ge=1, le=10)
     idempotency_key: str = Field(min_length=3, max_length=250)
     priority: int = Field(default=0, ge=-100, le=100)
     generation_policy: str = "TEXT_TO_VIDEO"
     asset_criticality: AssetCriticality = AssetCriticality.STANDARD
     cost_estimate: float = Field(default=0.0, ge=0)
+    provider_payload: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -70,6 +76,8 @@ class GenerationRequest(BaseModel):
             raise ValueError("end_frame_asset_id requires start_frame_asset_id")
         if self.type == "video" and self.duration is None:
             self.duration = 8
+        if self.type != "image" and self.image_count != 1:
+            raise ValueError("image_count applies to image generation only")
         return self
 
 

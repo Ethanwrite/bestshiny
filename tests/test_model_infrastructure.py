@@ -47,16 +47,24 @@ def test_every_generation_request_serializes_an_explicit_asset_criticality() -> 
 def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> None:
     config = load_model_infrastructure_config(CONFIG_PATH)
     provider_ids = {item.provider_model_id for item in config.models}
-    assert len(config.models) == 13
+    assert len(config.models) == 22
     assert {
         "openai/gpt-5.6-sol",
+        "anthropic/claude-opus-5",
+        "deepseek-v4-flash",
+        "qwen3.8-max",
+        "glm-5.2",
+        "seedream-5-0",
+        "openai/gpt-image-2",
+        "google/gemini-embedding-2",
+        "x-ai/grok-imagine-video",
         "anthropic/claude-sonnet-5",
         "kwaivgi/kling-v3.0-std",
         "kwaivgi/kling-v3.0-pro",
         "voyageai/voyage-multimodal-3.5",
         "flow-veo-3.1",
         "NARWHAL",
-        "seedance-2.5",
+        "doubao-seedance-2-5-260628",
         "veo-3.1-quality",
         "grok-video",
         "wan-2.7",

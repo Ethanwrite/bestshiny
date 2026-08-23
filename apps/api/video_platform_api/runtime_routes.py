@@ -49,6 +49,7 @@ from production_domain.models import (
     StyleEmbedding,
     TimelineTransition,
     Workspace,
+    WorkspaceCreditLedgerEntry,
 )
 from provider_budget_core import (
     DatabaseProviderBudgetRepository,
@@ -654,6 +655,16 @@ def register_runtime_routes(
                 raise HTTPException(404, "workspace not found")
             entries = container.workspace_credits.entries_in_session(session, workspace_id)
             events = container.workspace_credits.events_in_session(session, workspace_id)
+            purchase_ledger = list(
+                session.scalars(
+                    select(WorkspaceCreditLedgerEntry)
+                    .where(WorkspaceCreditLedgerEntry.workspace_id == workspace_id)
+                    .order_by(
+                        WorkspaceCreditLedgerEntry.created_at,
+                        WorkspaceCreditLedgerEntry.id,
+                    )
+                )
+            )
             return {
                 "workspace_id": workspace.id,
                 "plan_tier": workspace.plan_tier,
@@ -662,6 +673,9 @@ def register_runtime_routes(
                 "pricing_version": container.credit_pricing.version,
                 "reserved_credits": sum(
                     item.credits for item in entries if item.status in {"RESERVED", "RECONCILIATION_REQUIRED"}
+                ),
+                "purchased_credits": sum(
+                    item.credits if item.direction == "CREDIT" else -item.credits for item in purchase_ledger
                 ),
                 "entries": [
                     {
@@ -698,6 +712,22 @@ def register_runtime_routes(
                         "created_at": event.created_at,
                     }
                     for event in events[-200:]
+                ],
+                "purchase_ledger": [
+                    {
+                        "id": item.id,
+                        "payment_id": item.payment_id,
+                        "entry_type": item.entry_type,
+                        "direction": item.direction,
+                        "credits": item.credits,
+                        "balance_before": item.balance_before,
+                        "balance_after": item.balance_after,
+                        "currency": item.currency,
+                        "raw_amount_microunits": item.raw_amount_microunits,
+                        "chain_id": item.chain_id,
+                        "created_at": item.created_at,
+                    }
+                    for item in purchase_ledger[-200:]
                 ],
             }
 

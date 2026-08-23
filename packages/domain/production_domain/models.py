@@ -433,6 +433,274 @@ class WorkspaceCreditEvent(Base):
     )
 
 
+class AlchemyWebhookDelivery(Base):
+    """Immutable receipt for one authenticated Alchemy webhook delivery."""
+
+    __tablename__ = "alchemy_webhook_deliveries"
+    __table_args__ = (
+        UniqueConstraint("provider_event_id", name="uq_alchemy_delivery_provider_event"),
+        CheckConstraint("activity_count >= 0", name="ck_alchemy_delivery_activity_count"),
+        CheckConstraint("accepted_count >= 0", name="ck_alchemy_delivery_accepted_count"),
+        CheckConstraint("credited_count >= 0", name="ck_alchemy_delivery_credited_count"),
+        CheckConstraint("ignored_count >= 0", name="ck_alchemy_delivery_ignored_count"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_alchemy_delivery_payload_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider_event_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    webhook_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    webhook_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    network: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    activity_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    accepted_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    credited_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    ignored_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    result: Mapped[str] = mapped_column(String(40), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class DePayCheckoutSession(Base, TimestampMixin):
+    """One authenticated workspace handoff to the shared DePay payment link."""
+
+    __tablename__ = "depay_checkout_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_depay_checkout_token_hash"),
+        UniqueConstraint("payment_intent_id", name="uq_depay_checkout_payment_intent"),
+        CheckConstraint("requested_quantity > 0", name="ck_depay_checkout_quantity_positive"),
+        CheckConstraint("credits_granted >= 0", name="ck_depay_checkout_credits_nonnegative"),
+        CheckConstraint(
+            "status IN ('PENDING', 'PAID', 'EXPIRED', 'CANCELLED', 'RECONCILIATION_REQUIRED')",
+            name="ck_depay_checkout_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    payment_intent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("onchain_payment_intents.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    credits_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True, nullable=False)
+    payment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("onchain_payments.id", ondelete="RESTRICT"), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class DePayWebhookDelivery(Base):
+    """Append-only receipt for one authenticated DePay callback transaction."""
+
+    __tablename__ = "depay_webhook_deliveries"
+    __table_args__ = (
+        UniqueConstraint("event_key", name="uq_depay_delivery_event_key"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_depay_delivery_payload_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    event_key: Mapped[str] = mapped_column(String(240), index=True, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    link_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    checkout_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("depay_checkout_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    payment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("onchain_payments.id", ondelete="RESTRICT"), index=True
+    )
+    result: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class WorkspaceWalletBinding(Base, TimestampMixin):
+    """Workspace ownership projection for a verified EVM wallet."""
+
+    __tablename__ = "workspace_wallet_bindings"
+    __table_args__ = (
+        UniqueConstraint("chain_id", "address", name="uq_workspace_wallet_chain_address"),
+        CheckConstraint("chain_id > 0", name="ck_workspace_wallet_chain_positive"),
+        CheckConstraint("length(address) = 42", name="ck_workspace_wallet_address_length"),
+        CheckConstraint("address = lower(address)", name="ck_workspace_wallet_address_lowercase"),
+        CheckConstraint(
+            "status IN ('PENDING', 'VERIFIED', 'REVOKED')",
+            name="ck_workspace_wallet_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    chain_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True, nullable=False)
+    verified_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class WalletBindingChallenge(Base, TimestampMixin):
+    """Single-use wallet ownership challenge issued to an authenticated workspace member."""
+
+    __tablename__ = "wallet_binding_challenges"
+    __table_args__ = (
+        UniqueConstraint("nonce_hash", name="uq_wallet_binding_challenge_nonce_hash"),
+        CheckConstraint("chain_id > 0", name="ck_wallet_binding_challenge_chain_positive"),
+        CheckConstraint("length(address) = 42", name="ck_wallet_binding_challenge_address_length"),
+        CheckConstraint("address = lower(address)", name="ck_wallet_binding_challenge_address_lowercase"),
+        CheckConstraint(
+            "length(message_hash) = 64",
+            name="ck_wallet_binding_challenge_message_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    chain_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    message_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OnchainPaymentIntent(Base, TimestampMixin):
+    """Server-priced Base USDC purchase expected from one verified wallet."""
+
+    __tablename__ = "onchain_payment_intents"
+    __table_args__ = (
+        UniqueConstraint("transaction_hash", name="uq_onchain_payment_intent_transaction_hash"),
+        CheckConstraint("chain_id > 0", name="ck_payment_intent_chain_positive"),
+        CheckConstraint("raw_amount_microunits > 0", name="ck_payment_intent_amount_positive"),
+        CheckConstraint("credits > 0", name="ck_payment_intent_credits_positive"),
+        CheckConstraint(
+            "status IN ('PENDING', 'SUBMITTED', 'PAID', 'EXPIRED', 'CANCELLED', 'RECONCILIATION_REQUIRED')",
+            name="ck_payment_intent_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    wallet_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_wallet_bindings.id", ondelete="RESTRICT"), index=True
+    )
+    network: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    chain_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    from_address: Mapped[str | None] = mapped_column(String(42), index=True)
+    to_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    transaction_hash: Mapped[str | None] = mapped_column(String(66), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class OnchainPayment(Base, TimestampMixin):
+    """Canonical Base USDC transfer fact derived from an authenticated delivery."""
+
+    __tablename__ = "onchain_payments"
+    __table_args__ = (
+        UniqueConstraint("network", "transaction_hash", "log_index", name="uq_onchain_payment_log"),
+        CheckConstraint("chain_id > 0", name="ck_onchain_payment_chain_positive"),
+        CheckConstraint("token_decimals = 6", name="ck_onchain_payment_usdc_decimals"),
+        CheckConstraint("raw_amount_microunits > 0", name="ck_onchain_payment_amount_positive"),
+        CheckConstraint("credits_granted >= 0", name="ck_onchain_payment_credits_nonnegative"),
+        CheckConstraint(
+            "status IN ('RECEIVED', 'UNMATCHED', 'CREDITED', 'REMOVED', 'RECONCILIATION_REQUIRED')",
+            name="ck_onchain_payment_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    network: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    chain_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    transaction_hash: Mapped[str] = mapped_column(String(66), index=True, nullable=False)
+    log_index: Mapped[str] = mapped_column(String(66), nullable=False)
+    block_number: Mapped[str] = mapped_column(String(66), nullable=False)
+    from_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    to_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    token_decimals: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True
+    )
+    wallet_binding_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_wallet_bindings.id", ondelete="RESTRICT"), index=True
+    )
+    payment_intent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("onchain_payment_intents.id", ondelete="RESTRICT"), index=True
+    )
+    provider_event_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    credits_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class WorkspaceCreditLedgerEntry(Base):
+    """Append-only balance mutation for purchases and their chain-reorg reversals."""
+
+    __tablename__ = "workspace_credit_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("external_reference", name="uq_workspace_credit_ledger_external_reference"),
+        CheckConstraint("credits > 0", name="ck_workspace_credit_ledger_credits_positive"),
+        CheckConstraint("balance_before >= 0", name="ck_workspace_credit_ledger_before_nonnegative"),
+        CheckConstraint("balance_after >= 0", name="ck_workspace_credit_ledger_after_nonnegative"),
+        CheckConstraint("direction IN ('CREDIT', 'DEBIT')", name="ck_workspace_credit_ledger_direction"),
+        CheckConstraint(
+            "entry_type IN ('USDC_PURCHASE', 'USDC_REORG_REVERSAL')",
+            name="ck_workspace_credit_ledger_entry_type",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    payment_id: Mapped[str] = mapped_column(
+        ForeignKey("onchain_payments.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    related_entry_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_credit_ledger_entries.id", ondelete="RESTRICT"), index=True
+    )
+    external_reference: Mapped[str] = mapped_column(String(240), nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(60), index=True, nullable=False)
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(20), default="USDC", nullable=False)
+    raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
 class LegacyWorkspaceClaim(Base, TimestampMixin):
     """Append-only audit record for an explicit legacy-data ownership transfer."""
 
@@ -628,6 +896,115 @@ class CharacterIdentityVersion(Base, TimestampMixin):
     provider_bindings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="LOCKED", nullable=False)
     locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class NarrativeFact(Base, TimestampMixin):
+    """One story fact established at a point in the series, append-only.
+
+    A fact is what *happened*. Who is entitled to know it is tracked separately
+    by NarrativeDisclosure, because the same fact reaches the audience and each
+    character at different moments - that gap is what dramatic irony is made of.
+    """
+
+    __tablename__ = "narrative_facts"
+    __table_args__ = (
+        UniqueConstraint("project_id", "fact_key", name="uq_narrative_fact_key"),
+        CheckConstraint("length(fact_key) > 0", name="ck_narrative_fact_key_nonempty"),
+        CheckConstraint("length(fact_hash) = 64", name="ck_narrative_fact_hash_length"),
+        CheckConstraint("established_episode > 0", name="ck_narrative_fact_episode_positive"),
+        Index("ix_narrative_fact_lookup", "project_id", "established_episode"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    fact_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    fact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    established_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    established_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    subject_character_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class NarrativeDisclosure(Base, TimestampMixin):
+    """Append-only record that a fact became known to one holder.
+
+    ``holder_key`` is a character ID, or ``AUDIENCE`` for the viewer. A shot may
+    only let a character act on a fact that was disclosed to them at or before
+    the current episode; the audience knowing it is never sufficient.
+    """
+
+    __tablename__ = "narrative_disclosures"
+    __table_args__ = (
+        UniqueConstraint("fact_id", "holder_key", name="uq_narrative_disclosure_holder"),
+        CheckConstraint("length(holder_key) > 0", name="ck_narrative_disclosure_holder_nonempty"),
+        CheckConstraint("disclosed_episode > 0", name="ck_narrative_disclosure_episode_positive"),
+        Index("ix_narrative_disclosure_lookup", "project_id", "holder_key", "disclosed_episode"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    fact_id: Mapped[str] = mapped_column(
+        ForeignKey("narrative_facts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    holder_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    disclosed_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    disclosed_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(40), default="ON_SCREEN", nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class NarrativeObligation(Base, TimestampMixin):
+    """A setup that owes the viewer a payoff, and whether it has been paid.
+
+    Retrieval by similarity cannot surface these: episode 60's payoff shares no
+    vocabulary with episode 7's promise. An obligation is *owed*, not *similar*,
+    so it is tracked explicitly and carried into every later episode's context.
+    """
+
+    __tablename__ = "narrative_obligations"
+    __table_args__ = (
+        UniqueConstraint("project_id", "obligation_key", name="uq_narrative_obligation_key"),
+        CheckConstraint("length(obligation_key) > 0", name="ck_narrative_obligation_key_nonempty"),
+        CheckConstraint("opened_episode > 0", name="ck_narrative_obligation_open_positive"),
+        CheckConstraint(
+            "settled_episode IS NULL OR settled_episode >= opened_episode",
+            name="ck_narrative_obligation_settled_after_open",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN', 'SETTLED', 'ABANDONED')",
+            name="ck_narrative_obligation_status",
+        ),
+        CheckConstraint(
+            "(status = 'OPEN' AND settled_episode IS NULL) OR "
+            "(status != 'OPEN' AND settled_episode IS NOT NULL)",
+            name="ck_narrative_obligation_status_settled_pair",
+        ),
+        Index("ix_narrative_obligation_open", "project_id", "status", "opened_episode"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    obligation_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    promise: Mapped[str] = mapped_column(Text, nullable=False)
+    opened_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
+    settled_episode: Mapped[int | None] = mapped_column(Integer)
+    settled_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    settled_reason: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class CharacterStateVersion(Base, TimestampMixin):
@@ -1124,6 +1501,101 @@ class MediaAsset(Base, TimestampMixin):
     generation_candidate_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_candidates.id"), index=True
     )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class DirectUploadStatus(StrEnum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+    ABANDONED = "ABANDONED"
+
+
+class DirectUpload(Base, TimestampMixin):
+    """One authorized direct-to-storage upload, between presign and completion.
+
+    The client PUTs bytes straight to object storage, so this row is where the
+    server's decisions live in the meantime: which project and asset type were
+    authorized, which key was chosen, which digest the store will enforce, and
+    which quota reservation is being held. The client sends back only this row's
+    id, so it cannot promote its upload to a different project, a different
+    asset type or a different key between the two calls.
+    """
+
+    __tablename__ = "direct_uploads"
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_direct_upload_idempotency"),
+        Index("ix_direct_upload_expiry", "status", "expires_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    filename: Mapped[str] = mapped_column(String(300), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    declared_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    lineage_key: Mapped[str] = mapped_column(String(500), default="shared", nullable=False)
+    shot_id: Mapped[str | None] = mapped_column(String(36))
+    character_id: Mapped[str | None] = mapped_column(String(36))
+    storage_reservation_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(
+        String(40), default=DirectUploadStatus.PENDING.value, index=True, nullable=False
+    )
+    media_asset_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class MediaRenditionKind(StrEnum):
+    """What one stored encoding of a media asset is *for*.
+
+    The original is the user's bytes and is never replaced or re-encoded — a
+    character face, a product label or a fabric weave only survives at the
+    resolution it arrived at. Everything else is a derived copy created because
+    some consumer cannot accept the original, and a derived copy is disposable.
+    """
+
+    ORIGINAL = "ORIGINAL"
+    PROVIDER_REFERENCE = "PROVIDER_REFERENCE"
+    THUMBNAIL = "THUMBNAIL"
+
+
+class MediaRendition(Base, TimestampMixin):
+    """One stored encoding of a media asset, derived from its original.
+
+    A rendition never stands alone: it records the constraint profile that
+    caused it to exist, so a provider whose limits later change gets a new
+    rendition instead of silently reusing one built for different limits.
+    """
+
+    __tablename__ = "media_renditions"
+    __table_args__ = (
+        UniqueConstraint(
+            "media_asset_id",
+            "kind",
+            "constraint_key",
+            name="uq_media_rendition_scope",
+        ),
+        Index("ix_media_rendition_asset", "media_asset_id", "kind"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    media_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    # The bounds this encoding was built to satisfy. "original" for the source
+    # row; otherwise a stable digest of the consumer's declared constraints.
+    constraint_key: Mapped[str] = mapped_column(String(200), default="original", nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    local_path: Mapped[str | None] = mapped_column(String(1000))
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -1843,6 +2315,18 @@ class ProjectStyleLock(Base, TimestampMixin):
     style_embedding_id: Mapped[str] = mapped_column(
         ForeignKey("style_embeddings.id", ondelete="RESTRICT"), index=True, nullable=False
     )
+    # The second style layer, bound to the lock so it stays immutable and
+    # self-describing. Null means the project was locked before a semantic
+    # embedder was configured; that project keeps the deterministic gate alone
+    # rather than silently acquiring a second one whose reference was chosen
+    # after the fact.
+    # Declared as a plain identifier rather than a ForeignKey, matching
+    # `GenerationCandidate.output_asset_id`. SQLite cannot add a foreign key to
+    # an existing table without rebuilding it, and rebuilding this one breaks
+    # the triggers that guard the style pointer by name. The service only ever
+    # writes an embedding id it just created, and the row is append-only.
+    semantic_style_embedding_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    semantic_similarity_threshold: Mapped[float] = mapped_column(Float, default=0.80, nullable=False)
     similarity_threshold: Mapped[float] = mapped_column(Float, default=0.72, nullable=False)
     minimum_similarity_threshold: Mapped[float] = mapped_column(Float, default=0.55, nullable=False)
     drift_limit: Mapped[float] = mapped_column(Float, default=0.06, nullable=False)
@@ -1885,6 +2369,11 @@ class CandidateStyleEvaluation(Base, TimestampMixin):
         ForeignKey("style_embeddings.id", ondelete="RESTRICT"), index=True, nullable=False
     )
     status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    # Layer 2's own verdict, kept separate so it is queryable and so a combined
+    # status can never hide which layer objected.
+    semantic_status: Mapped[str | None] = mapped_column(String(40), index=True)
+    semantic_average_similarity: Mapped[float | None] = mapped_column(Float)
+    semantic_minimum_similarity: Mapped[float | None] = mapped_column(Float)
     average_similarity: Mapped[float | None] = mapped_column(Float)
     minimum_similarity: Mapped[float | None] = mapped_column(Float)
     p10_similarity: Mapped[float | None] = mapped_column(Float)
@@ -3390,3 +3879,43 @@ def _install_project_style_integrity_ddl() -> None:
 
 
 _install_project_style_integrity_ddl()
+
+
+def _install_payment_ledger_integrity_ddl() -> None:
+    """Prevent authenticated webhook receipts and posted credit entries from being rewritten."""
+
+    anchor = WorkspaceCreditLedgerEntry.__table__
+    for table_name in ("alchemy_webhook_deliveries", "workspace_credit_ledger_entries"):
+        for operation in ("UPDATE", "DELETE"):
+            event.listen(
+                anchor,
+                "after_create",
+                DDL(
+                    f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_append_only_{operation.lower()} "
+                    f"BEFORE {operation} ON {table_name} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table_name} is append-only'); END"
+                ).execute_if(dialect="sqlite"),
+            )
+
+    event.listen(
+        anchor,
+        "after_create",
+        DDL(
+            "CREATE OR REPLACE FUNCTION enforce_payment_ledger_append_only() "
+            "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+            "RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '23000'; "
+            "RETURN OLD; END; $$"
+        ).execute_if(dialect="postgresql"),
+    )
+    for table_name in ("alchemy_webhook_deliveries", "workspace_credit_ledger_entries"):
+        event.listen(
+            anchor,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER trg_{table_name}_append_only BEFORE UPDATE OR DELETE ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_payment_ledger_append_only()"
+            ).execute_if(dialect="postgresql"),
+        )
+
+
+_install_payment_ledger_integrity_ddl()

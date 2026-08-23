@@ -1,26 +1,36 @@
 # AI Director Platform V1
 
-面向 AI 短剧与商业视觉生产的可运行平台。产品提供两种入口，但共用同一套资产、记忆、路由、生成网关、成本与评估基础设施：
+A working platform for AI short-drama and commercial visual production. Two entry points share one set of asset, memory, routing, generation-gateway, cost and evaluation infrastructure:
 
-- **乘客模式（Passenger Seat）**：用户直接选择图片或视频、模型、时长、清晰度与参考素材；图片提示词可单独整理、撤销，再提交生成。
-- **自动导演（Autopilot）**：系统把剧本编译为 `Project → Episode → Scene → Shot → Candidate`，为镜头装配上下文、选择模型并执行质量门禁；内部视频提示词默认收起。
+- **Passenger Seat**: the user picks image or video, model, duration, resolution and reference assets directly. An image prompt can be corrected and undone separately before submission.
+- **Autopilot**: the system compiles a script into `Project → Episode → Scene → Shot → Candidate`, assembles per-shot context, selects a model and runs the quality gates. Internal video prompts stay collapsed by default.
 
-接手开发前必须先读 [文档导航](docs/README.md)、[开发交接](docs/DEVELOPMENT_HANDOFF_2026-08-20.md)、[当前完整架构](CURRENT_ARCHITECTURE.md)、[生产证据报告](docs/PRODUCTION_EVIDENCE.md)、[生产就绪检查表](docs/PRODUCTION_READINESS_CHECKLIST.md) 和 [产品需求台账](docs/PRODUCT_REQUIREMENTS_LEDGER.md)。Visual Runtime 的逐阶段实施记录见 [docs/VISUAL_RUNTIME_IMPLEMENTATION.md](docs/VISUAL_RUNTIME_IMPLEMENTATION.md)，源码与 Skill 审计见 [docs/source-audit.md](docs/source-audit.md) 和 [docs/skill-research.md](docs/skill-research.md)。
+Before taking over development, read [the documentation index](docs/README.md)、[the current handoff](HANDOFF.md)、[the open-issues list](docs/OPEN_ISSUES.md)、[the architecture](CURRENT_ARCHITECTURE.md)、[the production evidence report](docs/PRODUCTION_EVIDENCE.md)、[the readiness checklist](docs/PRODUCTION_READINESS_CHECKLIST.md) and [the requirements ledger](docs/PRODUCT_REQUIREMENTS_LEDGER.md). Source and Skill audits are in [docs/source-audit.md](docs/source-audit.md) and [docs/skill-research.md](docs/skill-research.md).
 
-> **当前 Phase III 离线检查点仍不可直接发布。** 离线算法核心已冻结为 commit `0a74d31`、tag `v0.2.0-algorithm-core-offline`；Phase III 实现提交为 `99f9c60`，证据快照 tag 为 `v0.3.0-production-evidence-core-offline`。Phase III 全仓门禁为 `406 passed, 57 warnings in 71.58s`；PostgreSQL 17.10 + pgvector 0.8.6 与 Docker Compose 生产类似 smoke 已实机通过。任何真实 Provider canary 都不得从代码实现推导为已验证：本轮真实 Provider 调用为 **0**，开发引起的已知 Provider 支出为 **USD 0**，单视频 canary 为 **NOT EXECUTED**。
+> **The Phase III offline checkpoint is still not releasable.** The offline algorithm core is frozen at commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`; Phase III was implemented at `99f9c60` with evidence snapshot tag `v0.3.0-production-evidence-core-offline`. The Phase III whole-repository gate was `406 passed, 57 warnings in 71.58s`, and PostgreSQL 17.10 + pgvector 0.8.6 plus a Docker Compose production-like smoke passed on real machines. No live Provider canary may be inferred from code: real Provider calls this round were **0**, known development-caused Provider spend is **USD 0**, and the single-video canary is **NOT EXECUTED**.
 
-2026-08-22 的当前开发检查点在不新增 Provider 的前提下，增加了迁移
-`0028_persistent_character_state`、迁移 `0029_project_style_lock` 和项目级锁定画风闭环。上述 `406 passed` 是前一个已打 tag
-检查点的历史证据。当前工作树门禁实测为 `451 passed, 61 warnings in 88.91s`，
-Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；这仍不是对真实视觉评审精度或生产上线的背书。
+The current 2026-08-23 development checkpoint adds migrations `0028_persistent_character_state` through
+`0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the
+series narrative ledger, and adds the first working image-generation path — `openai/gpt-image-2` through the
+OpenRouter Image API, bound as the `IMAGE_GENERATION` role. No video Provider was added and none was called.
+The `406 passed` figure above is historical evidence from the previously tagged checkpoint. The current
+working-tree gate measures **`612 passed, 2 skipped, 61 warnings`** — the two skipped are opt-in live image
+tests — with Ruff check, Mypy (133 source files), the Web production build and npm audit all green. This is
+still not an endorsement of real visual-review accuracy, of on-chain payment operations, or of a production
+launch.
 
-## 当前已实现
+## What is implemented
 
 - Commercial Auth：邮箱注册/登录/退出、PBKDF2-SHA256 强哈希密码、HttpOnly 会话 Cookie（生产 Secure、SameSite=Lax）、double-submit CSRF、持久登录限流、一次性密码重置、工作空间 `OWNER / ADMIN / EDITOR / VIEWER` 权限与项目/素材/生成路由租户隔离。
 - Narrative Compiler：场景、对白/动作事件、单一主动作镜头、输入/输出状态与前后镜头链。
 - Passenger/Autopilot 共用 `VisualProductionRuntime`、`GenerationGateway`、`MediaRegistry` 与持久化任务，不存在第二套生成引擎。
 - Image Prompt Corrector：只服务用户可见的图片提示词，记录原文、修改结果、变化说明与撤销数据；不参与 Autopilot 视频编译。
-- Video Prompt Runtime：`CanonicalShotSpec → VideoShotPromptCompiler → ModelAdapter`；Kling、Veo、Seedance、Grok、Wan 分别生成模型专用提示词与 payload。
+- Video Prompt Runtime：`PromptCompilerInput → PromptCompilerService → PromptCompilerOutput → ModelAdapter`；Skill 以内容哈希版本参与审计，Kling、Veo、Seedance、Grok、Wan 分别生成模型专用提示词与 payload。画风锁由 Compiler 自身从 `ProjectStyleService` 解析，任何调用方都不会静默丢失锁定画风。
+- Image Generation：`openai/gpt-image-2`（OpenRouter Image API，`POST /images`）是项目的图片模型，绑定为 `IMAGE_GENERATION` 角色的 PRIMARY，fallback 为 Seedream 5.0 与 Flow NARWHAL。支持文生图与图片编辑，单次最多 16 张参考图、10 张出图，400K 上下文。该接口同步返回 base64，因此 Gateway 增加了内联结果通道：`ProviderSubmission.result` 携带终态结果，`MediaRegistry.register_provider_bytes()` 用与下载素材相同的内容校验落库。超出模型已审阅执行范围的请求在付费调用之前本地拒绝。
+- Batch Candidates：`image_count`（API 层的 `n`）是显式选项，整批在调用前一次性计价与预占积分；返回的每一张图各自成为该镜头的一个 `GenerationCandidate`，供用户挑选，而不是一个结果加几个散落素材。
+- Media Plane：用户原图**永不**被重编码或降采样——人物面部、商品标签、织物纹理只存在于上传时的分辨率。Provider 通过 `GenerationProvider.reference_constraints` 声明可接受的像素/字节/格式上限，`RenditionResolver` 按需生成并缓存派生副本（`media_renditions`），以约束摘要为键，上限变化即生成新副本而非复用旧的。参考图 URL 由**对象存储**签发短时效 presigned URL，Provider 直接从对象存储拉取，API 不参与大文件传输；本地磁盘无法签发时**直接失败**而不是退回代理转发。
+- Direct Upload：写入同样绕开 API。`POST /v1/assets/uploads` 校验租户与配额后签发 presigned PUT（并把 SHA-256 绑进请求，由对象存储强制校验），客户端自行上传；`POST /v1/assets/uploads/{id}/complete` 通过 `HEAD` 取权威大小、读取 64KB 头部做格式与像素校验后落库。完整解码交给首次使用时的 `RenditionResolver`。未配置对象存储时该接口返回 `501`，仍可使用原有的 `POST /v1/assets` 分片上传。
+- Style Lock 双层校验：第一层为本地确定性 64 维描述子（色彩/明度/饱和度/边缘/明显漂移）；第二层为 `google/gemini-embedding-2`（复用现有 OpenRouter 凭据），负责材质、笔触、摄影语言与整体视觉语义。两层各自记录结论，取**更差**的一个，第二层不可用时判为 `REVIEW_REQUIRED` 而非放行。
 - Model Registry/Router：逻辑模型、provider model ID、信任等级与套餐角色绑定持久化到数据库；持久的 `ModelCapabilityProfile` 是 UI、Policy、Router、Cost 与 Adapter 的单一能力/质量先验事实源，旧 `config/video-models/*.json` 多头配置已移除，Wan 对齐 2.7。路由先执行能力与 `AssetCriticality` 硬门禁，低样本真实观测不会覆盖人工先验；`EDGE` 永远不能处理 canonical/hero/important 资产。
 - Model live kill switch：Gateway 在排队前与付费调用边界都核对持久模型身份和 `enabled/live_enabled`，最终检查与 Job CAS 同事务；重启不会覆盖管理员禁用状态，请求 metadata 也无法解锁。
 - Asset Registry：逻辑资产与不可变版本覆盖人物、场景、商品、道具等素材；只有显式提升才会改变 canonical 版本，数据库触发器防止跨资产链接、未记录切换和历史改写。
@@ -30,6 +40,7 @@ Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；�
 - Evaluation/Retry：结构化质量维度、关键失败、`ACCEPT / RETRY_SAME_MODEL / RETRY_REWRITE_PROMPT / SWITCH_MODEL / REJECT` 与有界重试计划。
 - Metrics/Benchmark/Trace：生产指标、基准测试结果与镜头级生产 trace；自适应路由默认关闭。
 - Credits admission + lifecycle：所有已认证的公开生成入口都由服务端解析套餐/模型角色/部署可用性/信任/估价；Free 在同一交易中创建 Job、积分预占、CostRecord 和幂等记录。完成时结算，明确的提交前终态会原子退回，跨过付费边界的不确定结果则冻结并进入内部审计对账，不盲退、不盲重试。
+- DePay/Base USDC 支付：全站只使用一条固定 30 USDC、Quantity OFF 的 DePay Link。每次点击都先生成独立 PaymentIntent，并注入 `order_ref` 与只保存 hash 的短期 checkout token。签名回调必须匹配订单、Base Mainnet、Circle Native USDC、Treasury 和精确 30 USDC，才会在同一事务中为 FREE 工作空间永久升级 `PRO` 并追加 3,000 Credits；已是 PRO 则只追加 3,000 Credits。无订阅、自动续费或钱包二次扣款。Alchemy 保留为链上重组/对账证据源。
 - Candidate + QA + Commit：一个镜头可有多个候选；自动证据不足时可由有写权限的真实用户填写理由并显式确认，形成独立审计记录，再单独采用；采用后原子写入唯一正式候选、时间线快照、尾帧与成本记录。
 - Persistent Narrative Character State：已将不可变的角色 identity 与可随剧情变化的伤口、衣物破损/污渍/湿润、道具、位置、时间和灯光状态硬隔离。每个候选以显式 JSON Patch 提议 delta，先过确定性 policy，再校验与候选输出绑定的可视证据；只有采用候选时才追加新版本、commit 记录，通过 branch-aware head CAS 前移并传播给下一镜。旧版本、delta、验证与 commit 全部保留，保留审计/比较所需事实并拒绝过期冲突。
 - 状态提议只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于 Candidate/Generation Job 分配事务内写入。全部提议的 proposal-set hash 同时绑定 Candidate 与 Generation Job，并在 validate/commit 再校验，阻断生成后偷换 delta。显式 `branch_key` 可从 input TimelineState 选定的不可变状态版本创建独立 scope v1/head，不推进 main head。
@@ -42,7 +53,7 @@ Ruff format/check、Mypy（122 source files）和 `git diff --check` 全绿；�
 - Media：内容字节按 SHA-256 共享，镜头/候选来源链保持独立；供应商媒体上传带并发 claim、租约和付费边界 fencing，本地与 S3/R2/MinIO 存储共用同一注册表。工作空间存储已按真实 `size_bytes` 执行原子 reserve/settle/release，不确定结果保留 hold 而不盲目释放。
 - Workbench：注册/登录遮罩、自主创作/智能导演双模式、中文画面描述优化、人物主参考 v1/v2 重新提交、场景/产品/道具通用版本上传及指定镜头重做入口；界面只显示通俗说法，内部合同和模型指令默认收起。
 
-## 一键启动（Docker）
+## One-command start (Docker)
 
 > 下列命令是 MVP 的运行方式。`0023` 的 SQLite recovery 阻断已修复，但仍不要直接对现有混合 schema 开发库执行；应先读交接文档、备份并在临时库验证。
 
@@ -66,11 +77,11 @@ uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0029_project_style_lock`：`0025` 增加 Flow affinity/迁移约束，`0026` 增加持久单一 Capability Registry，`0027` 增加模型/嵌入/账单/决策证据、Timeline v3、Live Canary、Auth 加固与存储配额，`0028` 增加 append-only 的 character state version/delta/validation/commit 和可 CAS 前移的 branch head，`0029` 增加项目 `canonical_style_version_id`、不可变 Style Embedding/Lock/Candidate Evaluation 与数据库一致性保护。历史 PostgreSQL/Docker 证据只背书到 `0027`；`0029` 当前只有 SQLite/离线代码证据，不代表旧 Compose volume 或生产库已执行升级。
+当前迁移代码链为单 head `0034_narrative_ledger`。`0030` 增加 Alchemy Delivery、Base USDC 付款事实与追加式购买积分 Ledger；`0031` 增加通用链上 PaymentIntent；`0032` 增加 DePay checkout session 与不可改写的签名回调收据；`0033` 把 DePay checkout 绑定到独立 PaymentIntent，并将 FREE→PRO 与 3,000 Credits 入账收口到同一事务。PostgreSQL 实机证据仍只到 `0032`，上线前必须在临时 PostgreSQL 验证 `0033`；历史 Compose 证据仍只背书到 `0027`。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 
-## 本地开发
+## Local development
 
 > 当前忽略的 `data/platform.db` 是混合 schema，默认启动可因 `workspaces.plan_tier/credit_balance` 缺列失败。在修复前，只对临时新库运行下列迁移；不要对该开发库盲目 upgrade/stamp。
 
@@ -100,11 +111,11 @@ python3 -m http.server 18081 --directory apps/web
 
 静态开发页默认访问 `http://127.0.0.1:18080`；Docker 中由 Nginx 把 `/api` 转发到 8080。
 
-## 关键环境变量
+## Key environment variables
 
 完整模板见 [.env.example](.env.example)。
 
-| 变量 | 默认值/作用 | 生产建议 |
+| Variable | Default / purpose | Production guidance |
 | --- | --- | --- |
 | `DATABASE_URL` | 本地 SQLite；Compose 覆盖为 PostgreSQL | 使用受管数据库并先备份再迁移 |
 | `STORAGE_BACKEND` | `local`，也支持 S3 兼容存储 | 配置私有 bucket、最小权限密钥 |
@@ -127,12 +138,19 @@ python3 -m http.server 18081 --directory apps/web
 | `GENERATION_CLAIM_LEASE_SECONDS` | `300` 秒，生成提交/轮询/完成落库的数据库租约 | 必须大于单次轮询与媒体下载超时；不得用于绕过未知付费请求保护 |
 | `FLOW_API_BASE/FLOW_API_KEY/FLOW_PROJECT_ID` | Google Flow 运行配置 | 仅使用用户合法账号、项目与主动授权 |
 | `PROVIDER_MODE` / `ALLOW_LIVE_PROVIDER_CALLS` / `LIVE_PROVIDER_CONFIRMATION` | 默认 Mock/关闭 | 即使三重门开启，真实边界仍必须匹配持久 `LiveCanaryPermit` |
+| `ALCHEMY_WEBHOOK_SIGNING_KEY` / `ALCHEMY_WEBHOOK_ID` | 校验 Alchemy Delivery 的签名与可选 Webhook 身份 | 只放 Secret Manager；签名必须覆盖未经 JSON 重排的原始 body |
+| `ALCHEMY_NETWORK` / `ALCHEMY_TREASURY_ADDRESS` | `BASE_MAINNET` 与平台 USDC 收款地址 | 地址需与 Alchemy Address Activity 跟踪目标和前端付款目标一致 |
+| `ALCHEMY_CREDITING_ENABLED` / `ALCHEMY_USDC_MICROUNITS_PER_CREDIT` | 默认关闭；默认 10,000 微单位（0.01 USDC）兑换 1 credit | 真实小额回归和对账 Runbook 通过前保持关闭 |
+| `LEGACY_WALLET_PAYMENTS_ENABLED` | 默认 `false` | 旧的自定义金额/钱包绑定 API 仅作兼容代码；公开商业流程不得开启 |
+| `DEPAY_PAYMENT_LINK_URL` / `DEPAY_LINK_ID` | DePay 共享 Base Native USDC Payment Link 及其 ID | 链接必须仅收 Base Native USDC，并与 Treasury 地址一致 |
+| `DEPAY_CALLBACK_PUBLIC_KEY` | DePay 在启用 callback 后生成的 RSA 公钥 | 用于验证原始 body 的 `x-signature`；不要用任意未签名请求入账 |
+| `DEPAY_OFFER_AMOUNT_USDC` / `DEPAY_OFFER_CREDITS` / `DEPAY_OFFER_UPGRADE_PLAN` | 默认 `30` / `3000` / `PRO` | 服务端单一 Offer 事实源；修改时必须同步 DePay 固定金额 Link |
 
 ## Feature flags
 
 所有高风险自动化默认关闭。环境变量提供全局默认值，数据库可设置全局或项目级 override；项目级优先。
 
-| Flag | 环境变量 | 打开后的行为 |
+| Flag | Environment variable | Behaviour when enabled |
 | --- | --- | --- |
 | `voyage_memory` | `FEATURE_VOYAGE_MEMORY` | Autopilot 自动检索/写入项目记忆；远程 embedding 统一经 `ModelRoleRuntime`，失败则记录降级并仅使用结构化时间线 |
 | `auto_evaluation` | `FEATURE_AUTO_EVALUATION` | 生成完成后触发结构化评估 |
@@ -141,13 +159,13 @@ python3 -m http.server 18081 --directory apps/web
 
 运行时查询与修改：`GET /internal/feature-flags`、`PUT /internal/feature-flags/{name}`。这些接口与业务 API 使用相同的 Bearer API Key 防护。
 
-## 主要 API
+## Main API
 
 API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录会话 token；`/internal/*`与供应商账号管理使用 `PLATFORM_API_KEY`；浏览器 Worker 只使用管理员发行的、绑定 worker/account/provider 的可撤销专用凭证。三者均不可混用。
 
-### 用户与生成
+### Users and generation
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/auth/register`、`/api/auth/login` | 创建账号/工作空间或登录；成功后设置 HttpOnly 会话 Cookie |
@@ -156,6 +174,11 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/api/prompt/correct` | 图片提示词整理与可撤销修订 |
 | `POST` | `/api/pricing/estimate` | 生成前成本与积分估算 |
 | `GET` | `/api/workspaces/{workspace_id}/credits` | 查询余额、冻结额、生命周期聚合与最近事件 |
+| `POST` | `/v1/webhooks/alchemy` | 公开但必须通过 Alchemy HMAC；接收 Base Native USDC Address Activity Delivery |
+| `POST` | `/v1/webhooks/depay` | 公开但必须通过 DePay RSA-PSS `x-signature`；验证付款并追加积分 Ledger |
+| `GET` | `/v1/payments/config`、`/v1/workspaces/{workspace_id}/billing` | 读取 DePay/Base 配置和工作空间积分 |
+| `POST` | `/v1/workspaces/{workspace_id}/depay-checkouts` | 为已登录工作空间创建 DePay 充值会话与带上下文的共享链接 |
+| `GET` | `/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}` | 查询充值会话状态供 Web 轮询 |
 | `POST` | `/api/passenger/generate` | 乘客模式提交图片/视频任务 |
 | `POST` | `/v1/shots/{shot_id}/generate` | 自动导演生成镜头候选 |
 | `GET` | `/v1/generations/{job_id}` | 查询生成任务 |
@@ -165,9 +188,9 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/v1/projects/{project_id}/characters/{character_id}/narrative-state` | 读取指定 timeline scope 的当前状态 head 和不可变 identity 绑定 |
 | `GET` | `/v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions` | 读取 candidate 的 delta、分阶段验证和已提交版本审计视图 |
 
-### 资产
+### Assets
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
 | `POST` | `/api/assets` | 创建逻辑资产 |
 | `GET` | `/api/projects/{project_id}/assets` | 按项目/类型列资产 |
@@ -176,9 +199,9 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/api/assets/{asset_id}/versions/{version_id}/promote` | 显式切换 canonical 版本 |
 | `GET/POST` | `/api/projects/{project_id}/style-lock` | 查询或由真实用户明确确认一次性锁定项目画风；锁定后不可替换 |
 
-### 内部运行时与观测
+### Internal runtime and observability
 
-| Method | Path | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
 | `POST` | `/internal/router/video` | 获取可解释的视频模型排名 |
 | `POST` | `/internal/memory/index`、`/internal/memory/search` | 写入/检索多层记忆 |
@@ -198,7 +221,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/internal/production-evidence?project_id=...` | 仅 `PLATFORM_API_KEY`；按 project/job/shot 查看脱敏的 model execution、Provider job/Flow binding、QA、decision、cost/billing 与 timeline evidence |
 | `POST` | `/v1/workers/{worker_id}/socket-ticket` | Worker 用专用 Bearer 凭证换取短期一次性 WebSocket ticket |
 
-## 安全与降级原则
+## Security and degradation principles
 
 - `PLATFORM_API_KEY` 为空时，内部/管理员 HTTP 路由返回 503；生产环境中的弱 key 也会拒绝启动。Worker 凭证只能注册、心跳、领取命令与回传结果；不能访问内部 QC/管理路由。WebSocket 使用一次性短期 ticket 或 Authorization header，不在 URL query 传密钥。
 - 密码经 PBKDF2-SHA256（60 万轮）加随机 salt 存储，会话仅保存 SHA-256 token 哈希并带过期/撤销时间；浏览器使用 HttpOnly Cookie，unsafe cookie 请求使用 double-submit CSRF，Bearer/internal 路径保持兼容且不放弱权限边界。
@@ -216,7 +239,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 - Google Flow Worker 只在用户已登录且主动授权的浏览器上下文工作，不绕过 CAPTCHA、登录、风控或平台访问控制。
 - 模型 Adapter 只负责编译模型专用 prompt/payload，不等于供应商 transport 已接通。
 
-## 质量门禁
+## Quality gates
 
 ```bash
 uv run ruff format --check . --exclude references
@@ -226,25 +249,25 @@ uv run pytest -q
 docker compose config -q
 ```
 
-### Phase II 之前的稳定基线
+### Stable baseline before Phase II
 
 截至 2026-08-20，完整测试套件为 **205 passed**。新增回归覆盖注册/登录/会话撤销、工作空间角色与跨租户阻断、生产认证不可关闭、Worker 专用凭证绑定/撤销/过期与一次性 WebSocket ticket、上传主动内容/伪装 MIME/请求大小阻断、媒体下载 SSRF/私网 DNS/重定向/流式限额、受保护媒体访问、中文图片描述事实保持/撤销、模型路由、五种视频 Adapter、canonical 资产与数据库不变量、人工复核审计、记忆检索与预算、评估/重试、指标/benchmark、Passenger/Autopilot 共用运行时，以及多 worker 提交/轮询/完成竞态、候选正式采纳竞态、成本记录幂等、相同字节独立来源链、供应商媒体并发上传/人工恢复、取消/重启容量释放、历史预约迁移与终态不可回退。
 
 真实浏览器已在 1440px、1024px 与 390px 验证注册、退出/重新登录、双模式切换、中文画面描述优化/恢复原文、人物主参考 v1→v2、场景资产 v1→v2 与显式正式版切换；三个断点无横向溢出，控制台无 error/warning。
 
-### Phase III tag 历史门禁与当前工作树门禁
+### Phase III tag gates and current working-tree gates
 
 离线基线的历史冻结结果是 **348 passed, 39 warnings**。Phase III tag 历史完整套件为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
 
-2026-08-22 当前未发布工作树实测为 **451 passed, 61 warnings in 88.91s**；Ruff format/check、Mypy（122 source files）、Node syntax、Alembic 单 head 和 `git diff --check` 全绿。专项 SQLite schema/migration 回归及新临时 PostgreSQL 17 的 `0028` trigger 正/反例通过；`0029` 仍只有 SQLite/离线证据，这不改变历史 Compose smoke 只运行到 `0027` 的事实。
+2026-08-22 当前未发布工作树实测为 **468 passed, 61 warnings in 139.29s**；Ruff check、Mypy（132 source files）、Web 生产构建、npm audit 与 Alembic 单 head 全绿。PostgreSQL 17 fresh `0032`/`alembic check` 是前一迁移的证据，当前 `0033` 仍需 PostgreSQL 验证；历史 Compose smoke 只运行到 `0027`。
 
-PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/populated migration、`vector(16)`、关键索引/唯一性/外键、积分事务、生成 enqueue 事务和 head `0027`。Docker Desktop 29.5.3 上 Compose config、API/worker/Web 镜像 build、up、PostgreSQL/MinIO/API health、Web/Worker 运行、宿主 HTTP 200 smoke 和容器内 Alembic head/check 均通过；使用纯假 development smoke 凭据，无 Provider key/live call，并在结束后不删卷 shutdown。完整证据见 [生产证据报告](docs/PRODUCTION_EVIDENCE.md) 和 [开发交接](docs/DEVELOPMENT_HANDOFF_2026-08-20.md)。
+PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/populated migration、`vector(16)`、关键索引/唯一性/外键、积分事务、生成 enqueue 事务和 head `0027`。Docker Desktop 29.5.3 上 Compose config、API/worker/Web 镜像 build、up、PostgreSQL/MinIO/API health、Web/Worker 运行、宿主 HTTP 200 smoke 和容器内 Alembic head/check 均通过；使用纯假 development smoke 凭据，无 Provider key/live call，并在结束后不删卷 shutdown。完整证据见 [the production evidence report](docs/PRODUCTION_EVIDENCE.md) 和 [the current handoff](HANDOFF.md)。
 
-## 尚未完成或需要真实环境验证
+## Incomplete, or needing real-environment verification
 
 - Seedance、官方 Veo、Grok、Omni、Kling、Runway/Wan 目前主要是持久能力配置、Adapter 或诚实的未配置 provider slot；本轮无真实调用，不能把 payload/Mock 测试等同于供应商端到端。
 - Voyage Multimodal 已经 `ModelRoleRuntime` 接入并可安全降级，但实际 text/image/multimodal embedding canary 都是 **NOT EXECUTED**；上线前需验证真实维度、检索质量、延迟、账单与数据合规。
-- 生成积分的 Reserve → Generate → Settle / Refund → Reconcile 已闭环；RunAPI `UNCERTAIN` USD 预算也已有强证据的内部人工对账。未完成的是充值/购买、grant 周期、过期、管理员调账和外部 invoice 自动验真。新 Free Passenger 视频在未显式传 duration 时默认 4 秒（约 44 credits），50 starter credits 可预占一次；显式 8 秒仍约 87 credits 并在余额不足时于 Job/Provider 前 fail closed。
+- 生成积分的 Reserve → Generate → Settle / Refund → Reconcile 已闭环。固定 30 USDC PaymentIntent、DePay 共享链接、checkout token、签名 callback、FREE→PRO 与追加式入账已实现，但真实小额支付、运营对账 UI 和 PostgreSQL/Compose `0033` 证据尚未完成。签名 callback 公钥与 Treasury 未配置时，Web 付款按钮会 fail closed。
 - Google Flow 已实现首次自动 affinity、sticky account/project、双向唯一数据库约束、限制性 migration plan 和四元 poll 标识；默认 provisioner 在无可用真实部署时 fail closed。无真实 Flow account/project canary，仍不可开启商用 live。
 - Web 已接通生成结果确认、选择已有/新建逻辑资产、人物/场景/产品修改图重新提交与显式 canonical 提升；完整版本对比和 promotion 审计历史的专用页仍待完善。
 - HttpOnly/Secure/SameSite Cookie、CSRF、找回密码和持久登录限流已完成；邮箱验证、MFA、成员邀请/移除、设备会话和完整安全事件仍需在公网商用前完成。

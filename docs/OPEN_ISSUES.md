@@ -1,6 +1,6 @@
 # Open Issues — everything left unresolved
 
-Snapshot: 2026-08-23 · companion to [`../HANDOFF.md`](../HANDOFF.md)
+Snapshot: 2026-08-23 · commit `ea9d042` · companion to [`../HANDOFF.md`](../HANDOFF.md)
 
 Every item this session raised and did **not** finish, in one place. Section 1 needs you.
 Sections 2–4 are engineering work and need no decision from you.
@@ -174,8 +174,11 @@ the first live batch rather than trusting the default.
 
 ## 4. P2 — release blockers
 
-- Migration head `0034_narrative_ledger` has offline/temporary-database evidence only.
-  Production-shaped populated upgrade and rollback are unverified.
+- Migration head `0037_direct_uploads` has offline/temporary-database evidence only.
+  Production-shaped populated upgrade and rollback are unverified across `0035`–`0037`.
+- **The repository has no remote.** Everything, including commit `ea9d042`, exists only on this
+  machine. A disk failure loses the entire project. This is the cheapest unaddressed risk on
+  the list.
 - No live evidence for Payment, Provider, VLM, real billing or real on-chain payment.
   Known spend remains **USD 0**.
 - Email verification, MFA, member/device sessions, production secrets/HTTPS, backup and

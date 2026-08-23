@@ -1,6 +1,6 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-23 · Branch `main` · **NOT PRODUCTION-READY** · nothing committed
+Date: 2026-08-23 · Branch `main` · commit `ea9d042` · **NOT PRODUCTION-READY** · no remote
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted
@@ -349,33 +349,40 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 - Aggregate style drift across episodes is unmonitored (per-candidate only).
 - `timeline_scope_key` branch proliferation has no retirement policy.
 
-## 9. Git state — read before committing anything
+## 9. Git state
 
-**Nothing is committed.** The working tree mixes at least eight independent workflows, so it
-cannot be staged file-by-file:
+**Committed at `ea9d042`** on `main`, on 2026-08-23. Everything described in this document is
+in version control; the working tree is clean.
+
+That commit carries eight workflows at once. They were never split, and by the time they were
+committed they had developed on top of each other in `container.py`, `models.py`, `main.py`,
+`gateway.py` and the media/style services, so no hunk-level separation was possible after the
+fact. The tip passes every gate. The per-workflow history that would have shown each change
+alone does not exist and cannot be reconstructed:
 
 1. Persistent Character State / Project Style Lock follow-ups
 2. Alchemy / Wallet / DePay / Web wallet and migrations `0030`–`0033`
 3. Adapter payload → Provider handover fixes
 4. Unified Prompt/Skill base and the final input/output contract
 5. 2026-08-22: model registry, skills, narrative ledger, migration `0034`
-6. 2026-08-23: the `openai/gpt-image-2` image path, inline provider output in the Gateway and
-   media registry, `IMAGE_GENERATION` role, style-lock enforcement in the compiler, and
-   episode-scoped retrieval
+6. 2026-08-23: the `openai/gpt-image-2` image path, `IMAGE_GENERATION` role, style-lock
+   enforcement in the compiler, episode-scoped retrieval
 7. 2026-08-23: the media plane (presigned references, `media_renditions`, migration `0035`),
    batch candidates, and the semantic style layer (migration `0036`)
 8. 2026-08-23: direct-to-storage uploads (migration `0037`) and enabling layer 2
 
-Workflows 6 and 7 are the most separable, and 7 depends on 6. Both are confined to the
-OpenRouter adapter, the provider SDK, the Gateway, the media and style services, the model
-registry defaults, the container, one API route, migrations `0035`–`0036` and their tests. Do
-not delete, reset or overwrite any WIP without asking.
+**Going forward, commit per workflow.** The reason this one is a blob is that five sessions
+went by without committing; the cost is that `git log` cannot answer "when did the media plane
+change" for anything before `ea9d042`.
 
-`container.py`, `models.py`, `pyproject.toml`, `uv.lock`, `README.md` and several evidence
-documents contain cross-workflow edits. Split by hunk, not by file, and re-run the gates
-after each candidate commit.
+That commit also fixed a `.gitignore` defect worth knowing about: `references/` was unanchored,
+so it matched `skills/*/references/` as well as the root directory. Both Skill reference
+libraries — the ones `model-prompting` and `image-prompt-corrector` instruct an agent to read —
+had never been in version control. A fresh clone would have had Skills pointing at files that
+were not there. The patterns are anchored now (`/references/`, `/data/`, `/output/`, `/dist/`).
 
-The repository has **no remote**, so "pushed" cannot be verified for any commit.
+The repository has **no remote**, so nothing is pushed and "pushed" cannot be verified for any
+commit. Nothing outside this machine has a copy.
 
 ## 10. Model-backed prompt compilation (not started)
 

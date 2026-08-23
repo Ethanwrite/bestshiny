@@ -3,6 +3,7 @@
 Snapshot date: 2026-08-23
 Repository: `ai-director-platform`
 Branch: `main`
+Commit: `ea9d042` (working tree clean; no remote)
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
 Migration head: `0037_direct_uploads`

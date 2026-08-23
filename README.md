@@ -9,7 +9,7 @@ Before taking over development, read [the documentation index](docs/README.md)ã€
 
 > **The Phase III offline checkpoint is still not releasable.** The offline algorithm core is frozen at commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`; Phase III was implemented at `99f9c60` with evidence snapshot tag `v0.3.0-production-evidence-core-offline`. The Phase III whole-repository gate was `406 passed, 57 warnings in 71.58s`, and PostgreSQL 17.10 + pgvector 0.8.6 plus a Docker Compose production-like smoke passed on real machines. No live Provider canary may be inferred from code: real Provider calls this round were **0**, known development-caused Provider spend is **USD 0**, and the single-video canary is **NOT EXECUTED**.
 
-The current 2026-08-23 development checkpoint adds migrations `0028_persistent_character_state` through
+The current 2026-08-23 development checkpoint (commit `ea9d042`, no remote) adds migrations `0028_persistent_character_state` through
 `0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the
 series narrative ledger, and adds the first working image-generation path â€” `openai/gpt-image-2` through the
 OpenRouter Image API, bound as the `IMAGE_GENERATION` role. No video Provider was added and none was called.

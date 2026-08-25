@@ -56,6 +56,44 @@ def _put(url: str, payload: bytes, headers: dict[str, str]) -> int:
         return int(response.status)
 
 
+def _probe_content_md5(storage, payload: bytes, orphans: list[str]) -> tuple[str, str, str]:  # type: ignore[no-untyped-def]
+    """Does this store at least reject a wrong `Content-MD5`?
+
+    Alibaba documents Content-MD5 and CRC64 rather than the `x-amz-checksum-*`
+    family, so a store that ignores the SHA-256 checksum may still refuse a
+    mismatched MD5. That is worth knowing, but it is a *weaker* guarantee: it
+    proves the bytes arrived unchanged, not that they hash to the SHA-256 the
+    key is named after. Only a read-back at completion establishes the latter.
+    """
+
+    import base64
+
+    key = "_preflight/md5-probe.bin"
+    honest_md5 = base64.b64encode(hashlib.md5(payload).digest()).decode()  # noqa: S324
+    try:
+        url = storage.client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": storage.bucket, "Key": key, "ContentMD5": honest_md5},
+            ExpiresIn=600,
+        )
+    except Exception:
+        return (WARN, "  └ Content-MD5 fallback", "the store would not presign one")
+    try:
+        _put(url, payload + b"tampered", {"Content-MD5": honest_md5})
+    except urllib.error.HTTPError:
+        return (
+            OK,
+            "  └ Content-MD5 fallback",
+            "available — proves transit integrity, NOT that bytes match the key's SHA-256",
+        )
+    orphans.append(key)
+    return (
+        FAIL,
+        "  └ Content-MD5 fallback",
+        "not enforced either — completion must read the object back and hash it",
+    )
+
+
 def main() -> int:
     settings = Settings()
     if settings.storage_backend.lower() != "s3":
@@ -97,12 +135,30 @@ def main() -> int:
     digest = hashlib.sha256(payload).hexdigest()
     key = f"_preflight/{digest}.png"
     failures = 0
+    orphans: list[str] = []
 
     presigned = storage.presigned_upload(key, sha256=digest, mime_type="image/png", expires_in=600)
     if presigned is None:
         _say(FAIL, "presigned PUT", "the store would not issue one")
         return 1
-    _say(OK, "presigned PUT", f"checksum bound: {'x-amz-checksum-sha256' in presigned.headers}")
+
+    # Structural, no extra permission: a virtual-hosted URL puts the bucket in
+    # the hostname, a path-style one puts it in the path. The transfer below is
+    # the real proof; this names the mismatch when the transfer fails.
+    presign_host = urlsplit(presigned.url).hostname or ""
+    looks_virtual = presign_host.startswith(f"{settings.s3_bucket}.")
+    wanted_virtual = settings.s3_addressing_style == "virtual"
+    if settings.s3_addressing_style == "auto" or looks_virtual == wanted_virtual:
+        _say(OK, "addressing style", f"{'virtual' if looks_virtual else 'path'}-hosted URL issued")
+    else:
+        failures += 1
+        _say(
+            FAIL,
+            "addressing style",
+            f"configured {settings.s3_addressing_style}, URL is "
+            f"{'virtual' if looks_virtual else 'path'}-hosted",
+        )
+    _say(OK, "presigned PUT", f"sha256 checksum bound: {'x-amz-checksum-sha256' in presigned.headers}")
 
     try:
         _say(OK, "client transfer", f"HTTP {_put(presigned.url, payload, presigned.headers)}")
@@ -110,26 +166,29 @@ def main() -> int:
         _say(FAIL, "client transfer", f"HTTP {exc.code} — {exc.reason}")
         return 1
 
-    # 3. The one that matters. Declare this digest, send different bytes.
+    # The one that matters. Declare this digest, send different bytes.
+    tamper_key = f"_preflight/tamper-{digest}.png"
     tampered = storage.presigned_upload(
-        f"_preflight/tamper-{digest}.png", sha256=digest, mime_type="image/png", expires_in=600
+        tamper_key, sha256=digest, mime_type="image/png", expires_in=600
     )
     enforced = False
     if tampered is not None:
         try:
             _put(tampered.url, payload + b"tampered", tampered.headers)
+            orphans.append(tamper_key)
         except urllib.error.HTTPError:
             enforced = True
     if enforced:
-        _say(OK, "digest enforced by store", "mismatched bytes rejected")
+        _say(OK, "checksum enforcement", "mismatched bytes rejected by the store")
     else:
         failures += 1
-        _say(
-            FAIL,
-            "digest enforced by store",
-            "MISMATCHED BYTES ACCEPTED — content-addressed keys are not trustworthy here",
-        )
-        storage.client.delete_object(Bucket=storage.bucket, Key=f"_preflight/tamper-{digest}.png")
+        _say(FAIL, "checksum enforcement", "the store accepted bytes that do not match the digest")
+        # Which remedy applies depends on what this store *does* guarantee, so
+        # answer that in the same run rather than costing a second round trip.
+        # Content-MD5 is documented for OSS and proves the bytes did not change
+        # in transit — it does **not** prove `object bytes == the SHA-256 in the
+        # key`, which is a different claim and the one content-addressing needs.
+        _say(*_probe_content_md5(storage, payload, orphans))
 
     stat = storage.stat(key)
     if stat and stat.size == len(payload):
@@ -140,37 +199,65 @@ def main() -> int:
 
     header = storage.read_prefix(key, 65536)
     if header[:8] == payload[:8]:
-        _say(OK, "bounded range read", f"{len(header)} bytes")
+        _say(OK, "range GET", f"{len(header)} bytes, bounded")
     else:
         failures += 1
-        _say(FAIL, "bounded range read", "returned nothing usable")
+        _say(FAIL, "range GET", "returned nothing usable")
 
     reference = storage.presigned_reference_url(key, expires_in=600, mime_type="image/png")
     if not reference:
         failures += 1
-        _say(FAIL, "presigned reference URL", "not issued — providers cannot fetch references")
+        _say(FAIL, "reference URL", "not issued — providers cannot fetch references")
     else:
         try:
             with urllib.request.urlopen(reference, timeout=60) as response:
                 fetched = response.read()
             if fetched == payload:
-                _say(OK, "provider can fetch it", f"{len(fetched)} bytes, identical")
+                _say(OK, "reference URL", f"fetched {len(fetched)} bytes, identical")
             else:
                 failures += 1
-                _say(FAIL, "provider can fetch it", "bytes differ")
+                _say(FAIL, "reference URL", "bytes differ from what was uploaded")
         except urllib.error.HTTPError as exc:
             failures += 1
-            _say(FAIL, "provider can fetch it", f"HTTP {exc.code}")
-        if urlsplit(reference).scheme != "https":
-            _say(WARN, "reference URL is HTTPS", "live mode refuses a non-HTTPS reference")
+            _say(FAIL, "reference URL", f"HTTP {exc.code}")
+        if urlsplit(reference).scheme == "https":
+            _say(OK, "reference URL HTTPS", "")
+        else:
+            failures += 1
+            _say(FAIL, "reference URL HTTPS", "live mode refuses a non-HTTPS reference")
 
-    storage.client.delete_object(Bucket=storage.bucket, Key=key)
+    # The platform never deletes an object, so the service role is not required
+    # to carry oss:DeleteObject. Only this script needs it, and being denied is
+    # information rather than a failure.
+    orphans.append(key)
+    undeleted = []
+    for orphan in orphans:
+        try:
+            storage.client.delete_object(Bucket=storage.bucket, Key=orphan)
+        except Exception:
+            undeleted.append(orphan)
+    if undeleted:
+        _say(WARN, "probe cleanup", "oss:DeleteObject not granted; remove by hand:")
+        for orphan in undeleted:
+            print(f"           {orphan}")
+
     print()
-    if failures:
-        print(f"  {failures} check(s) failed — do not run reference-carrying shots against this store.\n")
-        return 1
-    print("  Storage plane verified. Reference media, direct uploads and renditions are safe here.\n")
-    return 0
+    if not failures:
+        print("  Storage plane verified. Reference media, direct uploads and renditions are safe here.\n")
+        return 0
+    print(f"  {failures} check(s) failed.\n")
+    if not enforced:
+        print(
+            "  The store does not enforce the SHA-256 the presigned PUT declares. Content-MD5\n"
+            "  and CRC64 are what Alibaba documents, and neither settles the question this\n"
+            "  design depends on: a content-addressed key asserts `object bytes hash to the\n"
+            "  SHA-256 in the key`, and transit integrity is a different, weaker claim. ETag\n"
+            "  is explicitly not a data-integrity guarantee. The remaining honest option is to\n"
+            "  read the object back at completion and hash it, refusing adoption on mismatch —\n"
+            "  which costs one full download per upload and gives back part of why writes\n"
+            "  bypass the API. Send this output before changing any storage code.\n"
+        )
+    return 1
 
 
 if __name__ == "__main__":

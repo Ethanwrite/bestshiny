@@ -1,6 +1,6 @@
 # Open Issues — everything left unresolved
 
-Snapshot: 2026-08-23 · commit `ea9d042` · companion to [`../HANDOFF.md`](../HANDOFF.md)
+Snapshot: 2026-08-25 · live gate OPEN · Wan T2V verified · companion to [`../HANDOFF.md`](../HANDOFF.md)
 
 Every item this session raised and did **not** finish, in one place. Section 1 needs you.
 Sections 2–4 are engineering work and need no decision from you.
@@ -26,22 +26,24 @@ per generation path, would this reach the provider, fail closed here, or **fail 
 provider after being billed**. As of this snapshot it reports Wan T2V as the only live-
 testable path — see §1.3 for why I2V and R2V are not.
 
-### 1.1 Live calls are still gated off
+### 1.1 Live calls are ON — every provider transport is billable
 
-All three must be true together, in `ai-director-platform/.env`:
+All three gates are set, on your instruction (2026-08-25):
 
-| Variable | Now | Must be |
-| --- | --- | --- |
-| `PROVIDER_MODE` | `mock` | `live` |
-| `ALLOW_LIVE_PROVIDER_CALLS` | `true` ✅ | `true` |
-| `LIVE_PROVIDER_CONFIRMATION` | `I_UNDERSTAND_THIS_COSTS_MONEY` ✅ | same |
+| Variable | Now |
+| --- | --- |
+| `PROVIDER_MODE` | `live` ✅ |
+| `ALLOW_LIVE_PROVIDER_CALLS` | `true` ✅ |
+| `LIVE_PROVIDER_CONFIRMATION` | `I_UNDERSTAND_THIS_COSTS_MONEY` ✅ |
 
-Two of the three are already set. **`PROVIDER_MODE` is the only one left**, and the agent will
-not flip it for you: it is the switch that turns every provider transport from a network-free
-mock into a billable HTTP client.
+`PLATFORM_API_KEY` and `CREDENTIAL_ENCRYPTION_KEY` were generated locally and written to
+`.env`; both are self-generated entropy, not third-party credentials. A live *generation*
+through the Gateway additionally needs a `LiveCanaryPermit` via
+`POST /internal/live-canary-permits`.
 
-A live *generation* additionally needs a `LiveCanaryPermit`, created through
-`POST /internal/live-canary-permits` (requires `PLATFORM_API_KEY`, currently empty).
+20 of 22 models are `live_enabled` after `POST /internal/models/reconcile-live?apply=true`.
+The two that stay shut are `grok-video-official` and `veo-3.1-quality-official`, whose
+providers are reserved stubs with no transport.
 
 For RunAPI edge calls specifically, also set `ALLOW_RUNAPI_EDGE_CALLS=true` (currently
 `false`). `RUNAPI_BASE_URL` and `RUNAPI_MODEL_ID` are configured.
@@ -82,16 +84,10 @@ it means the reference plane, the `media[]` payload and the R2V matrix cannot be
 until a bucket exists. Configure S3/R2/MinIO and an HTTPS `PUBLIC_BASE_URL`, or accept that the
 live evidence covers T2V only.
 
-
-`S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` are empty, so the storage
-backend is local disk and cannot issue a presigned URL. Seedance, Wan, OpenRouter and RunAPI
-fetch reference media **themselves, from object storage**; the API is deliberately not in that
-path. Until a bucket is configured, every reference-carrying shot — and every image *edit* —
-fails closed with `PROVIDER_REFERENCE_URL_UNAVAILABLE`.
-
-`LOCAL_REFERENCE_SIGNING_KEY` is set in `.env` so local development can exercise edits. That
-route **does** proxy bytes through this service. It is a development affordance: leave it empty
-in production. Also set `PUBLIC_BASE_URL` to an HTTPS origin.
+Every reference-carrying shot — and every image *edit* — fails closed with
+`PROVIDER_REFERENCE_URL_UNAVAILABLE` until a bucket exists. `LOCAL_REFERENCE_SIGNING_KEY` is
+set for local development and **does** proxy bytes through this service; leave it empty in
+production and set `PUBLIC_BASE_URL` to an HTTPS origin.
 
 Why this matters beyond correctness: with the API in the media path, a dozen concurrent 4K
 reference edits make the control plane an image CDN — the tier least able to absorb it.
@@ -112,7 +108,7 @@ Google Flow reverse proxy, and it can be registered. This is also what blocks th
 
 ### 1.6 Rotate the keys pasted into chat
 
-Ark, DashScope and RunAPI keys were pasted into the conversation transcript. Your earlier
+Ark, DashScope, RunAPI and a GitHub PAT were pasted into the conversation transcript. Your earlier
 "no rotation needed" decision covered keys that only ever lived in your local environment;
 these did not.
 

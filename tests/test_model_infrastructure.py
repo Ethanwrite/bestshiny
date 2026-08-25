@@ -47,7 +47,8 @@ def test_every_generation_request_serializes_an_explicit_asset_criticality() -> 
 def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> None:
     config = load_model_infrastructure_config(CONFIG_PATH)
     provider_ids = {item.provider_model_id for item in config.models}
-    assert len(config.models) == 22
+    # 22 + the three OpenRouter Veo 3.1 variants added 2026-08-25.
+    assert len(config.models) == 25
     assert {
         "openai/gpt-5.6-sol",
         "anthropic/claude-opus-5",

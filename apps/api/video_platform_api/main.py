@@ -5,7 +5,7 @@ import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,6 +44,7 @@ from generation_gateway import (
 from generation_gateway.gateway import UnsafeRetry
 from image_prompt_core import ImagePromptCorrectRequest
 from media_service import (
+    DEFAULT_SWEEP_LIMIT,
     DirectUploadConflict,
     DirectUploadExpired,
     DirectUploadNotFinished,
@@ -54,6 +55,7 @@ from media_service import (
     WorkspaceStorageQuota,
     WorkspaceStorageQuotaExceeded,
     lineage_key,
+    sweep_expired_uploads,
 )
 from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
 from model_registry_core import ModelRole, ShotRequirements
@@ -89,7 +91,6 @@ from production_domain.models import (
     CharacterIdentityVersion,
     CostRecord,
     DecisionRecord,
-    DirectUpload,
     DirectUploadStatus,
     Episode,
     GenerationCandidate,
@@ -105,7 +106,6 @@ from production_domain.models import (
     QAResult,
     Scene,
     Shot,
-    StorageReservation,
     TimelineState,
     User,
     WorkerStatus,
@@ -819,7 +819,13 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            # 402, not 403. Now that every plan is charged, "your plan does not
+            # allow this" and "you are allowed and out of credits" are different
+            # answers with different fixes — upgrade versus top up — and only
+            # the caller can act on the difference.
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1753,6 +1759,14 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(413, str(exc)) from exc
         except UnsafeMediaUpload as exc:
             raise HTTPException(415, str(exc)) from exc
+        except StorageReservationConflict as exc:
+            # The hold this completion meant to settle is no longer settleable —
+            # another path moved it. The transaction rolled back, so nothing is
+            # half-written; this is a conflict the client can see and retry, not
+            # the 500 it used to be. The expiry sweep was the reachable cause and
+            # no longer races here, but the settlement is fail-closed by design
+            # and a conflict must stay an answer rather than a stack trace.
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         finally:
@@ -1765,6 +1779,71 @@ def create_app(container: Container | None = None) -> FastAPI:
                 if upload.storage_reservation_id:
                     storage_quota.release(upload.storage_reservation_id)
         return _asset_view(adopted, reused=reused)
+
+    @app.get(
+        "/internal/models/external-evidence",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def external_evidence(logical_name: str | None = None):
+        """What the public record says about the models this platform runs.
+
+        Read-only, and deliberately reports the excluded evidence too. The
+        question an operator actually has is not "what is the prior" but "why
+        is this model's prior still a hand-authored number", and the answer is
+        in the exclusions: a version mismatch, a weak source grade, or nothing
+        published at all.
+        """
+
+        from external_evidence_core import ExternalEvidenceService
+
+        service = ExternalEvidenceService.load()
+        if logical_name is None:
+            return {
+                "registry_version": service.version,
+                "frozen_at": service.registry.frozen_at,
+                "prior_eligibility_rule": service.registry.prior_eligibility_rule,
+                "external_prior_enabled": container.settings.feature_external_prior,
+                "coverage": service.coverage(),
+                "gaps": [item.model_dump() for item in service.registry.gaps],
+                "conflicts": [item.model_dump() for item in service.registry.conflicts],
+            }
+        items = service.items_for(logical_name)
+        if not items and logical_name not in service.unbacked_model_names():
+            raise HTTPException(404, f"no external evidence entry for {logical_name}")
+        return {
+            "registry_version": service.version,
+            "logical_name": logical_name,
+            "metrics": [
+                {
+                    "evidence_id": item.evidence_id,
+                    "benchmark": item.evidence.benchmark_name,
+                    "model_version": item.evidence.model.version,
+                    "model_revision": item.evidence.model.revision,
+                    "operation": item.evidence.operation,
+                    "metric_name": item.metric.metric_name,
+                    "value": item.metric.value,
+                    "metric_scale": item.metric.metric_scale_override or item.evidence.metric_scale,
+                    "sample_size_prompts": item.evidence.sample_size_prompts,
+                    "sample_size_runs": item.evidence.sample_size_runs,
+                    "confidence_interval": item.evidence.confidence_interval,
+                    "evaluator": item.evidence.evaluator,
+                    "canonical_scene": item.metric.canonical_scene,
+                    "canonical_capability": item.metric.canonical_capability,
+                    "mapping_confidence": item.metric.mapping_confidence,
+                    "source_grade": item.grade,
+                    "sources": [
+                        {"source_id": s.source_id, "title": s.title, "url": s.url,
+                         "snapshot_at": s.snapshot_at, "dynamic": s.dynamic}
+                        for s in item.sources
+                    ],
+                    "version_match": item.binding.version_match,
+                    "prior_eligible": item.prior_eligible,
+                    "ineligibility_reasons": list(item.ineligibility_reasons),
+                    "limitations": item.evidence.limitations,
+                }
+                for item in items
+            ],
+        }
 
     @app.post(
         "/internal/models/reconcile-live",
@@ -1847,85 +1926,25 @@ def create_app(container: Container | None = None) -> FastAPI:
         "/internal/maintenance/expired-uploads",
         dependencies=[Depends(verify_api_key)],
     )
-    def sweep_expired_uploads(limit: int = 200):
+    def sweep_expired_uploads_endpoint(limit: int = DEFAULT_SWEEP_LIMIT):
         """Reclaim uploads whose authorized window closed without completing.
 
-        A client that authorizes and walks away leaves a `PENDING` row, a quota
-        hold, and possibly an object it did PUT. Nothing observed any of that:
-        `expires_at` was written and indexed and no query read it, so the hold
-        was capacity the workspace never got back.
-
-        Two paths reclaim a hold when the client returns — completing an expired
-        session, and re-authorizing one. This is the path for the client that
-        never returns. It is deliberately an endpoint rather than a background
-        loop inside the API: sweeping is an operational action with a schedule
-        an operator owns, and a loop that quietly releases quota is worse than
-        one that has to be invoked.
-
-        The object itself is **not** deleted. Removing bytes a user may have
-        paid to upload is not a decision a sweeper should make.
+        The operator-triggered face of the same sweep the worker runs on a
+        schedule (`EXPIRED_UPLOAD_SWEEP_INTERVAL_SECONDS`). Both call one
+        implementation, so an out-of-band reclaim and the periodic one cannot
+        drift apart — and because each upload is claimed under its own row lock,
+        running both at once is safe.
         """
 
-        swept: list[dict[str, Any]] = []
-        for upload in container.direct_uploads.expired(limit=limit):
-            released = False
-            # Only a hold with no asset behind it. An upload that registered its
-            # asset and then failed to settle keeps its hold on purpose.
-            if upload.storage_reservation_id and upload.media_asset_id is None:
-                try:
-                    released = storage_quota.release(upload.storage_reservation_id)
-                except (LookupError, StorageReservationConflict):
-                    released = False
-            container.direct_uploads.abandon(upload.id)
-            swept.append(
-                {
-                    "upload_id": upload.id,
-                    "project_id": upload.project_id,
-                    "storage_key": upload.storage_key,
-                    "expires_at": _aware_utc(upload.expires_at).isoformat(),
-                    "reservation_released": released,
-                    # The bucket still holds whatever the client wrote.
-                    "orphaned_object": True,
-                }
-            )
-
-        stale_after = utcnow() - timedelta(
-            seconds=max(60, container.settings.storage_reservation_stale_after_seconds)
-        )
-        with container.database.session() as session:
-            accounted = set(
-                session.scalars(
-                    select(DirectUpload.storage_reservation_id).where(
-                        DirectUpload.status == DirectUploadStatus.PENDING.value,
-                        DirectUpload.storage_reservation_id.is_not(None),
-                    )
-                )
-            )
-            stale = [
-                {
-                    "reservation_id": item.id,
-                    "workspace_id": item.workspace_id,
-                    "project_id": item.project_id,
-                    "reserved_bytes": item.reserved_bytes,
-                    "created_at": _aware_utc(item.created_at).isoformat(),
-                }
-                for item in session.scalars(
-                    select(StorageReservation).where(
-                        StorageReservation.status == "RESERVED",
-                        StorageReservation.created_at < stale_after,
-                    )
-                )
-                if item.id not in accounted
-            ]
-        return {
-            "swept": swept,
-            "swept_count": len(swept),
-            # Reported, never released. A hold this old with no PENDING upload
-            # behind it is either a process that died mid-request or a
-            # registration whose settlement failed — and those two need
-            # opposite actions, which only an operator can tell apart.
-            "reservations_needing_reconciliation": stale,
-        }
+        return sweep_expired_uploads(
+            database=container.database,
+            uploads=container.direct_uploads,
+            quota=storage_quota,
+            limit=limit,
+            reservation_stale_after_seconds=(
+                container.settings.storage_reservation_stale_after_seconds
+            ),
+        ).as_response()
 
     @app.post("/v1/assets")
     async def upload_asset(
@@ -2221,7 +2240,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -2683,7 +2704,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -2739,7 +2762,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc

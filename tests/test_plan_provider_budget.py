@@ -468,7 +468,9 @@ def test_insufficient_free_credits_roll_back_job_cost_and_ledger(container, monk
             },
         )
 
-    assert response.status_code == 403, response.text
+    # 402, not 403: being out of credits is a top-up problem, and it shares
+    # nothing but a rough shape with a plan that does not permit the request.
+    assert response.status_code == 402, response.text
     assert "required=87, available=50" in response.json()["detail"]
     with container.database.session() as session:
         stored_project = session.get(Project, project["id"])

@@ -5,11 +5,25 @@ from collections.abc import Mapping
 from provider_sdk import provider_can_handle
 
 from .registry import ModelCapabilityRegistry
-from .schemas import ModelCandidate, RouterDecision, ShotRequirements
+from .schemas import (
+    ModelCandidate,
+    ModelCapabilityProfile,
+    RejectedModel,
+    RouterDecision,
+    RoutingEvidence,
+    ShotRequirements,
+)
 
 
 class VideoModelRouter:
-    version = "video-router-v1"
+    version = "video-router-v2"
+
+    # This router ranks video generators and nothing else. The capability
+    # registry holds every modality — chat, embedding, image — and joins them
+    # all into ``all()``, so without these two the scored list silently
+    # includes models that cannot produce a frame.
+    modality = "video"
+    required_operation = "video_generation"
 
     profile_weights: dict[str, dict[str, float]] = {
         "generic": {
@@ -88,14 +102,48 @@ class VideoModelRouter:
         production_sample_counts: Mapping[str, int] | None = None,
     ):
         self.registry = registry
-        self.benchmark_adjustments = benchmark_adjustments or {}
-        self.production_adjustments = production_adjustments or {}
-        self.production_sample_counts = production_sample_counts or {}
+        self._baseline_evidence = RoutingEvidence(
+            benchmark_adjustments={
+                key: dict(value) for key, value in (benchmark_adjustments or {}).items()
+            },
+            production_adjustments={
+                key: dict(value) for key, value in (production_adjustments or {}).items()
+            },
+            production_sample_counts=dict(production_sample_counts or {}),
+        )
 
-    def _effective_capability(self, model_key: str, dimension: str, prior: float) -> float:
-        benchmark = self.benchmark_adjustments.get(model_key, {}).get(dimension, prior)
-        production = self.production_adjustments.get(model_key, {}).get(dimension, prior)
-        sample_count = self.production_sample_counts.get(model_key, 0)
+    @property
+    def baseline_evidence(self) -> RoutingEvidence:
+        """Evidence used when a caller supplies none of its own.
+
+        Deliberately read-only. This router is a container singleton shared by
+        every concurrent request; when live metrics were written onto it the
+        adjustments in force during one ranking were whatever the last caller
+        happened to leave behind, and no decision could be replayed. Per-request
+        evidence is passed to :meth:`rank` instead.
+        """
+
+        return self._baseline_evidence
+
+    @property
+    def benchmark_adjustments(self) -> Mapping[str, Mapping[str, float]]:
+        return self._baseline_evidence.benchmark_adjustments
+
+    @property
+    def production_adjustments(self) -> Mapping[str, Mapping[str, float]]:
+        return self._baseline_evidence.production_adjustments
+
+    @property
+    def production_sample_counts(self) -> Mapping[str, int]:
+        return self._baseline_evidence.production_sample_counts
+
+    @staticmethod
+    def _effective_capability(
+        evidence: RoutingEvidence, model_key: str, dimension: str, prior: float
+    ) -> float:
+        benchmark = evidence.benchmark_adjustments.get(model_key, {}).get(dimension, prior)
+        production = evidence.production_adjustments.get(model_key, {}).get(dimension, prior)
+        sample_count = evidence.production_sample_counts.get(model_key, 0)
         if sample_count < 20:
             weights = (0.75, 0.15, 0.10)
         elif sample_count < 50:
@@ -104,44 +152,82 @@ class VideoModelRouter:
             weights = (0.40, 0.30, 0.30)
         return max(0.0, min(1.0, weights[0] * prior + weights[1] * benchmark + weights[2] * production))
 
-    def _eligible(self, profile, requirements: ShotRequirements) -> tuple[bool, list[str]]:  # type: ignore[no-untyped-def]
-        failures: list[str] = []
+    def _eligible(
+        self, profile: ModelCapabilityProfile, requirements: ShotRequirements
+    ) -> list[tuple[str, str]]:
+        """Hard constraints, evaluated before any score exists.
+
+        Returns ``(reason_code, detail)`` pairs; empty means eligible. Modality
+        and operation come first because they are the only ones whose failure
+        means the model cannot do this job *at all* rather than not do it well.
+        """
+
+        failures: list[tuple[str, str]] = []
+        if profile.modality != self.modality:
+            failures.append(
+                ("MODALITY_MISMATCH", f"modality {profile.modality} is not {self.modality}")
+            )
+        if self.required_operation not in profile.supported_operations:
+            failures.append(
+                (
+                    f"{self.required_operation.upper()}_UNSUPPORTED",
+                    f"supported operations are {sorted(profile.supported_operations)}",
+                )
+            )
         if profile.status == "disabled":
-            failures.append("model disabled")
+            failures.append(("MODEL_DISABLED", "model disabled"))
         if profile.max_duration is not None and requirements.duration > profile.max_duration:
-            failures.append(f"duration exceeds {profile.max_duration:g}s")
+            failures.append(("DURATION_UNSUPPORTED", f"duration exceeds {profile.max_duration:g}s"))
         if profile.min_duration is not None and requirements.duration < profile.min_duration:
-            failures.append(f"duration is below {profile.min_duration:g}s")
+            failures.append(("DURATION_UNSUPPORTED", f"duration is below {profile.min_duration:g}s"))
         if profile.supported_resolutions and requirements.resolution not in profile.supported_resolutions:
-            failures.append(f"resolution {requirements.resolution} unsupported")
+            failures.append(
+                ("RESOLUTION_UNSUPPORTED", f"resolution {requirements.resolution} unsupported")
+            )
         if (
             profile.supported_aspect_ratios
             and requirements.aspect_ratio not in profile.supported_aspect_ratios
         ):
-            failures.append(f"aspect ratio {requirements.aspect_ratio} unsupported")
+            failures.append(
+                ("ASPECT_RATIO_UNSUPPORTED", f"aspect ratio {requirements.aspect_ratio} unsupported")
+            )
         if requirements.reference_image_count > profile.max_reference_images:
-            failures.append(f"reference image count exceeds {profile.max_reference_images}")
+            failures.append(
+                (
+                    "REFERENCE_COUNT_EXCEEDED",
+                    f"reference image count exceeds {profile.max_reference_images}",
+                )
+            )
         if not provider_can_handle(profile.provider_trust_level, requirements.asset_criticality):
             failures.append(
-                f"provider trust {profile.provider_trust_level.value} is below "
-                f"{requirements.asset_criticality.value} criticality"
+                (
+                    "PROVIDER_TRUST_INSUFFICIENT",
+                    f"provider trust {profile.provider_trust_level.value} is below "
+                    f"{requirements.asset_criticality.value} criticality",
+                )
             )
         if requirements.asset_criticality not in profile.criticality_allowed:
             failures.append(
-                f"asset criticality {requirements.asset_criticality.value} not explicitly allowed"
+                (
+                    "CRITICALITY_NOT_ALLOWED",
+                    f"asset criticality {requirements.asset_criticality.value} not explicitly allowed",
+                )
             )
         for requirement, capability in self.hard_capabilities.items():
             if getattr(requirements, requirement) and not getattr(profile, capability):
-                failures.append(f"{capability} required")
-        return not failures, failures
+                failures.append(("CAPABILITY_REQUIRED", f"{capability} required"))
+        return failures
 
     def rank(
         self,
         requirements: ShotRequirements,
         *,
         excluded_models: set[str] | None = None,
+        evidence: RoutingEvidence | None = None,
     ) -> RouterDecision:
         excluded_models = excluded_models or set()
+        evidence = evidence or self._baseline_evidence
+        rejected: list[RejectedModel] = []
         weights = dict(self.profile_weights[requirements.profile])
         for requirement, dimension in self.requirement_dimensions.items():
             if getattr(requirements, requirement):
@@ -160,9 +246,27 @@ class VideoModelRouter:
         candidates: list[ModelCandidate] = []
         for profile in self.registry.all():
             if profile.key in excluded_models:
+                rejected.append(
+                    RejectedModel(
+                        provider=profile.provider,
+                        model=profile.model_id,
+                        modality=profile.modality,
+                        reason_codes=["EXCLUDED_BY_CALLER"],
+                        details=["provider unconfigured or outside the request's allowed providers"],
+                    )
+                )
                 continue
-            eligible, capability_failures = self._eligible(profile, requirements)
-            if not eligible:
+            failures = self._eligible(profile, requirements)
+            if failures:
+                rejected.append(
+                    RejectedModel(
+                        provider=profile.provider,
+                        model=profile.model_id,
+                        modality=profile.modality,
+                        reason_codes=list(dict.fromkeys(code for code, _ in failures)),
+                        details=[detail for _, detail in failures],
+                    )
+                )
                 continue
             components: dict[str, float] = {}
             reasons: list[str] = []
@@ -170,7 +274,7 @@ class VideoModelRouter:
             fit = 0.0
             for dimension, weight in weights.items():
                 prior = profile.capability_prior.get(dimension, 0.0)
-                effective = self._effective_capability(profile.key, dimension, prior)
+                effective = self._effective_capability(evidence, profile.key, dimension, prior)
                 contribution = weight * effective
                 components[dimension] = round(contribution, 5)
                 fit += contribution
@@ -222,13 +326,20 @@ class VideoModelRouter:
                 )
             )
         candidates.sort(key=lambda candidate: (-candidate.score, candidate.provider, candidate.model))
+        rejected.sort(key=lambda item: (item.provider, item.model))
         if not candidates:
-            raise LookupError("no active model satisfies the shot requirements")
+            raise LookupError(
+                "no active model satisfies the shot requirements; rejected: "
+                + "; ".join(
+                    f"{item.provider}:{item.model}={','.join(item.reason_codes)}" for item in rejected
+                )
+            )
         selected = candidates[0]
         return RouterDecision(
             recommended=selected.model,
             provider=selected.provider,
             candidates=candidates,
+            rejected=rejected,
             router_version=self.version,
             profile=requirements.profile,
         )

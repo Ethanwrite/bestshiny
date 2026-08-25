@@ -405,9 +405,40 @@ class ModelCandidate(BaseModel):
     confidence_level: str
 
 
+class RoutingEvidence(BaseModel):
+    """The measured evidence in force for one ranking, frozen at the call.
+
+    Passed per request rather than held on the router, so that two concurrent
+    rankings cannot read each other's metrics and so that a recorded decision
+    can be replayed against the evidence that actually produced it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    benchmark_adjustments: dict[str, dict[str, float]] = Field(default_factory=dict)
+    production_adjustments: dict[str, dict[str, float]] = Field(default_factory=dict)
+    production_sample_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class RejectedModel(BaseModel):
+    """A model the router refused, and the machine-readable reason why.
+
+    A rejected model must not merely vanish from the candidate list. Without
+    this record there is no way to answer "why was that one not chosen?" after
+    the fact, which is the question every routing audit actually asks.
+    """
+
+    provider: str
+    model: str
+    modality: str
+    reason_codes: list[str]
+    details: list[str] = Field(default_factory=list)
+
+
 class RouterDecision(BaseModel):
     recommended: str
     provider: str
     candidates: list[ModelCandidate]
+    rejected: list[RejectedModel] = Field(default_factory=list)
     router_version: str
     profile: str

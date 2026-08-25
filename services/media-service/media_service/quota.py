@@ -261,29 +261,44 @@ class WorkspaceStorageQuota:
 
     def release(self, reservation_id: str) -> bool:
         with self.database.session() as session:
-            reservation = session.get(StorageReservation, reservation_id, with_for_update=True)
-            if reservation is None:
-                raise LookupError("storage reservation not found")
-            if reservation.status == "RELEASED":
-                return False
-            if reservation.status == "SETTLED":
-                return False
-            if reservation.status != "RESERVED":
-                raise StorageReservationConflict(
-                    f"unsupported storage reservation state: {reservation.status}"
-                )
-            released = session.execute(
-                update(Workspace)
-                .where(
-                    Workspace.id == reservation.workspace_id,
-                    Workspace.reserved_storage_bytes >= reservation.reserved_bytes,
-                )
-                .values(
-                    reserved_storage_bytes=(Workspace.reserved_storage_bytes - reservation.reserved_bytes)
-                )
+            return self.release_in(session, reservation_id)
+
+    def release_in(self, session: Session, reservation_id: str) -> bool:
+        """Release inside a transaction the caller owns.
+
+        The mirror of `settle_in`, and it exists for the same reason: the sweep
+        that reclaims an abandoned upload has to take the upload row and its
+        hold in **one** transaction, in the same order completion takes them.
+        Releasing in a transaction of its own is what let a sweeper drop a hold
+        out from under a completion that already owned the upload row — the
+        completion then found the reservation RELEASED, raised
+        `StorageReservationConflict` out of `settle_in`, and answered 500.
+        """
+
+        reservation = session.get(StorageReservation, reservation_id, with_for_update=True)
+        if reservation is None:
+            raise LookupError("storage reservation not found")
+        if reservation.status == "RELEASED":
+            return False
+        if reservation.status == "SETTLED":
+            return False
+        if reservation.status != "RESERVED":
+            raise StorageReservationConflict(
+                f"unsupported storage reservation state: {reservation.status}"
             )
-            if affected_rows(released) != 1:
-                raise StorageReservationConflict("workspace storage counters changed unexpectedly")
-            reservation.status = "RELEASED"
-            reservation.released_at = utcnow()
-            return True
+        released = session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == reservation.workspace_id,
+                Workspace.reserved_storage_bytes >= reservation.reserved_bytes,
+            )
+            .values(
+                reserved_storage_bytes=(Workspace.reserved_storage_bytes - reservation.reserved_bytes)
+            )
+        )
+        if affected_rows(released) != 1:
+            raise StorageReservationConflict("workspace storage counters changed unexpectedly")
+        reservation.status = "RELEASED"
+        reservation.released_at = utcnow()
+        session.flush()
+        return True

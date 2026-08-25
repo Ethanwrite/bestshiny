@@ -67,3 +67,34 @@ def test_adapter_keeps_assets_out_of_opaque_prompt_only_contract():
     assert result.asset_bindings == ["lin:v1", "asset-front", "asset-profile"]
     assert result.payload["first_frame"] == "frame-01"
     assert result.payload["last_frame"] == "frame-02"
+
+
+def test_the_wan_compiler_never_sends_the_shots_audio_design_as_a_parameter():
+    """Wan 2.7 has no generate-audio switch, and no `parameters.audio` at all.
+
+    This compiler passed `shot.audio` — a dict describing the audio *design* —
+    straight into the payload, and the provider posted it as `parameters.audio`,
+    so every Wan request this platform built carried `"audio": {}`. Wan's audio
+    inputs are three different URLs on three different modes, and the compiler
+    now passes those through instead when the context resolves them.
+    """
+
+    shot = {**SHOT, "audio": {"dialogue": "none", "ambience": "room tone"}}
+    result = VideoAdapterRegistry().get("wan").compile(
+        "wan-2.7", AdapterInput(shot=shot, context=CONTEXT)
+    )
+    assert "audio" not in result.payload
+    assert result.payload["audio_url"] is None
+    assert result.payload["driving_audio"] is None
+    assert result.payload["reference_voice"] is None
+    # The design itself is not lost; it is in the prompt, where it belongs.
+    assert "room tone" in result.prompt
+
+    carried = VideoAdapterRegistry().get("wan").compile(
+        "wan-2.7",
+        AdapterInput(
+            shot=shot,
+            context={**CONTEXT, "driving_audio": "https://media.invalid/take.mp3"},
+        ),
+    )
+    assert carried.payload["driving_audio"] == "https://media.invalid/take.mp3"

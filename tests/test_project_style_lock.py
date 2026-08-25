@@ -65,13 +65,15 @@ def _style_version(container, project_id: str, payload: bytes, *, name: str = "�
 
 
 def _lock(container, project_id: str, version_id: str):  # type: ignore[no-untyped-def]
+    email = f"style-lock-{project_id}-{version_id}@example.com"
     with container.database.session() as session:
-        actor = User(
-            email=f"style-lock-{project_id}-{version_id}@example.com",
-            display_name="Style Lock Owner",
-        )
-        session.add(actor)
-        session.flush()
+        # Reused rather than recreated, so a test may call this twice for the
+        # same version — a refused lock followed by a successful retry.
+        actor = session.scalar(select(User).where(User.email == email))
+        if actor is None:
+            actor = User(email=email, display_name="Style Lock Owner")
+            session.add(actor)
+            session.flush()
         actor_id = actor.id
     return container.styles.lock(
         project_id,
@@ -385,12 +387,32 @@ class _StubSemanticEmbedder:
 
     version = "stub-semantic-v1"
 
-    def __init__(self, vectors=None, *, fail: bool = False):
+    normalization = "L2"
+    distance_metric = "cosine"
+
+    def __init__(self, vectors=None, *, fail: bool = False, model_revision: str = ""):
         self.model = "stub/semantic-style"
         self.provider = "stub"
+        self.model_revision = model_revision
         self._vectors = vectors
         self.fail = fail
         self.calls = 0
+        self._dimension = 0
+
+    def space_identity(self):  # type: ignore[no-untyped-def]
+        from style_core import EmbeddingSpaceIdentity, SemanticStyleUnavailable
+
+        if not self._dimension:
+            raise SemanticStyleUnavailable("stub has not answered yet")
+        return EmbeddingSpaceIdentity(
+            provider=self.provider,
+            model=self.model,
+            model_revision=self.model_revision,
+            input_schema_version=self.version,
+            dimension=self._dimension,
+            normalization=self.normalization,
+            distance_metric=self.distance_metric,
+        )
 
     def embed_images(self, images, *, project_id):  # type: ignore[no-untyped-def]
         from style_core import SemanticStyleUnavailable
@@ -398,9 +420,13 @@ class _StubSemanticEmbedder:
         self.calls += 1
         if self.fail:
             raise SemanticStyleUnavailable("stub is offline")
-        if self._vectors is not None:
-            return [list(self._vectors) for _ in images]
-        return [[1.0, 0.0, 0.0, 0.0] for _ in images]
+        vectors = (
+            [list(self._vectors) for _ in images]
+            if self._vectors is not None
+            else [[1.0, 0.0, 0.0, 0.0] for _ in images]
+        )
+        self._dimension = len(vectors[0])
+        return vectors
 
 
 def test_a_project_locked_without_a_semantic_layer_keeps_the_single_gate(container, project):  # type: ignore[no-untyped-def]
@@ -505,6 +531,131 @@ def test_a_lock_with_a_semantic_layer_is_not_evaluated_by_layer_one_alone(contai
     assert "STYLE_SEMANTIC_EMBEDDER_NOT_CONFIGURED" in evaluation.reason_codes
 
 
+def test_a_locked_embedding_records_the_space_it_belongs_to(container, project):  # type: ignore[no-untyped-def]
+    """Both layers, because both are compared and either can move."""
+
+    from production_domain.models import ProjectStyleLock, StyleEmbedding
+    from style_core import EmbeddingSpaceIdentity
+
+    embedder = _StubSemanticEmbedder(model_revision="stub-2026-08")
+    container.styles.semantic = embedder
+    _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
+    locked = _lock(container, project.id, version.id)
+
+    with container.database.session() as session:
+        stored = session.get(ProjectStyleLock, locked.id)
+        layer_one = session.get(StyleEmbedding, stored.style_embedding_id)
+        layer_two = session.get(StyleEmbedding, stored.semantic_style_embedding_id)
+
+        assert EmbeddingSpaceIdentity.from_embedding(layer_one) == EmbeddingSpaceIdentity(
+            provider="LOCAL_DETERMINISTIC",
+            model="visual-style-descriptor-64d",
+            model_revision="",
+            input_schema_version="style-descriptor-v1",
+            dimension=64,
+            normalization="L2",
+            distance_metric="cosine",
+        )
+        assert EmbeddingSpaceIdentity.from_embedding(layer_two) == EmbeddingSpaceIdentity(
+            provider="stub",
+            model="stub/semantic-style",
+            model_revision="stub-2026-08",
+            input_schema_version="stub-semantic-v1",
+            dimension=4,
+            normalization="L2",
+            distance_metric="cosine",
+        )
+
+
+def test_a_candidate_from_a_different_semantic_space_is_never_scored(container, project):  # type: ignore[no-untyped-def]
+    """A model swap behind a stable id must not produce a confident verdict.
+
+    Cosine over vectors from two unrelated spaces does not raise; it returns a
+    plausible number. The only way that becomes visible is by comparing the
+    spaces before comparing the vectors.
+    """
+
+    embedder = _StubSemanticEmbedder(vectors=[1.0, 0.0, 0.0, 0.0], model_revision="rev-A")
+    service = _lock_two_layer(container, project, embedder)
+    candidate_id = _candidate_with_output(container, project.id, _png((12, 40, 80)))
+
+    # Same model id, same dimensions, different revision — the shape a silent
+    # provider-side model swap actually has.
+    embedder.model_revision = "rev-B"
+    evaluation = service.evaluate_candidate(candidate_id)
+
+    assert evaluation.status == "REVIEW_REQUIRED"
+    moved = [code for code in evaluation.reason_codes if code.startswith("STYLE_SEMANTIC_EMBEDDING_SPACE")]
+    assert moved and moved[0].endswith("model_revision")
+    # Refused, not scored low: a meaningless comparison has no score at all.
+    assert evaluation.semantic_average_similarity is None
+
+
+def test_a_moved_local_descriptor_is_refused_rather_than_compared(container, project):  # type: ignore[no-untyped-def]
+    """Layer 1 has a space too, and it is the one that ships in every lock."""
+
+    _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
+    _lock(container, project.id, version.id)
+    candidate_id = _candidate_with_output(container, project.id, _png((12, 40, 80)))
+
+    original = type(container.styles.descriptor).version
+    type(container.styles.descriptor).version = "style-descriptor-v2"
+    try:
+        evaluation = container.styles.evaluate_candidate(candidate_id)
+    finally:
+        type(container.styles.descriptor).version = original
+
+    assert evaluation.status == "REVIEW_REQUIRED"
+    moved = [code for code in evaluation.reason_codes if code.startswith("STYLE_EMBEDDING_SPACE_CHANGED")]
+    assert moved and moved[0].endswith("input_schema_version")
+    assert evaluation.average_similarity is None
+    assert evaluation.sample_scores == []
+
+
+def test_a_reference_from_a_stale_space_cannot_be_reused_to_lock(container, project):  # type: ignore[no-untyped-def]
+    """The lock must bind the space the embedder produces now, not a stored one.
+
+    Reference rows are found by model id, which a revision bump does not change.
+    Reusing one would bind layer 2 to a space no candidate will ever be in.
+    """
+
+    from style_core import SemanticStyleLayerRequired
+
+    embedder = _StubSemanticEmbedder(model_revision="rev-A")
+    container.styles.semantic = embedder
+    _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
+    container.styles.ensure_semantic_embedding(version.id)
+
+    embedder.model_revision = "rev-B"
+    with pytest.raises(SemanticStyleLayerRequired) as refused:
+        _lock(container, project.id, version.id)
+    assert refused.value.reason.startswith("SEMANTIC_EMBEDDING_SPACE_CHANGED")
+    assert refused.value.retryable is False
+
+
+def test_space_identity_names_every_field_that_moved():
+    from style_core import EmbeddingSpaceIdentity
+
+    base = EmbeddingSpaceIdentity(
+        provider="openrouter",
+        model="google/gemini-embedding-2",
+        model_revision="",
+        input_schema_version="semantic-style-embedder-v1",
+        dimension=1024,
+        normalization="L2",
+        distance_metric="cosine",
+    )
+    assert base.differences(base) == []
+    from dataclasses import replace
+
+    assert base.differences(replace(base, dimension=3072)) == ["dimension"]
+    assert base.differences(replace(base, distance_metric="dot")) == ["distance_metric"]
+    assert base.differences(replace(base, model="voyageai/voyage-multimodal-3.5", dimension=1)) == [
+        "model",
+        "dimension",
+    ]
+
+
 def test_the_worse_layer_verdict_always_wins():
     from style_core.service import _worst_status
 
@@ -516,29 +667,154 @@ def test_the_worse_layer_verdict_always_wins():
     assert _worst_status("REVIEW_REQUIRED", "PASS") == "REVIEW_REQUIRED"
 
 
-def test_an_enabled_layer_two_that_cannot_run_is_recorded_on_the_lock(container, project):  # type: ignore[no-untyped-def]
-    """Enabling the feature while the transport is mocked must not look like off.
+def test_an_enabled_layer_two_that_cannot_run_refuses_the_lock(container, project):  # type: ignore[no-untyped-def]
+    """A transient outage must not permanently downgrade a project's gate.
 
-    With `FEATURE_SEMANTIC_STYLE_LOCK=true` and `PROVIDER_MODE=mock`, the
-    embedding call cannot reach a model. The lock then carries one layer — which
-    is correct — but it must say why, or a single-layer lock made by accident is
-    indistinguishable from one made deliberately.
+    The lock is append-only and a trigger forbids re-locking, so a single-layer
+    lock written while layer 2 happened to be unreachable would be the last word
+    on how every candidate in the project is judged — and would look identical
+    to one made deliberately with the feature off.
+
+    Refusing costs a retry. Degrading costs the second gate for the life of the
+    project.
+    """
+
+    from production_domain.models import Project, ProjectStyleLock
+    from sqlalchemy import select as sa_select
+    from style_core import SemanticStyleLayerRequired
+
+    embedder = _StubSemanticEmbedder(fail=True)
+    container.styles.semantic = embedder
+    _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
+
+    with pytest.raises(SemanticStyleLayerRequired) as refused:
+        _lock(container, project.id, version.id)
+    assert refused.value.reason.startswith("SEMANTIC_MODEL_UNAVAILABLE")
+    assert refused.value.retryable is True
+
+    # Nothing was written, so the project is still lockable rather than stuck.
+    with container.database.session() as session:
+        assert (
+            session.scalar(sa_select(ProjectStyleLock).where(ProjectStyleLock.project_id == project.id))
+            is None
+        )
+        assert session.get(Project, project.id).canonical_style_version_id is None
+
+    # And the retry, once the model answers, produces the two-layer lock that
+    # was asked for in the first place.
+    embedder.fail = False
+    locked = _lock(container, project.id, version.id)
+    assert locked.semantic_style_embedding_id is not None
+    with container.database.session() as session:
+        stored = session.get(ProjectStyleLock, locked.id)
+        assert stored.metadata_json["style_layers"] == 2
+        assert stored.metadata_json["semantic_layer_absent_reason"] is None
+
+
+def test_unreadable_reference_media_is_not_reported_as_retryable(container, project):  # type: ignore[no-untyped-def]
+    """Refusal has two causes and only one of them is worth waiting out."""
+
+    from style_core import SemanticStyleLayerRequired
+    from style_core.service import SemanticReferenceAttempt
+
+    container.styles.semantic = _StubSemanticEmbedder()
+    _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
+
+    original = type(container.styles).semantic_reference
+    type(container.styles).semantic_reference = lambda self, version_id: SemanticReferenceAttempt(  # type: ignore[method-assign]
+        None, "SEMANTIC_REFERENCE_MEDIA_UNREADABLE"
+    )
+    try:
+        with pytest.raises(SemanticStyleLayerRequired) as refused:
+            _lock(container, project.id, version.id)
+    finally:
+        type(container.styles).semantic_reference = original  # type: ignore[method-assign]
+    assert refused.value.reason == "SEMANTIC_REFERENCE_MEDIA_UNREADABLE"
+    assert refused.value.retryable is False
+
+
+def test_the_lock_endpoint_answers_503_only_when_a_retry_could_help(container):  # type: ignore[no-untyped-def]
+    """The status code has to tell the user whether waiting is worth anything."""
+
+    from style_core.service import SemanticReferenceAttempt
+
+    container.settings.auth_required = True
+    with TestClient(create_app(container)) as client:
+        issued = client.post(
+            "/api/auth/register",
+            json={
+                "email": "style-503@example.com",
+                "password": "correct horse battery staple",
+                "display_name": "Style Owner",
+            },
+        ).json()
+        headers = {"Authorization": f"Bearer {issued['access_token']}"}
+        project_id = client.post(
+            "/v1/projects", headers=headers, json={"title": "Fail Closed API"}
+        ).json()["id"]
+        media = _media(container, project_id, _png((18, 48, 88), stripes=True), "api-style.png")
+        asset = client.post(
+            "/api/assets",
+            headers=headers,
+            json={"project_id": project_id, "asset_type": "STYLE", "name": "冷青插画"},
+        ).json()
+        version = client.post(
+            f"/api/assets/{asset['id']}/versions",
+            headers=headers,
+            json={"primary_media_asset_id": media.id},
+        ).json()
+        client.post(
+            f"/api/assets/{asset['id']}/versions/{version['id']}/promote",
+            headers=headers,
+            json={"reason": "用户确认这一版为正式画风"},
+        )
+        body = {
+            "style_version_id": version["id"],
+            "reason": "用户确认整部作品使用冷青插画风格",
+            "explicit_confirmation": True,
+        }
+
+        embedder = _StubSemanticEmbedder(fail=True)
+        container.styles.semantic = embedder
+        unavailable = client.post(f"/api/projects/{project_id}/style-lock", headers=headers, json=body)
+        assert unavailable.status_code == 503, unavailable.text
+        assert "semantic layer" in unavailable.json()["detail"]
+
+        original = type(container.styles).semantic_reference
+        type(container.styles).semantic_reference = (  # type: ignore[method-assign]
+            lambda self, version_id: SemanticReferenceAttempt(None, "SEMANTIC_REFERENCE_MEDIA_UNREADABLE")
+        )
+        try:
+            unreadable = client.post(f"/api/projects/{project_id}/style-lock", headers=headers, json=body)
+        finally:
+            type(container.styles).semantic_reference = original  # type: ignore[method-assign]
+        assert unreadable.status_code == 409, unreadable.text
+
+        # Neither refusal consumed the project's one chance to lock.
+        embedder.fail = False
+        locked = client.post(f"/api/projects/{project_id}/style-lock", headers=headers, json=body)
+        assert locked.status_code == 200, locked.text
+        assert locked.json()["locked"] is True
+
+
+def test_the_feature_switched_off_still_makes_a_deliberate_single_layer_lock(container, project):  # type: ignore[no-untyped-def]
+    """Fail-closed applies to the layer being *enabled*, not to its absence.
+
+    With `FEATURE_SEMANTIC_STYLE_LOCK=false` there is no embedder at all, a
+    single-layer lock is the intended outcome, and the lock says so.
     """
 
     from production_domain.models import ProjectStyleLock
-    from sqlalchemy import select as sa_select
 
-    container.styles.semantic = _StubSemanticEmbedder(fail=True)
+    assert container.styles.semantic is None
     _asset, version, _media_asset = _style_version(container, project.id, _png((12, 40, 80)))
-    _lock(container, project.id, version.id)
+    locked = _lock(container, project.id, version.id)
 
     with container.database.session() as session:
-        lock = session.scalar(sa_select(ProjectStyleLock).where(ProjectStyleLock.project_id == project.id))
-        assert lock.semantic_style_embedding_id is None
-        assert lock.metadata_json["style_layers"] == 1
-        assert lock.metadata_json["semantic_layer_absent_reason"].startswith(
-            "SEMANTIC_MODEL_UNAVAILABLE"
-        )
+        stored = session.get(ProjectStyleLock, locked.id)
+        assert stored.semantic_style_embedding_id is None
+        assert stored.metadata_json["style_layers"] == 1
+        assert stored.metadata_json["semantic_layer_absent_reason"] == "SEMANTIC_EMBEDDER_NOT_CONFIGURED"
 
 
 def test_a_two_layer_lock_says_so(container, project):  # type: ignore[no-untyped-def]

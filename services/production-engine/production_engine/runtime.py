@@ -26,7 +26,12 @@ from memory_core import (
     MultimodalMemoryEngine,
 )
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
-from model_registry_core import RouterDecision, ShotRequirements, VideoModelRouter
+from model_registry_core import (
+    RouterDecision,
+    RoutingEvidence,
+    ShotRequirements,
+    VideoModelRouter,
+)
 from platform_contracts import (
     AuthoritativeTimelineFence,
     CanonicalShotSpec,
@@ -322,18 +327,21 @@ class VisualProductionRuntime:
             end_frame_asset_id,
             preferred_provider=preferred_provider,
         )
+        evidence = self.router.baseline_evidence
         if self.flags.enabled("adaptive_router", project_id=project_id):
             production, counts = self.metrics.production_adjustments()
-            self.router.production_adjustments = production
-            self.router.production_sample_counts = counts
-            self.router.benchmark_adjustments = self.benchmarks.adjustments()
+            evidence = RoutingEvidence(
+                benchmark_adjustments=dict(self.benchmarks.adjustments()),
+                production_adjustments=production,
+                production_sample_counts=counts,
+            )
         excluded = {
             profile.key
             for profile in self.router.registry.all()
             if not self.gateway.providers.is_configured(profile.provider)
             or (allowed_providers and profile.provider not in allowed_providers)
         }
-        decision = self.router.rank(requirements, excluded_models=excluded)
+        decision = self.router.rank(requirements, excluded_models=excluded, evidence=evidence)
         selected = decision.candidates[0]
         adapter_context = generation_context.model_dump(mode="json")
         adapter_context.update(

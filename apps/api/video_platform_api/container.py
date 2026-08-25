@@ -74,6 +74,7 @@ from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
 from skill_core import PromptCompilerService, SkillRegistry
+from sqlalchemy.engine import make_url
 from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
@@ -163,8 +164,34 @@ def build_container(settings: Settings | None = None) -> Container:
             raise RuntimeError(
                 "PLATFORM_API_KEY must be a high-entropy secret of at least 32 bytes in production"
             )
+        # SQLite is not a smaller PostgreSQL here. Under pysqlite a
+        # `begin_nested()` savepoint does not roll back with its enclosing
+        # transaction, and seven call sites — the registry, renditions, the
+        # gateway and provider affinity — depend on that rollback to keep a
+        # failed step from being committed. A production database that silently
+        # keeps half-applied work is not a performance problem, it is a
+        # correctness one.
+        backend = make_url(settings.database_url).get_backend_name()
+        if backend != "postgresql":
+            raise RuntimeError(
+                f"production requires a PostgreSQL DATABASE_URL, not {backend}; "
+                "SQLite savepoints do not roll back under pysqlite"
+            )
+    # Every guard above and this one read configuration only. They run before
+    # the first connection is opened, so a misconfigured deployment is refused
+    # for the reason it is actually misconfigured rather than for whichever
+    # symptom the database happens to surface first.
+    credentials = CredentialVault(
+        settings.credential_encryption_key,
+        allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
+    )
     database = Database(settings.database_url)
-    database.create_all()
+    if settings.deployment_environment == "test":
+        # A per-test throwaway database cannot replay every revision. This is
+        # the one place ORM metadata may build a schema, and it stamps what it
+        # built so the check below asks the same question everywhere.
+        database.create_all_and_stamp()
+    database.require_schema_revision()
     alchemy_webhooks = AlchemyUSDCWebhookService(
         database,
         signing_key=settings.alchemy_webhook_signing_key,
@@ -228,6 +255,7 @@ def build_container(settings: Settings | None = None) -> Container:
         max_upload_bytes=settings.max_upload_bytes,
         max_image_pixels=settings.max_image_pixels,
         ttl_seconds=settings.direct_upload_ttl_seconds,
+        verify_sha256_on_complete=settings.s3_verify_upload_sha256_on_complete,
     )
     runtime = BrowserRuntime(database, heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds)
     live_provider_settings = LiveProviderSettings(
@@ -538,10 +566,6 @@ def build_container(settings: Settings | None = None) -> Container:
         flow_affinity=flow_affinity,
         live_canary=live_canary,
     )
-    credentials = CredentialVault(
-        settings.credential_encryption_key,
-        allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
-    )
     production = ProductionEngine(database)
     skills = SkillRegistry(settings.skills_root)
     agents = AgentRuntime(production, gateway, media, skills)
@@ -560,9 +584,7 @@ def build_container(settings: Settings | None = None) -> Container:
     # changes what "committable" means, and a gate that is quietly stronger on
     # some projects than others is not a gate.
     semantic_style = (
-        ModelRoleSemanticStyleEmbedder(model_roles)
-        if settings.feature_semantic_style_lock
-        else None
+        ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
     prompts = PromptCompilerService(database, skills, styles)

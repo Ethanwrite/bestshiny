@@ -82,6 +82,7 @@ packages = [
   "core/provider-budget/provider_budget_core",
   "core/entitlements/entitlement_core",
   "core/payments/payment_core",
+  "core/external-evidence/external_evidence_core",
 ]
 
 [tool.pytest.ini_options]
@@ -89,6 +90,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
   "live_provider: opt-in tests that may contact a paid external provider; requires --run-live-provider and provider live gates",
+  "postgres_only: needs genuinely concurrent transactions; skipped on the SQLite half of the matrix",
 ]
 pythonpath = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
@@ -107,6 +109,7 @@ pythonpath = [
   "core/provider-budget",
   "core/entitlements",
   "core/payments",
+  "core/external-evidence",
 ]
 
 [tool.ruff]
@@ -144,4 +147,5 @@ files = [
   "core/provider-budget",
   "core/entitlements",
   "core/payments",
+  "core/external-evidence",
 ]

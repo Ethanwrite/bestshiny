@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from media_service import RemoteMediaSecurityError
 from media_service import registry as media_registry_module
 from PIL import Image
+from platform_database import Database
 from platform_shared import (
     CredentialVault,
     Settings,
@@ -295,7 +296,11 @@ def test_vault_uses_ephemeral_dev_key_and_production_fails_closed(tmp_path, monk
     monkeypatch.delenv("DEPLOYMENT_ENVIRONMENT", raising=False)
     settings = Settings(
         _env_file=None,
-        database_url=f"sqlite:///{tmp_path / 'production.db'}",
+        # Production refuses a non-PostgreSQL database, so a SQLite URL here
+        # would be rejected for that reason and never reach the vault. No
+        # connection is opened: every production guard is a configuration
+        # guard, and they all run before the first connect.
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1:1/unreachable",
         storage_root=tmp_path / "media",
         platform_api_key="production-platform-key-32-bytes-unique-A7z9",
         credential_encryption_key="",
@@ -322,7 +327,7 @@ def test_production_rejects_weak_internal_service_keys(tmp_path, weak_key) -> No
 def test_production_rejects_disabled_auth_while_development_allows_it(tmp_path) -> None:  # type: ignore[no-untyped-def]
     production = Settings(
         _env_file=None,
-        database_url=f"sqlite:///{tmp_path / 'production-auth.db'}",
+        database_url="postgresql+psycopg://unused:unused@127.0.0.1:1/unreachable",
         storage_root=tmp_path / "production-media",
         deployment_environment="production",
         auth_required=False,
@@ -332,9 +337,14 @@ def test_production_rejects_disabled_auth_while_development_allows_it(tmp_path) 
     with pytest.raises(RuntimeError, match="AUTH_REQUIRED must remain enabled"):
         build_container(production)
 
+    development_url = f"sqlite:///{tmp_path / 'development-auth.db'}"
+    # Startup no longer creates a schema. A development database is migrated by
+    # alembic; this test is about the auth guard, so it takes the sanctioned
+    # throwaway-database shortcut instead of replaying every revision.
+    Database(development_url).create_all_and_stamp()
     development = Settings(
         _env_file=None,
-        database_url=f"sqlite:///{tmp_path / 'development-auth.db'}",
+        database_url=development_url,
         storage_root=tmp_path / "development-media",
         deployment_environment="development",
         auth_required=False,

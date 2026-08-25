@@ -172,7 +172,16 @@ class WanAdapter(VideoModelAdapter):
             # A resolution tier, not a pixel size. Wan reads them differently.
             "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
-            "audio": common["audio"],
+            # Wan 2.7 has no generate-audio switch. Its three audio inputs are
+            # all *assets*: a custom track on T2V, audio that drives the
+            # performance on I2V, and a timbre reference beside an R2V
+            # reference material. `common["audio"]` is the shot's audio design —
+            # a dict — and posting it as a parameter is what produced the
+            # `"audio": {}` that travelled on every Wan request. It is dropped
+            # here; the prompt already carries the audio design in words.
+            "audio_url": value.context.get("audio_url"),
+            "driving_audio": value.context.get("driving_audio"),
+            "reference_voice": value.context.get("reference_voice"),
             "style_control": common["style_control"],
         }
         return _result(provider="wan", model=model, prompt=prompt, payload=payload, context=value.context)

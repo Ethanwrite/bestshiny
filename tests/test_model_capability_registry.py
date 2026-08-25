@@ -92,7 +92,7 @@ def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
     assert wan27.logical_name == "wan-2.7-official"
     assert wan30.logical_name == "wan-3.0-official"
     # Distinct profile versions: 3.0 is reviewed on its own evidence.
-    assert wan27.version == "wan-2.7-manual-v3"
+    assert wan27.version == "wan-2.7-manual-v4"
     assert wan30.version == "wan-3.0-manual-v1"
     # 2.7 ships as three DashScope models, so all three modes are routable, and
     # continuation / reference / edit are separate claims rather than one blur.
@@ -102,12 +102,19 @@ def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
     # Continuation: a clip whose end the shot carries on from. An I2V operation.
     assert wan27.supports_video_extension is True
     assert "first_clip" in wan27.provider_metadata["modes"]["i2v"]["accepts"]
-    # Native audio out is declared; a voice reference carried in is not, and the
-    # two are separate flags precisely so one cannot be read as the other.
+    # Native audio out and audio carried *in* stay separate flags precisely so one
+    # cannot be read as the other. Both are true for 2.7, which the profile used
+    # to deny: R2V nests a `reference_voice` audio URL inside a reference
+    # material and I2V takes a `driving_audio` media entry, and both are assets
+    # the model conditions on rather than audio it produces.
     assert wan27.supports_audio is True
-    assert wan27.supports_reference_voice is False
+    assert wan27.supports_reference_voice is True
     assert wan27.supports_native_audio is True
-    assert wan27.supports_voice_reference is False
+    assert wan27.supports_voice_reference is True
+    assert "driving_audio" in wan27.provider_metadata["modes"]["i2v"]["accepts"]
+    voice = wan27.provider_metadata["capability_axes"]["voice"]
+    assert voice["field"] == "reference_voice"
+    assert voice["nested_in"] == ["reference_image", "reference_video"]
     # Reference: footage and stills the shot only takes identity or grade from.
     assert wan27.supports_v2v is True
     assert wan27.supports_reference_image is True
@@ -116,8 +123,17 @@ def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
     assert wan27.max_reference_images == 5
     r2v = wan27.provider_metadata["modes"]["r2v"]
     assert r2v["max_first_frame"] == 1 and r2v["max_reference_assets"] == 5
+    assert r2v["min_reference_assets"] == 1
     # R2V takes a first frame alongside its references; that is the mode's point.
     assert "first_frame" in r2v["accepts"]
+    # The floor is 2 seconds, not 1 — a 1-second shot was routable and refused by
+    # the provider. And the ceiling is not one number: carrying a reference video
+    # caps R2V at 10, which a single `max_duration` cannot express.
+    assert wan27.min_duration == 2
+    assert r2v["max_duration_with_reference_video"] == 10
+    # T2V has no media plane at all, so it can carry no reference image.
+    assert wan27.provider_metadata["modes"]["t2v"]["accepts"] == []
+    assert "reference_image" not in wan27.provider_metadata["modes"]["i2v"]["accepts"]
     # Edit: not published for 2.7. The profile says so in one place, and the
     # adapter refuses generate_image in the other.
     assert wan27.provider_metadata["capability_axes"]["edit"]["supported"] is False

@@ -31,6 +31,7 @@ from qa_core import FFmpegFrameSampler
 from sqlalchemy import select
 
 from .semantic import SemanticStyleEmbedder, SemanticStyleUnavailable
+from .space import EmbeddingSpaceIdentity
 
 
 class StyleLockConflict(RuntimeError):
@@ -70,6 +71,8 @@ class StyleGenerationControl:
         return {**self.prompt_view(), "embedding": list(self.embedding)}
 
 
+
+
 class LocalStyleDescriptor:
     """Deterministic 64-D color/tonal/edge descriptor for offline style control.
 
@@ -82,6 +85,23 @@ class LocalStyleDescriptor:
     model = "visual-style-descriptor-64d"
     version = "style-descriptor-v1"
     dimension = 64
+    # `aggregate` divides by the L2 norm; `similarity` is cosine. Stated here so
+    # that changing either without changing `version` is a comparison the
+    # service refuses rather than a number nobody questions.
+    normalization = "L2"
+    distance_metric = "cosine"
+
+    @classmethod
+    def space_identity(cls) -> EmbeddingSpaceIdentity:
+        return EmbeddingSpaceIdentity(
+            provider=cls.provider,
+            model=cls.model,
+            model_revision="",
+            input_schema_version=cls.version,
+            dimension=cls.dimension,
+            normalization=cls.normalization,
+            distance_metric=cls.distance_metric,
+        )
 
     @staticmethod
     def _histogram(values: list[int], bins: int, maximum: int = 256) -> list[float]:
@@ -156,6 +176,35 @@ class SemanticReferenceAttempt:
 
     embedding: StyleEmbedding | None
     reason: str | None
+
+
+class SemanticStyleLayerRequired(RuntimeError):
+    """Layer 2 is switched on and its reference could not be produced.
+
+    A style lock is append-only and a database trigger forbids re-locking, so a
+    lock is not a request that can be corrected later — it is the last word on
+    how every candidate in the project will be judged. Letting it fall back to
+    one layer would mean a transient outage at the embedding provider silently
+    and permanently downgrades a project's gate, and the resulting lock would be
+    indistinguishable from one made deliberately with the feature off.
+
+    Refusing costs the user a retry. Degrading costs them the second gate for
+    the life of the project.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(f"project style cannot be locked without its semantic layer: {reason}")
+        self.reason = reason
+
+    @property
+    def retryable(self) -> bool:
+        """Whether waiting and trying again could plausibly succeed.
+
+        An unreachable model can come back; media that cannot be read will not
+        become readable on its own, and needs a different style version.
+        """
+
+        return self.reason.startswith("SEMANTIC_MODEL_UNAVAILABLE")
 
 
 def _worst_status(deterministic: str, semantic: str | None) -> str:
@@ -258,7 +307,7 @@ class ProjectStyleService:
                 )
             )
             if existing:
-                return SemanticReferenceAttempt(existing, None)
+                return existing
             embedding = StyleEmbedding(
                 project_id=project_id,
                 asset_version_id=style_version_id,
@@ -267,6 +316,9 @@ class ProjectStyleService:
                 provider=self.descriptor.provider,
                 model=self.descriptor.model,
                 algorithm_version=self.descriptor.version,
+                model_revision="",
+                normalization=self.descriptor.normalization,
+                distance_metric=self.descriptor.distance_metric,
                 embedding_hash=embedding_hash,
                 source_media_ids=[item.id for item in usable_media],
                 source_media_hashes=[item.sha256 for item in usable_media],
@@ -276,6 +328,27 @@ class ProjectStyleService:
             session.add(embedding)
             session.flush()
             return embedding
+
+    def _reference_space_drift(self, existing: StyleEmbedding) -> str | None:
+        """Why a stored reference is no longer comparable, or None if it is.
+
+        Called before reusing a reference, never after scoring against it. The
+        embedder's space is only knowable once it has answered, so a reference
+        whose model has not been called this process cannot be confirmed; it is
+        re-derived rather than trusted, which costs one call and cannot be
+        wrong.
+        """
+
+        if self.semantic is None:
+            return "SEMANTIC_EMBEDDER_NOT_CONFIGURED"
+        try:
+            current = self.semantic.space_identity()
+        except SemanticStyleUnavailable:
+            return None
+        moved = current.differences(EmbeddingSpaceIdentity.from_embedding(existing))
+        if not moved:
+            return None
+        return f"SEMANTIC_EMBEDDING_SPACE_CHANGED:{','.join(moved)}"
 
     def ensure_semantic_embedding(self, style_version_id: str) -> StyleEmbedding | None:
         return self.semantic_reference(style_version_id).embedding
@@ -302,6 +375,12 @@ class ProjectStyleService:
                 )
             )
             if existing:
+                # Reusable only if the embedder still produces the space this
+                # row is in. Matching on the model id alone was enough to find
+                # it and is not enough to compare against it.
+                stale = self._reference_space_drift(existing)
+                if stale is not None:
+                    return SemanticReferenceAttempt(None, stale)
                 return SemanticReferenceAttempt(existing, None)
             version = session.get(AssetVersion, style_version_id)
             asset = session.get(Asset, version.asset_id) if version else None
@@ -323,6 +402,7 @@ class ProjectStyleService:
             vectors = self.semantic.embed_images(frames, project_id=project_id)
         except SemanticStyleUnavailable as exc:
             return SemanticReferenceAttempt(None, f"SEMANTIC_MODEL_UNAVAILABLE:{exc}"[:400])
+        semantic_space = self.semantic.space_identity()
         vector = self.descriptor.aggregate(vectors)
         embedding_hash = self._vector_hash(vector)
         with self.database.session() as session:
@@ -333,15 +413,18 @@ class ProjectStyleService:
                 )
             )
             if existing:
-                return existing
+                return SemanticReferenceAttempt(existing, None)
             embedding = StyleEmbedding(
                 project_id=project_id,
                 asset_version_id=style_version_id,
                 embedding=vector,
                 dimension=len(vector),
-                provider=self.semantic.provider,
-                model=self.semantic.model,
-                algorithm_version=getattr(self.semantic, "version", "semantic-style-v1"),
+                provider=semantic_space.provider,
+                model=semantic_space.model,
+                algorithm_version=semantic_space.input_schema_version,
+                model_revision=semantic_space.model_revision,
+                normalization=semantic_space.normalization,
+                distance_metric=semantic_space.distance_metric,
                 embedding_hash=embedding_hash,
                 source_media_ids=[item.id for item in usable_media],
                 source_media_hashes=[item.sha256 for item in usable_media],
@@ -395,6 +478,13 @@ class ProjectStyleService:
         # Layer 2's reference is extracted at lock time, from the same version,
         # so the two layers can never describe different frames.
         semantic_attempt = self.semantic_reference(style_version_id)
+        if self.semantic is not None and semantic_attempt.embedding is None:
+            # The feature is on, so this project is meant to have a two-layer
+            # gate. The lock is append-only and cannot be revised, so a lock
+            # made now would keep one layer for good. Refuse instead: nothing
+            # has been written yet, and a retry once the model is reachable
+            # produces the lock that was actually asked for.
+            raise SemanticStyleLayerRequired(semantic_attempt.reason or "SEMANTIC_LAYER_UNAVAILABLE")
         semantic_embedding_id = (
             semantic_attempt.embedding.id if semantic_attempt.embedding else None
         )
@@ -437,9 +527,10 @@ class ProjectStyleService:
                     "explicit_confirmation": True,
                     "lock_version": "project-style-lock-v1",
                     "style_layers": 2 if semantic_embedding_id else 1,
-                    # Present only when layer 2 was wanted and could not be
-                    # produced, so a single-layer lock is never indistinguishable
-                    # from one made before the layer existed.
+                    # With layer 2 switched on, a lock that reaches this point
+                    # has one; the guard above refuses the rest. This therefore
+                    # records the deliberate case — the feature was off — and
+                    # keeps a single-layer lock from looking like an accident.
                     "semantic_layer_absent_reason": semantic_attempt.reason,
                 },
             )
@@ -529,8 +620,12 @@ class ProjectStyleService:
             output_mime_type = output.mime_type
             output_path = Path(output.local_path or self.storage.path_for(output.storage_key))
             target = [float(value) for value in embedding.embedding]
+            locked_space = EmbeddingSpaceIdentity.from_embedding(embedding)
             semantic_target = (
                 [float(value) for value in semantic_embedding.embedding] if semantic_embedding else None
+            )
+            locked_semantic_space = (
+                EmbeddingSpaceIdentity.from_embedding(semantic_embedding) if semantic_embedding else None
             )
             semantic_threshold = style_lock.semantic_similarity_threshold
 
@@ -554,6 +649,16 @@ class ProjectStyleService:
                 reason_codes.append("STYLE_EVIDENCE_UNSUPPORTED_MEDIA")
         except (FileNotFoundError, OSError, RuntimeError, ValueError):
             reason_codes.append("STYLE_EVIDENCE_UNAVAILABLE")
+
+        # The locked vector and this candidate's vectors have to be in the same
+        # space before a number taken across them means anything. Cosine over
+        # vectors from two different descriptors does not fail — it returns a
+        # plausible score and the gate goes on trusting it.
+        descriptor_moved = self.descriptor.space_identity().differences(locked_space)
+        if descriptor_moved and vectors:
+            vectors = []
+            positions = []
+            reason_codes.append(f"STYLE_EMBEDDING_SPACE_CHANGED:{','.join(descriptor_moved)}")
 
         scores = [self.descriptor.similarity(target, vector) for vector in vectors]
         average = mean(scores) if scores else None
@@ -599,16 +704,29 @@ class ProjectStyleService:
                 semantic_status = "REVIEW_REQUIRED"
                 reason_codes.append("STYLE_SEMANTIC_EMBEDDER_NOT_CONFIGURED")
             else:
+                semantic_moved: list[str] = []
                 try:
                     semantic_vectors = self.semantic.embed_images(raw_frames, project_id=project_id)
+                    # Read after the call, because which model answers is decided
+                    # per call: a fallback binding can move the space between one
+                    # candidate and the next.
+                    if locked_semantic_space is not None:
+                        semantic_moved = self.semantic.space_identity().differences(
+                            locked_semantic_space
+                        )
+                except SemanticStyleUnavailable:
+                    semantic_status = "REVIEW_REQUIRED"
+                    reason_codes.append("STYLE_SEMANTIC_MODEL_UNAVAILABLE")
+                if semantic_status is None and semantic_moved:
+                    semantic_status = "REVIEW_REQUIRED"
+                    reason_codes.append(
+                        f"STYLE_SEMANTIC_EMBEDDING_SPACE_CHANGED:{','.join(semantic_moved)}"
+                    )
+                if semantic_status is None:
                     semantic_scores = [
                         self.descriptor.similarity(semantic_target, vector)
                         for vector in semantic_vectors
                     ]
-                except SemanticStyleUnavailable:
-                    semantic_status = "REVIEW_REQUIRED"
-                    reason_codes.append("STYLE_SEMANTIC_MODEL_UNAVAILABLE")
-                else:
                     semantic_average = mean(semantic_scores) if semantic_scores else None
                     semantic_minimum = min(semantic_scores) if semantic_scores else None
                     if semantic_average is None:

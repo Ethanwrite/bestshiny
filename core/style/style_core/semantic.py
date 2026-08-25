@@ -28,6 +28,8 @@ import base64
 from threading import Thread
 from typing import Any, Protocol, runtime_checkable
 
+from .space import EmbeddingSpaceIdentity
+
 
 class SemanticStyleUnavailable(RuntimeError):
     """The semantic layer could not produce evidence for this candidate.
@@ -47,6 +49,10 @@ class SemanticStyleEmbedder(Protocol):
     @property
     def provider(self) -> str: ...
 
+    def space_identity(self) -> EmbeddingSpaceIdentity:
+        """The space the vectors from the last `embed_images` belong to."""
+        ...
+
     def embed_images(self, images: list[bytes], *, project_id: str) -> list[list[float]]:
         """One vector per input image, in the same order.
 
@@ -65,12 +71,20 @@ class ModelRoleSemanticStyleEmbedder:
 
     version = "semantic-style-embedder-v1"
 
+    # The stored reference is L2-normalized by `LocalStyleDescriptor.aggregate`
+    # and scored with its cosine `similarity`. Declared here so the space this
+    # embedder produces is stated rather than inferred from whoever calls it.
+    normalization = "L2"
+    distance_metric = "cosine"
+
     def __init__(self, model_roles: Any, *, mime_type: str = "image/png", dimensions: int = 1024):
         self.model_roles = model_roles
         self.mime_type = mime_type
         self.dimensions = dimensions
         self._resolved_model = ""
         self._resolved_provider = ""
+        self._resolved_revision = ""
+        self._resolved_dimension = 0
 
     @property
     def model(self) -> str:
@@ -79,6 +93,29 @@ class ModelRoleSemanticStyleEmbedder:
     @property
     def provider(self) -> str:
         return self._resolved_provider or "unresolved"
+
+    def space_identity(self) -> EmbeddingSpaceIdentity:
+        """The space of the vectors this embedder last produced.
+
+        Only meaningful after `embed_images`: which model answers is the role
+        runtime's decision, made per call, and a fallback binding can change it
+        between one call and the next. Reading it before there is an answer
+        would be reporting a space no vector came from.
+        """
+
+        if not self._resolved_model:
+            raise SemanticStyleUnavailable(
+                "semantic embedding space is unknown until the model has answered"
+            )
+        return EmbeddingSpaceIdentity(
+            provider=self._resolved_provider,
+            model=self._resolved_model,
+            model_revision=self._resolved_revision,
+            input_schema_version=self.version,
+            dimension=self._resolved_dimension,
+            normalization=self.normalization,
+            distance_metric=self.distance_metric,
+        )
 
     def embed_images(self, images: list[bytes], *, project_id: str) -> list[list[float]]:
         if not images:
@@ -110,11 +147,19 @@ class ModelRoleSemanticStyleEmbedder:
         if resolved is not None:
             self._resolved_model = str(getattr(resolved, "provider_model_id", "") or "")
             self._resolved_provider = str(getattr(resolved, "provider", "") or "")
-        vectors = _vectors_from_response(getattr(execution, "response", None) or {})
+        response = getattr(execution, "response", None) or {}
+        # The provider's own answer for what served the call. It is the only
+        # place a silent model swap behind a stable id could show up, and most
+        # providers echo nothing — so it is recorded when present and empty
+        # otherwise, never guessed.
+        echoed = str(response.get("model") or "")
+        self._resolved_revision = echoed if echoed != self._resolved_model else ""
+        vectors = _vectors_from_response(response)
         if len(vectors) != len(images):
             raise SemanticStyleUnavailable(
                 f"semantic style model returned {len(vectors)} vectors for {len(images)} frames"
             )
+        self._resolved_dimension = len(vectors[0])
         return vectors
 
 

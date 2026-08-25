@@ -26,12 +26,13 @@ launch.
 - Passenger/Autopilot 共用 `VisualProductionRuntime`、`GenerationGateway`、`MediaRegistry` 与持久化任务，不存在第二套生成引擎。
 - Image Prompt Corrector：只服务用户可见的图片提示词，记录原文、修改结果、变化说明与撤销数据；不参与 Autopilot 视频编译。
 - Video Prompt Runtime：`PromptCompilerInput → PromptCompilerService → PromptCompilerOutput → ModelAdapter`；Skill 以内容哈希版本参与审计，Kling、Veo、Seedance、Grok、Wan 分别生成模型专用提示词与 payload。画风锁由 Compiler 自身从 `ProjectStyleService` 解析，任何调用方都不会静默丢失锁定画风。
-- Image Generation：`openai/gpt-image-2`（OpenRouter Image API，`POST /images`）是项目的图片模型，绑定为 `IMAGE_GENERATION` 角色的 PRIMARY，fallback 为 Seedream 5.0 与 Flow NARWHAL。支持文生图与图片编辑，单次最多 16 张参考图、10 张出图，400K 上下文。该接口同步返回 base64，因此 Gateway 增加了内联结果通道：`ProviderSubmission.result` 携带终态结果，`MediaRegistry.register_provider_bytes()` 用与下载素材相同的内容校验落库。超出模型已审阅执行范围的请求在付费调用之前本地拒绝。
+- Image Generation：`openai/gpt-image-2`（OpenRouter Image API，`POST /images`）是项目的图片模型，绑定为 `IMAGE_GENERATION` 角色的 PRIMARY，fallback 为 Seedream 5.0 与 Flow NARWHAL。支持文生图与图片编辑，单次最多 16 张参考图、10 张出图，400K 上下文。该接口同步返回 base64，因此 Gateway 增加了内联结果通道：`ProviderSubmission.result` 携带终态结果，`MediaRegistry.register_provider_bytes()` 用与下载素材相同的内容校验落库。该结果**不驻留在进程内**：它与「确认提交」同一个事务写入 `provider_synchronous_results`，与「作业终态」同一个事务删除——读取不消费，否则致命窗口只是从「轮询之前」挪到「读取与完成提交之间」。每个输出带 SHA-256，读回时校验；不匹配以 `submitted=True` 失败，进入 `RECONCILIATION_REQUIRED`，而不是把损坏产物当作已付费结果发布。超出模型已审阅执行范围的请求在付费调用之前本地拒绝。
 - Batch Candidates：`image_count`（API 层的 `n`）是显式选项，整批在调用前一次性计价与预占积分；返回的每一张图各自成为该镜头的一个 `GenerationCandidate`，供用户挑选，而不是一个结果加几个散落素材。
 - Media Plane：用户原图**永不**被重编码或降采样——人物面部、商品标签、织物纹理只存在于上传时的分辨率。Provider 通过 `GenerationProvider.reference_constraints` 声明可接受的像素/字节/格式上限，`RenditionResolver` 按需生成并缓存派生副本（`media_renditions`），以约束摘要为键，上限变化即生成新副本而非复用旧的。参考图 URL 由**对象存储**签发短时效 presigned URL，Provider 直接从对象存储拉取，API 不参与大文件传输；本地磁盘无法签发时**直接失败**而不是退回代理转发。
 - Direct Upload：写入同样绕开 API。`POST /v1/assets/uploads` 校验租户与配额后签发 presigned PUT（并把 SHA-256 绑进请求，由对象存储强制校验），客户端自行上传；`POST /v1/assets/uploads/{id}/complete` 通过 `HEAD` 取权威大小、读取 64KB 头部做格式与像素校验后落库。完整解码交给首次使用时的 `RenditionResolver`。未配置对象存储时该接口返回 `501`，仍可使用原有的 `POST /v1/assets` 分片上传。
-- Style Lock 双层校验：第一层为本地确定性 64 维描述子（色彩/明度/饱和度/边缘/明显漂移）；第二层为 `google/gemini-embedding-2`（复用现有 OpenRouter 凭据），负责材质、笔触、摄影语言与整体视觉语义。两层各自记录结论，取**更差**的一个，第二层不可用时判为 `REVIEW_REQUIRED` 而非放行。
-- Model Registry/Router：逻辑模型、provider model ID、信任等级与套餐角色绑定持久化到数据库；持久的 `ModelCapabilityProfile` 是 UI、Policy、Router、Cost 与 Adapter 的单一能力/质量先验事实源，旧 `config/video-models/*.json` 多头配置已移除，Wan 对齐 2.7。路由先执行能力与 `AssetCriticality` 硬门禁，低样本真实观测不会覆盖人工先验；`EDGE` 永远不能处理 canonical/hero/important 资产。
+- Style Lock 双层校验：第一层为本地确定性 64 维描述子（色彩/明度/饱和度/边缘/明显漂移）；第二层为 `google/gemini-embedding-2`（复用现有 OpenRouter 凭据），负责材质、笔触、摄影语言与整体视觉语义。两层各自记录结论，取**更差**的一个，评估时第二层不可用判为 `REVIEW_REQUIRED` 而非放行。**向量带着自己的空间**：`EmbeddingSpaceIdentity`（provider / model / model_revision / input_schema_version / dimension / normalization / distance_metric）随每条 `StyleEmbedding` 落库，比较任何相似度之前先比空间——因为失败模式是「不失败」：跨空间做余弦不会报错，只会返回一个看着挺合理的数。不匹配时落锁被拒、候选判 `REVIEW_REQUIRED` 且**不给分**（不是给低分），reason code 里点名是哪几个字段变了。**落锁则 fail-closed**：`FEATURE_SEMANTIC_STYLE_LOCK=true` 时，若第二层的参考产不出来，落锁直接被拒绝且不写任何东西——模型不可达返回 `503`（等待有意义），参考素材读不出返回 `409`（等待没意义）；锁是 append-only 且触发器禁止重锁，所以一次降级就是永久降级。开关关闭时单层锁仍是预期结果，并记录 `SEMANTIC_EMBEDDER_NOT_CONFIGURED`。
+- External Evidence Registry：`config/external-evidence/registry-v1.json`（`external-evidence-v1`，冻结于 2026-08-25）。版本化、来源可追、场景可映射：每条证据保留原始量表与样本量，引用 source_id，并在绑定到本平台模型时声明 `version_match`。只有 A/B 级来源 + `EXACT`/`EXACT_VERSION_UNSPECIFIED_REVISION` + mapping_confidence 非 LOW 才允许影响路由分；一条记录的等级取它引用的**最弱**来源。近似版本的证据（Wan 2.1 之于 2.7、Seedance 2.0 之于 2.5、Veo 3.1 Fast 之于 3.1、GPT-4o 之于 GPT Image 2）**故意保留并标为 mismatch**——删掉只会让人半年后从同一个公开来源重新推导一遍，然后悄悄挂错模型。不做跨来源归一/平均/总榜。目前 12 个生成模型里只有 `veo-3.1-fast`（OSCBench 精确 variant）与 `gpt-image-2` 有逐维证据，其余只有 holistic Arena 偏好；`FEATURE_EXTERNAL_PRIOR` 默认 **false**，通过 `GET /internal/models/external-evidence` 只读查询。
+- Model Registry/Router：逻辑模型、provider model ID、信任等级与套餐角色绑定持久化到数据库；持久的 `ModelCapabilityProfile` 是 UI、Policy、Router、Cost 与 Adapter 的单一能力/质量先验事实源，旧 `config/video-models/*.json` 多头配置已移除，Wan 对齐 2.7。路由先执行硬门禁再评分：`modality == video` 与 `video_generation ∈ supported_operations` 排在最前（registry 一张表容纳全部模态，不判模态就会把 embedding/chat 模型排进视频候选），其后是能力、时长、分辨率与 `AssetCriticality`。被拒绝的模型不会从列表里消失，而是进入 `RouterDecision.rejected` 并带上 `reason_codes`，事后可审计。真实观测以每次调用传入的不可变 `RoutingEvidence` 参与评分，不写在共享 router 实例上；低样本真实观测不会覆盖人工先验；`EDGE` 永远不能处理 canonical/hero/important 资产。
 - Model live kill switch：Gateway 在排队前与付费调用边界都核对持久模型身份和 `enabled/live_enabled`，最终检查与 Job CAS 同事务；重启不会覆盖管理员禁用状态，请求 metadata 也无法解锁。
 - Asset Registry：逻辑资产与不可变版本覆盖人物、场景、商品、道具等素材；只有显式提升才会改变 canonical 版本，数据库触发器防止跨资产链接、未记录切换和历史改写。
 - Project Style Lock：用户先把 `STYLE` 版本显式提升为 Canonical，再通过真实账号确认一次性锁定到项目。锁定版本拥有不可变的 64 维本地 Style Embedding 与 hash；后续素材库 Canonical 变更不会改写项目锁。所有 Autopilot 镜头自动继承锁定参考图、Prompt 约束及 Adapter style payload，生成结果逐帧计算相似度、低分比例和漂移斜率；缺证据、低相似度或持续漂移不能通过 Candidate Commit 门禁。
@@ -39,7 +40,7 @@ launch.
 - Memory/Context：L0/L1/L2 记忆、metadata-first 检索、文本/图片/视频预算装配。Narrative Memory 的 Voyage 路径已收口到 `ModelRoleRuntime → MULTIMODAL_EMBEDDING`，保存维度/输入/向量哈希而不保存审计向量全文；不可用时降级到 SQL 结构化时间线并记录 `MEMORY_VECTOR_DEGRADED`。
 - Evaluation/Retry：结构化质量维度、关键失败、`ACCEPT / RETRY_SAME_MODEL / RETRY_REWRITE_PROMPT / SWITCH_MODEL / REJECT` 与有界重试计划。
 - Metrics/Benchmark/Trace：生产指标、基准测试结果与镜头级生产 trace；自适应路由默认关闭。
-- Credits admission + lifecycle：所有已认证的公开生成入口都由服务端解析套餐/模型角色/部署可用性/信任/估价；Free 在同一交易中创建 Job、积分预占、CostRecord 和幂等记录。完成时结算，明确的提交前终态会原子退回，跨过付费边界的不确定结果则冻结并进入内部审计对账，不盲退、不盲重试。
+- Credits admission + lifecycle：所有已认证的公开生成入口都由服务端解析套餐/模型角色/部署可用性/信任/估价；**FREE / PRO / ENTERPRISE 一律**在同一交易中创建 Job、积分预占、CostRecord 和幂等记录。「谁扣款」由 `WorkspaceCreditBalance.billable` 一处定义：所有**套餐**都扣；无 workspace 的项目、以及 `ALL` 工作空间（关闭鉴权时的本地开发旁路，不是套餐）不扣。套餐决定额度发放、折扣与模型权限，不决定一次生成是否要花钱。余额不足返回 **402**，与套餐权限不足的 **403** 区分开——一个是充值，一个是升级。完成时结算，明确的提交前终态会原子退回，跨过付费边界的不确定结果则冻结并进入内部审计对账，不盲退、不盲重试。
 - DePay/Base USDC 支付：全站只使用一条固定 30 USDC、Quantity OFF 的 DePay Link。每次点击都先生成独立 PaymentIntent，并注入 `order_ref` 与只保存 hash 的短期 checkout token。签名回调必须匹配订单、Base Mainnet、Circle Native USDC、Treasury 和精确 30 USDC，才会在同一事务中为 FREE 工作空间永久升级 `PRO` 并追加 3,000 Credits；已是 PRO 则只追加 3,000 Credits。无订阅、自动续费或钱包二次扣款。Alchemy 保留为链上重组/对账证据源。
 - Candidate + QA + Commit：一个镜头可有多个候选；自动证据不足时可由有写权限的真实用户填写理由并显式确认，形成独立审计记录，再单独采用；采用后原子写入唯一正式候选、时间线快照、尾帧与成本记录。
 - Persistent Narrative Character State：已将不可变的角色 identity 与可随剧情变化的伤口、衣物破损/污渍/湿润、道具、位置、时间和灯光状态硬隔离。每个候选以显式 JSON Patch 提议 delta，先过确定性 policy，再校验与候选输出绑定的可视证据；只有采用候选时才追加新版本、commit 记录，通过 branch-aware head CAS 前移并传播给下一镜。旧版本、delta、验证与 commit 全部保留，保留审计/比较所需事实并拒绝过期冲突。
@@ -83,16 +84,22 @@ uv run alembic upgrade head
 
 ## Local development
 
-> 当前忽略的 `data/platform.db` 是混合 schema，默认启动可因 `workspaces.plan_tier/credit_balance` 缺列失败。在修复前，只对临时新库运行下列迁移；不要对该开发库盲目 upgrade/stamp。
+> 2026-08-25 起：schema 唯一权威是 alembic，启动不再建表而是校验 stamp。历史上那份混合 schema 的 `data/platform.db` 已不再是运行时目标——本地 `DATABASE_URL` 指向 compose 的 PostgreSQL。
 
-需要 Python 3.12+、`uv`、FFmpeg：
+需要 Python 3.12+、`uv`、FFmpeg，以及一个 PostgreSQL。SQLite 不再是受支持的运行时：pysqlite 下
+`begin_nested()` 的 savepoint 不会随外层事务回滚，而有七处调用点依赖这次回滚；`DEPLOYMENT_ENVIRONMENT=production`
+时启动会直接拒绝非 PostgreSQL 的 `DATABASE_URL`。
 
 ```bash
 cp .env.example .env
+docker compose up -d postgres
 uv sync --extra dev
 uv run alembic upgrade head
 uv run uvicorn video_platform_api.main:app --reload --port 18080
 ```
+
+Schema 的唯一权威是 alembic。应用启动**不再**建表，只校验数据库 stamp 是否等于
+`REQUIRED_SCHEMA_REVISION`，不等就拒绝启动并提示 `alembic upgrade head`。
 
 另一个终端运行 worker：
 
@@ -117,7 +124,7 @@ python3 -m http.server 18081 --directory apps/web
 
 | Variable | Default / purpose | Production guidance |
 | --- | --- | --- |
-| `DATABASE_URL` | 本地 SQLite；Compose 覆盖为 PostgreSQL | 使用受管数据库并先备份再迁移 |
+| `DATABASE_URL` | PostgreSQL（`docker compose up -d postgres`，已发布到 `127.0.0.1:5432`） | 使用受管数据库并先备份再迁移；production 下非 PostgreSQL 会被拒绝启动 |
 | `STORAGE_BACKEND` | `local`，也支持 S3 兼容存储 | 配置私有 bucket、最小权限密钥 |
 | `MAX_UPLOAD_BYTES` | 单文件默认最多 100 MiB，流式超限即中止并清理临时文件 | 与工作空间 `max/used/reserved_storage_bytes` 原子配额一起监控 |
 | `PUBLIC_BASE_URL` | `http://localhost:8080` | 设置为实际 HTTPS API 地址 |
@@ -242,12 +249,19 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 ## Quality gates
 
 ```bash
-uv run ruff format --check . --exclude references
 uv run ruff check . --exclude references
 uv run mypy
-uv run pytest -q
+uv run pytest -q                                        # SQLite —— 快，算法层
+POSTGRES_PASSWORD=... uv run pytest -q --database=postgres   # PostgreSQL —— 事务/并发/触发器
 docker compose config -q
 ```
+
+测试矩阵有两半。SQLite 那半足够覆盖纯算法与简单服务；事务、savepoint、锁、CAS、幂等、账本与触发器行为
+只有 PostgreSQL 那半能真正回答——它把共用的 `container` fixture 接到 `video_platform_test` 库里的一次性
+schema 上。自建 `Settings`、硬编码 SQLite URL 的测试模块（约十五个）不会被改道。
+
+两半都必须绿。已知的引擎差异如果是**被测代码**的缺陷而非测试的缺陷，登记在 `POSTGRES_KNOWN_DIVERGENCES`
+里作为 strict xfail，修好那天 PostgreSQL 这半会失败，直到把条目删掉为止。
 
 ### Stable baseline before Phase II
 
@@ -265,7 +279,8 @@ PostgreSQL 17.10 + pgvector 0.8.6 已在临时实机数据库验证 fresh/popula
 
 ## Incomplete, or needing real-environment verification
 
-- Seedance、官方 Veo、Grok、Omni、Kling、Runway/Wan 目前主要是持久能力配置、Adapter 或诚实的未配置 provider slot；本轮无真实调用，不能把 payload/Mock 测试等同于供应商端到端。
+- Seedance、官方 Veo、Grok、Omni、Kling、Runway 目前主要是持久能力配置、Adapter 或诚实的未配置 provider slot；本轮无真实调用，不能把 payload/Mock 测试等同于供应商端到端。
+- Wan 2.7 只有 **T2V** 经过真实调用验证（2026-08-25，一段 5s 720P）。请把这个结论读窄：T2V 是唯一没有 `media` 数组的模式，且那次 canary 未设 negative prompt、未带音频，所以它没有触碰任何 I2V/R2V 线上协议字段。2026-08-25 依据官方 T2V/I2V/R2V API 参考重新校正了请求体（`media.type` 直接携带语义角色而非 image/video/audio；`negative_prompt` 属于 `input`；音频分为 T2V `input.audio_url`、I2V `driving_audio`、R2V 参考素材内嵌 `reference_voice`；T2V/I2V 均不接受 reference image；时长 2–15 秒，R2V 带参考视频时上限 10 秒），细节见 HANDOFF §12d。**I2V 与 R2V 已于同日完成真实调用验证**：两段 2 秒 720P，任务 `fb7cf016`（I2V，`media.type=first_frame`）与 `57ba09a0`（R2V，`media.type=reference_image`），均 `COMPLETED` 且产物经 range 取回确认为真实 MP4 容器（`ftyp`/`isom`，约 400 KB）。参考图由阿里侧从 OSS 预签名 GET 抓取，`FETCHABLE_URL` 链路首次端到端跑通；同时确认 `input.negative_prompt`、`duration: 2`（校正后的下限）与 R2V 的 `parameters.ratio` 均被接受。累计已知消费：3 段片（T2V 5s、I2V 2s、R2V 2s）。**仍未验证**：三条音频通道（T2V `audio_url`、I2V `driving_audio`、R2V `reference_voice`）都需要可抓取的音频素材，本轮未跑。
 - Voyage Multimodal 已经 `ModelRoleRuntime` 接入并可安全降级，但实际 text/image/multimodal embedding canary 都是 **NOT EXECUTED**；上线前需验证真实维度、检索质量、延迟、账单与数据合规。
 - 生成积分的 Reserve → Generate → Settle / Refund → Reconcile 已闭环。固定 30 USDC PaymentIntent、DePay 共享链接、checkout token、签名 callback、FREE→PRO 与追加式入账已实现，但真实小额支付、运营对账 UI 和 PostgreSQL/Compose `0033` 证据尚未完成。签名 callback 公钥与 Treasury 未配置时，Web 付款按钮会 fail closed。
 - Google Flow 已实现首次自动 affinity、sticky account/project、双向唯一数据库约束、限制性 migration plan 和四元 poll 标识；默认 provisioner 在无可用真实部署时 fail closed。无真实 Flow account/project canary，仍不可开启商用 live。

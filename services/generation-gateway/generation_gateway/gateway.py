@@ -47,6 +47,8 @@ from production_domain.models import (
     ProviderBillingEvidence,
     ProviderProjectBinding,
     ProviderProjectBindingStatus,
+    ProviderSynchronousResult,
+    ProviderSynchronousResultOutput,
     RetryCategory,
     Shot,
     ShotStatus,
@@ -60,6 +62,7 @@ from production_engine import ShotContinuityService
 from provider_sdk import (
     GenerationProvider,
     ProviderError,
+    ProviderInlineOutput,
     ProviderJob,
     ProviderMode,
     ProviderPollIdentity,
@@ -209,13 +212,10 @@ class GenerationGateway:
         self.model_infrastructure = model_infrastructure
         self.flow_affinity = flow_affinity or FlowProjectAllocator(database, scheduler)
         self.live_canary = live_canary
-        # Results from providers whose generation call is synchronous. The entry
-        # is written between a confirmed submission and the poll that consumes
-        # it, both inside one `process()` call. Losing it (process death) is not
-        # a silent success or refund: the poll then fails with the provider's
-        # own not-retrievable error while `submitted` stays true, so the paid
-        # call lands in RECONCILIATION_REQUIRED for review.
-        self._synchronous_results: dict[str, tuple[str, ProviderJob]] = {}
+        # A synchronous result is not held in this process. It goes into the
+        # `provider_synchronous_results` inbox in the same transaction that
+        # confirms the submission, because a paid artefact must not depend on
+        # this object staying alive. See `_hold_synchronous_result`.
         try:
             self.provider_mode = ProviderMode(provider_mode)
         except ValueError as exc:
@@ -541,12 +541,13 @@ class GenerationGateway:
             workspace_credit_required = False
             if self.workspace_credits is not None:
                 credit_context = self.workspace_credits.balance_in_session(session, request.project_id)
-                workspace_credit_required = (
-                    credit_context.workspace_id is not None and credit_context.plan_tier == "FREE"
-                )
+                # One definition of who pays, on the balance itself: every plan
+                # does, and the development bypass and pre-commercial projects
+                # do not.
+                workspace_credit_required = credit_context.billable
                 if workspace_credit_required and estimated_credits is None:
                     raise WorkspaceCreditConflict(
-                        "FREE workspace generation requires a server-owned credit quote"
+                        "workspace generation requires a server-owned credit quote"
                     )
             requested_asset_ids = list(
                 dict.fromkeys(
@@ -565,12 +566,15 @@ class GenerationGateway:
                     raise LookupError(f"media asset not found: {asset_id}")
                 if asset.project_id != request.project_id:
                     raise LookupError("media asset does not belong to the generation project")
-            existing = session.scalar(
-                select(GenerationIdempotency).where(
-                    GenerationIdempotency.project_id == request.project_id,
-                    GenerationIdempotency.key == request.idempotency_key,
+            def claimed_key() -> GenerationIdempotency | None:
+                return session.scalar(
+                    select(GenerationIdempotency).where(
+                        GenerationIdempotency.project_id == request.project_id,
+                        GenerationIdempotency.key == request.idempotency_key,
+                    )
                 )
-            )
+
+            existing = claimed_key()
             if existing:
                 return replay(existing)
             try:
@@ -671,15 +675,33 @@ class GenerationGateway:
                         candidate.status = CandidateStatus.GENERATING.value
                     session.flush()
             except IntegrityError:
-                concurrent = session.scalar(
-                    select(GenerationIdempotency).where(
-                        GenerationIdempotency.project_id == request.project_id,
-                        GenerationIdempotency.key == request.idempotency_key,
-                    )
-                )
+                # A competitor claimed the key between the lookup above and this
+                # insert. Both requests are the same request; one job answers both.
+                concurrent = claimed_key()
                 if concurrent:
                     return replay(concurrent)
                 raise
+            except TimelineGenerationPlanStale:
+                # The fence is evaluated under the Shot's row lock, so a
+                # competitor holding that lock commits *before* this request can
+                # read the Shot — and what it reads is the Shot the competitor
+                # just moved to QUEUED. The fence is then stale against a change
+                # this very request caused, and the request would be told to plan
+                # again for work that is already running.
+                #
+                # A stale fence is therefore not conclusive on its own. It is
+                # conclusive only once the key is known to be unclaimed: if a
+                # claim exists it is a claim for this same request — `replay`
+                # still refuses a key whose request hash differs — and the
+                # idempotent answer is the competitor's job, not a 409.
+                #
+                # Ordering the claim ahead of the fence would reach the same
+                # place through `IntegrityError` above, but it would mean writing
+                # a job row before the plan behind it has been validated.
+                concurrent = claimed_key()
+                if concurrent is None:
+                    raise
+                return replay(concurrent)
             return job, False
 
     def get(self, job_id: str) -> GenerationJob | None:
@@ -1905,6 +1927,135 @@ class GenerationGateway:
             self._event(session, job_id, "SUBMISSION_CLAIM_EXPIRED", submitted=True)
         return self.get(job_id)
 
+    def _hold_synchronous_result(
+        self,
+        session: Session,
+        job: GenerationJob,
+        *,
+        provider_job_id: str,
+        result: ProviderJob,
+    ) -> None:
+        """Persist a synchronous provider's result inside the caller's transaction.
+
+        The caller is the transaction that confirms the submission, which is
+        what makes this durable at exactly the moment the workspace becomes
+        liable for the call.
+        """
+
+        # A retry of the same job reaches here with a new provider job id. The
+        # previous row is a result for a submission this attempt did not make,
+        # so it is replaced rather than kept alongside.
+        stale = session.scalar(
+            select(ProviderSynchronousResult).where(
+                ProviderSynchronousResult.generation_job_id == job.id
+            )
+        )
+        if stale is not None:
+            session.delete(stale)
+            session.flush()
+        held = ProviderSynchronousResult(
+            generation_job_id=job.id,
+            provider_job_id=provider_job_id,
+            attempt_number=max(job.attempt_count, 1),
+            status=result.status,
+            progress=float(result.progress or 0),
+            output_url=result.output_url,
+            output_mime_type=result.output_mime_type,
+            error=result.error,
+            raw_json=dict(result.raw or {}),
+        )
+        session.add(held)
+        session.flush()
+        for ordinal, output in enumerate(result.outputs):
+            session.add(
+                ProviderSynchronousResultOutput(
+                    result_id=held.id,
+                    ordinal=ordinal,
+                    mime_type=output.mime_type,
+                    content=output.content,
+                    content_sha256=hashlib.sha256(output.content).hexdigest(),
+                )
+            )
+        session.flush()
+
+    def _read_synchronous_result(self, job_id: str, provider_job_id: str) -> ProviderJob | None:
+        """Read the held result for one provider job, leaving the row in place.
+
+        Reading must not consume it. The row is what makes the window between a
+        confirmed submission and a committed completion survivable, and that
+        window does not close until the completion commits — so it is
+        `_discard_synchronous_result`, inside the transaction that marks the job
+        terminal, that removes it. A poll that reads the bytes and then dies
+        finds them still there on the next attempt.
+
+        A row whose `provider_job_id` does not match belongs to an earlier
+        attempt. It is discarded, never returned — a result for a submission
+        this poll did not make is not a result this poll may complete.
+        """
+
+        with self.database.session() as session:
+            held = session.scalar(
+                select(ProviderSynchronousResult).where(
+                    ProviderSynchronousResult.generation_job_id == job_id
+                )
+            )
+            if held is None:
+                return None
+            outputs: list[ProviderInlineOutput] = []
+            if held.provider_job_id == provider_job_id:
+                rows = session.scalars(
+                    select(ProviderSynchronousResultOutput)
+                    .where(ProviderSynchronousResultOutput.result_id == held.id)
+                    .order_by(ProviderSynchronousResultOutput.ordinal)
+                ).all()
+                for row in rows:
+                    content = bytes(row.content)
+                    if hashlib.sha256(content).hexdigest() != row.content_sha256:
+                        # Storage handed back bytes that are not what was
+                        # stored. Completing on them would publish a corrupt
+                        # artefact as a paid result; failing here sends the
+                        # credit to reconciliation instead.
+                        raise ProviderError(
+                            f"held synchronous output {row.ordinal} failed its digest check",
+                            RetryCategory.PERMANENT_ERROR,
+                            code="SYNCHRONOUS_RESULT_CORRUPT",
+                            # The provider was called and the workspace billed;
+                            # the credit must go to reconciliation, not refund.
+                            submitted=True,
+                        )
+                    outputs.append(ProviderInlineOutput(content=content, mime_type=row.mime_type))
+                result = ProviderJob(
+                    provider_job_id=held.provider_job_id,
+                    status=held.status,
+                    progress=held.progress,
+                    output_url=held.output_url,
+                    output_mime_type=held.output_mime_type,
+                    error=held.error,
+                    raw=dict(held.raw_json or {}),
+                    outputs=outputs,
+                )
+                return result
+            # Stale: an earlier attempt's result, which no poll may ever use.
+            session.delete(held)
+            return None
+
+    def _discard_synchronous_result(self, session: Session, job_id: str) -> None:
+        """Drop a held result inside the transaction that ends the job.
+
+        Called from every terminal transition, not only the successful one: a
+        job that failed or was cancelled will never consume its held bytes, and
+        several megabytes per job is not something to leave to the job row's
+        eventual cascade.
+        """
+
+        held = session.scalar(
+            select(ProviderSynchronousResult).where(
+                ProviderSynchronousResult.generation_job_id == job_id
+            )
+        )
+        if held is not None:
+            session.delete(held)
+
     def _claim_for_polling(self, job_id: str) -> str | None:
         """Atomically fence provider polling and completion finalization."""
 
@@ -2498,6 +2649,17 @@ class GenerationGateway:
                 self._event(
                     session, job.id, "PROVIDER_JOB_STARTED", provider_job_id=submission.provider_job_id
                 )
+                if submission.result is not None:
+                    # Same transaction as the confirmation: the artefact becomes
+                    # durable exactly when the submission does, so there is no
+                    # window in which the workspace has been billed for bytes
+                    # that live only in this process.
+                    self._hold_synchronous_result(
+                        session,
+                        job,
+                        provider_job_id=submission.provider_job_id,
+                        result=submission.result,
+                    )
                 session.flush()
             if submission.result is None:
                 return self._require_job(job_id)
@@ -2506,15 +2668,10 @@ class GenerationGateway:
             # than duplicating completion, billing and settlement here.
             poll_claim = self._claim_for_polling(job_id)
             if poll_claim is None:
+                # Another worker will poll it, and the held result is now
+                # readable by that worker rather than only by this one.
                 return self._require_job(job_id)
-            self._synchronous_results[job_id] = (submission.provider_job_id, submission.result)
-            try:
-                return await self._poll(job_id, poll_claim)
-            finally:
-                # The entry never outlives this call, whichever path the poll
-                # takes. A held result that survived into a later attempt would
-                # be a result for a submission that attempt did not make.
-                self._synchronous_results.pop(job_id, None)
+            return await self._poll(job_id, poll_claim)
         except GenerationTargetError as exc:
             self._release_live_generation_canary_before_boundary(
                 canary_reservation,
@@ -2646,12 +2803,13 @@ class GenerationGateway:
                 GenerationJob.account_id == poll_identity.provider_account_id,
                 GenerationJob.provider_project_id == poll_identity.provider_project_id,
             ]
-        # Consume unconditionally: a stale entry must never be reused by a later
-        # attempt against a different provider job.
-        held = self._synchronous_results.pop(job_id, None)
+        # Read the held result for *this* provider job. A row from an earlier
+        # attempt names a different provider job and is therefore not a result
+        # this poll may use; it is discarded rather than read.
+        held = self._read_synchronous_result(job_id, provider_job_id)
         try:
-            if held is not None and held[0] == provider_job_id:
-                result = held[1]
+            if held is not None:
+                result = held
             elif poll_identity is None:
                 result = await provider.get_job(
                     provider_job_id,
@@ -2887,6 +3045,11 @@ class GenerationGateway:
                         raise LookupError("generation job not found")
                     session.refresh(job)
                     finalized = True
+                    # The artefact is in the media plane now, so the inbox copy
+                    # has done its job. Same transaction as the completion, so
+                    # the bytes are never dropped by a completion that rolls
+                    # back.
+                    self._discard_synchronous_result(session, job_id)
                     self._record_provider_billing_evidence(
                         session,
                         job,
@@ -3149,6 +3312,12 @@ class GenerationGateway:
                 return current
             session.expire(job)
             session.refresh(job)
+            if target_status == JobStatus.FAILED.value:
+                # Terminal and not retryable: nothing will ever consume a held
+                # synchronous result, so the bytes go with the same transaction
+                # that ends the job. RETRY_WAIT and WORKER_NEEDS_USER_ACTION
+                # keep theirs — those jobs still have an attempt ahead of them.
+                self._discard_synchronous_result(session, job_id)
             if target_status == JobStatus.WORKER_NEEDS_USER_ACTION.value:
                 worker = session.get(BrowserWorker, job.worker_id) if job.worker_id else None
                 if worker:

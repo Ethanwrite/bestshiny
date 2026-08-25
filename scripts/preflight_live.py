@@ -180,6 +180,46 @@ def main() -> int:
         else:
             print(_line("PUBLIC_BASE_URL fallback", BLOCKED, "no signing key; no reference at all"))
 
+    print("\n=== Project style lock " + "=" * 54)
+    # Worth its own section because the lock is append-only and a trigger
+    # forbids re-locking. With layer 2 enabled the lock now fails closed rather
+    # than quietly writing a permanent single-layer gate, so "will locking work"
+    # is a question the operator has to be able to answer *before* trying.
+    if not settings.feature_semantic_style_lock:
+        print(_line("FEATURE_SEMANTIC_STYLE_LOCK", READY, "off — locks are deliberately single-layer"))
+    else:
+        print(_line("FEATURE_SEMANTIC_STYLE_LOCK", READY, "on — layer 2 is required to lock"))
+        embedding_key = settings.openrouter_api_key.strip()
+        if not gate_open:
+            print(
+                _line(
+                    "STYLE_SEMANTIC_EMBEDDING",
+                    BLOCKED,
+                    "PROVIDER_MODE is not live; every lock attempt will be refused",
+                )
+            )
+        elif not embedding_key:
+            print(
+                _line(
+                    "STYLE_SEMANTIC_EMBEDDING",
+                    BLOCKED,
+                    "OPENROUTER_API_KEY is unset; every lock attempt will be refused",
+                )
+            )
+        else:
+            print(
+                _line(
+                    "STYLE_SEMANTIC_EMBEDDING",
+                    RISK,
+                    "google/gemini-embedding-2 has never been called; locking is unproven",
+                )
+            )
+        print(
+            "\n  A refused lock costs nothing and can be retried. Locking is the one\n"
+            "  action here that cannot be undone: the row is append-only and a trigger\n"
+            "  forbids replacing it."
+        )
+
     print("\n=== Wan 2.7 paths " + "=" * 58)
     wan_transport = bool(settings.wan_api_key.strip() and settings.wan_dashscope_base_url.strip())
     modes = (

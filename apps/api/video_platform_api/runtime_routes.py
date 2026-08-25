@@ -65,7 +65,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_, select
-from style_core import StyleLockConflict
+from style_core import SemanticStyleLayerRequired, StyleLockConflict
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -596,7 +596,13 @@ def register_runtime_routes(
             )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            # 402, not 403. Now that every plan is charged, "your plan does not
+            # allow this" and "you are allowed and out of credits" are different
+            # answers with different fixes — upgrade versus top up — and only
+            # the caller can act on the difference.
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -829,6 +835,11 @@ def register_runtime_routes(
                 if not persisted or not embedding:
                     raise HTTPException(409, "project style lock provenance is incomplete")
                 return {"locked": True, **_style_lock_view(persisted, embedding)}
+        except SemanticStyleLayerRequired as exc:
+            # 503 only when waiting could actually help. Media that cannot be
+            # read will not become readable, and telling the user to retry
+            # would be a lie; that is a conflict with the version they chose.
+            raise HTTPException(503 if exc.retryable else 409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except (ValueError, StyleLockConflict) as exc:

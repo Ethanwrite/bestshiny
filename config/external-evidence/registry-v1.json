@@ -1,0 +1,2636 @@
+{
+  "registry_version": "external-evidence-v1",
+  "frozen_at": "2026-08-25",
+  "compiled_from": [
+    {
+      "document": "data01.md",
+      "title": "视觉生成模型 External Evidence：生产级 Model Router Cold-Start Prior 研究报告",
+      "role": "PRIMARY",
+      "why": "Carries an explicit operational definition of grades A–D, an explicit version-lock principle, exact-variant Arena entries with sample counts and 95% CI, and a gap/conflict register. Where the two documents disagree this one is taken, because it is the stricter of the two and states the criterion it is being strict about."
+    },
+    {
+      "document": "data03.md",
+      "title": "External Evidence v1 — Primary-Source Verified Final Report",
+      "role": "CROSS_CHECK",
+      "why": "A shorter re-verification pass. It discards anything it could not re-check against a primary source, which makes it useful as a corroboration signal and as a record of what one reviewer could not confirm. Its grades are recorded as disagreements rather than merged."
+    }
+  ],
+  "grade_definitions": {
+    "A": "Official or rigorous academic benchmark. Protocol, sample size, model labels and raw results are auditable. May serve as primary external quality evidence.",
+    "B": "High-quality independent benchmark or arena. Method is documented and N/CI or sufficient conditions are public, but prompt distribution, unique-rater count or server-side revision are missing. May serve as primary or supporting prior.",
+    "C": "Real numbers and some method, but total sample, rater count, CI, prompt corpus or reproduction conditions have important gaps. Weak prior only.",
+    "D": "Product capability announcement, marketing material or observational note. Never a quality prior; capability and version metadata only."
+  },
+  "version_match_levels": {
+    "EXACT": "Same model version and, where the source pins one, the same revision.",
+    "EXACT_VERSION_UNSPECIFIED_REVISION": "Version matches; the source did not pin a revision, so revision attribution stays unspecified.",
+    "VARIANT_MISMATCH": "Same version number, different served variant (Veo 3.1 vs Veo 3.1 Fast, Kling Pro vs Standard). Never a prior.",
+    "VERSION_MISMATCH": "Different version in the same family (Wan 2.1 vs Wan 2.7). Never a prior, and recorded precisely so nobody re-derives it later.",
+    "MODEL_MISMATCH": "A different model entirely (GPT-4o image vs GPT Image 2). Never a prior."
+  },
+  "prior_eligibility_rule": "grade in {A, B} AND version_match in {EXACT, EXACT_VERSION_UNSPECIFIED_REVISION} AND mapping_confidence != LOW. Everything else is recorded and readable but may not move a routing score.",
+  "prohibitions": [
+    "No normalisation, averaging or ranking across heterogeneous scales (Elo, Likert 1-5, 0-1 automatic, win-rate percentages).",
+    "No inheritance of a benchmark result from one model version to another.",
+    "No treating a capability claim (30s support, MoE, multi-reference count) as a quality measurement.",
+    "Aesthetics is not style_fidelity. Only a test with an explicit target style reference supports style_fidelity.",
+    "Compositional alignment (object count, colour, position, attribute binding) is not text_fidelity.",
+    "Arena Elo is a holistic preference aggregate and maps to no diagnostic capability."
+  ],
+  "sources": [
+    {
+      "source_id": "S-SD20",
+      "title": "Seedance 2.0: Advancing Video Generation for World Complexity",
+      "url": "https://arxiv.org/abs/2604.14148",
+      "publisher": "ByteDance Seed",
+      "source_type": "official_technical_report",
+      "published_at": "2026-04-15",
+      "snapshot_at": "2026-08-25",
+      "grade": "C",
+      "grade_rationale": "Extensive fine-grained tables and an expert evaluation framework, but overall prompt N, rater N and inter-rater statistics are not public.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-SD25",
+      "title": "Introducing Seedance 2.5",
+      "url": "https://seed.bytedance.com/en/blog/one-take-creation-flexible-referencing-introducing-seedance-2-5",
+      "publisher": "ByteDance Seed",
+      "source_type": "official_release",
+      "published_at": "2026-07-31",
+      "snapshot_at": "2026-08-25",
+      "grade": "D",
+      "grade_rationale": "Confirms version and capability (30s, multi-reference). Not a benchmark.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-KLOMNI",
+      "title": "Kling-Omni Technical Report",
+      "url": "https://arxiv.org/abs/2512.16776",
+      "publisher": "Kuaishou Kling Team",
+      "source_type": "official_technical_report",
+      "published_at": "2025-12",
+      "snapshot_at": "2026-08-25",
+      "grade": "C",
+      "grade_rationale": "Reports >500 cases and human G/S/B evaluation, but extractable exact numbers, rater N and CI are incomplete.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-KL30",
+      "title": "Kling AI 3.0 Official Launch",
+      "url": "https://ir.kuaishou.com/news-releases/news-release-details/kling-ai-launches-30-model-ushering-era-where-everyone-can-be",
+      "publisher": "Kuaishou",
+      "source_type": "official_release",
+      "published_at": "2026-02-05",
+      "snapshot_at": "2026-08-25",
+      "grade": "D",
+      "grade_rationale": "Version and input-mode confirmation only.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-VEO3",
+      "title": "Veo 3 Model Card",
+      "url": "https://storage.googleapis.com/deepmind-media/Model-Cards/Veo-3-Model-Card.pdf",
+      "publisher": "Google DeepMind",
+      "source_type": "official_model_card",
+      "published_at": "2025-05-23",
+      "snapshot_at": "2026-08-25",
+      "grade": "C",
+      "grade_rationale": "MovieGenBench 1,003 + 527 prompts and VBench I2V 355 pairs are explicit, but results are stated as best/SOTA preference with no raw win-rate table, rater N or CI.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-VEO31L",
+      "title": "Veo 3.1 Lite Model Card",
+      "url": null,
+      "publisher": "Google DeepMind",
+      "source_type": "official_model_card",
+      "published_at": "2026-04",
+      "snapshot_at": "2026-08-25",
+      "grade": "C",
+      "grade_rationale": "Explicit 1,000 T2V / 646 I2V and 54.6%/47.2% pairwise win rates, but rater N and CI are not public. Source document carried no full URL and none was invented.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-WAN21",
+      "title": "Wan: Open and Advanced Large-Scale Video Generative Models",
+      "url": "https://arxiv.org/abs/2503.20314",
+      "publisher": "Alibaba / Wan Team",
+      "source_type": "official_technical_report",
+      "published_at": "2025-03-26",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "Wan-Bench states 1,035 prompts, 14 major / 26 sub dimensions, automatic evaluators with human-preference weighting, and publishes raw sub-dimension scores.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-WAN21-HF",
+      "title": "Wan2.1-T2V-14B Model Card",
+      "url": "https://huggingface.co/Wan-AI/Wan2.1-T2V-14B",
+      "publisher": "Wan Team / Hugging Face",
+      "source_type": "official_model_card",
+      "published_at": "2025",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "Confirms the 1,035 internal prompts and 14/26 dimension structure directly.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-OSC",
+      "title": "OSCBench: Benchmarking Object State Change in Text-to-Video Generation",
+      "url": "https://arxiv.org/abs/2603.11698",
+      "publisher": "academic",
+      "source_type": "academic_benchmark",
+      "published_at": "2026-03-12",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "1,120 prompts, 140 scenarios, six models, human + GPT-5.2, 140 videos per model human-sampled at 3 raters per video, raw per-dimension tables public.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-AA-M",
+      "title": "Artificial Analysis Video Arena Methodology",
+      "url": "https://artificialanalysis.ai/video/methodology",
+      "publisher": "Artificial Analysis",
+      "source_type": "independent_arena_methodology",
+      "published_at": null,
+      "snapshot_at": "2026-08-25",
+      "grade": "B",
+      "grade_rationale": "Blind pairwise, per-modality Elo pools, Bradley-Terry MLE, default generation settings published. Prompt and voter populations are not fully open.",
+      "dynamic": true
+    },
+    {
+      "source_id": "S-AA-T2V",
+      "title": "Artificial Analysis Text-to-Video Leaderboard",
+      "url": "https://artificialanalysis.ai/video/leaderboard/text-to-video",
+      "publisher": "Artificial Analysis",
+      "source_type": "independent_arena_leaderboard",
+      "published_at": null,
+      "snapshot_at": "2026-08-25",
+      "grade": "B",
+      "grade_rationale": "Publishes model variant, Elo, 95% CI and sample count. Dynamic: the snapshot date is part of the evidence, and the numbers are not constants.",
+      "dynamic": true
+    },
+    {
+      "source_id": "S-AA-I2V",
+      "title": "Artificial Analysis Image-to-Video Leaderboard",
+      "url": "https://artificialanalysis.ai/video/leaderboard/image-to-video",
+      "publisher": "Artificial Analysis",
+      "source_type": "independent_arena_leaderboard",
+      "published_at": null,
+      "snapshot_at": "2026-08-25",
+      "grade": "B",
+      "grade_rationale": "Independent pool from T2V. Elo values are not comparable across pools.",
+      "dynamic": true
+    },
+    {
+      "source_id": "S-AA-EDIT",
+      "title": "Artificial Analysis Video Editing Leaderboard",
+      "url": "https://artificialanalysis.ai/video/leaderboard/video-editing",
+      "publisher": "Artificial Analysis",
+      "source_type": "independent_arena_leaderboard",
+      "published_at": null,
+      "snapshot_at": "2026-08-25",
+      "grade": "B",
+      "grade_rationale": "Independent editing pool. Must not be compared across pools with T2V Elo.",
+      "dynamic": true
+    },
+    {
+      "source_id": "S-QIB",
+      "title": "Qwen-Image-Bench",
+      "url": "https://github.com/QwenLM/Qwen-Image-Bench",
+      "publisher": "Qwen Team",
+      "source_type": "academic_benchmark",
+      "published_at": "2026-05",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "1,000 bilingual expert-crafted prompts. Q-Judger trained on 130k+ expert-annotated pairs, 80 professional annotators, at least 3 reviews per sample, code and evaluator parameters public, Spearman rho .92 against human expert ranking.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-OAI-GI2",
+      "title": "GPT Image 2 Model Docs",
+      "url": "https://developers.openai.com/api/docs/models/gpt-image-2",
+      "publisher": "OpenAI",
+      "source_type": "official_model_docs",
+      "published_at": "2026-04-21",
+      "snapshot_at": "2026-08-25",
+      "grade": "D",
+      "grade_rationale": "Authoritative for version metadata: confirms `gpt-image-2` and snapshot `gpt-image-2-2026-04-21` exist. The page itself is not a generation-quality benchmark.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-BIZ",
+      "title": "BizGenEval",
+      "url": "https://arxiv.org/abs/2603.25732",
+      "publisher": "Microsoft Research et al.",
+      "source_type": "academic_benchmark",
+      "published_at": "2026-03-26",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "400 prompts, 8,000 human-verified checklist questions, 20 tasks, 26 systems, covering text, layout, attributes and knowledge constraints in business visual documents.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-PHYEDIT",
+      "title": "PhyEditBench",
+      "url": "https://github.com/Previsior/PhyEditBench",
+      "publisher": "ECCV 2026 benchmark",
+      "source_type": "academic_benchmark",
+      "published_at": "2026",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "238 real-world instances plus 35 synthetic anti-physics cases, 4 categories / 12 subcategories, publishing consistency, instruction following, physical plausibility and image quality.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-WAN30",
+      "title": "Wan 3.0 Official Release",
+      "url": null,
+      "publisher": "Alibaba Cloud / Wan",
+      "source_type": "official_release",
+      "published_at": "2026-08-06",
+      "snapshot_at": "2026-08-25",
+      "grade": "D",
+      "grade_rationale": "Confirms 3.0 capability and multimodal input metadata. Not used as a quality benchmark. Source document carried no full URL and none was invented.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-GENEVAL",
+      "title": "GenEval: An Object-Focused Framework for Evaluating Text-to-Image Alignment",
+      "url": "https://arxiv.org/abs/2310.11513",
+      "publisher": "academic",
+      "source_type": "academic_benchmark",
+      "published_at": "2023",
+      "snapshot_at": "2026-08-25",
+      "grade": "A",
+      "grade_rationale": "Method is auditable. Carried from the cross-check document, where it scores GPT-4o image generation — a different model from GPT Image 2.",
+      "dynamic": false
+    },
+    {
+      "source_id": "S-GPTIMGEVAL",
+      "title": "GPT-ImgEval: A Comprehensive Benchmark for Diagnosing GPT4o in Image Generation",
+      "url": "https://arxiv.org/abs/2504.02782",
+      "publisher": "independent",
+      "source_type": "academic_benchmark",
+      "published_at": "2025-04",
+      "snapshot_at": "2026-08-25",
+      "grade": "B",
+      "grade_rationale": "Carried from the cross-check document. Diagnoses GPT-4o, not GPT Image 2.",
+      "dynamic": false
+    }
+  ],
+  "evidence": [
+    {
+      "evidence_id": "E-WAN21-WB",
+      "source_ids": [
+        "S-WAN21",
+        "S-WAN21-HF"
+      ],
+      "benchmark_name": "Wan-Bench",
+      "benchmark_version": "1.0",
+      "evaluation_method": "14 major / 26 sub dimensions; automatic evaluators plus human-preference-derived weighting",
+      "evaluator": "Wan-Bench automated evaluators + human preference weighting",
+      "human_or_automatic": "hybrid",
+      "sample_size_prompts": 1035,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Sora",
+        "HunyuanVideo",
+        "Mochi-1-preview"
+      ],
+      "model": {
+        "name": "Wan 2.1 T2V-14B",
+        "model_id": "Wan-AI/Wan2.1-T2V-14B",
+        "version": "2.1",
+        "revision": "official 14B release checkpoint",
+        "provider": "Alibaba / Wan Team"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-1",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Weighted Score",
+          "value": 0.724,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence",
+            "visual_quality"
+          ],
+          "mapping_confidence": "LOW",
+          "mapping_rationale": "Wan-Bench internal holistic aggregate. Never substitutable for a physics or motion sub-dimension."
+        },
+        {
+          "metric_name": "Physical Plausibility",
+          "value": 0.939,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Named metric aligns directly with the canonical capability."
+        },
+        {
+          "metric_name": "Smoothness",
+          "value": 0.91,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Independent motion dimension; kept separate from Large Motion."
+        },
+        {
+          "metric_name": "Large Motion Generation",
+          "value": 0.415,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Independent motion dimension; the low value is the point and must not be averaged away."
+        },
+        {
+          "metric_name": "ID Consistency",
+          "value": 0.946,
+          "canonical_scene": "character_consistency",
+          "canonical_capability": [
+            "identity_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Directly evaluates identity consistency."
+        },
+        {
+          "metric_name": "Camera Control",
+          "value": 0.527,
+          "canonical_scene": "camera_control",
+          "canonical_capability": [
+            "camera_control"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Same-named dimension, but semantic camera control rather than 6-DoF trajectory error."
+        },
+        {
+          "metric_name": "Action Instruction Following",
+          "value": 0.86,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Directly evaluates action instruction following."
+        },
+        {
+          "metric_name": "Spatial Position Accuracy",
+          "value": 0.59,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Compositional spatial accuracy; not a camera-control measurement."
+        }
+      ],
+      "limitations": [
+        "Prompt corpus is provider-internal.",
+        "No confidence interval published.",
+        "Applies to version 2.1 only; must not be inherited by 2.2, 2.6, 2.7 or 3.0."
+      ],
+      "notes": "Weighted Score 0.724 and Physical Plausibility 0.939 are two independent metrics."
+    },
+    {
+      "evidence_id": "E-WAN22-OSC",
+      "source_ids": [
+        "S-OSC"
+      ],
+      "benchmark_name": "OSCBench",
+      "benchmark_version": "2026 paper",
+      "evaluation_method": "1,120 T2V prompts across 140 object-state-change scenarios; human plus GPT-5.2 evaluation",
+      "evaluator": "human raters and GPT-5.2",
+      "human_or_automatic": "hybrid",
+      "sample_size_prompts": 1120,
+      "sample_size_runs": "full automatic benchmark; human subset 140 videos per model",
+      "human_eval_size": "3 raters per video x 140 videos per model; unique rater count not public",
+      "confidence_interval": null,
+      "comparison_models": [
+        "Open-Sora2.0",
+        "HunyuanVideo",
+        "HunyuanVideo1.5",
+        "Wan2.2",
+        "Kling2.5-Turbo",
+        "Veo3.1-Fast"
+      ],
+      "model": {
+        "name": "Wan 2.2",
+        "model_id": null,
+        "version": "2.2",
+        "revision": null,
+        "provider": "Alibaba / Wan"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-1",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Action (human)",
+          "value": 0.616,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Measures whether the requested action occurred."
+        },
+        {
+          "metric_name": "OSC Accuracy (human)",
+          "value": 0.56,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Whether the target state change correctly occurred."
+        },
+        {
+          "metric_name": "OSC Consistency (human)",
+          "value": 0.668,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Consistency of the state change across frames."
+        },
+        {
+          "metric_name": "OSC Consistency (GPT-5.2)",
+          "value": 0.71,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Automatic judge scores the same dimension higher than humans; both are kept."
+        },
+        {
+          "metric_name": "Realism (human)",
+          "value": 0.702,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Visual realism, deliberately not expanded into physical_realism."
+        },
+        {
+          "metric_name": "Subject (human)",
+          "value": 0.904,
+          "canonical_scene": "character_consistency",
+          "canonical_capability": [
+            "identity_consistency"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Subject presence and stability within an OSC clip; not long-form identity."
+        }
+      ],
+      "limitations": [
+        "Object-state-change domain only; not a general physics benchmark.",
+        "Does not inherit Wan 2.1 Wan-Bench results."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-WAN27-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE; Elo-like rescaling; per-modality pools",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 16424,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%)",
+      "comparison_models": [
+        "models in the same T2V-with-audio pool at snapshot time"
+      ],
+      "model": {
+        "name": "Wan2.7-260612",
+        "model_id": null,
+        "version": "2.7",
+        "revision": "260612",
+        "provider": "Alibaba / Wan"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p target or closest supported",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1154,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Large-sample holistic human preference. Maps to no diagnostic capability."
+        }
+      ],
+      "limitations": [
+        "Holistic preference only.",
+        "Dynamic leaderboard: the snapshot date is part of the evidence.",
+        "A separate leaderboard variant `Wan2.7` scores Elo 1107 +/-7 at N=5,575 and must not be merged with this one."
+      ],
+      "notes": "The `260612` revision corresponds to the DashScope `wan2.7-t2v-2026-06-12` model id this platform submits to, which is what makes this an exact-revision binding."
+    },
+    {
+      "evidence_id": "E-WAN30-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-EDIT",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE; separate T2V and editing pools",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 5543,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-10 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Wan 3.0",
+        "model_id": null,
+        "version": "3.0",
+        "revision": null,
+        "provider": "Alibaba / Wan"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p target or closest supported",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo (T2V with audio)",
+          "value": 1244,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for the exact current version."
+        },
+        {
+          "metric_name": "Elo (editing with audio)",
+          "value": 1191,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Separate editing pool at N=4,647, +/-7. Not comparable with the T2V figure."
+        }
+      ],
+      "limitations": [
+        "Newer entry with a smaller sample than mature entries.",
+        "Cannot infer physics, camera, dialogue or reference quality.",
+        "Wan 2.1 and 2.2 results are not inheritable to 3.0."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-K25-OSC",
+      "source_ids": [
+        "S-OSC"
+      ],
+      "benchmark_name": "OSCBench",
+      "benchmark_version": "2026 paper",
+      "evaluation_method": "1,120 T2V prompts across 140 object-state-change scenarios; human plus GPT-5.2 evaluation",
+      "evaluator": "human raters and GPT-5.2",
+      "human_or_automatic": "hybrid",
+      "sample_size_prompts": 1120,
+      "sample_size_runs": "human subset 140 videos per model",
+      "human_eval_size": "3 raters per video x 140 videos per model; unique rater count not public",
+      "confidence_interval": null,
+      "comparison_models": [
+        "Open-Sora2.0",
+        "HunyuanVideo",
+        "HunyuanVideo1.5",
+        "Wan2.2",
+        "Kling2.5-Turbo",
+        "Veo3.1-Fast"
+      ],
+      "model": {
+        "name": "Kling 2.5 Turbo",
+        "model_id": null,
+        "version": "2.5-Turbo",
+        "revision": "API service unspecified",
+        "provider": "Kuaishou"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1920x1080",
+        "duration": "5s",
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-1",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Action (human)",
+          "value": 0.826,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Whether the requested action was realised."
+        },
+        {
+          "metric_name": "OSC Accuracy (human)",
+          "value": 0.726,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Whether the target state change occurred."
+        },
+        {
+          "metric_name": "OSC Consistency (human)",
+          "value": 0.726,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "State-change consistency across frames."
+        },
+        {
+          "metric_name": "Realism (human)",
+          "value": 0.732,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Visual realism, not conservation-law physics."
+        },
+        {
+          "metric_name": "Aesthetics (human)",
+          "value": 0.836,
+          "canonical_scene": "cinematic_quality",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Perceptual aesthetics proxy. Not style_fidelity: no target style reference exists in this test."
+        }
+      ],
+      "limitations": [
+        "Object-state-change domain only.",
+        "Applies to Kling 2.5 Turbo; must not be inherited by Kling 3.0 or 3.0 Omni."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-K30-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 19936,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-5 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Kling 3.0 1080p Pro",
+        "model_id": null,
+        "version": "3.0",
+        "revision": "leaderboard variant: 1080p Pro",
+        "provider": "Kuaishou"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1105,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for this exact served variant."
+        }
+      ],
+      "limitations": [
+        "Holistic only.",
+        "Exact server checkpoint is not exposed.",
+        "Does not evidence camera, physics or dialogue quality.",
+        "Kling 3.0 720p Standard (Elo 1099 +/-6, N=19,076) and Kling 3.0 Omni 720p Standard (Elo 1088 +/-6, N=8,670) are separate variants and are recorded separately."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-K30STD-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 19076,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Kling 3.0 720p Standard",
+        "model_id": null,
+        "version": "3.0",
+        "revision": "leaderboard variant: 720p Standard",
+        "provider": "Kuaishou"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "720p",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1099,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for this exact served variant. Not merged with the Pro variant."
+        }
+      ],
+      "limitations": [
+        "Holistic only.",
+        "Must not be merged with Kling 3.0 1080p Pro."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-K30-SD20",
+      "source_ids": [
+        "S-SD20"
+      ],
+      "benchmark_name": "SeedVideoBench 2.0",
+      "benchmark_version": "2.0",
+      "evaluation_method": "media and industry experts, absolute 1-5 rating; competitor generations judged inside a provider-authored benchmark",
+      "evaluator": "media experts",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Seedance 2.0",
+        "Sora 2 Pro",
+        "Veo 3.1",
+        "Kling 2.6",
+        "Wan 2.6",
+        "Vidu Q2 Pro"
+      ],
+      "model": {
+        "name": "Kling 3.0",
+        "model_id": null,
+        "version": "3.0",
+        "revision": null,
+        "provider": "Kuaishou"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": "multilingual benchmark categories",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "1-5",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Motion Quality",
+          "value": 3.1,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Metric semantics are direct; the source grade is what limits this, not the mapping."
+        },
+        {
+          "metric_name": "Video Prompt Following",
+          "value": 2.78,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Direct prompt-following measurement."
+        },
+        {
+          "metric_name": "Aesthetics",
+          "value": 3.36,
+          "canonical_scene": "cinematic_quality",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Aesthetics proxy only; not style_fidelity."
+        },
+        {
+          "metric_name": "Audio Quality",
+          "value": 2.74,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "dialogue_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Audio track quality, not lip-sync accuracy."
+        },
+        {
+          "metric_name": "Audio-Visual Sync",
+          "value": 2.78,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "lip_sync"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Joint AV synchronisation; not an independent phoneme or LSE lip-sync metric."
+        },
+        {
+          "metric_name": "Audio Prompt Following",
+          "value": 2.54,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Audio-side prompt adherence."
+        }
+      ],
+      "limitations": [
+        "Competitor evaluated inside a provider-authored benchmark.",
+        "Overall N, rater N and CI are not public.",
+        "Grade C: weak prior only, regardless of how precise the mapping is."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-VEO31F-OSC",
+      "source_ids": [
+        "S-OSC"
+      ],
+      "benchmark_name": "OSCBench",
+      "benchmark_version": "2026 paper",
+      "evaluation_method": "1,120 T2V prompts across 140 object-state-change scenarios; human plus GPT-5.2 evaluation",
+      "evaluator": "human raters and GPT-5.2",
+      "human_or_automatic": "hybrid",
+      "sample_size_prompts": 1120,
+      "sample_size_runs": "human subset 140 videos per model",
+      "human_eval_size": "3 raters per video x 140 videos per model; unique rater count not public",
+      "confidence_interval": null,
+      "comparison_models": [
+        "Open-Sora2.0",
+        "HunyuanVideo",
+        "HunyuanVideo1.5",
+        "Wan2.2",
+        "Kling2.5-Turbo",
+        "Veo3.1-Fast"
+      ],
+      "model": {
+        "name": "Veo 3.1 Fast",
+        "model_id": null,
+        "version": "3.1",
+        "revision": "Fast variant",
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1280x720",
+        "duration": "6s",
+        "reference_mode": "none",
+        "fps": 24
+      },
+      "metric_scale": "0-1",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Action (human)",
+          "value": 0.908,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Whether the requested action was realised."
+        },
+        {
+          "metric_name": "Action (GPT-5.2)",
+          "value": 0.802,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Automatic judge on the same dimension; kept beside the human score, never averaged with it."
+        },
+        {
+          "metric_name": "OSC Accuracy (human)",
+          "value": 0.786,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Whether the target state change correctly occurred."
+        },
+        {
+          "metric_name": "OSC Consistency (human)",
+          "value": 0.748,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "State-change consistency across frames; not minute-scale identity continuity."
+        },
+        {
+          "metric_name": "Subject (human)",
+          "value": 0.936,
+          "canonical_scene": "character_consistency",
+          "canonical_capability": [
+            "identity_consistency"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Subject presence and stability within a short OSC clip."
+        },
+        {
+          "metric_name": "Object (human)",
+          "value": 0.916,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Object presence and correctness."
+        },
+        {
+          "metric_name": "Scene Alignment (human)",
+          "value": 0.89,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Scene matches the prompt."
+        },
+        {
+          "metric_name": "Realism (human)",
+          "value": 0.752,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Visual realism, deliberately not physical_realism."
+        },
+        {
+          "metric_name": "Aesthetics (human)",
+          "value": 0.874,
+          "canonical_scene": "cinematic_quality",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Aesthetics proxy; no target style reference, so not style_fidelity."
+        }
+      ],
+      "limitations": [
+        "Object-state-change domain only.",
+        "Bound to the Fast variant. Must not be inherited by plain Veo 3.1 or by Lite."
+      ],
+      "notes": "The frequently-quoted 0.976 for this model is the GPT-5.2 *Subject* score, not an aggregate. It is recorded here as a conflict rather than as a headline number; the cross-check document could not re-verify it from a primary table and excluded it."
+    },
+    {
+      "evidence_id": "E-VEO31-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 9033,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Veo 3.1",
+        "model_id": null,
+        "version": "3.1",
+        "revision": "leaderboard service version",
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p target or closest supported",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1090,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for the plain 3.1 variant."
+        }
+      ],
+      "limitations": [
+        "Overall preference only.",
+        "Veo 3.1 Lite (1088 +/-6, N=8,474) and Veo 3.1 Fast (1087 +/-6, N=17,863) are separate entries with heavily overlapping CIs; the three must not be merged or ranked against each other on this evidence."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-VEO31FAST-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 17863,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Veo 3.1 Fast",
+        "model_id": null,
+        "version": "3.1",
+        "revision": "Fast variant",
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p target or closest supported",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1087,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for the Fast variant."
+        }
+      ],
+      "limitations": [
+        "Overall preference only.",
+        "CI overlaps plain 3.1 and Lite; the ordering between the three variants is not established by this evidence."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-VEO31LITE-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena (text-to-video, with audio)",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 8474,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%)",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Veo 3.1 Lite",
+        "model_id": null,
+        "version": "3.1",
+        "revision": "Lite variant",
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": null,
+        "resolution": "1080p target or closest supported",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo",
+          "value": 1088,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic human preference for the Lite variant."
+        }
+      ],
+      "limitations": [
+        "Overall preference only.",
+        "CI overlaps plain 3.1 and Fast."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-VEO31L-PAIR",
+      "source_ids": [
+        "S-VEO31L"
+      ],
+      "benchmark_name": "Veo 3.1 Lite vs Veo 3.1 Fast pairwise",
+      "benchmark_version": null,
+      "evaluation_method": "human head-to-head comparison against Veo 3.1 Fast",
+      "evaluator": "human raters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": "1,000 T2V; 646 I2V",
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Veo 3.1 Fast"
+      ],
+      "model": {
+        "name": "Veo 3.1 Lite",
+        "model_id": null,
+        "version": "3.1",
+        "revision": "Lite variant",
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V/I2V",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none/image"
+      },
+      "metric_scale": "0-100% win rate",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "T2V win rate vs Veo 3.1 Fast",
+          "value": 54.6,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Head-to-head preference against one named opponent; not a standalone quality level."
+        },
+        {
+          "metric_name": "I2V win rate vs Veo 3.1 Fast",
+          "value": 47.2,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Below 50% against the same opponent on I2V; direction differs from T2V and must not be collapsed."
+        }
+      ],
+      "limitations": [
+        "No rater N or CI.",
+        "A win rate against one opponent cannot be converted into an Elo difference or a cross-model score."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-VEO3-MGB",
+      "source_ids": [
+        "S-VEO3"
+      ],
+      "benchmark_name": "MovieGenBench + VBench I2V",
+      "benchmark_version": null,
+      "evaluation_method": "human head-to-head preference",
+      "evaluator": "human raters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": "1,003 video prompts + 527 video+audio prompts; 355 VBench I2V image-text pairs",
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "MovieGen",
+        "Kling 2.0",
+        "Minimax",
+        "Sora / Sora Turbo",
+        "Runway",
+        "Wan 2.1"
+      ],
+      "model": {
+        "name": "Veo 3",
+        "model_id": null,
+        "version": "3",
+        "revision": null,
+        "provider": "Google DeepMind"
+      },
+      "modality": "video",
+      "operation": "T2V/I2V",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none/image"
+      },
+      "metric_scale": "pairwise human preference",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Overall preference",
+          "value": null,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Reported as best/preferred with no numeric win-rate table, so the value stays null rather than being invented."
+        },
+        {
+          "metric_name": "Prompt following",
+          "value": null,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Officially evaluated dimension; again stated without a numeric table."
+        }
+      ],
+      "limitations": [
+        "Sample sizes are explicit but raw win rates, rater N and CI are not public, which is what makes this grade C.",
+        "Belongs to Veo 3. The 1,003 / 527 / 355 sample sizes must not be back-propagated onto Veo 3.1."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-SD20-T2V",
+      "source_ids": [
+        "S-SD20"
+      ],
+      "benchmark_name": "SeedVideoBench 2.0",
+      "benchmark_version": "2.0",
+      "evaluation_method": "media and industry experts; absolute 1-5 rating plus usability/satisfaction rates",
+      "evaluator": "media experts",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Kling 2.6",
+        "Kling 3.0",
+        "Sora 2 Pro",
+        "Veo 3.1",
+        "Seedance 1.5",
+        "Wan 2.6",
+        "Vidu Q2 Pro"
+      ],
+      "model": {
+        "name": "Seedance 2.0",
+        "model_id": "doubao-seedance-2-0-260128",
+        "version": "2.0",
+        "revision": "260128",
+        "provider": "ByteDance Seed"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": "multilingual benchmark categories",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "1-5",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Motion Quality",
+          "value": 3.75,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Directly evaluates motion; does not automatically equal physics."
+        },
+        {
+          "metric_name": "Video Prompt Following",
+          "value": 3.43,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Direct prompt-following measurement."
+        },
+        {
+          "metric_name": "Aesthetics",
+          "value": 3.67,
+          "canonical_scene": "cinematic_quality",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Perceptual quality proxy. Not style_fidelity: no target style reference."
+        },
+        {
+          "metric_name": "Audio Quality",
+          "value": 3.63,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "dialogue_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Audio track quality."
+        },
+        {
+          "metric_name": "Audio-Visual Sync",
+          "value": 3.75,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "lip_sync"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Joint AV sync, not an independent phoneme or LSE lip-sync metric."
+        },
+        {
+          "metric_name": "Audio Prompt Following",
+          "value": 3.56,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Audio-side prompt adherence."
+        }
+      ],
+      "limitations": [
+        "Provider-authored benchmark.",
+        "Overall N, rater N and CI not public; grade C, weak prior only.",
+        "Applies to 2.0 only and must not be inherited by 2.5."
+      ],
+      "notes": "Usability rates reported alongside: Motion 97.55%, Prompt 84.97%, Aesthetics 96.32%, Audio 93.75%, AV Sync 93.30%, Audio Prompt 83.93%."
+    },
+    {
+      "evidence_id": "E-SD20-FINE",
+      "source_ids": [
+        "S-SD20"
+      ],
+      "benchmark_name": "SeedVideoBench 2.0",
+      "benchmark_version": "2.0",
+      "evaluation_method": "media and industry experts; absolute 1-5 rating plus usability/satisfaction rates",
+      "evaluator": "media experts",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Kling 2.6",
+        "Kling 3.0",
+        "Sora 2 Pro",
+        "Veo 3.1",
+        "Seedance 1.5",
+        "Wan 2.6",
+        "Vidu Q2 Pro"
+      ],
+      "model": {
+        "name": "Seedance 2.0",
+        "model_id": "doubao-seedance-2-0-260128",
+        "version": "2.0",
+        "revision": "260128",
+        "provider": "ByteDance Seed"
+      },
+      "modality": "video",
+      "operation": "T2V",
+      "conditions": {
+        "language": "multilingual",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "1-5",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Physical Feedback",
+          "value": 3.62,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "An explicit physics subcategory, closer to physical_realism than the aggregate Motion Quality."
+        },
+        {
+          "metric_name": "Physical Phenomena",
+          "value": 3.31,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Explicit physics subcategory."
+        },
+        {
+          "metric_name": "Natural Phenomena",
+          "value": 3.89,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Natural-phenomenon rendering; adjacent to physics rather than mechanics."
+        },
+        {
+          "metric_name": "Advanced Camera Movement",
+          "value": 3.46,
+          "canonical_scene": "camera_control",
+          "canonical_capability": [
+            "camera_control"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Targets camera-movement instructions. Not 6-DoF trajectory error."
+        },
+        {
+          "metric_name": "Text Overlay",
+          "value": 3.31,
+          "canonical_scene": "text_rendering",
+          "canonical_capability": [
+            "text_fidelity"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "An actual visual-text category rather than general prompt adherence relabelled."
+        },
+        {
+          "metric_name": "Short Text",
+          "value": 3.57,
+          "canonical_scene": "text_rendering",
+          "canonical_capability": [
+            "text_fidelity"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Visual text rendering category."
+        },
+        {
+          "metric_name": "Creative Text",
+          "value": 3.43,
+          "canonical_scene": "text_rendering",
+          "canonical_capability": [
+            "text_fidelity"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Visual text rendering category."
+        },
+        {
+          "metric_name": "Fine Hand Motion",
+          "value": 3.5,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Fine-grained motion subcategory."
+        },
+        {
+          "metric_name": "Intense Sports Motion",
+          "value": 3.21,
+          "canonical_scene": "action",
+          "canonical_capability": [
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Large-motion subcategory; independent of the 3.75 aggregate."
+        }
+      ],
+      "limitations": [
+        "N, rater N and CI not public; grade C.",
+        "These are independent sub-dimensions and must not be replaced by the Motion Quality aggregate."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-SD20-CN-AV",
+      "source_ids": [
+        "S-SD20"
+      ],
+      "benchmark_name": "SeedVideoBench 2.0",
+      "benchmark_version": "2.0",
+      "evaluation_method": "media and industry experts; absolute 1-5 rating plus usability/satisfaction rates",
+      "evaluator": "media experts",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Kling 2.6",
+        "Kling 3.0",
+        "Sora 2 Pro",
+        "Veo 3.1",
+        "Seedance 1.5",
+        "Wan 2.6",
+        "Vidu Q2 Pro"
+      ],
+      "model": {
+        "name": "Seedance 2.0",
+        "model_id": "doubao-seedance-2-0-260128",
+        "version": "2.0",
+        "revision": "260128",
+        "provider": "ByteDance Seed"
+      },
+      "modality": "audio-video",
+      "operation": "T2V with native audio",
+      "conditions": {
+        "language": "Chinese / English / multilingual",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "1-5",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Chinese Multi-Person Dialogue",
+          "value": 3.86,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "lip_sync",
+            "dialogue_quality",
+            "chinese_language_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "The Chinese multi-speaker subset of an AV-sync benchmark. Directly relevant, but not an independent phoneme or LSE lip-sync measurement."
+        },
+        {
+          "metric_name": "Chinese Dialect/Accent",
+          "value": 3.64,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "chinese_language_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Dialect and accent handling."
+        },
+        {
+          "metric_name": "Chinese Variety Show Voice",
+          "value": 3.14,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "chinese_language_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Lowest of the Chinese subcategories; kept rather than smoothed."
+        },
+        {
+          "metric_name": "Chinese Opera",
+          "value": 3.63,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "chinese_language_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Chinese vocal style subcategory."
+        },
+        {
+          "metric_name": "English",
+          "value": 4.17,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "dialogue_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "English subset scores well above every Chinese subset; the gap is the useful signal."
+        },
+        {
+          "metric_name": "Singing/Rap",
+          "value": 4.14,
+          "canonical_scene": "dialogue",
+          "canonical_capability": [
+            "dialogue_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Musical vocal subcategory."
+        }
+      ],
+      "limitations": [
+        "Not an independent public Chinese lip-sync benchmark.",
+        "N, rater N and CI not public; grade C.",
+        "The report itself acknowledges lip-sync errors can still occur in complex multi-speaker scenes."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-SD20-R2V",
+      "source_ids": [
+        "S-SD20"
+      ],
+      "benchmark_name": "SeedVideoBench 2.0",
+      "benchmark_version": "2.0",
+      "evaluation_method": "media and industry experts; absolute 1-5 rating plus usability/satisfaction rates",
+      "evaluator": "media experts",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "Kling 2.6",
+        "Kling 3.0",
+        "Sora 2 Pro",
+        "Veo 3.1",
+        "Seedance 1.5",
+        "Wan 2.6",
+        "Vidu Q2 Pro"
+      ],
+      "model": {
+        "name": "Seedance 2.0",
+        "model_id": "doubao-seedance-2-0-260128",
+        "version": "2.0",
+        "revision": "260128",
+        "provider": "ByteDance Seed"
+      },
+      "modality": "video",
+      "operation": "R2V / editing / continuation / extension",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "subject image/video, motion video, style reference, edit input video"
+      },
+      "metric_scale": "mixed: see per-metric scale in rationale",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Subject-image Reference Alignment (1-5)",
+          "value": 3.18,
+          "canonical_scene": "reference_adherence",
+          "canonical_capability": [
+            "reference_adherence",
+            "identity_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Directly measures subject-reference match."
+        },
+        {
+          "metric_name": "Subject-video Reference Alignment (1-5)",
+          "value": 3.35,
+          "canonical_scene": "reference_adherence",
+          "canonical_capability": [
+            "reference_adherence",
+            "identity_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Directly measures subject-reference match from video."
+        },
+        {
+          "metric_name": "Motion Reference Alignment (1-5)",
+          "value": 2.64,
+          "canonical_scene": "reference_adherence",
+          "canonical_capability": [
+            "reference_adherence",
+            "motion_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Explicitly requires the motion reference to be matched."
+        },
+        {
+          "metric_name": "Style Reference Alignment (1-5)",
+          "value": 2.37,
+          "canonical_scene": "style_fidelity",
+          "canonical_capability": [
+            "style_fidelity",
+            "reference_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "An actual target style reference exists here, which is what makes style_fidelity a legal mapping — unlike a general Aesthetics score."
+        },
+        {
+          "metric_name": "Video editing Edit Consistency (1-5)",
+          "value": 3.75,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Cross-time consistency during editing."
+        },
+        {
+          "metric_name": "Continuation Reference Alignment (1-5)",
+          "value": 3.18,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "temporal_consistency"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Continuation consistency."
+        },
+        {
+          "metric_name": "Extension Task Following (1-3)",
+          "value": 1.93,
+          "canonical_scene": "continuity",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "On a 1-3 scale. The weakest R2V subtask for this model, and a useful counter-example to its other R2V strengths."
+        }
+      ],
+      "limitations": [
+        "Scales differ per metric and are stored per metric rather than unified.",
+        "Provider benchmark; N not public; grade C."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-SD20-AA",
+      "source_ids": [
+        "S-AA-T2V",
+        "S-AA-I2V",
+        "S-AA-EDIT",
+        "S-AA-M"
+      ],
+      "benchmark_name": "Artificial Analysis Video Arena",
+      "benchmark_version": null,
+      "evaluation_method": "blind same-prompt pairwise preference; Bradley-Terry MLE; separate pools per modality",
+      "evaluator": "blind public voters",
+      "human_or_automatic": "human",
+      "sample_size_prompts": null,
+      "sample_size_runs": 22179,
+      "human_eval_size": "unique voters not public",
+      "confidence_interval": "+/-6 (95%) on T2V",
+      "comparison_models": [
+        "models in the same pool at snapshot time"
+      ],
+      "model": {
+        "name": "Dreamina Seedance 2.0 720p",
+        "model_id": null,
+        "version": "2.0",
+        "revision": "leaderboard variant",
+        "provider": "ByteDance / Dreamina"
+      },
+      "modality": "video",
+      "operation": "T2V / I2V / editing",
+      "conditions": {
+        "language": null,
+        "resolution": "720p",
+        "duration": "10s target or closest supported",
+        "reference_mode": "none/image/edit source"
+      },
+      "metric_scale": "Elo-like",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Elo (T2V with audio)",
+          "value": 1221,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Holistic preference."
+        },
+        {
+          "metric_name": "Elo (I2V with audio)",
+          "value": 1191,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Separate I2V pool at N=14,990, +/-7. Not comparable with the T2V figure."
+        },
+        {
+          "metric_name": "Elo (editing with audio)",
+          "value": 1038,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Separate editing pool at N=22,544, +/-5."
+        }
+      ],
+      "limitations": [
+        "Dynamic and holistic.",
+        "Cannot diagnose physics, lip-sync, camera or style.",
+        "Applies to Seedance 2.0, not 2.5."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-GI2-QIB",
+      "source_ids": [
+        "S-QIB"
+      ],
+      "benchmark_name": "Qwen-Image-Bench",
+      "benchmark_version": null,
+      "evaluation_method": "1,000 bilingual expert-crafted prompts (500 long + 500 short); Q-Judger automatic scoring validated against human expert ranking",
+      "evaluator": "Q-Judger (Qwen3.6-27B), trained on 130k+ bilingual expert-annotated prompt-image pairs",
+      "human_or_automatic": "automatic, human-validated",
+      "sample_size_prompts": 1000,
+      "sample_size_runs": "benchmark generation protocol",
+      "human_eval_size": "80 professional annotators used in judge-data creation; at least 3 independent reviews per sample",
+      "confidence_interval": null,
+      "comparison_models": [
+        "18 systems"
+      ],
+      "model": {
+        "name": "GPT Image 2",
+        "model_id": null,
+        "version": "2",
+        "revision": "unspecified",
+        "provider": "OpenAI"
+      },
+      "modality": "image",
+      "operation": "T2I",
+      "conditions": {
+        "language": "Chinese leaderboard subset / bilingual dataset",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-100",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Quality",
+          "value": 58.65,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Top-level Quality dimension of the benchmark."
+        },
+        {
+          "metric_name": "Alignment",
+          "value": 65.85,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Explicitly measures text-image alignment."
+        },
+        {
+          "metric_name": "Aesthetics",
+          "value": 67.53,
+          "canonical_scene": "cinematic_quality",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Aesthetics proxy; cannot be relabelled style_fidelity."
+        },
+        {
+          "metric_name": "Real-world Fidelity",
+          "value": 57.38,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Realism of depicted content."
+        },
+        {
+          "metric_name": "Creative Generation",
+          "value": 75.23,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "An aggregate spanning text rendering, design and storytelling. Explicitly NOT usable as a text_fidelity score."
+        },
+        {
+          "metric_name": "Overall",
+          "value": 64.69,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "LOW",
+          "mapping_rationale": "Benchmark aggregate; recorded but never usable as a single capability prior."
+        }
+      ],
+      "limitations": [
+        "The benchmark did not expose the exact OpenAI API snapshot, so revision stays unspecified.",
+        "Creative Generation aggregates several facets and cannot be relabelled as text fidelity alone."
+      ],
+      "notes": "GPT Image 1.5 on the same benchmark: Quality 55.14, Aesthetics 60.88, Alignment 61.72, Real-world Fidelity 53.95, Creative Generation 66.35, Overall 59.65."
+    },
+    {
+      "evidence_id": "E-GI2-PHY",
+      "source_ids": [
+        "S-PHYEDIT"
+      ],
+      "benchmark_name": "PhyEditBench",
+      "benchmark_version": null,
+      "evaluation_method": "238 real-world instances plus 35 synthetic anti-physics cases; five editing settings; unified VLM judge",
+      "evaluator": "unified VLM judge",
+      "human_or_automatic": "automatic",
+      "sample_size_prompts": 273,
+      "sample_size_runs": "five editing settings in benchmark design",
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [
+        "multiple image editors"
+      ],
+      "model": {
+        "name": "GPT Image 2",
+        "model_id": null,
+        "version": "2",
+        "revision": "unspecified",
+        "provider": "OpenAI"
+      },
+      "modality": "image",
+      "operation": "instruction-guided image editing",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "input image"
+      },
+      "metric_scale": "1-10",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Physical Plausibility (normal physics)",
+          "value": 9.13,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Direct metric of a dedicated physics-editing benchmark. Image editing, not video dynamics."
+        },
+        {
+          "metric_name": "Physical Plausibility (anti-physics)",
+          "value": 4.85,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "physical_realism"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "The same model on deliberately anti-physical prompts. The gap from 9.13 is the evidence: a physics prior must carry its task condition, not a single scalar."
+        },
+        {
+          "metric_name": "Consistency (normal)",
+          "value": 9.99,
+          "canonical_scene": "reference_adherence",
+          "canonical_capability": [
+            "reference_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Preservation of the input image and scene constraints under editing. Not temporal consistency."
+        },
+        {
+          "metric_name": "Instruction Following (normal)",
+          "value": 9.57,
+          "canonical_scene": "physics",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Physics-editing instruction adherence."
+        },
+        {
+          "metric_name": "Image Quality (normal)",
+          "value": 8.19,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "visual_quality"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Output image quality."
+        }
+      ],
+      "limitations": [
+        "Image editing physics, not video dynamics.",
+        "Exact OpenAI snapshot unspecified."
+      ],
+      "notes": null
+    },
+    {
+      "evidence_id": "E-GI2-BIZ",
+      "source_ids": [
+        "S-BIZ"
+      ],
+      "benchmark_name": "BizGenEval",
+      "benchmark_version": null,
+      "evaluation_method": "400 prompts, 20 tasks, 8,000 human-verified checklist questions; checklist-based automatic scoring",
+      "evaluator": "checklist evaluation backed by human-verified questions",
+      "human_or_automatic": "hybrid construction, automatic scoring",
+      "sample_size_prompts": 400,
+      "sample_size_runs": "26 model systems evaluated",
+      "human_eval_size": "8,000 human-verified checklist questions",
+      "confidence_interval": null,
+      "comparison_models": [
+        "26 systems"
+      ],
+      "model": {
+        "name": "GPT-Image-2.0",
+        "model_id": null,
+        "version": "2",
+        "revision": "unspecified",
+        "provider": "OpenAI"
+      },
+      "modality": "image",
+      "operation": "T2I business visual document generation",
+      "conditions": {
+        "language": "benchmark-defined",
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-100%",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Hard",
+          "value": 83.2,
+          "canonical_scene": "commercial_hero",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "The closest public evidence to commercial content, but the benchmark is slides, charts, web pages, posters and scientific figures — not product packshots. Adjacent mapping only."
+        },
+        {
+          "metric_name": "Easy",
+          "value": 95.3,
+          "canonical_scene": "commercial_hero",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Same caveat."
+        }
+      ],
+      "limitations": [
+        "Commercial visual documents are not SKU or product-packshot fidelity.",
+        "Exact gpt-image-2 API snapshot unspecified."
+      ],
+      "notes": "Covers text rendering, layout control, attribute binding and knowledge reasoning, but publishes only Hard/Easy aggregates here, so no text-only sub-score can be extracted."
+    },
+    {
+      "evidence_id": "E-GPT4O-GENEVAL",
+      "source_ids": [
+        "S-GENEVAL",
+        "S-GPTIMGEVAL"
+      ],
+      "benchmark_name": "GenEval (via GPT-ImgEval)",
+      "benchmark_version": null,
+      "evaluation_method": "object-focused compositional evaluation: single/two-object presence, counting, colour, spatial position, attribute binding",
+      "evaluator": "automatic object detection pipeline",
+      "human_or_automatic": "automatic",
+      "sample_size_prompts": null,
+      "sample_size_runs": null,
+      "human_eval_size": null,
+      "confidence_interval": null,
+      "comparison_models": [],
+      "model": {
+        "name": "GPT-4o image generation",
+        "model_id": null,
+        "version": "4o",
+        "revision": null,
+        "provider": "OpenAI"
+      },
+      "modality": "image",
+      "operation": "T2I",
+      "conditions": {
+        "language": null,
+        "resolution": null,
+        "duration": null,
+        "reference_mode": "none"
+      },
+      "metric_scale": "0-1",
+      "higher_is_better": true,
+      "metrics": [
+        {
+          "metric_name": "Overall",
+          "value": 0.84,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "MEDIUM",
+          "mapping_rationale": "Compositional alignment aggregate."
+        },
+        {
+          "metric_name": "Counting",
+          "value": 0.85,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Object counting."
+        },
+        {
+          "metric_name": "Colors",
+          "value": 0.92,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Colour correctness."
+        },
+        {
+          "metric_name": "Position",
+          "value": 0.75,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Spatial position correctness."
+        },
+        {
+          "metric_name": "Attribute binding",
+          "value": 0.61,
+          "canonical_scene": "generic",
+          "canonical_capability": [
+            "prompt_adherence"
+          ],
+          "mapping_confidence": "HIGH",
+          "mapping_rationale": "Attribute binding correctness."
+        }
+      ],
+      "limitations": [
+        "This is GPT-4o image generation, a different model from GPT Image 2. It is recorded so that nobody re-derives it onto GPT Image 2 later.",
+        "GenEval measures compositional alignment and is explicitly NOT text rendering."
+      ],
+      "notes": "Carried from the cross-check document, which used GenEval where the primary document used Qwen-Image-Bench. They are not the same model."
+    }
+  ],
+  "bindings": [
+    {
+      "logical_name": "veo-3.1-fast-openrouter",
+      "provider_model_id": "google/veo-3.1-fast",
+      "evidence_id": "E-VEO31F-OSC",
+      "version_match": "EXACT",
+      "rationale": "OSCBench evaluated the Fast variant by name. This is the only video model this platform runs that has per-dimension external evidence bound to the exact variant served."
+    },
+    {
+      "logical_name": "veo-3.1-fast-openrouter",
+      "provider_model_id": "google/veo-3.1-fast",
+      "evidence_id": "E-VEO31FAST-AA",
+      "version_match": "EXACT",
+      "rationale": "Arena entry is the Fast variant by name."
+    },
+    {
+      "logical_name": "veo-3.1-lite-openrouter",
+      "provider_model_id": "google/veo-3.1-lite",
+      "evidence_id": "E-VEO31LITE-AA",
+      "version_match": "EXACT",
+      "rationale": "Arena entry is the Lite variant by name."
+    },
+    {
+      "logical_name": "veo-3.1-lite-openrouter",
+      "provider_model_id": "google/veo-3.1-lite",
+      "evidence_id": "E-VEO31L-PAIR",
+      "version_match": "EXACT",
+      "rationale": "Official Lite model card, measured against Fast.",
+      "note": "A win rate against one named opponent. Usable as evidence about Lite-versus-Fast only, never as a standalone quality level."
+    },
+    {
+      "logical_name": "veo-3.1-openrouter",
+      "provider_model_id": "google/veo-3.1",
+      "evidence_id": "E-VEO31-AA",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Arena entry is plain Veo 3.1; the served checkpoint behind the leaderboard is not exposed."
+    },
+    {
+      "logical_name": "veo-3.1-openrouter",
+      "provider_model_id": "google/veo-3.1",
+      "evidence_id": "E-VEO31F-OSC",
+      "version_match": "VARIANT_MISMATCH",
+      "rationale": "OSCBench is bound to Veo 3.1 Fast. Recorded so the Action .908 and OSC Consistency .748 figures are never re-derived onto the plain variant."
+    },
+    {
+      "logical_name": "veo-3.1-openrouter",
+      "provider_model_id": "google/veo-3.1",
+      "evidence_id": "E-VEO3-MGB",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "MovieGenBench 1,003 / 527 and VBench I2V 355 belong to Veo 3, not 3.1."
+    },
+    {
+      "logical_name": "flow-veo-3.1-internal",
+      "provider_model_id": "flow-veo-3.1",
+      "evidence_id": "E-VEO31-AA",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Same model version, served through Google Flow rather than OpenRouter. Which backend serves it is not part of the version identity the evidence pins."
+    },
+    {
+      "logical_name": "kling-3-pro-openrouter",
+      "provider_model_id": "kwaivgi/kling-v3.0-pro",
+      "evidence_id": "E-K30-AA",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Arena variant is Kling 3.0 1080p Pro, which matches the served tier."
+    },
+    {
+      "logical_name": "kling-3-pro-openrouter",
+      "provider_model_id": "kwaivgi/kling-v3.0-pro",
+      "evidence_id": "E-K30-SD20",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Version matches, but the source is a competitor-authored benchmark at grade C, so this is a weak prior at best.",
+      "note": "Grade C caps this regardless of how exact the version match is."
+    },
+    {
+      "logical_name": "kling-3-pro-openrouter",
+      "provider_model_id": "kwaivgi/kling-v3.0-pro",
+      "evidence_id": "E-K25-OSC",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "OSCBench measured Kling 2.5 Turbo. Recorded so its Action .826 is never inherited by 3.0."
+    },
+    {
+      "logical_name": "kling-3-standard-openrouter",
+      "provider_model_id": "kwaivgi/kling-v3.0-std",
+      "evidence_id": "E-K30STD-AA",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Arena variant is Kling 3.0 720p Standard, which matches the served tier."
+    },
+    {
+      "logical_name": "kling-3-standard-openrouter",
+      "provider_model_id": "kwaivgi/kling-v3.0-std",
+      "evidence_id": "E-K25-OSC",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Kling 2.5 Turbo is a different version."
+    },
+    {
+      "logical_name": "wan-2.7-official",
+      "provider_model_id": "wan-2.7",
+      "evidence_id": "E-WAN27-AA",
+      "version_match": "EXACT",
+      "rationale": "The Arena entry is `Wan2.7-260612`, and this platform submits to `wan2.7-t2v-2026-06-12`. The revision matches, which is what makes this exact rather than version-only.",
+      "note": "A second Arena variant named plain `Wan2.7` scores 1107 +/-7 at N=5,575. It is a different entry and must not be merged."
+    },
+    {
+      "logical_name": "wan-2.7-official",
+      "provider_model_id": "wan-2.7",
+      "evidence_id": "E-WAN21-WB",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Wan-Bench measured Wan 2.1 T2V-14B. Physical Plausibility .939, ID Consistency .946 and Camera Control .527 belong to 2.1 and are recorded here precisely so they are never re-derived onto 2.7."
+    },
+    {
+      "logical_name": "wan-2.7-official",
+      "provider_model_id": "wan-2.7",
+      "evidence_id": "E-WAN22-OSC",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "OSCBench measured Wan 2.2."
+    },
+    {
+      "logical_name": "wan-3.0-official",
+      "provider_model_id": "wan-3.0",
+      "evidence_id": "E-WAN30-AA",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Arena entry is Wan 3.0.",
+      "note": "This account has no Wan 3.0 API access and the model is disabled in the model registry. The evidence is kept so that enabling it later is a config change rather than a research task."
+    },
+    {
+      "logical_name": "wan-3.0-official",
+      "provider_model_id": "wan-3.0",
+      "evidence_id": "E-WAN21-WB",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Wan 2.1 Wan-Bench is not inheritable by 3.0."
+    },
+    {
+      "logical_name": "seedance-2.5-official",
+      "provider_model_id": "doubao-seedance-2-5-260628",
+      "evidence_id": "E-SD20-T2V",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Every SeedVideoBench 2.0 number belongs to Seedance 2.0. Seedance 2.5 has official capability material and no benchmark this registry accepts."
+    },
+    {
+      "logical_name": "seedance-2.5-official",
+      "provider_model_id": "doubao-seedance-2-5-260628",
+      "evidence_id": "E-SD20-FINE",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Same: the fine-grained physics, camera and text sub-scores belong to 2.0."
+    },
+    {
+      "logical_name": "seedance-2.5-official",
+      "provider_model_id": "doubao-seedance-2-5-260628",
+      "evidence_id": "E-SD20-CN-AV",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Same: the Chinese dialogue and AV-sync sub-scores belong to 2.0. This is the most tempting inheritance on the list, because it is the only Chinese-dialogue evidence that exists at all."
+    },
+    {
+      "logical_name": "seedance-2.5-official",
+      "provider_model_id": "doubao-seedance-2-5-260628",
+      "evidence_id": "E-SD20-R2V",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "Same: the R2V and style-reference scores belong to 2.0."
+    },
+    {
+      "logical_name": "seedance-2.5-official",
+      "provider_model_id": "doubao-seedance-2-5-260628",
+      "evidence_id": "E-SD20-AA",
+      "version_match": "VERSION_MISMATCH",
+      "rationale": "The Arena entry is Dreamina Seedance 2.0 720p."
+    },
+    {
+      "logical_name": "gpt-image-2-openrouter",
+      "provider_model_id": "openai/gpt-image-2",
+      "evidence_id": "E-GI2-QIB",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "Qwen-Image-Bench evaluated GPT Image 2 but did not disclose which OpenAI API snapshot it called, so the revision stays unspecified rather than being claimed as `gpt-image-2-2026-04-21`."
+    },
+    {
+      "logical_name": "gpt-image-2-openrouter",
+      "provider_model_id": "openai/gpt-image-2",
+      "evidence_id": "E-GI2-PHY",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "PhyEditBench evaluated GPT Image 2 for instruction-guided editing; snapshot unspecified."
+    },
+    {
+      "logical_name": "gpt-image-2-openrouter",
+      "provider_model_id": "openai/gpt-image-2",
+      "evidence_id": "E-GI2-BIZ",
+      "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+      "rationale": "BizGenEval evaluated GPT-Image-2.0; snapshot unspecified."
+    },
+    {
+      "logical_name": "gpt-image-2-openrouter",
+      "provider_model_id": "openai/gpt-image-2",
+      "evidence_id": "E-GPT4O-GENEVAL",
+      "version_match": "MODEL_MISMATCH",
+      "rationale": "GenEval / GPT-ImgEval diagnose GPT-4o image generation. A different model, recorded so its 0.84 overall is never attached to GPT Image 2."
+    }
+  ],
+  "unbacked_models": [
+    {
+      "logical_name": "seedream-5.0-ark",
+      "provider_model_id": "seedream-5-0",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "No public benchmark for this exact version was found in either source document. Its capability priors in the model registry are hand-authored judgement."
+    },
+    {
+      "logical_name": "grok-imagine-video-openrouter",
+      "provider_model_id": "x-ai/grok-imagine-video",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "Not present in either source document."
+    },
+    {
+      "logical_name": "grok-video-official",
+      "provider_model_id": "grok-video",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "Not present in either source document. Also served by a provider with no transport."
+    },
+    {
+      "logical_name": "flow-narwhal-image-internal",
+      "provider_model_id": "NARWHAL",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "Internal model; no public evidence exists by construction."
+    },
+    {
+      "logical_name": "veo-3.1-quality-official",
+      "provider_model_id": "veo-3.1-quality",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "The served variant behind `veo-3.1-quality` is not established, so no Arena variant can be bound to it without guessing. Also served by a provider with no transport."
+    }
+  ],
+  "gaps": [
+    {
+      "scope": "every video model this platform runs",
+      "canonical_scene": "product_fidelity",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "No public benchmark covering SKU, logo, packaging, geometry and material fidelity against a product reference was found for any current version."
+    },
+    {
+      "scope": "every video model this platform runs",
+      "canonical_scene": "commercial_hero",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "The closest evidence (BizGenEval) is static business documents — slides, charts, posters — not product hero video."
+    },
+    {
+      "scope": "every video model this platform runs",
+      "canonical_scene": "dialogue + lip_sync + chinese_language_quality",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "The only Chinese multi-speaker AV evidence is grade C and belongs to Seedance 2.0, a version this platform does not run. No independent large-N Chinese lip-sync benchmark bound to a current version was found."
+    },
+    {
+      "scope": "every video model this platform runs",
+      "canonical_scene": "continuity beyond 15-30s",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Public benchmarks are short clips and partial extensions. No unified long-horizon identity-drift curve."
+    },
+    {
+      "scope": "every video model this platform runs",
+      "canonical_scene": "camera_control (trajectory-accurate)",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Semantic camera-control scores exist (Wan-Bench, SeedVideoBench) but no cross-model ground-truth 6-DoF pose-error benchmark."
+    },
+    {
+      "scope": "every model",
+      "canonical_scene": "artifact_rate",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Public benchmarks report quality or preference scores, not a comparably defined failure or artefact event rate."
+    },
+    {
+      "scope": "seedance-2.5-official",
+      "canonical_scene": "all quality scenes",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Official capability material only. Seedance 2.0 results are not inheritable."
+    },
+    {
+      "scope": "wan-2.7-official",
+      "canonical_scene": "physics, camera_control, reference_adherence, character_consistency, dialogue",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Only a holistic Arena entry exists for this exact revision."
+    },
+    {
+      "scope": "kling-3-pro-openrouter, kling-3-standard-openrouter",
+      "canonical_scene": "action, physics, dialogue, lip_sync, camera_control, reference_adherence, character_consistency, continuity",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Grade A/B evidence for Kling 3.0 is holistic Arena only. The competitor-authored diagnostic table is grade C."
+    },
+    {
+      "scope": "veo-3.1-openrouter, flow-veo-3.1-internal",
+      "canonical_scene": "physics, dialogue, lip_sync, camera_control, reference_adherence, style_fidelity",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "OSCBench is bound to the Fast variant and does not transfer to the plain variant."
+    },
+    {
+      "scope": "gpt-image-2-openrouter",
+      "canonical_scene": "text_rendering",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Both Qwen-Image-Bench Creative Generation and BizGenEval Hard/Easy are aggregates containing text among other facets. No text-only sub-score can be legally extracted."
+    },
+    {
+      "scope": "gpt-image-2-openrouter",
+      "canonical_scene": "product_fidelity, style_fidelity",
+      "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
+      "reason": "Business documents are not product packshots, and Aesthetics is not target-style adherence."
+    }
+  ],
+  "conflicts": [
+    {
+      "conflict_id": "C-GRADE-SD20",
+      "kind": "SOURCE_GRADE_DISAGREEMENT",
+      "description": "The primary document grades the Seedance 2.0 technical report C because overall prompt N, rater N and inter-rater statistics are not public. The cross-check document grades it A, noting the sample total is incomplete and calling it borderline A/B.",
+      "resolution": "C is recorded. The stricter grade is taken because it names the criterion it is applying, and because a weak prior that is labelled weak costs nothing while an overstated one propagates."
+    },
+    {
+      "conflict_id": "C-GRADE-VEO3",
+      "kind": "SOURCE_GRADE_DISAGREEMENT",
+      "description": "The primary document grades the Veo 3 model card C (sample sizes explicit, raw win rates and rater N absent). The cross-check document grades it A for sample sizes and B for the missing win-rate tables.",
+      "resolution": "C is recorded, for the same reason."
+    },
+    {
+      "conflict_id": "C-VEO31F-0976",
+      "kind": "MISREAD_NUMBER",
+      "description": "A figure of 0.976 has circulated for Veo 3.1 Fast on OSCBench. It is the GPT-5.2 *Subject* score, not an aggregate. The cross-check document could not re-verify it from a primary table and excluded it entirely.",
+      "resolution": "Recorded as the Subject sub-metric only. It is not stored as an aggregate and no aggregate is derived from it."
+    },
+    {
+      "conflict_id": "C-GI2-BENCHMARK-SET",
+      "kind": "DIFFERENT_MODEL",
+      "description": "The cross-check document evidences image generation with GenEval on GPT-4o (Overall 0.84). The primary document evidences GPT Image 2 with Qwen-Image-Bench, PhyEditBench and BizGenEval.",
+      "resolution": "Both are stored. The GenEval record is bound to gpt-image-2 as MODEL_MISMATCH so it can never feed a prior, and exists so nobody re-derives 0.84 onto GPT Image 2."
+    },
+    {
+      "conflict_id": "C-OSC-EVAL",
+      "kind": "EVALUATOR_DISAGREEMENT",
+      "description": "On OSCBench, human and GPT-5.2 scores for the same model and dimension differ materially: Veo 3.1 Fast Action .908 human versus .802 automatic; Kling 2.5 Turbo Accuracy .726 versus .652; Wan 2.2 OSC Consistency .668 human versus .710 automatic — the automatic judge is higher in that last case.",
+      "resolution": "Human and automatic scores are stored as separate metrics. Neither is treated as ground truth for the other and they are never averaged."
+    },
+    {
+      "conflict_id": "C-VEO-LITE",
+      "kind": "APPARENT_ONLY",
+      "description": "The official Lite model card reports a 54.6% T2V win rate against Fast, while the Arena has Lite at 1088 +/-6 and Fast at 1087 +/-6.",
+      "resolution": "Not a contradiction. The Arena CIs overlap almost entirely and the prompt pools and methods differ. A win rate against one opponent must not be converted into an Elo difference."
+    },
+    {
+      "conflict_id": "C-WAN-PHYS",
+      "kind": "DIFFERENT_DEFINITION",
+      "description": "Wan-Bench reports Physical Plausibility .939 for Wan 2.1, while independent physics evaluations rank some closed models above Wan 2.1.",
+      "resolution": "Both can hold. Different benchmarks, model pools and definitions of physics. .939 is not a 93.9% real-world physics correctness rate."
+    },
+    {
+      "conflict_id": "C-GI2-PHY-REGIME",
+      "kind": "TASK_CONDITION",
+      "description": "GPT Image 2 scores Physical Plausibility 9.13 on normal physics and 4.85 on anti-physics prompts in the same benchmark.",
+      "resolution": "Not an error. A physics prior must carry its task condition; a single physics scalar per model would be wrong here."
+    },
+    {
+      "conflict_id": "C-AA-OFFICIAL",
+      "kind": "INCOMPARABLE",
+      "description": "Seedance 2.0 leads several dimensions in its own SeedVideoBench 2.0 tables while sitting below other models on the current Artificial Analysis holistic leaderboard.",
+      "resolution": "Not the same metric. Internal diagnostic benchmark versus blind holistic preference, different pools, different dates. No fusion into a single score."
+    }
+  ]
+}

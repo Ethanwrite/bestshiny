@@ -161,6 +161,15 @@ is about 44 credits, allowing one request against the 50-credit starter grant. A
 about 87 credits and fails before Job/Provider creation if the balance cannot be reserved. Fixed-offer purchases are
 implemented; recurring grants, expiry and administrator adjustments are not.
 
+**Every plan draws on that wallet.** Reservation used to return an inert charge for any tier other than FREE,
+so a PRO or ENTERPRISE generation was priced, the quote was written onto the Job, and nothing was reserved,
+settled or held for reconciliation. Who pays is one property — `WorkspaceCreditBalance.billable` — read by
+both the credit service and the Gateway: every plan does; a project with no workspace and the `ALL` workspace
+do not. `ALL` is the workspace created when authentication is disabled — the local development bypass, not a
+tier — and it still receives server pricing and CostRecords. A plan sets the grant, the discount and which
+models may be used; it does not decide whether a generation costs anything. Running out of credits answers
+`402`, distinct from the `403` of a plan entitlement denial: top up versus upgrade.
+
 The workspace wallet is authoritative only for user credits:
 
 ```text
@@ -353,6 +362,30 @@ alone. `prepare_autopilot` retrieves with `SERIES` scope against the shot's own 
 Known gap: retrieval is still keyed on the current shot's prompt text, so *which* earlier beat matters is
 decided by similarity. Obligations are covered by the ledger; episodic callbacks are not.
 
+## External Evidence Registry
+
+`config/external-evidence/registry-v1.json` records what the public record says about the exact model
+versions this platform runs, and — more importantly — what it does not say. It is versioned
+(`external-evidence-v1`, frozen 2026-08-25), every number keeps the scale it was measured on, every record
+cites its sources, and every binding to a model here declares a `version_match`.
+
+Only `EXACT` or `EXACT_VERSION_UNSPECIFIED_REVISION` matches from grade A or B sources, at mapping
+confidence above LOW, may influence a routing score. A record's grade is the **weakest** source it cites.
+Near-miss evidence — Wan 2.1's diagnostics against Wan 2.7, Seedance 2.0's against 2.5, Veo 3.1 Fast's
+against plain 3.1, GPT-4o's GenEval against GPT Image 2 — is deliberately recorded and bound to the model
+it would tempt someone to attach it to, marked as a mismatch, because deleting it only means it gets
+re-derived later and attached silently.
+
+Nothing in the registry fuses, averages or ranks across sources: a Likert 3.75, an Elo 1154 and a 0-1
+automatic 0.939 measure three different things. Human and automatic judge scores on the same benchmark
+dimension are stored separately. Aggregates are stored at `mapping_confidence: LOW` and can never stand in
+for a capability. A source that published words instead of numbers stores a null value.
+
+Today ten of the twelve generative models here have no diagnostic external evidence — see
+`docs/OPEN_ISSUES.md` §2.25. `FEATURE_EXTERNAL_PRIOR` is **false** by default: the registry is a read-only
+data asset and `GET /internal/models/external-evidence` is how it is read. Its immediate use is to say which
+`capability_prior` values are backed by public evidence and which are hand-authored judgement.
+
 ## Model capability and role runtime
 
 `ModelDefinition`, `ModelRoleBinding` and the one-to-one persistent `ModelCapabilityProfile` now form the
@@ -361,7 +394,21 @@ aspect ratio, resolution, Provider metadata and manual quality priors. Old per-p
 were removed, so UI, admission, policy, router, cost and adapters cannot read a parallel capability truth. Wan is
 registered consistently as 2.7 rather than borrowing experimental 3.0 priors.
 
-Manual priors are labeled `MANUAL_PRIOR`. Runtime observations are blended by the router with:
+`VideoModelRouter` ranks **video generators only**. The registry is one table across every modality, and
+`registry.all()` joins all of them, so the router declares `modality = "video"` and
+`required_operation = "video_generation"` and applies both as hard constraints before any score exists. A model
+that fails a hard constraint is not dropped silently: it is returned in `RouterDecision.rejected` as a
+`RejectedModel` carrying machine-readable `reason_codes` (`MODALITY_MISMATCH`, `VIDEO_GENERATION_UNSUPPORTED`,
+`RESOLUTION_UNSUPPORTED`, `PROVIDER_TRUST_INSUFFICIENT`, `EXCLUDED_BY_CALLER`, …), so "why was that model not
+chosen?" is answerable after the fact rather than by re-deriving the decision.
+
+Measured evidence is passed **per ranking** as a frozen `RoutingEvidence`, never written onto the router. The router
+is a container singleton shared by every concurrent request; while live metrics were assigned onto it, the
+adjustments in force during any one ranking were whatever the previous caller happened to leave behind, and no
+decision could be replayed. `benchmark_adjustments`, `production_adjustments` and `production_sample_counts` are now
+read-only properties over the baseline evidence, so an assignment raises instead of quietly winning a race.
+
+Manual priors are labeled `MANUAL_PRIOR`. Runtime observations are blended per ranking with:
 
 ```text
 prior_weight = 0.80
@@ -449,6 +496,17 @@ decode the multipart path performs is deliberately given up; a truncated file fa
 where `RenditionResolver` already decodes. `POST /v1/assets` remains for deployments with no
 object storage, and `POST /v1/assets/uploads` answers `501` there rather than inventing a URL.
 
+Completion has one owner: the `direct_uploads` row is locked, exactly one caller leaves `PENDING`, and the
+asset registration, the status change and the quota settlement share one transaction. An authorized upload
+whose client never returns is reclaimed by `media_service.maintenance.sweep_expired_uploads`, called both by
+`POST /internal/maintenance/expired-uploads` and by the worker loop on `EXPIRED_UPLOAD_SWEEP_INTERVAL_SECONDS`
+(default 300; `0` disables). The sweep takes the **same lock order as completion** — the upload row first, its
+storage reservation second, both in one transaction, with the `PENDING`/expiry predicate re-read under the
+lock — so a sweep and a completion racing for one upload serialise instead of leaving a `PENDING` row beside a
+`RELEASED` hold. The object itself is never deleted, and a stale `RESERVED` hold with no `PENDING` upload
+behind it is reported for operator reconciliation rather than released: a hold whose registration succeeded
+and whose settlement failed must survive.
+
 `StorageProvider.presigned_reference_url()` returns a real presign on S3-compatible storage and
 `None` on local disk. `None` is treated as "no fetchable reference" and fails closed before the
 submission boundary; it is never a reason to proxy. `LOCAL_REFERENCE_SIGNING_KEY` enables a
@@ -514,6 +572,18 @@ model nobody selected. OpenRouter's Image API follows the same rule through a re
 per model rather than a model-key table, because what must not be guessed there is the model's limits rather
 than its ID.
 
+Wan 2.7 is three DashScope models behind one adapter, and its request body is the provider's, not a
+normalisation of it. `input` carries `prompt`, `negative_prompt` and — on T2V only — `audio_url`; `parameters`
+carries `resolution`, the conditional `ratio`, `duration`, `seed`, `prompt_extend` and `watermark` and nothing
+else. I2V and R2V carry their non-text inputs in `input.media`, where each entry's `type` **is** the semantic
+role verbatim — `first_frame`, `last_frame`, `first_clip`, `driving_audio`, `reference_image`,
+`reference_video` — with an optional `reference_voice` audio URL nested on a reference entry. Nothing is
+inferred from array position. The adapter holds each mode to the roles it accepts, to I2V's closed list of
+material combinations, to the published reference bounds, and to a duration range that depends on the request
+(2–15 seconds, or 2–10 for R2V carrying a reference video). `test_model_routing_integrity.py` pins every one of
+those against the registry profile, because two copies of one published limit is how a shot ends up refused in
+one place and billed in the other.
+
 Provider request bodies are built from explicit allowlists rather than by dropping underscore-prefixed keys.
 OpenRouter video, RunAPI image/video and Ark image forward only their documented transport fields; tenancy,
 routing, accounting, idempotency, style embeddings, canonical shot spec and other internal audit metadata
@@ -571,6 +641,23 @@ Polling identifies the tuple `(local_generation_job_id, provider_account_id, pro
 provider_job_id)` rather than trusting a remote job ID alone.
 
 ## Project style lock and drift gate
+
+**A vector carries the space it belongs to.** `EmbeddingSpaceIdentity` — provider, model, model revision,
+input schema version, dimension, normalization, distance metric — is stored with every `StyleEmbedding` and
+compared before any similarity is taken. It has to be, because the failure mode is silence: cosine over two
+vectors from unrelated spaces returns a plausible number rather than an error. A mismatch refuses the lock
+when reusing a stored reference, and produces `REVIEW_REQUIRED` with
+`STYLE_EMBEDDING_SPACE_CHANGED:<fields>` / `STYLE_SEMANTIC_EMBEDDING_SPACE_CHANGED:<fields>` and **no score**
+when evaluating a candidate. Layer 2's space is read after the model answers, because which model answers is
+decided per call. What this cannot see is a provider swapping a model behind a stable id at unchanged
+dimensions, since no provider wired here publishes a revision.
+
+**Layer 2 fails closed.** With `FEATURE_SEMANTIC_STYLE_LOCK` on, a lock whose semantic reference cannot be
+produced is refused (`SemanticStyleLayerRequired`) and nothing is written — `503` when the model was
+unreachable, `409` when the reference media could not be read. The lock is append-only and a trigger forbids
+re-locking, so a degraded lock would be permanent and would look identical to one made deliberately with the
+feature off. With the feature off, a single-layer lock remains the intended outcome and records
+`SEMANTIC_EMBEDDER_NOT_CONFIGURED`: fail-closed applies to the layer being enabled, not to its absence.
 
 `STYLE` remains an ordinary logical asset with immutable versions and explicit Canonical promotion. A project does
 not follow that mutable asset pointer after confirmation: `ProjectStyleService.lock()` requires a Canonical READY
@@ -717,6 +804,47 @@ Known spend:        USD 0
 ```
 
 ## Data architecture and migrations
+
+**One schema authority.** Alembic creates and alters every database. `Database.create_all()` no longer runs at
+startup: `build_container()` compares the stamped revision to `REQUIRED_SCHEMA_REVISION` and refuses to start
+otherwise, naming `alembic upgrade head`. `create_all_and_stamp()` remains for throwaway databases — a per-test
+tmp file, a scratch simulation — and runs only under `DEPLOYMENT_ENVIRONMENT=test`; it stamps what it builds so
+the startup check asks one question everywhere. A test asserts the constant equals the alembic head.
+
+**PostgreSQL is the only supported runtime.** Production refuses a non-PostgreSQL `DATABASE_URL`, because under
+pysqlite a `begin_nested()` savepoint does not roll back with its enclosing transaction and seven call sites
+depend on that rollback to keep a failed step from being committed. Every production guard is a configuration
+guard and they all run before the first connection is opened, so a misconfigured deployment is refused for the
+reason it is actually misconfigured.
+
+**The test matrix has two halves.** `pytest` runs the shared `container` fixture on SQLite; `pytest
+--database=postgres` reroutes it into a throwaway schema in a dedicated `video_platform_test` database, which is
+where transaction, savepoint, locking and trigger behaviour is actually answered. Test modules that build their
+own `Settings` with a hard-coded SQLite URL are not rerouted. Divergences that are defects in the code rather
+than the test are listed in `POSTGRES_KNOWN_DIVERGENCES` as strict xfails, so fixing one fails the run until its
+entry is removed.
+
+**A synchronous provider's result is durable, not process-local.** A synchronous image API returns the artefact
+in the response body — no remote job to re-read, no URL to fetch — while the Gateway is submit-then-poll. The
+result is written to `provider_synchronous_results` (+ ordered `provider_synchronous_result_outputs`) in the same
+transaction that confirms the submission, so it becomes durable exactly when the workspace becomes liable, and is
+deleted in the same transaction that marks the job terminal. Reading never consumes it: delete-on-read would move
+the fatal window from "before the poll" to "between the read and the completion commit". Each output carries a
+SHA-256 re-checked on read, and a mismatch fails `submitted=True` so a corrupt artefact reaches reconciliation
+rather than being published as a paid result. The row is an inbox, not the media plane — the bytes move into the
+media plane on completion, through the same content validation a downloaded artefact passes.
+
+**A stale timeline fence is not conclusive on its own.** The fence is evaluated under the Shot's row lock, so
+the loser of a race between two requests carrying the same `idempotency_key` reads the Shot only after the
+winner has committed, and reads it `QUEUED` — a fence stale against a change its own duplicate caused. The
+create path therefore treats a stale fence as conclusive only once the key is known to be unclaimed; a claim
+that exists is a claim for the same request (a differing request hash is still an `IdempotencyConflict`), and
+the idempotent answer is the competitor's job rather than a 409.
+
+**Every plpgsql guard declares its SQLSTATE.** A `RAISE EXCEPTION` with no ERRCODE reports `P0001`, which
+SQLAlchemy raises as `ProgrammingError` — while the same guard under SQLite raises `IntegrityError`. Integrity
+guards use `23514`; the character-state head fence deliberately uses `40001`, because a stale fence means
+re-read and retry rather than invalid data. A test fails if any guard omits its SQLSTATE.
 
 Phase III extends the existing table groups with:
 

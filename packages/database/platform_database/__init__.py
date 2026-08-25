@@ -1,3 +1,3 @@
-from .session import Database
+from .session import REQUIRED_SCHEMA_REVISION, Database, SchemaRevisionMismatch
 
-__all__ = ["Database"]
+__all__ = ["REQUIRED_SCHEMA_REVISION", "Database", "SchemaRevisionMismatch"]

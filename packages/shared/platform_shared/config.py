@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # that does not implement it, and know that the content-addressed key then
     # names content the object is merely claimed to hold.
     s3_enforce_upload_checksum: bool = True
+    # Alibaba OSS accepts the S3 checksum header but does not enforce it. When
+    # enabled, direct-upload completion streams the object once from storage
+    # and verifies the SHA-256 before adopting the content-addressed key.
+    s3_verify_upload_sha256_on_complete: bool = False
     public_base_url: str = "http://localhost:8080"
     # How long a provider-facing reference URL stays valid. It is a short-lived
     # object-storage credential, never a stored field on the asset row.
@@ -49,6 +53,15 @@ class Settings(BaseSettings):
     # and settlement failed, and releasing that one would make real storage
     # unaccounted.
     storage_reservation_stale_after_seconds: int = 86_400
+    # How often the worker reclaims uploads whose authorized window closed
+    # without completing. `POST /internal/maintenance/expired-uploads` runs the
+    # same sweep on demand; this is what makes it a closed loop in production
+    # rather than an endpoint someone has to remember. Set to 0 to disable and
+    # drive it entirely from cron or an operator.
+    expired_upload_sweep_interval_seconds: int = 300
+    # Uploads reclaimed per sweep. A bound, not a target: whatever is left over
+    # is picked up by the next one.
+    expired_upload_sweep_limit: int = 200
     web_origins: str = "http://localhost:3000,http://127.0.0.1:18081"
     platform_api_key: str = ""
     deployment_environment: Literal["development", "test", "production"] = "production"
@@ -127,6 +140,13 @@ class Settings(BaseSettings):
     # locked style and per evaluated candidate, and it changes what "committable"
     # means, so switching it on is a deliberate act.
     feature_semantic_style_lock: bool = False
+    # Whether the External Evidence Registry may influence routing scores.
+    # Off by default: the registry ships as a read-only data asset first, so
+    # that publishing it changes nothing about which model gets picked. Turning
+    # it on affects the holistic `visual_quality` dimension for the models that
+    # have exact-version public evidence, plus the per-dimension priors for
+    # `veo-3.1-fast`, which is the only video model that has any.
+    feature_external_prior: bool = False
     feature_voyage_memory: bool = False
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False

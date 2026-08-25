@@ -1008,7 +1008,11 @@ async def test_live_model_change_at_atomic_boundary_never_reaches_transport(
             idempotency_key="live-disabled-model-gate",
             asset_criticality=AssetCriticality.STANDARD,
             metadata={"live_enabled": True, "model_definition_enabled": True},
-        )
+        ),
+        # Every plan is charged now, so every generation carries a server-owned
+        # quote. This test is about the live-model fence, not about pricing, so
+        # the quote is the smallest one that is still a real charge.
+        estimated_credits=1,
     )
 
     assert replayed is False

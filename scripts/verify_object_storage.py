@@ -6,10 +6,10 @@ generation is billed:
 
 1. a presigned PUT can be issued at all;
 2. a client can transfer straight to the store, without the API in the path;
-3. **the store enforces the declared digest** — this is the load-bearing one.
-   Content-addressed keys are only safe because bytes that do not hash to the
-   declared SHA-256 are rejected. A store that ignores `x-amz-checksum-sha256`
-   accepts them, and the key then names content the object does not contain;
+3. **the declared digest is enforced or verified** — content-addressed keys
+   are safe only when mismatched bytes are rejected by the store, or the
+   completion path reads the object once and verifies its SHA-256 before
+   adoption;
 4. `HEAD` reports a size the completion path can settle a quota hold against;
 5. a bounded range read returns the header validation needs;
 6. a presigned GET is issued, and the bytes come back identical — this is the
@@ -115,8 +115,10 @@ def main() -> int:
 
     host = urlsplit(settings.s3_endpoint_url).hostname or "?"
     print(f"\n  bucket {settings.s3_bucket} at {host}")
-    print(f"  region {settings.s3_region} · addressing {settings.s3_addressing_style} · "
-          f"checksum {'on' if settings.s3_enforce_upload_checksum else 'OFF'}\n")
+    print(
+        f"  region {settings.s3_region} · addressing {settings.s3_addressing_style} · "
+        f"checksum {'on' if settings.s3_enforce_upload_checksum else 'OFF'}\n"
+    )
 
     storage = S3CompatibleStorage(
         bucket=settings.s3_bucket,
@@ -168,9 +170,7 @@ def main() -> int:
 
     # The one that matters. Declare this digest, send different bytes.
     tamper_key = f"_preflight/tamper-{digest}.png"
-    tampered = storage.presigned_upload(
-        tamper_key, sha256=digest, mime_type="image/png", expires_in=600
-    )
+    tampered = storage.presigned_upload(tamper_key, sha256=digest, mime_type="image/png", expires_in=600)
     enforced = False
     if tampered is not None:
         try:
@@ -178,17 +178,32 @@ def main() -> int:
             orphans.append(tamper_key)
         except urllib.error.HTTPError:
             enforced = True
+    completion_verified = False
     if enforced:
         _say(OK, "checksum enforcement", "mismatched bytes rejected by the store")
     else:
-        failures += 1
-        _say(FAIL, "checksum enforcement", "the store accepted bytes that do not match the digest")
-        # Which remedy applies depends on what this store *does* guarantee, so
-        # answer that in the same run rather than costing a second round trip.
-        # Content-MD5 is documented for OSS and proves the bytes did not change
-        # in transit — it does **not** prove `object bytes == the SHA-256 in the
-        # key`, which is a different claim and the one content-addressing needs.
+        _say(WARN, "checksum enforcement", "store accepted mismatched bytes")
+        # Content-MD5 proves transit integrity, not content-addressed identity.
         _say(*_probe_content_md5(storage, payload, orphans))
+        if settings.s3_verify_upload_sha256_on_complete:
+            actual = storage.content_sha256(key, max_bytes=settings.max_upload_bytes)
+            tampered_actual = storage.content_sha256(
+                tamper_key,
+                max_bytes=settings.max_upload_bytes,
+            )
+            completion_verified = actual == digest and tampered_actual not in {None, digest}
+            if completion_verified:
+                _say(OK, "completion SHA-256", "valid object accepted; mismatched object rejected")
+            else:
+                failures += 1
+                _say(FAIL, "completion SHA-256", "full-object verification did not prove identity")
+        else:
+            failures += 1
+            _say(
+                FAIL,
+                "completion SHA-256",
+                "enable S3_VERIFY_UPLOAD_SHA256_ON_COMPLETE for this backend",
+            )
 
     stat = storage.stat(key)
     if stat and stat.size == len(payload):
@@ -246,7 +261,7 @@ def main() -> int:
         print("  Storage plane verified. Reference media, direct uploads and renditions are safe here.\n")
         return 0
     print(f"  {failures} check(s) failed.\n")
-    if not enforced:
+    if not enforced and not completion_verified:
         print(
             "  The store does not enforce the SHA-256 the presigned PUT declares. Content-MD5\n"
             "  and CRC64 are what Alibaba documents, and neither settles the question this\n"

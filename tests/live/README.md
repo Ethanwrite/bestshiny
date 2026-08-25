@@ -33,17 +33,27 @@ one into a log.
 | `test_wan_video_live.py::test_the_reviewed_model_ids_are_the_ones_that_get_posted` | free, no socket | The model ID, `media[]` shape and framing parameters this environment would actually post, per mode |
 | `test_wan_video_live.py::test_rejected_shots_never_reach_the_provider` | free, no socket | Every fail-closed rule holds with no request made |
 | `test_wan_video_live.py::test_smallest_t2v_generation_reaches_a_terminal_state` | **billed** | Submit, poll and artefact parsing against the real DashScope async protocol |
+| `test_wan_video_live.py::test_smallest_i2v_generation_reaches_a_terminal_state` | **billed** | `input.media` with `type: first_frame`, and `input.negative_prompt`, against the real service |
+| `test_wan_video_live.py::test_smallest_r2v_generation_reaches_a_terminal_state` | **billed** | `input.media` with `type: reference_image`, plus the conditional `ratio` |
 | `test_openrouter_image_live.py::test_capability_descriptor_matches_the_reviewed_envelope` | free `GET` | The published limits still match the envelope compiled into the adapter |
 | `test_openrouter_image_live.py::test_smallest_approved_generation_returns_decodable_image_bytes` | **billed**, ~USD 0.01 | Request body and response parsing against the real service |
 
 Only Wan **T2V** is testable without object storage. I2V and R2V each carry a reference the provider fetches
-itself, and with `S3_*` unset there is no URL Alibaba can reach. Run `scripts/preflight_live.py` first — it
-reports exactly that, makes no network call and prints no secret.
+itself, and with `S3_*` unset there is no URL Alibaba can reach; the `reference_plate` fixture writes one small
+plate under `_live/`, presigns a GET for it and deletes it afterwards, and **skips** when the store is not
+configured. Run `scripts/preflight_live.py` first — it reports exactly that, makes no network call and prints
+no secret — and `scripts/verify_object_storage.py` to prove the presigned GET a provider would fetch from.
+
+The `reference_plate` fixture reads storage settings through `Settings` (so, from `.env`) rather than
+`os.environ`, deliberately and only there: for storage a quiet skip is the worse failure. Wan credentials still
+come from the exported environment. Note also that this store rejects boto3's chunked `put_object`
+(`Aws MultiChunkedEncoding STREAMING-UNSIGNED-PAYLOAD-TRAILER is not supported`), so the fixture transfers
+through a presigned PUT — the same path the platform uses.
 
 A typical invocation, cheapest first:
 
 ```text
-pytest --run-live-provider -m live_provider tests/live/test_wan_video_live.py -k "not smallest_t2v"
+pytest --run-live-provider -m live_provider tests/live/test_wan_video_live.py -k "not smallest"
 ```
 
 Live tests must use the smallest approved non-canonical fixture, record latency/cost/failure evidence, and must

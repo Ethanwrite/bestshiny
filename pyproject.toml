@@ -123,6 +123,7 @@ select = ["E", "F", "I", "B", "UP"]
 "apps/api/video_platform_api/main.py" = ["B008"]
 "apps/api/video_platform_api/auth.py" = ["B008"]
 "apps/api/video_platform_api/runtime_routes.py" = ["B008"]
+"apps/api/video_platform_api/admin_routes.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -594,7 +594,10 @@ def build_container(settings: Settings | None = None) -> Container:
         model_roles,
         credit_pricing,
     )
-    video_router = VideoModelRouter(model_registry)
+    video_router = VideoModelRouter(
+        model_registry,
+        require_live_lifecycle=settings.provider_mode == "live",
+    )
     video_adapters = VideoAdapterRegistry()
     image_prompts = ImagePromptCorrector()
     asset_registry = AssetRegistry(database)

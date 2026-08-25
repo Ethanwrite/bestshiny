@@ -144,6 +144,22 @@ class CredentialStatus(StrEnum):
     NOT_CONFIGURED = "NOT_CONFIGURED"
 
 
+class PlatformRole(StrEnum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+    SUPER_ADMIN = "SUPER_ADMIN"
+
+
+class ModelLifecycleStatus(StrEnum):
+    DISABLED = "DISABLED"
+    CONFIGURED = "CONFIGURED"
+    TESTING = "TESTING"
+    VERIFIED = "VERIFIED"
+    LIVE = "LIVE"
+    DEGRADED = "DEGRADED"
+    BLOCKED = "BLOCKED"
+
+
 class TimelineTransitionType(StrEnum):
     CONTINUOUS = "CONTINUOUS"
     SCENE_CUT = "SCENE_CUT"
@@ -282,6 +298,9 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
     password_hash: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+    platform_role: Mapped[str] = mapped_column(
+        String(40), default=PlatformRole.USER.value, server_default=PlatformRole.USER.value, nullable=False
+    )
 
 
 class WorkspaceMembership(Base, TimestampMixin):
@@ -697,6 +716,63 @@ class WorkspaceCreditLedgerEntry(Base):
     raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class AdminCreditAdjustment(Base):
+    """Append-only operator credit mutation, separate from payment evidence."""
+
+    __tablename__ = "admin_credit_adjustments"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_admin_credit_adjustment_idempotency"),
+        CheckConstraint("delta != 0", name="ck_admin_credit_adjustment_delta_nonzero"),
+        CheckConstraint("before_balance >= 0", name="ck_admin_credit_adjustment_before_nonnegative"),
+        CheckConstraint("after_balance >= 0", name="ck_admin_credit_adjustment_after_nonnegative"),
+        Index("ix_admin_credit_adjustments_workspace_created", "workspace_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    operator_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_balance: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_balance: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class AdminAuditLog(Base):
+    """Append-only, redacted record of every high-impact platform mutation."""
+
+    __tablename__ = "admin_audit_logs"
+    __table_args__ = (
+        Index("ix_admin_audit_entity_created", "entity_type", "entity_id", "created_at"),
+        Index("ix_admin_audit_actor_created", "actor_user_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    actor_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    before_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    after_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(500))
+    request_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True, nullable=False
     )
@@ -2634,10 +2710,104 @@ class ModelDefinition(Base, TimestampMixin):
     criticality_allowed: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     live_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), default="", server_default="", nullable=False)
+    user_visible: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    router_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(40),
+        default=ModelLifecycleStatus.CONFIGURED.value,
+        server_default=ModelLifecycleStatus.CONFIGURED.value,
+        index=True,
+        nullable=False,
+    )
+    pricing_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_live_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_window: Mapped[int | None] = mapped_column(Integer)
     max_duration: Mapped[float | None] = mapped_column(Float)
     supported_aspect_ratios: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ModelVerification(Base):
+    """Immutable evidence for a model-specific production-protocol verification."""
+
+    __tablename__ = "model_verifications"
+    __table_args__ = (
+        UniqueConstraint("model_definition_id", "idempotency_key", name="uq_model_verification_key"),
+        Index("ix_model_verification_created", "model_definition_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    operator_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    protocol_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    result: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    evidence_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    billable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    latency_ms: Mapped[float | None] = mapped_column(Float)
+    detail: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class ProviderControl(Base, TimestampMixin):
+    """Persisted provider kill switch; credentials remain in the secret plane."""
+
+    __tablename__ = "provider_controls"
+    provider: Mapped[str] = mapped_column(String(80), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    disabled_reason: Mapped[str | None] = mapped_column(String(500))
+    changed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+
+
+def _install_admin_append_only_ddl() -> None:
+    for table in (AdminAuditLog.__table__, AdminCreditAdjustment.__table__, ModelVerification.__table__):
+        table_name = str(table.name)  # type: ignore[attr-defined]
+        for operation in ("UPDATE", "DELETE"):
+            event.listen(
+                table,
+                "after_create",
+                DDL(
+                    f"CREATE TRIGGER trg_{table_name}_append_only_{operation.lower()} "
+                    f"BEFORE {operation} ON {table_name} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table_name} is append-only'); END"
+                ).execute_if(dialect="sqlite"),
+            )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                "CREATE OR REPLACE FUNCTION enforce_admin_append_only() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'admin audit table is append-only' USING ERRCODE = '23000'; "
+                "RETURN OLD; END; $$"
+            ).execute_if(dialect="postgresql"),
+        )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER trg_{table_name}_append_only BEFORE UPDATE OR DELETE ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_admin_append_only()"
+            ).execute_if(dialect="postgresql"),
+        )
+
+
+_install_admin_append_only_ddl()
 
 
 class ModelCapabilityProfile(Base, TimestampMixin):

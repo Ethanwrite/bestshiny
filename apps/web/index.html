@@ -1,365 +1,734 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Best Shiny — Studio Workbench</title>
+    <title>Best Shiny — AI Video Production Workspace</title>
+    <meta name="description" content="Best Shiny is an AI video production workspace. Go from script to final shot with scenes, shots, characters and continuity — not just prompts." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect rx=%2216%22 width=%2264%22 height=%2264%22 fill=%22%2339e7ff%22/><path d=%22M16 21h32M16 32h24M16 43h32%22 stroke=%22%23070a12%22 stroke-width=%225%22/></svg>" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect rx=%2214%22 width=%2264%22 height=%2264%22 fill=%22%23f2a93b%22/><path d=%22M23 18l22 14-22 14z%22 fill=%22%230a0a0b%22/></svg>" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/public.css" />
+    <link rel="stylesheet" href="/admin.css" />
   </head>
   <body>
-    <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
-      <div class="auth-card">
-        <div class="auth-brand"><div class="brand-mark" aria-hidden="true">B</div><div><strong>Best Shiny</strong><small>STUDIO WORKBENCH · V2.0</small></div></div>
-        <span class="eyebrow">安全工作空间</span>
-        <h1 id="authTitle">登录工作空间</h1>
-        <p id="authDescription">登录后只会看到你所在工作空间的项目与素材。</p>
-        <form id="authForm">
-          <div id="registerFields" class="hidden">
-            <label>你的名称<input id="authDisplayName" maxlength="160" autocomplete="name" placeholder="例如：林导演" /></label>
-            <label>工作空间名称<input id="authWorkspaceName" maxlength="200" autocomplete="organization" placeholder="例如：星河视觉" /></label>
+    <!-- ============================================================ -->
+    <!-- PUBLIC SITE SHELL — completely independent of the app shell  -->
+    <!-- ============================================================ -->
+    <div id="publicShell" class="pub" hidden>
+      <header class="pub-header">
+        <a class="pub-brand" href="/" data-link>
+          <span class="brand-mark" aria-hidden="true">B</span>
+          <span class="pub-brand-name">Best Shiny</span>
+        </a>
+        <nav class="pub-nav" aria-label="Product">
+          <a href="/product" data-link data-nav="/product">Product</a>
+          <a href="/models" data-link data-nav="/models">Models</a>
+          <a href="/pricing" data-link data-nav="/pricing">Pricing</a>
+        </nav>
+        <div class="pub-actions">
+          <a class="btn btn-tertiary" href="/login" data-link>Sign in</a>
+          <a class="btn btn-primary" href="/signup" data-link>Start Creating</a>
+        </div>
+        <button id="pubMenuBtn" class="pub-menu-btn" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+      </header>
+
+      <main class="pub-main">
+        <div id="publicPages"></div>
+
+        <!-- Auth lives inside the public shell: /login and /signup -->
+        <section id="authGate" class="auth-gate" aria-labelledby="authTitle" hidden>
+          <div class="auth-card">
+            <div class="auth-brand">
+              <span class="brand-mark" aria-hidden="true">B</span>
+              <span><strong>Best Shiny</strong><small>AI VIDEO PRODUCTION WORKSPACE</small></span>
+            </div>
+            <h1 id="authTitle">Sign in</h1>
+            <p id="authDescription">You will only see the projects and assets inside your own workspace.</p>
+            <form id="authForm">
+              <div id="registerFields" class="hidden">
+                <label>Your name<input id="authDisplayName" maxlength="160" autocomplete="name" placeholder="e.g. Lin" /></label>
+                <label>Workspace name<input id="authWorkspaceName" maxlength="200" autocomplete="organization" placeholder="e.g. Galaxy Visuals" /></label>
+              </div>
+              <label>Email<input id="authEmail" type="email" maxlength="320" autocomplete="email" required placeholder="name@company.com" /></label>
+              <label>Password<input id="authPassword" type="password" minlength="12" maxlength="1024" autocomplete="current-password" required placeholder="At least 12 characters" /></label>
+              <div id="authError" class="auth-error" role="alert"></div>
+              <button id="authSubmitBtn" class="btn btn-primary btn-full" type="submit">Sign in</button>
+            </form>
+            <div class="auth-links">
+              <button id="authModeBtn" class="btn btn-tertiary" type="button">No account? Create one</button>
+              <button id="forgotPasswordBtn" class="btn btn-tertiary" type="button">Forgot password?</button>
+            </div>
+            <small class="auth-footnote">Passwords are stored as strong hashes only. Sessions can be revoked at any time.</small>
           </div>
-          <label>邮箱<input id="authEmail" type="email" maxlength="320" autocomplete="email" required placeholder="name@company.com" /></label>
-          <label>密码<input id="authPassword" type="password" minlength="12" maxlength="1024" autocomplete="current-password" required placeholder="至少 12 个字符" /></label>
-          <div id="authError" class="auth-error" role="alert"></div>
-          <button id="authSubmitBtn" class="button primary full" type="submit">登录</button>
-        </form>
-        <button id="authModeBtn" class="text-button auth-mode" type="button">没有账号？免费注册</button>
-        <button id="forgotPasswordBtn" class="text-button auth-mode" type="button">忘记密码？</button>
-        <small class="auth-footnote">密码仅保存强哈希；登录会话可随时退出撤销。</small>
-      </div>
-    </section>
-    <dialog id="passwordResetDialog" class="project-dialog" aria-labelledby="passwordResetTitle">
-      <form id="passwordResetForm" class="project-dialog-form">
-        <div class="project-dialog-heading"><span class="eyebrow">账号恢复</span><h2 id="passwordResetTitle">重置密码</h2><p>先申请重置令牌，再用令牌设置至少 12 个字符的新密码。</p></div>
-        <label>邮箱<input id="resetEmail" type="email" maxlength="320" autocomplete="email" required /></label>
-        <button id="requestResetBtn" class="button secondary full" type="button">申请重置令牌</button>
-        <label>重置令牌<input id="resetToken" minlength="20" maxlength="500" autocomplete="off" placeholder="从重置邮件复制；开发环境会自动填入" /></label>
-        <label>新密码<input id="resetNewPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" /></label>
-        <p id="passwordResetStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
-        <p id="passwordResetError" class="project-dialog-error" role="alert"></p>
-        <div class="project-dialog-actions"><button id="closePasswordResetBtn" class="button secondary" type="button">关闭</button><button id="confirmResetBtn" class="button primary" type="submit">确认重置</button></div>
-      </form>
-    </dialog>
-    <div id="appShell" class="app-shell auth-locked">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true">B</div>
-          <div><strong>Best Shiny</strong><small>STUDIO WORKBENCH · V2.0</small></div>
+        </section>
+      </main>
+
+      <footer id="publicFooter" class="pub-footer">
+        <div class="pub-footer-inner">
+          <div class="pub-footer-brand">
+            <span class="brand-mark" aria-hidden="true">B</span>
+            <p>AI video production workspace. Script to final shot, with continuity that holds.</p>
+          </div>
+          <nav aria-label="Footer">
+            <span class="pub-footer-label">Product</span>
+            <a href="/product" data-link>Overview</a>
+            <a href="/models" data-link>Models</a>
+            <a href="/pricing" data-link>Pricing</a>
+          </nav>
+          <nav aria-label="Account">
+            <span class="pub-footer-label">Account</span>
+            <a href="/login" data-link>Sign in</a>
+            <a href="/signup" data-link>Create account</a>
+          </nav>
         </div>
+        <div class="pub-footer-base"><span>© Best Shiny</span><span class="mono">STUDIO WORKBENCH · V2.0</span></div>
+      </footer>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- APPLICATION SHELL — object-centric workspace                 -->
+    <!-- ============================================================ -->
+    <div id="appShell" class="app-shell auth-locked" hidden>
+      <header class="app-topbar">
+        <a class="app-brand" href="/" data-link title="Best Shiny">
+          <span class="brand-mark" aria-hidden="true">B</span>
+        </a>
+
         <div class="project-switcher">
-          <span class="eyebrow">当前项目</span>
-          <select id="projectSelect" aria-label="选择项目"></select>
+          <select id="projectSelect" aria-label="Current project"></select>
+          <button id="newProjectBtn" class="project-switcher-add" type="button" title="New project" aria-label="New project">+</button>
         </div>
-        <div class="top-actions">
-          <span id="accountName" class="account-name"></span>
-          <span id="systemStatus" class="status-pill"><i></i>系统检查中</span>
-          <button id="walletBtn" class="button secondary wallet-trigger" type="button">充值积分</button>
-          <button id="newProjectBtn" class="button secondary">新建项目</button>
-          <button id="logoutBtn" class="button secondary logout-button">退出</button>
-          <button id="generateBtn" class="button primary hidden">生成 / 重做当前镜头</button>
+
+        <nav class="app-nav" aria-label="Workspace">
+          <button class="app-nav-item active" data-mode="create" type="button">Create</button>
+          <button class="app-nav-item" data-mode="director" type="button">Director</button>
+          <button class="app-nav-item" data-mode="productions" type="button">Productions</button>
+        </nav>
+
+        <div class="app-topbar-right">
+          <button id="walletBtn" class="credits-pill" type="button" title="Credits and top up">
+            <span class="credits-dot" aria-hidden="true"></span>
+            <span id="creditsAmount" class="mono">—</span>
+          </button>
+          <span id="systemStatus" class="status-pill is-neutral"><i></i>Checking</span>
+          <div class="user-menu">
+            <button id="userMenuBtn" class="user-menu-btn" type="button" aria-haspopup="true" aria-expanded="false">
+              <span id="userAvatar" class="user-avatar" aria-hidden="true">·</span>
+              <span id="accountName" class="user-menu-name"></span>
+              <span class="user-menu-caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="userMenu" class="user-menu-panel" hidden>
+              <span id="userMenuEmail" class="user-menu-email"></span>
+              <button id="assetsNavBtn" class="user-menu-action" type="button">Project assets</button>
+              <button id="adminNavBtn" class="user-menu-action" type="button" hidden>Admin · System health</button>
+              <div class="user-menu-sep"></div>
+              <button id="logoutBtn" class="user-menu-action is-danger" type="button">Sign out</button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <nav class="mode-switch" aria-label="工作模式">
-        <button class="mode-button active" data-mode="passenger">自主创作</button>
-        <button class="mode-button" data-mode="autopilot">智能导演</button>
-        <button class="mode-button" data-mode="operations">生产控制台</button>
-        <span id="modeDescription">描述画面、选择生成方式、开始创作</span>
-      </nav>
-
-      <section id="passengerWorkspace" class="passenger-workspace">
-        <div class="passenger-hero">
-          <div><span class="eyebrow">STUDIO</span><h1>视觉创作工作台</h1><p>从提示词、参考素材到镜头计划，在一个连续的制作界面中完成。</p></div>
-          <div class="media-toggle" role="tablist"><button class="active" data-media="image">生成图片</button><button data-media="video">生成视频</button></div>
+      <div id="appSubbar" class="app-subbar">
+        <!-- Create -->
+        <div class="subbar-pane" data-page="create">
+          <div class="segmented" role="tablist" aria-label="Output type">
+            <button class="active" data-media="image" type="button" role="tab">Image</button>
+            <button data-media="video" type="button" role="tab">Video</button>
+          </div>
+          <span class="subbar-sep" aria-hidden="true"></span>
+          <span id="modeDescription" class="subbar-hint">Describe the frame, pick a model, generate.</span>
         </div>
-        <div class="passenger-grid">
-          <article class="creation-card prompt-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">创作内容</span><h2 id="passengerPromptHeading">描述你想要的图片</h2></div><span id="promptTypeBadge" class="mini-badge">图片意图自动识别</span></div>
-            <textarea id="passengerPrompt" rows="11" placeholder="例如：一个女生拿着香水，高级一点"></textarea>
-            <div id="imagePromptActions" class="inline-actions">
-              <button id="correctImagePromptBtn" class="button secondary grow">优化画面描述</button>
-              <button id="refinePromptBtn" class="button secondary grow">AI 深度精修</button>
-              <button id="undoImagePromptBtn" class="button ghost" disabled>恢复原文</button>
-            </div>
-            <div id="promptCorrectionSummary" class="decision-box">只会增强构图、灯光、材质和层次，不会擅自重设计。</div>
-          </article>
-          <article class="creation-card settings-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">生成设置</span><h2>选择生成方式</h2></div></div>
-            <label>生成模型<select id="passengerModel"><option value="">正在读取模型…</option></select></label>
-            <div class="field-grid">
-              <label>画面比例<select id="passengerAspect"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
-              <label>清晰度<select id="passengerResolution"><option>720p</option><option>1080p</option></select></label>
-            </div>
-            <label id="passengerDurationField" class="hidden">视频时长<input id="passengerDuration" type="number" min="1" max="30" value="4" /></label>
-            <label><span id="passengerReferenceLabel">参考图片（可选）</span><input id="passengerReference" type="file" accept="image/*" /></label>
-            <div class="cost-preview"><span>预计消耗</span><strong id="passengerCost">选择模型后显示</strong></div>
-            <small class="credit-note">根据生成方式、时长、清晰度和参考图计算，并预留 20% 波动；1 积分 = $0.01。</small>
-            <button id="passengerGenerateBtn" class="button primary full">开始生成图片</button>
-            <small>平台会自动选择可用生成线路，避免重复计费，并保存费用记录和素材。</small>
-          </article>
-          <article class="creation-card result-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">生成结果</span><h2>本次结果</h2></div><button id="passengerRefreshBtn" class="text-button">刷新 ↻</button></div>
-            <div id="passengerResult" class="passenger-result empty-state" aria-live="polite">提交生成后在这里查看状态</div>
-            <div id="passengerAssetFields" class="asset-confirm-fields">
-              <label>加入已有素材（可选）<select id="passengerExistingAsset"><option value="">新建一个素材</option></select></label>
-              <div class="field-grid">
-                <label>素材用途<select id="passengerAssetType"><option value="REFERENCE">普通参考</option><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option></select></label>
-                <label>素材名称<input id="passengerAssetName" placeholder="例如：女主角正式造型" /></label>
+        <!-- Director -->
+        <div class="subbar-pane" data-page="director" hidden>
+          <span id="directorBreadcrumb" class="subbar-crumb">No shot selected</span>
+          <span id="directorTimeContext" class="subbar-meta mono"></span>
+          <span class="subbar-sep" aria-hidden="true"></span>
+          <span id="directorShotStatus" class="status-chip is-neutral">Draft</span>
+          <div class="subbar-spacer"></div>
+          <button id="viewScriptBtn" class="btn btn-tertiary" type="button" hidden>View original script</button>
+          <button id="refreshCandidatesBtn" class="btn btn-tertiary" type="button">Refresh variants</button>
+        </div>
+        <!-- Productions -->
+        <div class="subbar-pane" data-page="productions" hidden>
+          <div class="segmented" role="tablist" aria-label="Job status filter">
+            <button class="active" data-job-filter="all" type="button" role="tab">All</button>
+            <button data-job-filter="running" type="button" role="tab">Running</button>
+            <button data-job-filter="queued" type="button" role="tab">Queued</button>
+            <button data-job-filter="completed" type="button" role="tab">Completed</button>
+            <button data-job-filter="failed" type="button" role="tab">Failed</button>
+          </div>
+          <div class="subbar-spacer"></div>
+          <button id="productionsRefreshBtn" class="btn btn-tertiary" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <div id="appBody" class="app-body">
+        <!-- ---------------- SIDEBAR ---------------- -->
+        <aside class="app-sidebar" id="appSidebar">
+          <!-- Create sidebar: prompt + references + assets -->
+          <div class="pane" data-page="create">
+            <section class="pane-block">
+              <div class="pane-head">
+                <h2 id="passengerPromptHeading">Describe the frame</h2>
+                <span id="promptTypeBadge" class="badge">Auto intent</span>
               </div>
-              <label class="check-row"><input id="passengerPromoteCanonical" type="checkbox" /> 设为该素材的正式参考版本</label>
-            </div>
-            <button id="promotePassengerAssetBtn" class="button secondary full" disabled>确认用于当前项目</button>
-            <small class="result-help">确认后会保存一份可追溯的新版本；只有勾选“正式参考版本”才会替换项目当前使用的参考图。</small>
-          </article>
-          <article class="creation-card asset-manager-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">素材版本</span><h2>上传修改后的人物、场景或产品图</h2></div><span class="mini-badge">旧版本会保留</span></div>
-            <p class="asset-manager-copy">选择已有素材可新增一个版本；不选择则新建素材。只有你主动勾选时，新图才会成为项目当前的正式参考。</p>
-            <div class="asset-manager-fields">
-              <label>已有素材（可选）<select id="manualExistingAsset"><option value="">新建一个素材</option></select></label>
-              <label>素材用途<select id="manualAssetType"><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option><option value="REFERENCE">普通参考</option></select></label>
-              <label>素材名称<input id="manualAssetName" placeholder="例如：酒店大堂雨夜版" /></label>
-            </div>
-            <div class="asset-manager-upload">
-              <label>修改后的图片<input id="manualAssetFile" type="file" accept="image/*" /></label>
-              <label class="check-row"><input id="manualPromoteCanonical" type="checkbox" /> 设为当前正式参考</label>
-              <button id="manualAssetUploadBtn" class="button secondary">保存为新版本</button>
-            </div>
-            <button id="lockProjectStyleBtn" class="button primary full" disabled>锁定为整部作品画风</button>
-            <small id="projectStyleLockStatus">请先把一版视觉风格设为正式参考，再由项目成员明确锁定。</small>
-            <div id="manualAssetStatus" class="decision-box">人物主参考图也可以在“智能导演 → 人物”中直接更新。</div>
-          </article>
-        </div>
-      </section>
+              <textarea id="passengerPrompt" class="prompt-box" rows="9" placeholder="e.g. Rainy convenience-store doorway at night, a girl turns with a lit phone, 35mm film, cold and warm light meeting"></textarea>
+              <div id="imagePromptActions" class="btn-row">
+                <button id="correctImagePromptBtn" class="btn btn-secondary btn-grow" type="button">Improve</button>
+                <button id="refinePromptBtn" class="btn btn-secondary btn-grow" type="button">Deep refine</button>
+                <button id="undoImagePromptBtn" class="btn btn-tertiary" type="button" disabled>Undo</button>
+              </div>
+              <p id="promptCorrectionSummary" class="pane-note">Only composition, light, material and depth are enhanced. Your subject is never redesigned.</p>
+            </section>
 
-      <main id="autopilotWorkspace" class="workspace-grid hidden">
-        <aside class="panel left-panel">
-          <div class="panel-heading">
-            <div><span class="eyebrow">故事输入</span><h2>剧本与场景</h2></div>
-            <span id="episodeStatus" class="mini-badge">尚未拆解</span>
+            <section class="pane-block">
+              <div class="pane-head">
+                <h2 id="passengerReferenceLabel">Reference image</h2>
+              </div>
+              <label class="dropzone" for="passengerReference">
+                <span class="dropzone-icon" aria-hidden="true">+</span>
+                <span class="dropzone-copy"><strong>Drop an image</strong><small>or click to browse</small></span>
+                <input id="passengerReference" type="file" accept="image/*" />
+              </label>
+              <p id="referenceFileName" class="pane-note mono" hidden></p>
+            </section>
+
+            <section class="pane-block pane-block-grow">
+              <div class="pane-head">
+                <h2>Project assets</h2>
+                <button id="openAssetsBtn" class="btn btn-tertiary" type="button">Manage</button>
+              </div>
+              <div id="assetRail" class="asset-rail empty">
+                <p class="empty-inline">No assets yet. Generate a frame and save it to the project.</p>
+              </div>
+            </section>
           </div>
-          <textarea id="scriptInput" class="script-editor" spellcheck="false" placeholder="输入剧本，例如：
-EXT. 酒店雨棚 - NIGHT
-赵凯：你看这部手机。
-林瑾转身，向雨棚边缘走两步。"></textarea>
-          <div class="inline-actions">
-            <button id="compileBtn" class="button primary grow">拆解为镜头</button>
+
+          <!-- Director sidebar: script before compile, scene/shot tree after -->
+          <div class="pane" data-page="director" hidden>
+            <section class="pane-block pane-block-grow" id="scriptPanel">
+              <div class="pane-head">
+                <h2>Script</h2>
+                <span id="episodeStatus" class="badge">Not compiled</span>
+              </div>
+              <textarea id="scriptInput" class="script-box" spellcheck="false" placeholder="EXT. HOTEL AWNING - NIGHT
+ZHAO KAI: Look at this phone.
+LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
+              <button id="compileBtn" class="btn btn-primary btn-full" type="button">Break into shots</button>
+              <p class="pane-note">Scenes, shots and the state each shot starts and ends in are derived once and kept.</p>
+            </section>
+
+            <section class="pane-block pane-block-grow" id="shotTreePanel" hidden>
+              <div class="pane-head">
+                <h2>Scenes &amp; shots</h2>
+                <span class="badge mono"><b id="sceneCount">0</b> scenes</span>
+              </div>
+              <div id="sceneList" class="shot-tree empty-state">Compile a script to see scenes and shots.</div>
+            </section>
           </div>
-          <div class="section-label"><span>场景结构</span><b id="sceneCount">0</b></div>
-          <div id="sceneList" class="scene-list empty-state">创建项目并拆解剧本后显示场景</div>
+
+          <!-- Productions sidebar: summary + job lookup -->
+          <div class="pane" data-page="productions" hidden>
+            <section class="pane-block">
+              <div class="pane-head"><h2>This session</h2></div>
+              <div class="stat-list">
+                <div class="stat-row"><span class="stat-dot is-running"></span><span>Running</span><b id="prodCountRunning" class="mono">0</b></div>
+                <div class="stat-row"><span class="stat-dot is-queued"></span><span>Queued</span><b id="prodCountQueued" class="mono">0</b></div>
+                <div class="stat-row"><span class="stat-dot is-ok"></span><span>Completed</span><b id="prodCountCompleted" class="mono">0</b></div>
+                <div class="stat-row"><span class="stat-dot is-danger"></span><span>Failed</span><b id="prodCountFailed" class="mono">0</b></div>
+              </div>
+            </section>
+            <section class="pane-block">
+              <div class="pane-head"><h2>Track a job</h2></div>
+              <label class="field">Job ID<input id="operationsJobId" autocomplete="off" placeholder="Paste a generation job id" /></label>
+              <button id="loadJobBtn" class="btn btn-secondary btn-full" type="button">Load job</button>
+              <p class="pane-note">Jobs you started in this session are listed automatically.</p>
+            </section>
+          </div>
+
         </aside>
 
-        <section class="center-stage">
-          <div class="timeline-card">
-            <div class="panel-heading compact">
-              <div><span class="eyebrow">制作进度</span><h2>镜头时间线</h2></div>
-              <div class="legend"><span><i class="dot planned"></i>已规划</span><span><i class="dot committed"></i>已采用</span></div>
-            </div>
-            <div id="shotTimeline" class="shot-timeline empty-state">暂无镜头</div>
-          </div>
-
-          <div class="current-shot-card">
-            <div class="shot-hero">
-              <div class="shot-preview">
-                <div class="preview-grid"></div>
-                <div class="preview-content"><span id="shotNumber">镜头 —</span><strong id="shotAction">选择一个镜头</strong><small id="shotState">开始画面 → 一个主要动作 → 结束画面</small></div>
+        <!-- ---------------- CANVAS ---------------- -->
+        <main class="app-canvas" id="appCanvas">
+          <!-- Create canvas -->
+          <section id="passengerWorkspace" class="pane canvas-pane" data-page="create">
+            <div class="canvas-toolbar">
+              <h1 class="page-title">Generation canvas</h1>
+              <div class="btn-row">
+                <button id="saveToProjectBtn" class="btn btn-secondary" type="button" disabled>Save to project</button>
+                <button id="passengerRefreshBtn" class="btn btn-tertiary" type="button">Refresh</button>
               </div>
-              <div class="shot-summary">
-                <span class="eyebrow">当前镜头</span>
-                <h1 id="shotTitle">尚未选择镜头</h1>
-                <p id="shotPrompt">从左侧拆解剧本，系统会按顺序生成可制作的镜头，并记住每个镜头前后的状态。</p>
-                <div class="metrics-row">
-                  <div><span>时长</span><strong id="shotDuration">—</strong></div>
-                  <div><span>与上一镜衔接</span><strong id="shotContinuity">—</strong></div>
-                  <div><span>生成方法</span><strong id="shotPolicy">—</strong></div>
-                  <div><span>模型</span><strong id="shotProvider">—</strong></div>
+            </div>
+            <div id="passengerResult" class="canvas-stage empty-state" aria-live="polite">
+              <div class="empty-block">
+                <span class="empty-icon" aria-hidden="true">▣</span>
+                <strong>Nothing generated yet</strong>
+                <p>Start from a written frame, or drop a reference image to work from.</p>
+                <div class="btn-row btn-row-center">
+                  <button class="btn btn-secondary" type="button" data-empty-action="prompt">Start from prompt</button>
+                  <button class="btn btn-secondary" type="button" data-empty-action="upload">Upload an image</button>
                 </div>
               </div>
             </div>
+          </section>
+
+          <!-- Director canvas -->
+          <section id="autopilotWorkspace" class="pane canvas-pane" data-page="director" hidden>
+            <div id="shotTimeline" class="filmstrip empty-state">No shots yet</div>
+
+            <div class="shot-stage" id="shotPreviewStage">
+              <div class="shot-stage-media" id="shotStageMedia">
+                <div class="empty-block">
+                  <span class="empty-icon" aria-hidden="true">◻</span>
+                  <strong id="shotStageTitle">No shot selected</strong>
+                  <p id="shotStageCopy">Choose a shot from the tree on the left, or compile a script to generate the shot list.</p>
+                  <div class="btn-row btn-row-center" id="shotStageActions">
+                    <button class="btn btn-secondary" type="button" data-empty-action="first-shot">Choose a shot</button>
+                    <button class="btn btn-secondary" type="button" data-empty-action="compile">Generate shots</button>
+                  </div>
+                </div>
+              </div>
+              <div class="shot-stage-caption">
+                <span id="shotNumber" class="mono">SHOT —</span>
+                <strong id="shotAction">Select a shot</strong>
+                <small id="shotState">Opening state → one action → closing state</small>
+              </div>
+            </div>
+
+            <div class="shot-notes">
+              <div class="shot-notes-main">
+                <div class="pane-head">
+                  <h2 id="shotTitle">No shot selected</h2>
+                </div>
+                <p id="shotPrompt" class="shot-directive">Compile a script on the left and the system builds an ordered, producible shot list, remembering the state each shot starts and ends in.</p>
+                <label class="field">Director notes<textarea id="rawPrompt" rows="3" readonly placeholder="Select a shot to see the original directive"></textarea></label>
+              </div>
+              <div class="shot-notes-side">
+                <div class="metric"><span>Duration</span><b id="shotDuration">—</b></div>
+                <div class="metric"><span>Continuity</span><b id="shotContinuity">—</b></div>
+                <div class="metric"><span>Method</span><b id="shotPolicy">—</b></div>
+                <div class="metric"><span>Model</span><b id="shotProvider">—</b></div>
+              </div>
+            </div>
+
+            <div class="variants">
+              <div class="pane-head">
+                <h2>Variants</h2>
+                <span class="pane-head-note">Compare, review, then approve one into the timeline.</span>
+              </div>
+              <div id="candidateGrid" class="variant-grid empty-state">
+                <div class="empty-block">
+                  <strong>No variants yet</strong>
+                  <p>Generate this shot to compare A / B / C with quality checks and cost.</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Productions canvas -->
+          <section id="productionsWorkspace" class="pane canvas-pane" data-page="productions" hidden>
+            <div class="canvas-toolbar">
+              <h1 class="page-title">Productions</h1>
+              <span class="page-subtitle">Generation jobs for this workspace, with progress, cost and recovery.</span>
+            </div>
+            <div id="productionsList" class="job-list empty-state">
+              <div class="empty-block">
+                <span class="empty-icon" aria-hidden="true">◷</span>
+                <strong>No production jobs yet</strong>
+                <p>Jobs appear here as soon as you generate a frame or a shot.</p>
+                <div class="btn-row btn-row-center">
+                  <button class="btn btn-secondary" type="button" data-empty-action="go-create">Go to Create</button>
+                  <button class="btn btn-secondary" type="button" data-empty-action="go-director">Go to Director</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+        </main>
+
+        <!-- ---------------- INSPECTOR ---------------- -->
+        <aside class="app-inspector" id="appInspector">
+          <!-- Create inspector: settings -->
+          <div class="pane" data-page="create">
+            <div class="inspector-head">
+              <span class="eyebrow">Inspector</span>
+              <h2 id="inspectorTitle">Generation settings</h2>
+            </div>
+            <div class="inspector-body">
+              <section class="group">
+                <h3 class="group-title">Model</h3>
+                <label class="field"><span class="field-label">Generation model</span><select id="passengerModel"><option value="">Reading models…</option></select></label>
+                <p id="modelHint" class="field-note">The model you pick is never silently swapped.</p>
+              </section>
+              <section class="group">
+                <h3 class="group-title">Output</h3>
+                <div class="field-grid">
+                  <label class="field"><span class="field-label">Ratio</span><select id="passengerAspect"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
+                  <label class="field"><span class="field-label">Quality</span><select id="passengerResolution"><option>720p</option><option>1080p</option></select></label>
+                </div>
+                <label class="field hidden" id="passengerDurationField"><span class="field-label">Duration (seconds)</span><input id="passengerDuration" type="number" min="1" max="30" value="4" /></label>
+              </section>
+              <details class="disclosure">
+                <summary>Advanced</summary>
+                <label class="field"><span class="field-label">Negative prompt</span><textarea id="passengerNegativePrompt" rows="3" placeholder="What must not appear"></textarea></label>
+                <label class="field"><span class="field-label">Generation strategy</span>
+                  <select id="passengerCriticality">
+                    <option value="STANDARD">Standard</option>
+                    <option value="IMPORTANT">Important</option>
+                    <option value="HERO">Hero</option>
+                    <option value="CANONICAL">Canonical</option>
+                  </select>
+                </label>
+                <p class="field-note">Criticality raises the trust bar the platform requires of a provider before it accepts the result.</p>
+                <div class="kv-list">
+                  <div class="kv"><span>Provider</span><b id="advProvider" class="mono">—</b></div>
+                  <div class="kv"><span>Model version</span><b id="advModelVersion" class="mono">—</b></div>
+                  <div class="kv"><span>Pricing</span><b id="advPricing" class="mono">—</b></div>
+                </div>
+              </details>
+            </div>
           </div>
 
-          <div class="candidates-card">
-            <div class="panel-heading compact">
-              <div><span class="eyebrow">多个结果对比</span><h2>备选成片</h2></div>
-              <button id="refreshCandidatesBtn" class="text-button">刷新结果 ↻</button>
+          <!-- Director inspector: object properties -->
+          <div class="pane" data-page="director" hidden>
+            <div class="inspector-head">
+              <span class="eyebrow">Inspector</span>
+              <h2 id="directorInspectorTitle">Shot properties</h2>
             </div>
-            <div id="candidateGrid" class="candidate-grid empty-state">生成后可对比方案 A / B / C、质量检查与成本</div>
-          </div>
-        </section>
+            <div class="inspector-body">
+              <details class="group-disclosure" open>
+                <summary><h3 class="group-title">Character</h3></summary>
+                <div id="characterList" class="binding-list"><p class="empty-inline">No characters yet</p></div>
+                <details class="disclosure">
+                  <summary>Add or update a character</summary>
+                  <label class="field"><span class="field-label">Name</span><input id="characterName" placeholder="e.g. Lin Jin" /></label>
+                  <label class="field"><span class="field-label">Description</span><textarea id="characterDescription" rows="3" placeholder="Appearance, hair, wardrobe and the traits that must not change"></textarea></label>
+                  <button id="createCharacterBtn" class="btn btn-secondary btn-full" type="button">Create character</button>
+                  <label class="field"><span class="field-label">Master reference image</span><input id="characterAsset" type="file" accept="image/*" /></label>
+                  <button id="confirmCharacterBtn" class="btn btn-secondary btn-full" type="button">Lock as new identity version</button>
+                </details>
+              </details>
 
-        <aside class="panel inspector-panel">
-          <div class="panel-heading"><div><span class="eyebrow">镜头设置</span><h2>画面设置</h2></div></div>
-          <div class="inspector-tabs" role="tablist">
-            <button class="active" data-tab="character">人物</button><button data-tab="camera">画面</button><button data-tab="prompt">高级</button>
-          </div>
-          <div class="tab-panel active" id="tab-character">
-            <label>角色名称<input id="characterName" placeholder="例如：林瑾" /></label>
-            <label>角色设定<textarea id="characterDescription" rows="3" placeholder="外貌、发型、服装和不可改变的特征"></textarea></label>
-            <button id="createCharacterBtn" class="button secondary full">建立角色档案</button>
-            <label>角色主参考图<input id="characterAsset" type="file" accept="image/*" /></label>
-            <button id="confirmCharacterBtn" class="button primary full">上传新的正式参考图</button>
-            <div id="characterList" class="binding-list"><p>尚未建立角色</p></div>
-          </div>
-          <div class="tab-panel" id="tab-camera">
-            <div class="field-grid">
-              <label>画面远近<select id="cameraScale"><option>中景</option><option>近景</option><option>全景</option><option>特写</option></select></label>
-              <label>拍摄角度<select id="cameraAngle"><option>平视</option><option>低角度</option><option>高角度</option><option>侧面</option></select></label>
+              <details class="group-disclosure" open>
+                <summary><h3 class="group-title">Camera</h3></summary>
+                <div class="field-grid">
+                  <label class="field"><span class="field-label">Framing</span><select id="cameraScale"><option>Medium</option><option>Close-up</option><option>Wide</option><option>Extreme close-up</option></select></label>
+                  <label class="field"><span class="field-label">Angle</span><select id="cameraAngle"><option>Eye level</option><option>Low angle</option><option>High angle</option><option>Profile</option></select></label>
+                </div>
+                <label class="field"><span class="field-label">Movement</span><select id="cameraMove"><option>Locked off</option><option>Slow push in</option><option>Pan left</option><option>Follow</option><option>Orbit</option></select></label>
+              </details>
+
+              <details class="group-disclosure">
+                <summary><h3 class="group-title">Lighting</h3></summary>
+                <label class="field"><span class="field-label">Key light</span><select id="lighting"><option>Cold side light, rainy night</option><option>Soft frontal</option><option>Warm backlight</option><option>High-contrast rim</option></select></label>
+              </details>
+
+              <details class="group-disclosure">
+                <summary><h3 class="group-title">Composition</h3></summary>
+                <div class="kv-list" id="shotComposition">
+                  <div class="kv"><span>Shot type</span><b id="compShotType">—</b></div>
+                  <div class="kv"><span>Opening state</span><b id="compInputState">—</b></div>
+                  <div class="kv"><span>Closing state</span><b id="compOutputState">—</b></div>
+                </div>
+              </details>
+
+              <details class="group-disclosure">
+                <summary><h3 class="group-title">Continuity</h3></summary>
+                <button id="continuityBtn" class="btn btn-secondary btn-full" type="button">Check continuity</button>
+                <div id="continuityResult" class="output-box empty-state">Select a shot and the system proposes the safer way to join it to the previous one.</div>
+              </details>
+
+              <details class="group-disclosure">
+                <summary><h3 class="group-title">Model</h3></summary>
+                <div class="kv-list">
+                  <div class="kv"><span>Provider</span><b id="shotModelProvider" class="mono">—</b></div>
+                  <div class="kv"><span>Method</span><b id="shotModelPolicy">—</b></div>
+                  <div class="kv"><span>Continuity policy</span><b id="shotModelContinuity">—</b></div>
+                </div>
+                <p class="field-note">The director picks a route from the shot's requirements, its join to the previous shot, and what is configured right now.</p>
+              </details>
+
+              <details class="disclosure">
+                <summary>Advanced</summary>
+                <label class="field"><span class="field-label">Per-shot budget ceiling (USD)</span><input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
+                <label class="field"><span class="field-label">Compiled prompt (read only)</span><textarea id="compiledPrompt" rows="7" readonly></textarea></label>
+              </details>
             </div>
-            <label>镜头怎么移动<select id="cameraMove"><option>固定</option><option>缓慢推进</option><option>向左摇镜</option><option>跟随</option><option>环绕</option></select></label>
-            <label>主要光线<select id="lighting"><option>雨夜冷色侧光</option><option>柔和正面光</option><option>暖色逆光</option><option>高反差轮廓光</option></select></label>
-            <button id="continuityBtn" class="button secondary full">检查镜头衔接</button>
-            <div id="continuityResult" class="decision-box">选择镜头后，系统会给出更稳妥的衔接方式。</div>
           </div>
-          <div class="tab-panel" id="tab-prompt">
-            <label>原始镜头要求<textarea id="rawPrompt" rows="5" readonly placeholder="选择镜头后显示原始要求"></textarea></label>
-            <div class="decision-box">智能导演只会把已确认的镜头要求转换成生成模型能理解的描述；不会套用图片优化规则，也不会改变剧情。</div>
-            <details class="advanced-details"><summary>查看生成模型收到的描述</summary><label>仅供排查<textarea id="compiledPrompt" rows="9" readonly></textarea></label></details>
+
+          <!-- Productions inspector: selected job -->
+          <div class="pane" data-page="productions" hidden>
+            <div class="inspector-head">
+              <span class="eyebrow">Inspector</span>
+              <h2>Job detail</h2>
+            </div>
+            <div class="inspector-body">
+              <div id="generationControlStatus" class="output-box empty-state">Select a job, or paste a job ID on the left.</div>
+              <div class="btn-row btn-row-stack">
+                <button id="retryJobBtn" class="btn btn-secondary" type="button" disabled>Retry safely</button>
+                <button id="cancelJobBtn" class="btn btn-danger" type="button" disabled>Cancel generation</button>
+                <button id="reconcileJobBtn" class="btn btn-secondary" type="button" disabled hidden>Reconcile</button>
+              </div>
+              <details class="disclosure">
+                <summary>Job events</summary>
+                <div id="generationEvents" class="event-list empty-state">No job loaded</div>
+              </details>
+            </div>
           </div>
-          <details class="advanced-details generation-settings">
-            <summary>高级生成设置</summary>
-            <label>单镜头预算上限（美元）<input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
-            <small>系统会根据镜头要求、前后衔接和当前可用的生成方式自动选择。</small>
-          </details>
         </aside>
-      </main>
-      <section id="operationsWorkspace" class="operations-workspace hidden">
-        <div class="operations-hero">
-          <div><span class="eyebrow">PRODUCTION OPS</span><h1>生产控制台</h1><p>查看生成线路、处理任务异常，并核对每个镜头的成本、决策和叙事状态。</p></div>
-          <button id="operationsRefreshBtn" class="button secondary" type="button">刷新全局状态</button>
+      </div>
+
+      <!-- ---------------- BOTTOM ACTION BAR ---------------- -->
+      <footer id="appActionBar" class="app-actionbar">
+        <div class="pane actionbar-pane" data-page="create">
+          <div class="actionbar-facts">
+            <div class="fact"><span>Model</span><b id="barModel">—</b></div>
+            <div class="fact"><span>Ratio</span><b id="barAspect">9:16</b></div>
+            <div class="fact"><span>Quality</span><b id="barResolution">720p</b></div>
+            <div class="fact" id="barDurationFact" hidden><span>Duration</span><b id="barDuration">4s</b></div>
+            <div class="fact fact-cost"><span>Estimated</span><b id="passengerCost">Pick a model</b></div>
+          </div>
+          <button id="passengerGenerateBtn" class="btn btn-primary btn-cta" type="button">Generate image</button>
         </div>
-        <div class="operations-metrics" aria-label="生产状态概览">
-          <div><span>已配置供应商</span><strong id="operationsProviderMetric">—</strong></div>
-          <div><span>可用模型</span><strong id="operationsModelMetric">—</strong></div>
-          <div><span>技能目录</span><strong id="operationsSkillMetric">—</strong></div>
-          <div><span>当前任务</span><strong id="operationsJobMetric">未选择</strong></div>
+
+        <div class="pane actionbar-pane" data-page="director" hidden>
+          <div class="actionbar-facts">
+            <div class="fact"><span>Duration</span><b id="barShotDuration">—</b></div>
+            <div class="fact"><span>Model</span><b id="barShotModel">—</b></div>
+            <div class="fact"><span>Resolution</span><b id="barShotResolution">1080p</b></div>
+            <div class="fact fact-cost"><span>Budget ceiling</span><b id="barShotCost">$0.80</b></div>
+          </div>
+          <button id="generateBtn" class="btn btn-primary btn-cta" type="button" disabled>Generate shot</button>
         </div>
-        <div class="operations-grid">
-          <article class="operations-card span-two">
-            <div class="panel-heading compact"><div><span class="eyebrow">线路状态</span><h2>供应商、模型与技能</h2></div></div>
-            <div id="providerHealthGrid" class="provider-health-grid empty-state">正在读取生成线路…</div>
-            <details class="advanced-details"><summary>查看技能目录</summary><div id="skillCatalog" class="skill-catalog empty-state">正在读取技能…</div></details>
-          </article>
 
-          <article class="operations-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">任务恢复</span><h2>生成任务控制</h2></div></div>
-            <label>任务 ID<input id="operationsJobId" autocomplete="off" placeholder="粘贴 generation job id" /></label>
-            <div class="operation-actions">
-              <button id="loadJobBtn" class="button secondary" type="button">读取</button>
-              <button id="retryJobBtn" class="button secondary" type="button" disabled>安全重试</button>
-              <button id="cancelJobBtn" class="button secondary" type="button" disabled>取消</button>
-              <button id="reconcileJobBtn" class="button secondary" type="button" disabled>对账</button>
-            </div>
-            <div id="generationControlStatus" class="operations-output empty-state">输入任务 ID，或从生成结果中带入任务。</div>
-            <details class="advanced-details"><summary>查看任务事件</summary><div id="generationEvents" class="event-list empty-state">尚未读取任务</div></details>
-          </article>
-
-          <article class="operations-card span-two">
-            <div class="panel-heading compact"><div><span class="eyebrow">可追溯性</span><h2>镜头成本与决策证据</h2></div><button id="loadShotAuditBtn" class="text-button" type="button">刷新证据 ↻</button></div>
-            <label>镜头<select id="operationsShotSelect"><option value="">请先创建并拆解剧本</option></select></label>
-            <div class="audit-grid">
-              <section><h3>成本</h3><div id="shotCostView" class="operations-output empty-state">选择镜头后显示</div></section>
-              <section><h3>策略决策</h3><div id="shotDecisionList" class="event-list empty-state">选择镜头后显示</div></section>
-              <section><h3>状态迁移</h3><div id="stateTransitionList" class="event-list empty-state">选择镜头后显示</div></section>
-            </div>
-          </article>
-
-          <article class="operations-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">角色连续性</span><h2>叙事状态</h2></div></div>
-            <div class="field-grid">
-              <label>角色<select id="operationsCharacterSelect"><option value="">尚无角色</option></select></label>
-              <label>时间线<input id="narrativeScope" value="main" maxlength="100" /></label>
-            </div>
-            <button id="loadNarrativeBtn" class="button secondary full" type="button">读取当前状态</button>
-            <div id="narrativeStateView" class="operations-output empty-state">选择角色后显示</div>
-            <details class="advanced-details narrative-initialize">
-              <summary>初始化叙事状态</summary>
-              <label>已采用的候选<select id="narrativeCandidateSelect"><option value="">当前镜头尚无已采用候选</option></select></label>
-              <label>状态 JSON<textarea id="narrativeStateInput" rows="6">{
-  "location": "",
-  "wardrobe": "",
-  "emotion": "",
-  "props": []
-}</textarea></label>
-              <label>确认理由<input id="narrativeReason" placeholder="说明已经核对的剧情状态" /></label>
-              <label class="check-row"><input id="narrativeConfirm" type="checkbox" /> 我已核对该状态并明确确认写入</label>
-              <button id="initializeNarrativeBtn" class="button primary full" type="button">初始化状态</button>
-            </details>
-          </article>
-
-          <article class="operations-card">
-            <div class="panel-heading compact"><div><span class="eyebrow">大文件上传</span><h2>校验直传资产</h2></div></div>
-            <p class="operations-copy">先计算 SHA-256 并取得一次性上传授权，再直接写入对象存储；完成后由服务端核验并登记资产。</p>
-            <label>文件<input id="directUploadFile" type="file" /></label>
-            <div class="field-grid">
-              <label>资产类型<select id="directUploadType"><option value="REFERENCE">普通参考</option><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option></select></label>
-              <label>关联范围<select id="directUploadScope"><option value="project">当前项目</option><option value="shot">当前镜头</option><option value="character">当前角色</option></select></label>
-            </div>
-            <button id="directUploadBtn" class="button primary full" type="button">校验并上传</button>
-            <div id="directUploadStatus" class="operations-output empty-state">选择文件后开始上传</div>
-          </article>
+        <div class="pane actionbar-pane" data-page="productions" hidden>
+          <div class="actionbar-facts">
+            <div class="fact"><span>Tracked</span><b id="barJobCount" class="mono">0 jobs</b></div>
+            <div class="fact fact-cost"><span>Session spend</span><b id="barJobSpend" class="mono">0 CR</b></div>
+          </div>
+          <button class="btn btn-primary btn-cta" type="button" data-empty-action="go-create">New generation</button>
         </div>
-      </section>
-
-      <dialog id="newProjectDialog" class="project-dialog" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
-        <form id="newProjectForm" class="project-dialog-form" novalidate>
-          <div class="project-dialog-heading">
-            <span class="eyebrow">开始新计划</span>
-            <h2 id="newProjectTitle">新建项目</h2>
-            <p id="newProjectDescription">给项目起一个方便团队识别的名称，创建后会自动切换到新项目。</p>
-          </div>
-          <label for="newProjectName">项目名称</label>
-          <input id="newProjectName" name="projectName" maxlength="200" required autocomplete="off" aria-describedby="newProjectError" aria-invalid="false" value="竖屏短剧计划" />
-          <p id="newProjectStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
-          <p id="newProjectError" class="project-dialog-error" role="alert"></p>
-          <div class="project-dialog-actions">
-            <button id="cancelNewProjectBtn" class="button secondary" type="button">取消</button>
-            <button id="confirmNewProjectBtn" class="button primary" type="submit">创建项目</button>
-          </div>
-        </form>
-      </dialog>
-      <dialog id="walletDialog" class="project-dialog wallet-dialog" aria-labelledby="walletTitle">
-        <div class="project-dialog-form">
-          <div class="project-dialog-heading">
-            <span class="eyebrow">DePay · Base USDC</span>
-            <h2 id="walletTitle">Upgrade to Pro</h2>
-            <p id="walletDescription">一次支付，解锁 Pro 并获得 3,000 Credits。没有订阅或自动续费。</p>
-          </div>
-          <div class="wallet-balance-card">
-            <span>工作空间积分</span>
-            <strong id="walletCreditBalance">—</strong>
-          </div>
-          <div class="wallet-state-grid">
-            <div><span>网络</span><strong id="walletNetwork">Base</strong></div>
-            <div><span>币种</span><strong>Native USDC</strong></div>
-            <div><span>结算服务</span><strong>DePay</strong></div>
-            <div><span>回调状态</span><strong id="walletCreditingStatus">检查中</strong></div>
-          </div>
-          <p id="walletStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
-          <p id="walletError" class="project-dialog-error" role="alert"></p>
-          <div class="wallet-payment-box">
-            <div class="wallet-offer"><span id="walletOfferLabel">Upgrade to Pro</span><strong id="walletOfferPrice">30 USDC</strong><p id="walletOfferBenefits">✓ Unlock Pro<br>✓ Includes 3,000 Credits</p></div>
-            <button id="payUsdcBtn" class="button primary full" type="button" disabled>升级 Pro</button>
-            <small>每次点击都会生成新的 PaymentIntent/order_ref；底层使用同一条固定 30 USDC Link。</small>
-          </div>
-          <div id="depayCheckout" class="depay-checkout" hidden>
-            <img id="depayQrCode" alt="DePay 收款二维码" width="220" height="220" />
-            <strong id="depayCheckoutSummary"></strong>
-            <div class="wallet-actions">
-              <button id="openDePayBtn" class="button primary" type="button">打开 DePay 付款</button>
-              <button id="copyDePayBtn" class="button secondary" type="button">复制付款链接</button>
-            </div>
-          </div>
-          <div class="project-dialog-actions">
-            <button id="closeWalletBtn" class="button secondary" type="button">关闭</button>
-          </div>
-        </div>
-      </dialog>
-      <div id="toast" class="toast" role="status"></div>
+      </footer>
     </div>
+
+    <!-- ============================================================ -->
+    <!-- DIALOGS                                                      -->
+    <!-- ============================================================ -->
+    <dialog id="newProjectDialog" class="sheet" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
+      <form id="newProjectForm" class="sheet-body" novalidate>
+        <div class="sheet-head">
+          <h2 id="newProjectTitle">New project</h2>
+          <p id="newProjectDescription">Give it a name your team will recognise. You are switched to it once created.</p>
+        </div>
+        <label class="field" for="newProjectName"><span class="field-label">Project name</span>
+          <input id="newProjectName" name="projectName" maxlength="200" required autocomplete="off" aria-describedby="newProjectError" aria-invalid="false" value="Vertical short drama" />
+        </label>
+        <p id="newProjectStatus" class="sheet-status" role="status" aria-live="polite"></p>
+        <p id="newProjectError" class="sheet-error" role="alert"></p>
+        <div class="sheet-actions">
+          <button id="cancelNewProjectBtn" class="btn btn-tertiary" type="button">Cancel</button>
+          <button id="confirmNewProjectBtn" class="btn btn-primary" type="submit">Create project</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- ============================================================ -->
+    <!-- ADMIN CONSOLE SHELL — platform RBAC, never workspace chrome -->
+    <!-- ============================================================ -->
+    <div id="adminShell" class="admin-shell" hidden>
+      <aside class="admin-sidebar">
+        <a class="admin-brand" href="/admin" data-link><span class="brand-mark">B</span><span><strong>Best Shiny</strong><small>PLATFORM ADMIN</small></span></a>
+        <nav class="admin-nav" aria-label="Admin Console">
+          <a href="/admin" data-link data-admin-nav="overview"><span>⌁</span>Overview</a>
+          <a href="/admin/users" data-link data-admin-nav="users"><span>◎</span>Users</a>
+          <a href="/admin/credits" data-link data-admin-nav="credits"><span>◈</span>Credits &amp; Billing</a>
+          <a href="/admin/models" data-link data-admin-nav="models"><span>◇</span>Models</a>
+          <a href="/admin/providers" data-link data-admin-nav="providers"><span>⊞</span>Providers</a>
+          <a href="/admin/routing" data-link data-admin-nav="routing"><span>⑂</span>Routing</a>
+          <a href="/admin/jobs" data-link data-admin-nav="jobs"><span>◷</span>Jobs</a>
+          <a href="/admin/projects" data-link data-admin-nav="projects"><span>▱</span>Projects</a>
+          <a href="/admin/system" data-link data-admin-nav="system"><span>✣</span>System Health</a>
+          <a href="/admin/audit" data-link data-admin-nav="audit"><span>≣</span>Audit Logs</a>
+        </nav>
+        <div class="admin-sidebar-foot">
+          <a href="/app" data-link>← Creator Workspace</a>
+          <span id="adminIdentity" class="mono">—</span>
+        </div>
+      </aside>
+      <main class="admin-main">
+        <header class="admin-header">
+          <div><p id="adminEyebrow" class="admin-eyebrow">PLATFORM OPERATIONS</p><h1 id="adminTitle">Overview</h1><p id="adminSubtitle">Live operational facts with explicit coverage.</p></div>
+          <div class="admin-header-actions"><span id="adminAsOf" class="mono">—</span><button id="adminRefreshBtn" class="btn btn-secondary" type="button">Refresh</button></div>
+        </header>
+        <section class="admin-filterbar" id="adminFilterbar" hidden>
+          <label>Search<input id="adminSearch" type="search" placeholder="Email, ID, model, project…" /></label>
+          <label>Status<select id="adminStatusFilter"><option value="">All statuses</option></select></label>
+          <label id="adminDateFromField" hidden>From<input id="adminDateFrom" type="datetime-local" /></label>
+          <label id="adminDateToField" hidden>To<input id="adminDateTo" type="datetime-local" /></label>
+          <button id="adminApplyFilters" class="btn btn-secondary" type="button">Apply</button>
+        </section>
+        <section id="adminContent" class="admin-content" aria-live="polite"><div class="admin-loading">Loading operational data…</div></section>
+      </main>
+      <aside id="adminDrawer" class="admin-drawer" hidden aria-label="Detail">
+        <div class="admin-drawer-head"><div><p class="admin-eyebrow">DETAIL</p><h2 id="adminDrawerTitle">Record</h2></div><button id="adminDrawerClose" class="btn btn-tertiary" type="button">Close</button></div>
+        <div id="adminDrawerBody" class="admin-drawer-body"></div>
+      </aside>
+    </div>
+
+    <dialog id="adminConfirmDialog" class="admin-confirm">
+      <form method="dialog">
+        <p class="admin-eyebrow">CONFIRM CHANGE</p>
+        <h2 id="adminConfirmTitle">Confirm operation</h2>
+        <p id="adminConfirmDescription"></p>
+        <label id="adminReasonField">Reason<textarea id="adminReason" minlength="8" maxlength="500" required></textarea></label>
+        <div class="admin-confirm-actions"><button class="btn btn-tertiary" value="cancel">Cancel</button><button id="adminConfirmSubmit" class="btn btn-danger" value="default">Confirm</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="passwordResetDialog" class="sheet" aria-labelledby="passwordResetTitle">
+      <form id="passwordResetForm" class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="passwordResetTitle">Reset password</h2>
+          <p>Request a reset token first, then set a new password of at least 12 characters.</p>
+        </div>
+        <label class="field"><span class="field-label">Email</span><input id="resetEmail" type="email" maxlength="320" autocomplete="email" required /></label>
+        <button id="requestResetBtn" class="btn btn-secondary btn-full" type="button">Request reset token</button>
+        <label class="field"><span class="field-label">Reset token</span><input id="resetToken" minlength="20" maxlength="500" autocomplete="off" placeholder="From the reset email; auto-filled in development" /></label>
+        <label class="field"><span class="field-label">New password</span><input id="resetNewPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" /></label>
+        <p id="passwordResetStatus" class="sheet-status" role="status" aria-live="polite"></p>
+        <p id="passwordResetError" class="sheet-error" role="alert"></p>
+        <div class="sheet-actions">
+          <button id="closePasswordResetBtn" class="btn btn-tertiary" type="button">Close</button>
+          <button id="confirmResetBtn" class="btn btn-primary" type="submit">Reset password</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="scriptDrawer" class="sheet sheet-wide" aria-labelledby="scriptDrawerTitle">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="scriptDrawerTitle">Original script</h2>
+          <p>Read only. Shots already derived from this script are never silently overwritten.</p>
+        </div>
+        <pre id="scriptOriginalView" class="script-original"></pre>
+        <div class="sheet-actions">
+          <button id="closeScriptDrawerBtn" class="btn btn-tertiary" type="button">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="saveAssetDialog" class="sheet" aria-labelledby="saveAssetTitle">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="saveAssetTitle">Save to project</h2>
+          <p>A traceable new version is written. The project's current reference only changes if you say so.</p>
+        </div>
+        <div id="passengerAssetFields">
+          <label class="field"><span class="field-label">Add to an existing asset</span><select id="passengerExistingAsset"><option value="">Create a new asset</option></select></label>
+          <div class="field-grid">
+            <label class="field"><span class="field-label">Asset type</span><select id="passengerAssetType"><option value="REFERENCE">Reference</option><option value="CHARACTER">Character</option><option value="SCENE">Scene</option><option value="PRODUCT">Product</option><option value="PROP">Prop</option><option value="WARDROBE">Wardrobe</option><option value="STYLE">Style</option></select></label>
+            <label class="field"><span class="field-label">Asset name</span><input id="passengerAssetName" placeholder="e.g. Lead — formal look" /></label>
+          </div>
+          <label class="check-row"><input id="passengerPromoteCanonical" type="checkbox" /> Set as the canonical reference for this asset</label>
+        </div>
+        <div class="sheet-actions">
+          <button id="closeSaveAssetBtn" class="btn btn-tertiary" type="button">Cancel</button>
+          <button id="promotePassengerAssetBtn" class="btn btn-primary" type="button" disabled>Save version</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="assetDetailsDialog" class="sheet sheet-wide" aria-labelledby="assetDetailsTitle">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="assetDetailsTitle">Project assets</h2>
+          <p>Pick an asset to see its current reference. Version history and canonical control are one level down.</p>
+        </div>
+        <div class="asset-details">
+          <label class="field"><span class="field-label">Asset</span><select id="manualExistingAsset"><option value="">Create a new asset</option></select></label>
+          <div class="asset-current">
+            <div class="asset-current-media" id="assetCurrentMedia"><span class="empty-icon" aria-hidden="true">▣</span></div>
+            <div class="asset-current-facts">
+              <span class="eyebrow">Current reference</span>
+              <strong id="assetCurrentName">No asset selected</strong>
+              <small id="assetCurrentMeta" class="mono">—</small>
+            </div>
+          </div>
+          <div class="field-grid">
+            <label class="field"><span class="field-label">Type</span><select id="manualAssetType"><option value="CHARACTER">Character</option><option value="SCENE">Scene</option><option value="PRODUCT">Product</option><option value="PROP">Prop</option><option value="WARDROBE">Wardrobe</option><option value="STYLE">Style</option><option value="REFERENCE">Reference</option></select></label>
+            <label class="field"><span class="field-label">Name</span><input id="manualAssetName" placeholder="e.g. Hotel lobby — rainy night" /></label>
+          </div>
+          <label class="field"><span class="field-label">Replace with a new image</span><input id="manualAssetFile" type="file" accept="image/*" /></label>
+          <div class="btn-row">
+            <button id="manualAssetUploadBtn" class="btn btn-secondary btn-grow" type="button">Save as new version</button>
+          </div>
+          <div id="manualAssetStatus" class="output-box">A character's master reference can also be updated from the Director inspector.</div>
+
+          <details class="disclosure">
+            <summary>Version history &amp; canonical control</summary>
+            <div id="assetVersionList" class="version-list empty-state">Select an asset to see its versions.</div>
+            <label class="check-row"><input id="manualPromoteCanonical" type="checkbox" /> Set the uploaded version as the canonical reference</label>
+            <button id="lockProjectStyleBtn" class="btn btn-secondary btn-full" type="button" disabled>Lock as the project's style</button>
+            <small id="projectStyleLockStatus" class="field-note">Promote a style version to canonical first, then a project member can lock it explicitly.</small>
+          </details>
+        </div>
+        <div class="sheet-actions">
+          <button id="closeAssetDetailsBtn" class="btn btn-tertiary" type="button">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="walletDialog" class="sheet" aria-labelledby="walletTitle">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <span class="eyebrow">DePay · Base USDC</span>
+          <h2 id="walletTitle">Top up credits</h2>
+          <p id="walletDescription">One payment, credits land on webhook confirmation. No subscription, no auto-renewal.</p>
+        </div>
+        <div class="wallet-balance">
+          <span>Workspace balance</span>
+          <strong id="walletCreditBalance">—</strong>
+        </div>
+        <div class="kv-list">
+          <div class="kv"><span>Network</span><b id="walletNetwork">Base</b></div>
+          <div class="kv"><span>Currency</span><b>Native USDC</b></div>
+          <div class="kv"><span>Settlement</span><b>DePay</b></div>
+          <div class="kv"><span>Callback</span><b id="walletCreditingStatus">Checking</b></div>
+        </div>
+        <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
+        <p id="walletError" class="sheet-error" role="alert"></p>
+        <div class="wallet-offer">
+          <div class="wallet-offer-head">
+            <span id="walletOfferLabel">Top up credits</span>
+            <strong id="walletOfferPrice">30 USDC</strong>
+          </div>
+          <p id="walletOfferBenefits">✓ Unlock Pro<br>✓ Includes 3,000 credits</p>
+          <button id="payUsdcBtn" class="btn btn-primary btn-full" type="button" disabled>Pay with USDC</button>
+          <small class="field-note">Every click mints a fresh PaymentIntent and order_ref against the same fixed offer.</small>
+        </div>
+        <div id="depayCheckout" class="depay-checkout" hidden>
+          <img id="depayQrCode" alt="DePay payment QR code" width="200" height="200" />
+          <strong id="depayCheckoutSummary" class="mono"></strong>
+          <div class="btn-row">
+            <button id="openDePayBtn" class="btn btn-secondary btn-grow" type="button">Open DePay</button>
+            <button id="copyDePayBtn" class="btn btn-tertiary" type="button">Copy link</button>
+          </div>
+        </div>
+        <div class="sheet-actions">
+          <button id="closeWalletBtn" class="btn btn-tertiary" type="button">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <script type="module" src="/router.js"></script>
+    <script type="module" src="/public.js"></script>
     <script type="module" src="/app.js"></script>
     <script type="module" src="/wallet.js"></script>
+    <script type="module" src="/admin.js"></script>
   </body>
 </html>

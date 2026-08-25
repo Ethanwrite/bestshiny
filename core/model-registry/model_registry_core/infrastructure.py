@@ -71,6 +71,8 @@ class RuntimeModelState:
     modality: str
     enabled: bool
     live_enabled: bool
+    lifecycle_status: str
+    router_enabled: bool
     supported_operations: tuple[str, ...]
     capability_profile_version: str
 
@@ -480,6 +482,8 @@ class ModelInfrastructureService:
             modality=definition.modality,
             enabled=definition.enabled,
             live_enabled=definition.live_enabled,
+            lifecycle_status=definition.lifecycle_status,
+            router_enabled=definition.router_enabled,
             supported_operations=tuple(profile.supported_operations),
             capability_profile_version=profile.profile_version,
         )

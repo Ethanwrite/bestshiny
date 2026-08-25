@@ -100,12 +100,12 @@ class VideoModelRouter:
         benchmark_adjustments: Mapping[str, Mapping[str, float]] | None = None,
         production_adjustments: Mapping[str, Mapping[str, float]] | None = None,
         production_sample_counts: Mapping[str, int] | None = None,
+        require_live_lifecycle: bool = True,
     ):
         self.registry = registry
+        self.require_live_lifecycle = require_live_lifecycle
         self._baseline_evidence = RoutingEvidence(
-            benchmark_adjustments={
-                key: dict(value) for key, value in (benchmark_adjustments or {}).items()
-            },
+            benchmark_adjustments={key: dict(value) for key, value in (benchmark_adjustments or {}).items()},
             production_adjustments={
                 key: dict(value) for key, value in (production_adjustments or {}).items()
             },
@@ -164,9 +164,7 @@ class VideoModelRouter:
 
         failures: list[tuple[str, str]] = []
         if profile.modality != self.modality:
-            failures.append(
-                ("MODALITY_MISMATCH", f"modality {profile.modality} is not {self.modality}")
-            )
+            failures.append(("MODALITY_MISMATCH", f"modality {profile.modality} is not {self.modality}"))
         if self.required_operation not in profile.supported_operations:
             failures.append(
                 (
@@ -181,9 +179,7 @@ class VideoModelRouter:
         if profile.min_duration is not None and requirements.duration < profile.min_duration:
             failures.append(("DURATION_UNSUPPORTED", f"duration is below {profile.min_duration:g}s"))
         if profile.supported_resolutions and requirements.resolution not in profile.supported_resolutions:
-            failures.append(
-                ("RESOLUTION_UNSUPPORTED", f"resolution {requirements.resolution} unsupported")
-            )
+            failures.append(("RESOLUTION_UNSUPPORTED", f"resolution {requirements.resolution} unsupported"))
         if (
             profile.supported_aspect_ratios
             and requirements.aspect_ratio not in profile.supported_aspect_ratios
@@ -244,7 +240,12 @@ class VideoModelRouter:
         weights = {dimension: weight / total_weight for dimension, weight in weights.items()}
 
         candidates: list[ModelCandidate] = []
-        for profile in self.registry.all():
+        profiles = (
+            self.registry.routable(require_live=self.require_live_lifecycle)
+            if hasattr(self.registry, "routable")
+            else self.registry.all()
+        )
+        for profile in profiles:
             if profile.key in excluded_models:
                 rejected.append(
                     RejectedModel(

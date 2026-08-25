@@ -97,6 +97,7 @@ from production_domain.models import (
     MediaAsset,
     MediaProviderBinding,
     MediaRendition,
+    ModelDefinition,
     Project,
     PromptCompilation,
     PromptRevision,
@@ -117,6 +118,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
 
+from .admin_routes import register_admin_routes
 from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
 from .container import Container, build_container
 from .payment_routes import register_payment_routes
@@ -1713,9 +1715,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                 # adopt it; only one may settle the hold.
                 claim = container.direct_uploads.claim_completion(session, upload.id)
                 if not claim.claimed:
-                    winner = (
-                        container.media.get(claim.media_asset_id) if claim.media_asset_id else None
-                    )
+                    winner = container.media.get(claim.media_asset_id) if claim.media_asset_id else None
                     if winner is not None:
                         return _asset_view(winner, reused=True)
                     raise HTTPException(409, "this upload can no longer be completed")
@@ -1734,9 +1734,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                     # cated against, not a second derivation of it.
                     lineage_key=upload.lineage_key,
                 )
-                container.direct_uploads.mark_completed(
-                    session, upload.id, media_asset_id=adopted.id
-                )
+                container.direct_uploads.mark_completed(session, upload.id, media_asset_id=adopted.id)
                 if claim.reservation_id:
                     # Same transaction as the asset row and the status change,
                     # so a crash between them cannot leave real storage
@@ -1832,8 +1830,13 @@ def create_app(container: Container | None = None) -> FastAPI:
                     "mapping_confidence": item.metric.mapping_confidence,
                     "source_grade": item.grade,
                     "sources": [
-                        {"source_id": s.source_id, "title": s.title, "url": s.url,
-                         "snapshot_at": s.snapshot_at, "dynamic": s.dynamic}
+                        {
+                            "source_id": s.source_id,
+                            "title": s.title,
+                            "url": s.url,
+                            "snapshot_at": s.snapshot_at,
+                            "dynamic": s.dynamic,
+                        }
                         for s in item.sources
                     ],
                     "version_match": item.binding.version_match,
@@ -1941,9 +1944,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             uploads=container.direct_uploads,
             quota=storage_quota,
             limit=limit,
-            reservation_stale_after_seconds=(
-                container.settings.storage_reservation_stale_after_seconds
-            ),
+            reservation_stale_after_seconds=(container.settings.storage_reservation_stale_after_seconds),
         ).as_response()
 
     @app.post("/v1/assets")
@@ -2337,17 +2338,27 @@ def create_app(container: Container | None = None) -> FastAPI:
     async def list_providers(_principal: AuthPrincipal = Depends(auth.current_user)):
         result = []
         for name in container.providers.list():
-            health = await container.providers.get(name).health()
+            if not container.providers.is_configured(name) or not container.model_registry.provider_enabled(
+                name
+            ):
+                continue
             profiles = container.capabilities.by_provider(name)
+            with container.database.session() as session:
+                visible_model_ids = set(
+                    session.scalars(
+                        select(ModelDefinition.id).where(
+                            ModelDefinition.provider == name,
+                            ModelDefinition.enabled.is_(True),
+                            ModelDefinition.user_visible.is_(True),
+                        )
+                    )
+                )
+            profiles = [profile for profile in profiles if profile.model_definition_id in visible_model_ids]
+            if not profiles:
+                continue
             result.append(
                 {
                     "name": name,
-                    "configured": container.providers.is_configured(name),
-                    "healthy": health.ok,
-                    "detail": health.detail,
-                    "capabilities": {
-                        profile.model_id: profile.model_dump(mode="json") for profile in profiles
-                    },
                     "models": [
                         {
                             "model_id": profile.model_id,
@@ -2777,6 +2788,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     auth.register_routes(app, verify_api_key)
     register_payment_routes(app, container, auth)
     register_runtime_routes(app, container, verify_api_key, auth)
+    register_admin_routes(app, container, auth, verify_api_key)
     return app
 
 

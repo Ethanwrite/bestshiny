@@ -272,6 +272,11 @@ class GenerationGateway:
                 "MODEL_DISABLED",
                 f"server model definition is disabled: {provider}:{model}",
             )
+        if definition.lifecycle_status in {"DISABLED", "BLOCKED"}:
+            raise GenerationTargetError(
+                "MODEL_LIFECYCLE_BLOCKED",
+                f"model lifecycle denies new generation traffic: {provider}:{model}",
+            )
         required_operation = f"{media_type}_generation"
         if required_operation not in definition.supported_operations:
             raise GenerationTargetError(
@@ -546,9 +551,7 @@ class GenerationGateway:
                 # do not.
                 workspace_credit_required = credit_context.billable
                 if workspace_credit_required and estimated_credits is None:
-                    raise WorkspaceCreditConflict(
-                        "workspace generation requires a server-owned credit quote"
-                    )
+                    raise WorkspaceCreditConflict("workspace generation requires a server-owned credit quote")
             requested_asset_ids = list(
                 dict.fromkeys(
                     asset_id
@@ -566,6 +569,7 @@ class GenerationGateway:
                     raise LookupError(f"media asset not found: {asset_id}")
                 if asset.project_id != request.project_id:
                     raise LookupError("media asset does not belong to the generation project")
+
             def claimed_key() -> GenerationIdempotency | None:
                 return session.scalar(
                     select(GenerationIdempotency).where(
@@ -1946,9 +1950,7 @@ class GenerationGateway:
         # previous row is a result for a submission this attempt did not make,
         # so it is replaced rather than kept alongside.
         stale = session.scalar(
-            select(ProviderSynchronousResult).where(
-                ProviderSynchronousResult.generation_job_id == job.id
-            )
+            select(ProviderSynchronousResult).where(ProviderSynchronousResult.generation_job_id == job.id)
         )
         if stale is not None:
             session.delete(stale)
@@ -1995,9 +1997,7 @@ class GenerationGateway:
 
         with self.database.session() as session:
             held = session.scalar(
-                select(ProviderSynchronousResult).where(
-                    ProviderSynchronousResult.generation_job_id == job_id
-                )
+                select(ProviderSynchronousResult).where(ProviderSynchronousResult.generation_job_id == job_id)
             )
             if held is None:
                 return None
@@ -2049,9 +2049,7 @@ class GenerationGateway:
         """
 
         held = session.scalar(
-            select(ProviderSynchronousResult).where(
-                ProviderSynchronousResult.generation_job_id == job_id
-            )
+            select(ProviderSynchronousResult).where(ProviderSynchronousResult.generation_job_id == job_id)
         )
         if held is not None:
             session.delete(held)
@@ -2216,6 +2214,7 @@ class GenerationGateway:
                     ModelDefinition.provider_model_id == definition.provider_model_id,
                     ModelDefinition.modality == definition.modality,
                     ModelDefinition.enabled.is_(True),
+                    ModelDefinition.lifecycle_status.not_in(("DISABLED", "BLOCKED")),
                 )
                 if self.provider_mode is ProviderMode.LIVE:
                     eligible_definition = eligible_definition.where(ModelDefinition.live_enabled.is_(True))
@@ -3099,9 +3098,7 @@ class GenerationGateway:
                             job.id,
                             "MEDIA_BATCH_SIBLINGS_REGISTERED",
                             asset_ids=[asset_id for _candidate, asset_id in sibling_outputs],
-                            candidate_ids=[
-                                candidate for candidate, _asset in sibling_outputs if candidate
-                            ],
+                            candidate_ids=[candidate for candidate, _asset in sibling_outputs if candidate],
                         )
                     self._event(session, job.id, "VIDEO_GENERATED", candidate_id=candidate_id)
                     self._event(session, job.id, "DYNAMIC_QA_STARTED", candidate_id=candidate_id)

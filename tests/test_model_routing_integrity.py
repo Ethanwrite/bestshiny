@@ -140,3 +140,55 @@ def test_no_binding_of_any_kind_targets_a_provider_with_no_transport(config, mod
         and not _awaiting_operator_config(models[b["model_logical_name"]])
     ]
     assert not offenders, "role bindings on providers with no transport: " + "; ".join(offenders)
+
+
+def test_wan_adapter_bounds_match_the_registry_declaration(models) -> None:  # type: ignore[no-untyped-def]
+    """The adapter enforces the bounds; the registry advertises them.
+
+    Two copies of one published limit is exactly the drift this file exists to
+    catch — the adapter refusing a sixth reference while the registry routes
+    shots that carry one is a failure nobody sees until a generation is billed.
+    """
+
+    from wan_provider.adapter import _MODE_ROLES, MAX_FIRST_FRAME, MAX_REFERENCE_ASSETS
+
+    profile = models["wan-2.7-official"]["capability_profile"]
+    r2v = profile["provider_metadata"]["modes"]["r2v"]
+    assert profile["max_reference_images"] == MAX_REFERENCE_ASSETS
+    assert r2v["max_reference_assets"] == MAX_REFERENCE_ASSETS
+    assert r2v["max_first_frame"] == MAX_FIRST_FRAME
+    for mode, declared in profile["provider_metadata"]["modes"].items():
+        assert {role.value for role in _MODE_ROLES[mode]} == set(declared["accepts"]), (
+            f"Wan {mode} accepts different roles in the adapter and the registry"
+        )
+
+
+def test_wan_declared_capabilities_are_ones_the_wire_can_actually_carry(models) -> None:  # type: ignore[no-untyped-def]
+    """A capability flag is a promise the serializer has to be able to keep.
+
+    Both directions fail here. A profile that claims a capability no mode
+    accepts advertises an input the adapter would refuse; a mode that accepts a
+    role the profile does not claim sends an input nobody authorised. Voice is
+    the live case: `supports_audio` means native audio *out*, so a voice
+    reference carried *in* needed its own flag rather than riding on that one.
+    """
+
+    from wan_provider.adapter import _MODE_ROLES, ROLE_CAPABILITY_FLAG, WanMedia, WanMediaRole
+
+    profile = models["wan-2.7-official"]["capability_profile"]
+    accepted = {role for roles in _MODE_ROLES.values() for role in roles}
+    for role, flag in ROLE_CAPABILITY_FLAG.items():
+        assert profile.get(flag, False) is (role in accepted), (
+            f"{flag} and the modes accepting {role.value} disagree"
+        )
+
+    # Wan 2.7 declares no voice reference, so nothing may route one.
+    assert profile["supports_reference_voice"] is False
+    assert WanMediaRole.REFERENCE_VOICE not in accepted
+
+    # The serializer is nonetheless ready for the day the flag flips: a voice
+    # reference has a wire form, and it is still just type + url.
+    voiced = WanMedia(WanMediaRole.REFERENCE_VOICE, "https://media.invalid/voice.wav").as_payload()
+    assert voiced == {"type": "audio", "url": "https://media.invalid/voice.wav"}
+    assert set(voiced) == set(profile["provider_metadata"]["wire_contract"]["media_fields"])
+    assert voiced["type"] in profile["provider_metadata"]["wire_contract"]["media_types"]

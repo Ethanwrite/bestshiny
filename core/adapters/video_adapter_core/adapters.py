@@ -156,14 +156,21 @@ class WanAdapter(VideoModelAdapter):
             ]
         )
         common = common_payload(value.shot, value.context)
+        # Wan 2.7 distinguishes the roles rather than taking a flat media list:
+        # a first frame anchors I2V, a first clip continues from existing
+        # footage, and reference stills/videos carry identity into R2V. Naming
+        # them separately here is what lets the adapter reject a shot whose
+        # inputs no single Wan mode can carry, instead of dropping some of them.
         payload = {
             "prompt": prompt,
             "first_frame": common["start_frame"],
             "last_frame": common["end_frame"],
+            "first_clip": common["first_clip"],
             "reference_images": common["reference_images"],
             "reference_video": common["reference_video"],
             "duration": common["duration"],
-            "size": common["resolution"],
+            # A resolution tier, not a pixel size. Wan reads them differently.
+            "resolution": common["resolution"],
             "aspect_ratio": common["aspect_ratio"],
             "audio": common["audio"],
             "style_control": common["style_control"],

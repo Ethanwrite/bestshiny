@@ -679,6 +679,438 @@ async def test_seedance_video_consumes_gateway_resolved_reference_urls() -> None
     assert image_urls == ["https://media.invalid/start.png", "https://media.invalid/reference.png"]
 
 
+# --- 3b. Wan 2.7 runtime model keys -----------------------------------------
+#
+# Wan 2.7 ships one DashScope model per mode, so the mode — not the request
+# body alone — decides which model ID is posted. These pin the reviewed IDs so
+# a rename cannot happen silently, and pin the fail-closed behaviour for a
+# family with no reviewed ID at all.
+
+
+def test_wan_resolves_one_dashscope_model_per_mode() -> None:
+    from wan_provider.adapter import resolve_video_model
+
+    assert resolve_video_model("wan-2.7", "t2v", {}) == "wan2.7-t2v-2026-06-12"
+    assert resolve_video_model("wan-2.7", "i2v", {}) == "wan2.7-i2v-2026-04-25"
+    assert resolve_video_model("wan-2.7", "r2v", {}) == "wan2.7-r2v-2026-06-12"
+
+
+def test_wan_rejects_the_invitation_only_beta_family_instead_of_guessing() -> None:
+    """Wan 3.0 is Beta-gated, so it has no reviewed runtime ID to default to."""
+
+    from wan_provider.adapter import resolve_video_model
+
+    with pytest.raises(ProviderError) as error:
+        resolve_video_model("wan-3.0", "t2v", {})
+    assert error.value.code == "INVALID_REQUEST"
+    assert "WAN_VIDEO_MODEL_KEYS" in str(error.value)
+
+
+def test_wan_operator_declaration_outranks_the_reviewed_default() -> None:
+    from wan_provider.adapter import parse_video_model_keys, resolve_video_model
+
+    mapping = parse_video_model_keys("wan-2.7:i2v=wan2.7-i2v-preview,wan-3.0=wan3.0-beta")
+    assert resolve_video_model("wan-2.7", "i2v", mapping) == "wan2.7-i2v-preview"
+    assert resolve_video_model("wan-3.0", "t2v", mapping) == "wan3.0-beta"
+    # An unmapped mode still falls through to its reviewed default.
+    assert resolve_video_model("wan-2.7", "t2v", mapping) == "wan2.7-t2v-2026-06-12"
+
+
+@pytest.mark.asyncio
+async def test_wan_selects_the_mode_model_from_the_request_shape() -> None:
+    """The mode is inferred from the payload, and each mode posts its own model."""
+
+    from wan_provider import WanProvider
+
+    def _provider() -> tuple[WanProvider, MockProviderTransport]:
+        transport = MockProviderTransport(
+            {
+                ("POST", "/services/aigc/video-generation/video-synthesis"): ProviderHttpResponse(
+                    202, {"output": {"task_id": "wan-mode-task"}}
+                )
+            }
+        )
+        return WanProvider(video_transport=transport), transport
+
+    cases = (
+        ({"prompt": "one action"}, "wan2.7-t2v-2026-06-12"),
+        (
+            {"prompt": "one action", "start_frame_url": "https://media.invalid/start.png"},
+            "wan2.7-i2v-2026-04-25",
+        ),
+        (
+            {"prompt": "one action", "reference_video_url": "https://media.invalid/ref.mp4"},
+            "wan2.7-r2v-2026-06-12",
+        ),
+    )
+    for request, expected_model in cases:
+        provider, transport = _provider()
+        await provider.generate_video({**request, "model": "wan-2.7"}, account_id="", worker_id="")
+        body = transport.requests[0].json_body
+        assert body is not None
+        assert body["model"] == expected_model
+
+
+# --- 3c. The Wan 2.7 media plane --------------------------------------------
+#
+# The defect these started from: `_video_payload` read `reference_video` and a
+# first frame and nothing else, so `reference_images` / `reference_urls` — the
+# list the Gateway resolves and pays to resolve — never reached DashScope. A
+# shot generated on four character plates rendered as if it had none.
+#
+# They also pin the wire contract, which is narrower than the internal one: an
+# entry carries `type` and `url` only. The role decides the model, the limits
+# and the ordering, and is then dropped.
+
+
+def _wan(**kwargs):  # type: ignore[no-untyped-def]
+    from wan_provider import WanProvider
+
+    transport = MockProviderTransport(
+        {
+            ("POST", "/services/aigc/video-generation/video-synthesis"): ProviderHttpResponse(
+                202, {"output": {"task_id": "wan-media-task"}}
+            )
+        }
+    )
+    return WanProvider(video_transport=transport, **kwargs), transport
+
+
+@pytest.mark.asyncio
+async def test_wan_carries_reference_images_instead_of_dropping_them() -> None:
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "reference_urls": [
+                "https://media.invalid/face.png",
+                "https://media.invalid/wardrobe.png",
+            ],
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-r2v-2026-06-12"
+    assert body["input"]["media"] == [
+        {"type": "image", "url": "https://media.invalid/face.png"},
+        {"type": "image", "url": "https://media.invalid/wardrobe.png"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wan_media_entries_carry_only_the_official_fields() -> None:
+    """The role is canonical internal state and never reaches the provider."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "start_frame_url": "https://media.invalid/start.png",
+            "reference_urls": ["https://media.invalid/face.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert all(set(item) == {"type", "url"} for item in body["input"]["media"])
+
+
+@pytest.mark.asyncio
+async def test_wan_r2v_takes_a_first_frame_alongside_its_references() -> None:
+    """The published R2V matrix: first_frame + reference_image/reference_video.
+
+    Position is the only role signal the provider gets, so the frame leads.
+    """
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "start_frame_url": "https://media.invalid/start.png",
+            "reference_video": "https://media.invalid/style.mp4",
+            "reference_urls": ["https://media.invalid/face.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-r2v-2026-06-12"
+    assert body["input"]["media"] == [
+        {"type": "image", "url": "https://media.invalid/start.png"},
+        {"type": "video", "url": "https://media.invalid/style.mp4"},
+        {"type": "image", "url": "https://media.invalid/face.png"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wan_start_frame_alone_is_i2v() -> None:
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "start_frame_url": "https://media.invalid/start.png",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-i2v-2026-04-25"
+
+
+@pytest.mark.asyncio
+async def test_wan_enforces_the_published_reference_bounds_before_billing() -> None:
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "reference_urls": [f"https://media.invalid/ref{index}.png" for index in range(6)],
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "at most 5 reference assets" in str(error.value)
+    assert not transport.requests
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "start_frame_url": "https://media.invalid/start.png",
+            "reference_urls": [f"https://media.invalid/ref{index}.png" for index in range(4)],
+            "reference_video": "https://media.invalid/style.mp4",
+        },
+        account_id="",
+        worker_id="",
+    )
+    # One first frame plus five reference assets is exactly the bound.
+    assert transport.requests[0].json_body["model"] == "wan2.7-r2v-2026-06-12"
+    assert len(transport.requests[0].json_body["input"]["media"]) == 6
+
+
+@pytest.mark.asyncio
+async def test_wan_continuation_from_a_clip_is_an_i2v_shot() -> None:
+    """A clip the shot grows out of is I2V's job, like a first frame."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "first_clip": "https://media.invalid/previous.mp4",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-i2v-2026-04-25"
+    assert body["input"]["media"] == [
+        {"type": "video", "url": "https://media.invalid/previous.mp4"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wan_continuation_and_a_reference_video_are_not_the_same_request() -> None:
+    """Continuing from footage and referencing it select different models."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {"model": "wan-2.7", "prompt": "one action", "first_clip": "https://media.invalid/a.mp4"},
+        account_id="",
+        worker_id="",
+    )
+    assert transport.requests[0].json_body["model"] == "wan2.7-i2v-2026-04-25"
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "reference_video": "https://media.invalid/a.mp4",
+        },
+        account_id="",
+        worker_id="",
+    )
+    assert transport.requests[0].json_body["model"] == "wan2.7-r2v-2026-06-12"
+
+    # And asking for both is refused rather than silently resolved to one: I2V
+    # carries no reference video, R2V carries no clip to continue from.
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "first_clip": "https://media.invalid/a.mp4",
+                "reference_video": "https://media.invalid/b.mp4",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "reference_video" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_refuses_a_voice_reference_it_does_not_declare() -> None:
+    """`supports_reference_voice` is false, so no mode may carry one.
+
+    The serializer can express it — a voice reference is `type: audio` and
+    still only type + url — but the capability declaration is the gate, and a
+    request carrying one fails before it is billed rather than arriving with
+    the voice quietly missing.
+    """
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "reference_voice": "https://media.invalid/voice.wav",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "reference_voice" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_refuses_a_reference_the_provider_cannot_fetch() -> None:
+    """An unresolved asset ID would spend a generation on an unreadable input."""
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {"model": "wan-2.7", "prompt": "one action", "reference_images": ["asset-abc123"]},
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "must be a URL" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_sends_a_resolution_tier_and_never_a_pixel_size() -> None:
+    from wan_provider.adapter import _resolution
+
+    assert _resolution("720p") == "720P"
+    assert _resolution("1080P") == "1080P"
+    for rejected in ("1280*720", "1280x720", "cinema"):
+        with pytest.raises(ProviderError):
+            _resolution(rejected)
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {"model": "wan-2.7", "prompt": "one action", "size": "1280*720"},
+            account_id="",
+            worker_id="",
+        )
+    assert "not a pixel size" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_sends_ratio_only_where_nothing_else_fixes_the_aspect() -> None:
+    """t2v takes a ratio; i2v never does; r2v only without a first frame."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {"model": "wan-2.7", "prompt": "one action", "resolution": "1080p", "aspect_ratio": "9:16"},
+        account_id="",
+        worker_id="",
+    )
+    assert transport.requests[0].json_body["parameters"] == {
+        "resolution": "1080P",
+        "ratio": "9:16",
+        "watermark": False,
+    }
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "resolution": "1080p",
+            "aspect_ratio": "9:16",
+            "start_frame_url": "https://media.invalid/start.png",
+        },
+        account_id="",
+        worker_id="",
+    )
+    # I2V: the frame fixes the aspect, so no ratio travels beside it.
+    assert transport.requests[0].json_body["parameters"] == {
+        "resolution": "1080P",
+        "watermark": False,
+    }
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "resolution": "1080p",
+            "aspect_ratio": "9:16",
+            "reference_urls": ["https://media.invalid/face.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+    # R2V with references only: nothing fixes the aspect, so the ratio applies.
+    assert transport.requests[0].json_body["parameters"]["ratio"] == "9:16"
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "resolution": "1080p",
+            "aspect_ratio": "9:16",
+            "reference_urls": ["https://media.invalid/face.png"],
+            "start_frame_url": "https://media.invalid/start.png",
+        },
+        account_id="",
+        worker_id="",
+    )
+    # R2V carrying a first frame: the frame wins, as it does on I2V.
+    assert "ratio" not in transport.requests[0].json_body["parameters"]
+
+
+@pytest.mark.asyncio
+async def test_wan_honours_an_explicit_mode_over_the_inferred_one() -> None:
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "mode": "t2v",
+            "prompt": "one action",
+            "reference_urls": ["https://media.invalid/face.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-t2v-2026-06-12"
+
+
 @pytest.mark.asyncio
 async def test_wan_video_consumes_gateway_resolved_reference_urls() -> None:
     from wan_provider import WanProvider
@@ -708,8 +1140,10 @@ async def test_wan_video_consumes_gateway_resolved_reference_urls() -> None:
     body = transport.requests[0].json_body
     assert body is not None
     assert body["model"] == "wan-i2v"
-    assert body["input"]["img_url"] == "https://media.invalid/start.png"
-    assert body["input"]["last_frame_url"] == "https://media.invalid/end.png"
+    assert body["input"]["media"] == [
+        {"type": "image", "url": "https://media.invalid/start.png"},
+        {"type": "image", "url": "https://media.invalid/end.png"},
+    ]
 
 
 @pytest.mark.asyncio

@@ -92,10 +92,36 @@ def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
     assert wan27.logical_name == "wan-2.7-official"
     assert wan30.logical_name == "wan-3.0-official"
     # Distinct profile versions: 3.0 is reviewed on its own evidence.
-    assert wan27.version == "wan-2.7-manual-v1"
+    assert wan27.version == "wan-2.7-manual-v3"
     assert wan30.version == "wan-3.0-manual-v1"
+    # 2.7 ships as three DashScope models, so all three modes are routable, and
+    # continuation / reference / edit are separate claims rather than one blur.
     assert wan27.supports_t2v is True
-    assert wan27.supports_i2v is False
+    assert wan27.supports_i2v is True
+    assert wan27.supports_start_frame is True
+    # Continuation: a clip whose end the shot carries on from. An I2V operation.
+    assert wan27.supports_video_extension is True
+    assert "first_clip" in wan27.provider_metadata["modes"]["i2v"]["accepts"]
+    # Native audio out is declared; a voice reference carried in is not, and the
+    # two are separate flags precisely so one cannot be read as the other.
+    assert wan27.supports_audio is True
+    assert wan27.supports_reference_voice is False
+    assert wan27.supports_native_audio is True
+    assert wan27.supports_voice_reference is False
+    # Reference: footage and stills the shot only takes identity or grade from.
+    assert wan27.supports_v2v is True
+    assert wan27.supports_reference_image is True
+    assert wan27.supports_character_reference is True
+    # Published bounds, not a conservative guess.
+    assert wan27.max_reference_images == 5
+    r2v = wan27.provider_metadata["modes"]["r2v"]
+    assert r2v["max_first_frame"] == 1 and r2v["max_reference_assets"] == 5
+    # R2V takes a first frame alongside its references; that is the mode's point.
+    assert "first_frame" in r2v["accepts"]
+    # Edit: not published for 2.7. The profile says so in one place, and the
+    # adapter refuses generate_image in the other.
+    assert wan27.provider_metadata["capability_axes"]["edit"]["supported"] is False
+    assert "image_generation" not in wan27.supported_operations
     # 3.0's published envelope is materially different and must not be flattened.
     assert wan30.max_duration == 30 and wan27.max_duration < 30
     # 2.7 stays the primary route; 3.0 is an explicit fallback, not a silent swap.

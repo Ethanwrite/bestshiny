@@ -8,6 +8,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from generation_gateway.scheduler import AccountScheduler
 from pgvector.sqlalchemy import Vector
 from platform_database import Database
@@ -22,6 +23,13 @@ SCHEMA_SNAPSHOTS = (
     ROOT / "migrations/schema_snapshots/platform_v1.py",
     ROOT / "migrations/schema_snapshots/platform_v2.py",
 )
+
+
+def _script_head(config: Config) -> str:
+    """The single current head, as alembic itself reports it."""
+
+    return ScriptDirectory.from_config(config).get_current_head()
+
 
 
 def _legacy_capacity_database(tmp_path, monkeypatch, filename):  # type: ignore[no-untyped-def]
@@ -1073,7 +1081,10 @@ def test_persistent_character_state_supports_assetless_recovery_and_rejects_part
     engine = sa.create_engine(recovery_url)
     with engine.connect() as connection:
         revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-    assert revision == "0037_direct_uploads"
+    # Read the head rather than naming it: this assertion is about the recovery
+    # database reaching the tip, not about which revision the tip happens to be,
+    # and hard-coding it made every new migration edit an unrelated test.
+    assert revision == _script_head(config)
     assert not {
         "character_state_versions",
         "character_state_deltas",

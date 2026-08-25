@@ -87,6 +87,11 @@ class ModelCapabilityProfileConfig(BaseModel):
     supports_video_extension: bool = False
     supports_camera_instruction: bool = False
     supports_audio: bool = False
+    # Distinct from supports_audio, which is native audio *out*. This is a voice
+    # or audio asset carried *in*, as a reference the model conditions on.
+    # Conflating them means a profile can promise voice conditioning that no
+    # adapter is able to send.
+    supports_reference_voice: bool = False
     supports_text_rendering: bool = False
     max_reference_images: int = Field(default=0, ge=0)
     min_duration: float | None = Field(default=None, gt=0)
@@ -250,6 +255,7 @@ class ModelCapabilityProfile(BaseModel):
     supports_video_extension: bool = False
     supports_camera_instruction: bool = False
     supports_audio: bool = False
+    supports_reference_voice: bool = False
     supports_text_rendering: bool = False
     max_reference_images: int = 0
     physics_prior: float = Field(default=0.5, ge=0, le=1)
@@ -295,7 +301,15 @@ class ModelCapabilityProfile(BaseModel):
 
     @property
     def supports_native_audio(self) -> bool:
+        """Audio the model *produces*. Not the same as conditioning on a voice."""
+
         return self.supports_audio
+
+    @property
+    def supports_voice_reference(self) -> bool:
+        """A voice or audio asset the model conditions *on*."""
+
+        return self.supports_reference_voice
 
     @property
     def supports_dialogue(self) -> bool:

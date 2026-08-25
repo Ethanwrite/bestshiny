@@ -260,7 +260,9 @@ async def test_wan_27_uses_dashscope_async_protocol_and_workspace_client() -> No
     assert request.json_body == {
         "model": "wan-test-t2v",
         "input": {"prompt": "one simple action"},
-        "parameters": {"duration": 5, "size": "720p", "watermark": False},
+        # A resolution *tier*. "720p" used to be posted into `size`, which takes
+        # pixel dimensions.
+        "parameters": {"duration": 5, "resolution": "720P", "watermark": False},
     }
     job = await provider.get_job(
         submission.provider_job_id,

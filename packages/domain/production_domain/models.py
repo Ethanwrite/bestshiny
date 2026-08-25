@@ -2613,6 +2613,9 @@ class ModelCapabilityProfile(Base, TimestampMixin):
     supports_video_extension: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     supports_camera_instruction: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     supports_audio: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Audio carried *in* as a reference, as opposed to supports_audio, which is
+    # audio the model generates.
+    supports_reference_voice: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     supports_text_rendering: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     max_reference_images: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     min_duration: Mapped[float | None] = mapped_column(Float)

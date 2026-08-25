@@ -1193,13 +1193,25 @@
         "credential_required": true
       },
       "capability_profile": {
-        "profile_version": "wan-2.7-manual-v1",
+        "profile_version": "wan-2.7-manual-v3",
         "confidence_level": "initial",
         "supported_operations": [
           "video_generation"
         ],
         "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_start_end": true,
+        "supports_v2v": true,
+        "supports_video_extension": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": true,
+        "supports_character_reference": true,
+        "supports_audio": true,
+        "supports_reference_voice": false,
         "supports_camera_instruction": true,
+        "max_reference_images": 5,
         "min_duration": 1,
         "max_duration": 15,
         "supported_aspect_ratios": [
@@ -1220,7 +1232,90 @@
         "text_render_prior": 0.5,
         "provider_metadata": {
           "adapter": "wan",
-          "evidence": "adapter_contract_only_no_live_capability_verification",
+          "evidence": "published_mode_matrix_no_live_capability_verification",
+          "modes": {
+            "t2v": {
+              "model": "wan2.7-t2v-2026-06-12",
+              "accepts": [
+                "reference_image"
+              ],
+              "framing": [
+                "resolution",
+                "ratio"
+              ]
+            },
+            "i2v": {
+              "model": "wan2.7-i2v-2026-04-25",
+              "accepts": [
+                "first_frame",
+                "last_frame",
+                "first_clip",
+                "reference_image"
+              ],
+              "framing": [
+                "resolution"
+              ]
+            },
+            "r2v": {
+              "model": "wan2.7-r2v-2026-06-12",
+              "accepts": [
+                "first_frame",
+                "reference_image",
+                "reference_video"
+              ],
+              "framing": [
+                "resolution",
+                "ratio_when_no_first_frame"
+              ],
+              "max_first_frame": 1,
+              "max_reference_assets": 5
+            }
+          },
+          "wire_contract": {
+            "media_fields": [
+              "type",
+              "url"
+            ],
+            "media_types": [
+              "image",
+              "video",
+              "audio"
+            ],
+            "note": "role is canonical internal state and is never serialized; array position is the only role signal the provider receives"
+          },
+          "capability_axes": {
+            "continuation": {
+              "role": "first_clip",
+              "mode": "i2v",
+              "flag": "supports_video_extension",
+              "reason": "continuing from a clip is an I2V operation: the clip is what the new footage grows out of, exactly as a first frame is"
+            },
+            "voice": {
+              "role": "reference_voice",
+              "mode": null,
+              "flag": "supports_reference_voice",
+              "supported": false,
+              "reason": "supports_audio is native audio out; Wan 2.7 declares no voice or audio asset carried in as a reference. The role and its wire form ('type': 'audio') exist so the serializer is ready if that changes, and no mode accepts it while the flag is false"
+            },
+            "reference": {
+              "roles": [
+                "reference_image",
+                "reference_video"
+              ],
+              "mode": "r2v",
+              "flags": [
+                "supports_v2v",
+                "supports_reference_image",
+                "supports_multi_reference",
+                "supports_character_reference"
+              ]
+            },
+            "edit": {
+              "supported": false,
+              "reason": "Wan 2.7 publishes t2v, i2v and r2v only; this adapter exposes no edit operation and generate_image raises CAPABILITY_NOT_SUPPORTED"
+            }
+          },
+          "reference_bounds_evidence": "alibaba_cloud_deployment_documentation",
           "cost": {
             "normalized": 0.42,
             "estimated_per_second": 0.07

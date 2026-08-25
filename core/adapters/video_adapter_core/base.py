@@ -81,6 +81,10 @@ def common_payload(spec: CanonicalShotSpec, context: dict[str, Any]) -> dict[str
         "end_frame": context.get("end_frame"),
         "reference_video": context.get("reference_video")
         or (reference_videos[0] if reference_videos else None),
+        # Footage the shot continues from, as distinct from footage it merely
+        # references. A provider that conflates the two continues from a clip it
+        # was only meant to take style from.
+        "first_clip": context.get("first_clip") or context.get("previous_clip"),
         "audio": shot.get("audio") or {},
         "style_embedding": (context.get("style_control") or {}).get("embedding"),
         "style_control": context.get("style_control"),

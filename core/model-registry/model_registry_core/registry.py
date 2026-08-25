@@ -34,6 +34,7 @@ _BOOLEAN_CAPABILITIES = {
     "supports_video_extension",
     "supports_camera_instruction",
     "supports_audio",
+    "supports_reference_voice",
     "supports_text_rendering",
 }
 
@@ -88,6 +89,7 @@ class ModelCapabilityRegistry:
             supports_video_extension=row.supports_video_extension,
             supports_camera_instruction=row.supports_camera_instruction,
             supports_audio=row.supports_audio,
+            supports_reference_voice=row.supports_reference_voice,
             supports_text_rendering=row.supports_text_rendering,
             max_reference_images=row.max_reference_images,
             min_duration=row.min_duration,

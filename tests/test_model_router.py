@@ -21,7 +21,7 @@ def test_registry_loads_persisted_manual_profiles(container):
     assert wan is not None
     assert wan.source == "MANUAL_PRIOR"
     assert wan.supports_t2v is True
-    assert wan.supports_i2v is False
+    assert wan.supports_i2v is True
 
 
 def test_router_penalizes_grok_for_rear_view_ending(container):

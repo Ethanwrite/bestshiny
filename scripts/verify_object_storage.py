@@ -6,13 +6,14 @@ generation is billed:
 
 1. a presigned PUT can be issued at all;
 2. a client can transfer straight to the store, without the API in the path;
-3. **the declared digest is enforced or verified** — content-addressed keys
+3. a browser can preflight that PUT from every configured Web origin;
+4. **the declared digest is enforced or verified** — content-addressed keys
    are safe only when mismatched bytes are rejected by the store, or the
    completion path reads the object once and verifies its SHA-256 before
    adoption;
-4. `HEAD` reports a size the completion path can settle a quota hold against;
-5. a bounded range read returns the header validation needs;
-6. a presigned GET is issued, and the bytes come back identical — this is the
+5. `HEAD` reports a size the completion path can settle a quota hold against;
+6. a bounded range read returns the header validation needs;
+7. a presigned GET is issued, and the bytes come back identical — this is the
    URL an external provider fetches a reference from.
 
 It writes one small object under a `_preflight/` prefix and deletes it.
@@ -54,6 +55,52 @@ def _put(url: str, payload: bytes, headers: dict[str, str]) -> int:
     request = urllib.request.Request(url, data=payload, method="PUT", headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         return int(response.status)
+
+
+def _cors_preflight(
+    url: str,
+    *,
+    origin: str,
+    upload_headers: dict[str, str],
+) -> tuple[bool, str]:
+    requested_headers = sorted(header.lower() for header in upload_headers)
+    request = urllib.request.Request(
+        url,
+        method="OPTIONS",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": ",".join(requested_headers),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            allowed_origin = response.headers.get("Access-Control-Allow-Origin", "").strip()
+            allowed_methods = {
+                item.strip().upper()
+                for item in response.headers.get("Access-Control-Allow-Methods", "").split(",")
+                if item.strip()
+            }
+            allowed_headers = {
+                item.strip().lower()
+                for item in response.headers.get("Access-Control-Allow-Headers", "").split(",")
+                if item.strip()
+            }
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except urllib.error.URLError as exc:
+        return False, str(exc.reason)
+    origin_ok = allowed_origin in {"*", origin}
+    method_ok = "PUT" in allowed_methods
+    headers_ok = "*" in allowed_headers or set(requested_headers).issubset(allowed_headers)
+    missing = []
+    if not origin_ok:
+        missing.append("origin")
+    if not method_ok:
+        missing.append("PUT")
+    if not headers_ok:
+        missing.append("headers " + ",".join(requested_headers))
+    return not missing, "allowed" if not missing else "missing " + "; ".join(missing)
 
 
 def _probe_content_md5(storage, payload: bytes, orphans: list[str]) -> tuple[str, str, str]:  # type: ignore[no-untyped-def]
@@ -162,6 +209,20 @@ def main() -> int:
         )
     _say(OK, "presigned PUT", f"sha256 checksum bound: {'x-amz-checksum-sha256' in presigned.headers}")
 
+    web_origins = [origin.strip().rstrip("/") for origin in settings.web_origins.split(",") if origin.strip()]
+    if not web_origins:
+        failures += 1
+        _say(FAIL, "browser CORS", "WEB_ORIGINS has no frontend origin to verify")
+    for origin in web_origins:
+        allowed, detail = _cors_preflight(
+            presigned.url,
+            origin=origin,
+            upload_headers=presigned.headers,
+        )
+        if not allowed:
+            failures += 1
+        _say(OK if allowed else FAIL, f"browser CORS · {origin}", detail)
+
     try:
         _say(OK, "client transfer", f"HTTP {_put(presigned.url, payload, presigned.headers)}")
     except urllib.error.HTTPError as exc:
@@ -258,7 +319,7 @@ def main() -> int:
 
     print()
     if not failures:
-        print("  Storage plane verified. Reference media, direct uploads and renditions are safe here.\n")
+        print("  Storage plane verified. Browser uploads, reference media and renditions are safe here.\n")
         return 0
     print(f"  {failures} check(s) failed.\n")
     if not enforced and not completion_verified:

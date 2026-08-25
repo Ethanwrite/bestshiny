@@ -153,6 +153,21 @@ python3 -m http.server 18081 --directory apps/web
 | `DEPAY_CALLBACK_PUBLIC_KEY` | DePay 在启用 callback 后生成的 RSA 公钥 | 用于验证原始 body 的 `x-signature`；不要用任意未签名请求入账 |
 | `DEPAY_OFFER_AMOUNT_USDC` / `DEPAY_OFFER_CREDITS` / `DEPAY_OFFER_UPGRADE_PLAN` | 默认 `30` / `3000` / `PRO` | 服务端单一 Offer 事实源；修改时必须同步 DePay 固定金额 Link |
 
+### Object-storage browser CORS
+
+`POST /v1/assets/uploads` 返回的预签名 PUT 由浏览器直接请求对象存储，因此 API 的
+`WEB_ORIGINS` 配置并不能代替 bucket CORS。对象存储必须为 `WEB_ORIGINS` 中每一个实际
+前端 Origin（协议、域名和端口必须完全一致）允许：
+
+- 方法：`PUT`、`GET`、`HEAD`；
+- 请求头：至少 `content-type`、`x-amz-checksum-sha256`，或受控的 `x-amz-*`；
+- 响应头：建议暴露 `ETag` 和请求追踪 ID；
+- 不要在使用 Cookie 的 API CORS 中用 `*`，bucket 也优先列出精确生产 Origin。
+
+上线前运行 `uv run python scripts/verify_object_storage.py`。它会从每个 `WEB_ORIGINS`
+来源模拟浏览器 OPTIONS 预检，并在 CORS、预签名上传、校验、HEAD、Range GET 或
+Provider 可取的 HTTPS URL 任一环节失败时返回非零。
+
 ## Feature flags
 
 所有高风险自动化默认关闭。环境变量提供全局默认值，数据库可设置全局或项目级 override；项目级优先。

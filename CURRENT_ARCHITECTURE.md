@@ -487,6 +487,12 @@ and returns a presigned PUT; the client transfers; `POST /v1/assets/uploads/{id}
 the object. A `direct_uploads` row (migration `0037`) holds the server's decisions in between, so
 the completion call carries only a row id and cannot retarget the upload.
 
+The bucket is also part of the browser contract: it must answer an `OPTIONS` preflight for every
+configured `WEB_ORIGINS` value and allow `PUT` plus every header bound into the presign (currently
+`content-type` and, when enabled, `x-amz-checksum-sha256`). API CORS cannot grant access to a
+different object-storage origin. `scripts/verify_object_storage.py` exercises this preflight before
+uploading, so a deployment with valid credentials but unusable browser CORS fails its storage gate.
+
 The presigned PUT binds `x-amz-checksum-sha256`, so the object store rejects bytes that do not
 hash to the declared digest — that is what makes a client-declared SHA-256 safe to
 content-address a key with, and it is why this service never reads the body to learn the hash.

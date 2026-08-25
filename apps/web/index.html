@@ -28,9 +28,22 @@
           <button id="authSubmitBtn" class="button primary full" type="submit">登录</button>
         </form>
         <button id="authModeBtn" class="text-button auth-mode" type="button">没有账号？免费注册</button>
+        <button id="forgotPasswordBtn" class="text-button auth-mode" type="button">忘记密码？</button>
         <small class="auth-footnote">密码仅保存强哈希；登录会话可随时退出撤销。</small>
       </div>
     </section>
+    <dialog id="passwordResetDialog" class="project-dialog" aria-labelledby="passwordResetTitle">
+      <form id="passwordResetForm" class="project-dialog-form">
+        <div class="project-dialog-heading"><span class="eyebrow">账号恢复</span><h2 id="passwordResetTitle">重置密码</h2><p>先申请重置令牌，再用令牌设置至少 12 个字符的新密码。</p></div>
+        <label>邮箱<input id="resetEmail" type="email" maxlength="320" autocomplete="email" required /></label>
+        <button id="requestResetBtn" class="button secondary full" type="button">申请重置令牌</button>
+        <label>重置令牌<input id="resetToken" minlength="20" maxlength="500" autocomplete="off" placeholder="从重置邮件复制；开发环境会自动填入" /></label>
+        <label>新密码<input id="resetNewPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" /></label>
+        <p id="passwordResetStatus" class="project-dialog-status" role="status" aria-live="polite"></p>
+        <p id="passwordResetError" class="project-dialog-error" role="alert"></p>
+        <div class="project-dialog-actions"><button id="closePasswordResetBtn" class="button secondary" type="button">关闭</button><button id="confirmResetBtn" class="button primary" type="submit">确认重置</button></div>
+      </form>
+    </dialog>
     <div id="appShell" class="app-shell auth-locked">
       <header class="topbar">
         <div class="brand">
@@ -54,6 +67,7 @@
       <nav class="mode-switch" aria-label="工作模式">
         <button class="mode-button active" data-mode="passenger">自主创作</button>
         <button class="mode-button" data-mode="autopilot">智能导演</button>
+        <button class="mode-button" data-mode="operations">生产控制台</button>
         <span id="modeDescription">描述画面、选择生成方式、开始创作</span>
       </nav>
 
@@ -68,6 +82,7 @@
             <textarea id="passengerPrompt" rows="11" placeholder="例如：一个女生拿着香水，高级一点"></textarea>
             <div id="imagePromptActions" class="inline-actions">
               <button id="correctImagePromptBtn" class="button secondary grow">优化画面描述</button>
+              <button id="refinePromptBtn" class="button secondary grow">AI 深度精修</button>
               <button id="undoImagePromptBtn" class="button ghost" disabled>恢复原文</button>
             </div>
             <div id="promptCorrectionSummary" class="decision-box">只会增强构图、灯光、材质和层次，不会擅自重设计。</div>
@@ -210,6 +225,84 @@ EXT. 酒店雨棚 - NIGHT
           </details>
         </aside>
       </main>
+      <section id="operationsWorkspace" class="operations-workspace hidden">
+        <div class="operations-hero">
+          <div><span class="eyebrow">PRODUCTION OPS</span><h1>生产控制台</h1><p>查看生成线路、处理任务异常，并核对每个镜头的成本、决策和叙事状态。</p></div>
+          <button id="operationsRefreshBtn" class="button secondary" type="button">刷新全局状态</button>
+        </div>
+        <div class="operations-metrics" aria-label="生产状态概览">
+          <div><span>已配置供应商</span><strong id="operationsProviderMetric">—</strong></div>
+          <div><span>可用模型</span><strong id="operationsModelMetric">—</strong></div>
+          <div><span>技能目录</span><strong id="operationsSkillMetric">—</strong></div>
+          <div><span>当前任务</span><strong id="operationsJobMetric">未选择</strong></div>
+        </div>
+        <div class="operations-grid">
+          <article class="operations-card span-two">
+            <div class="panel-heading compact"><div><span class="eyebrow">线路状态</span><h2>供应商、模型与技能</h2></div></div>
+            <div id="providerHealthGrid" class="provider-health-grid empty-state">正在读取生成线路…</div>
+            <details class="advanced-details"><summary>查看技能目录</summary><div id="skillCatalog" class="skill-catalog empty-state">正在读取技能…</div></details>
+          </article>
+
+          <article class="operations-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">任务恢复</span><h2>生成任务控制</h2></div></div>
+            <label>任务 ID<input id="operationsJobId" autocomplete="off" placeholder="粘贴 generation job id" /></label>
+            <div class="operation-actions">
+              <button id="loadJobBtn" class="button secondary" type="button">读取</button>
+              <button id="retryJobBtn" class="button secondary" type="button" disabled>安全重试</button>
+              <button id="cancelJobBtn" class="button secondary" type="button" disabled>取消</button>
+              <button id="reconcileJobBtn" class="button secondary" type="button" disabled>对账</button>
+            </div>
+            <div id="generationControlStatus" class="operations-output empty-state">输入任务 ID，或从生成结果中带入任务。</div>
+            <details class="advanced-details"><summary>查看任务事件</summary><div id="generationEvents" class="event-list empty-state">尚未读取任务</div></details>
+          </article>
+
+          <article class="operations-card span-two">
+            <div class="panel-heading compact"><div><span class="eyebrow">可追溯性</span><h2>镜头成本与决策证据</h2></div><button id="loadShotAuditBtn" class="text-button" type="button">刷新证据 ↻</button></div>
+            <label>镜头<select id="operationsShotSelect"><option value="">请先创建并拆解剧本</option></select></label>
+            <div class="audit-grid">
+              <section><h3>成本</h3><div id="shotCostView" class="operations-output empty-state">选择镜头后显示</div></section>
+              <section><h3>策略决策</h3><div id="shotDecisionList" class="event-list empty-state">选择镜头后显示</div></section>
+              <section><h3>状态迁移</h3><div id="stateTransitionList" class="event-list empty-state">选择镜头后显示</div></section>
+            </div>
+          </article>
+
+          <article class="operations-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">角色连续性</span><h2>叙事状态</h2></div></div>
+            <div class="field-grid">
+              <label>角色<select id="operationsCharacterSelect"><option value="">尚无角色</option></select></label>
+              <label>时间线<input id="narrativeScope" value="main" maxlength="100" /></label>
+            </div>
+            <button id="loadNarrativeBtn" class="button secondary full" type="button">读取当前状态</button>
+            <div id="narrativeStateView" class="operations-output empty-state">选择角色后显示</div>
+            <details class="advanced-details narrative-initialize">
+              <summary>初始化叙事状态</summary>
+              <label>已采用的候选<select id="narrativeCandidateSelect"><option value="">当前镜头尚无已采用候选</option></select></label>
+              <label>状态 JSON<textarea id="narrativeStateInput" rows="6">{
+  "location": "",
+  "wardrobe": "",
+  "emotion": "",
+  "props": []
+}</textarea></label>
+              <label>确认理由<input id="narrativeReason" placeholder="说明已经核对的剧情状态" /></label>
+              <label class="check-row"><input id="narrativeConfirm" type="checkbox" /> 我已核对该状态并明确确认写入</label>
+              <button id="initializeNarrativeBtn" class="button primary full" type="button">初始化状态</button>
+            </details>
+          </article>
+
+          <article class="operations-card">
+            <div class="panel-heading compact"><div><span class="eyebrow">大文件上传</span><h2>校验直传资产</h2></div></div>
+            <p class="operations-copy">先计算 SHA-256 并取得一次性上传授权，再直接写入对象存储；完成后由服务端核验并登记资产。</p>
+            <label>文件<input id="directUploadFile" type="file" /></label>
+            <div class="field-grid">
+              <label>资产类型<select id="directUploadType"><option value="REFERENCE">普通参考</option><option value="CHARACTER">人物</option><option value="SCENE">场景</option><option value="PRODUCT">产品</option><option value="PROP">道具</option><option value="WARDROBE">服装</option><option value="STYLE">视觉风格</option></select></label>
+              <label>关联范围<select id="directUploadScope"><option value="project">当前项目</option><option value="shot">当前镜头</option><option value="character">当前角色</option></select></label>
+            </div>
+            <button id="directUploadBtn" class="button primary full" type="button">校验并上传</button>
+            <div id="directUploadStatus" class="operations-output empty-state">选择文件后开始上传</div>
+          </article>
+        </div>
+      </section>
+
       <dialog id="newProjectDialog" class="project-dialog" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
         <form id="newProjectForm" class="project-dialog-form" novalidate>
           <div class="project-dialog-heading">

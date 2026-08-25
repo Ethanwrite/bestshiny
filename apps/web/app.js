@@ -46,6 +46,7 @@ const state = {
   authMode: "login", passengerPreviewObjectUrl: null,
   styleLock: null,
   submissions: restoreSubmissions(),
+  operations: { providers: [], skills: [], job: null },
 };
 const $ = (id) => document.getElementById(id);
 const escapeHTML = (value = "") => String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -144,6 +145,7 @@ function clearWorkspaceState() {
   state.characters = [];
   state.logicalAssets = [];
   state.styleLock = null;
+  state.operations = { providers: [], skills: [], job: null };
   state.passengerJobs = { image: null, video: null };
   state.passengerPrompts = { image: "", video: "" };
   state.passengerReferenceUpload = null;
@@ -166,6 +168,7 @@ function clearWorkspaceState() {
   resetProductionView();
   $("passengerResult").classList.add("empty-state");
   $("passengerResult").textContent = "提交生成后在这里查看状态";
+  syncOperationsContext();
 }
 
 function unlockAuth(user) {
@@ -257,10 +260,16 @@ function switchMode(mode) {
   document.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
   $("passengerWorkspace").classList.toggle("hidden", mode !== "passenger");
   $("autopilotWorkspace").classList.toggle("hidden", mode !== "autopilot");
+  $("operationsWorkspace").classList.toggle("hidden", mode !== "operations");
   $("generateBtn").classList.toggle("hidden", mode !== "autopilot");
-  $("modeDescription").textContent = mode === "passenger"
-    ? "描述画面、选择生成方式、开始创作"
-    : "系统拆解剧本、保持连续并检查每个镜头";
+  $("modeDescription").textContent = ({
+    passenger: "描述画面、选择生成方式、开始创作",
+    autopilot: "系统拆解剧本、保持连续并检查每个镜头",
+    operations: "监控线路、恢复任务并核对生产证据",
+  })[mode] || "";
+  if (mode === "operations" && state.authUser) {
+    loadOperations().catch((error) => toast(error.message));
+  }
 }
 
 function setPassengerMedia(media) {
@@ -399,6 +408,30 @@ async function correctPassengerPrompt() {
   toast("画面描述已优化，你可以继续修改或恢复原文");
 }
 
+async function refinePassengerPrompt() {
+  if (!state.project) return toast("请先创建项目");
+  const prompt = $("passengerPrompt").value.trim();
+  if (!prompt) return toast("请先描述想要的画面");
+  const button = $("refinePromptBtn");
+  button.disabled = true;
+  button.textContent = "精修中…";
+  try {
+    const result = await request("/v1/prompts/refine", {
+      method: "POST",
+      body: JSON.stringify({ project_id: state.project.id, prompt }),
+    });
+    state.passengerOriginal ??= result.original || prompt;
+    $("passengerPrompt").value = result.refined;
+    $("undoImagePromptBtn").disabled = false;
+    $("promptTypeBadge").textContent = result.model_refinement?.accepted ? "AI 精修已采用" : "规则精修已采用";
+    $("promptCorrectionSummary").textContent = `已完成深度精修，并锁定 ${result.preserved_facts?.length || 0} 项事实约束。`;
+    toast("提示词已深度精修，原始事实保持锁定");
+  } finally {
+    button.disabled = false;
+    button.textContent = "AI 深度精修";
+  }
+}
+
 function undoPassengerPrompt() {
   if (!state.passengerOriginal) return;
   $("passengerPrompt").value = state.passengerOriginal;
@@ -418,6 +451,7 @@ async function renderPassengerJob(job) {
     $("promotePassengerAssetBtn").textContent = "确认用于当前项目";
     return;
   }
+  $("operationsJobId").value = job.id;
   const output = job.output_asset_id || "等待生成完成";
   if (state.passengerPreviewObjectUrl) URL.revokeObjectURL(state.passengerPreviewObjectUrl);
   state.passengerPreviewObjectUrl = null;
@@ -688,6 +722,7 @@ async function selectProject(id) {
   await loadCharacters();
   if (state.project.episodes.length) await loadEpisode(state.project.episodes[0].id);
   else resetProductionView();
+  syncOperationsContext();
 }
 
 function resetProductionView() {
@@ -695,6 +730,7 @@ function resetProductionView() {
   $("sceneList").innerHTML = "创建第一集并拆解剧本后显示场景";
   $("shotTimeline").innerHTML = "暂无镜头";
   $("candidateGrid").innerHTML = "生成后可对比方案 A / B / C、质量检查与成本";
+  syncOperationsContext();
 }
 
 async function loadEpisode(id) {
@@ -742,11 +778,14 @@ async function selectShot(id) {
   $("rawPrompt").value = state.shot.user_prompt;
   $("compiledPrompt").value = state.shot.compiled_prompt || "";
   await loadCandidates();
+  syncOperationsContext();
 }
 
 async function loadCandidates() {
   if (!state.shot) return;
   state.candidates = await request(`/v1/shots/${state.shot.id}/candidates`);
+  const candidateJobId = state.candidates.find((candidate) => candidate.generation_job_id)?.generation_job_id;
+  if (candidateJobId && !$("operationsJobId").value.trim()) $("operationsJobId").value = candidateJobId;
   $("candidateGrid").classList.toggle("empty-state", !state.candidates.length);
   $("candidateGrid").innerHTML = state.candidates.length ? state.candidates.map((candidate, index) => {
     const qa = candidate.qa || {};
@@ -780,6 +819,7 @@ async function loadCandidates() {
   document.querySelectorAll("[data-human-review]").forEach((button) => button.addEventListener("click", () => humanReviewCandidate(button.dataset.humanReview).catch((error) => toast(error.message))));
   document.querySelectorAll("[data-review-reason]").forEach((input) => input.addEventListener("input", () => updateHumanReviewControl(input.dataset.reviewReason)));
   document.querySelectorAll("[data-review-confirm]").forEach((input) => input.addEventListener("change", () => updateHumanReviewControl(input.dataset.reviewConfirm)));
+  syncOperationsContext();
 }
 
 function updateHumanReviewControl(candidateId) {
@@ -998,6 +1038,260 @@ async function continuity() {
   $("continuityResult").textContent = `${simpleLabel(result.mode)} · 衔接风险 ${Math.round(result.risk_score*100)} / 100 · ${reasons}`;
 }
 
+function jsonView(value) {
+  return escapeHTML(JSON.stringify(value, null, 2));
+}
+
+function allProjectShots() {
+  return state.episode?.scenes.flatMap((scene) => scene.shots) || [];
+}
+
+function syncOperationsContext() {
+  if (!$("operationsShotSelect")) return;
+  const shots = allProjectShots();
+  const selectedShot = state.shot?.id || $("operationsShotSelect").value;
+  $("operationsShotSelect").innerHTML = shots.length
+    ? shots.map((shot, index) => `<option value="${escapeHTML(shot.id)}">镜头 ${String(index + 1).padStart(2, "0")} · ${escapeHTML(shot.prompt || shot.user_prompt || "未命名")}</option>`).join("")
+    : '<option value="">请先创建并拆解剧本</option>';
+  if (shots.some((shot) => shot.id === selectedShot)) $("operationsShotSelect").value = selectedShot;
+
+  const selectedCharacter = state.selectedCharacterId || $("operationsCharacterSelect").value;
+  $("operationsCharacterSelect").innerHTML = state.characters.length
+    ? state.characters.map((character) => `<option value="${escapeHTML(character.id)}">${escapeHTML(character.name)}</option>`).join("")
+    : '<option value="">尚无角色</option>';
+  if (state.characters.some((character) => character.id === selectedCharacter)) {
+    $("operationsCharacterSelect").value = selectedCharacter;
+  }
+
+  const committed = state.candidates.filter((candidate) => candidate.status === "COMMITTED");
+  $("narrativeCandidateSelect").innerHTML = committed.length
+    ? committed.map((candidate, index) => `<option value="${escapeHTML(candidate.id)}">方案 ${String.fromCharCode(65 + index)} · ${escapeHTML(candidate.id.slice(0, 8))}</option>`).join("")
+    : '<option value="">当前镜头尚无已采用候选</option>';
+}
+
+function renderProviders() {
+  const providers = state.operations.providers;
+  const configured = providers.filter((provider) => provider.configured !== false);
+  const models = configured.flatMap((provider) => provider.models || []).filter((model) => model.status !== "disabled");
+  $("operationsProviderMetric").textContent = `${configured.length} / ${providers.length}`;
+  $("operationsModelMetric").textContent = String(models.length);
+  $("operationsSkillMetric").textContent = String(state.operations.skills.length);
+  $("providerHealthGrid").classList.toggle("empty-state", !providers.length);
+  $("providerHealthGrid").innerHTML = providers.length ? providers.map((provider) => {
+    const available = (provider.models || []).filter((model) => model.status !== "disabled").length;
+    const status = provider.configured === false ? "未配置" : (provider.health?.ok ? "正常" : "异常");
+    return `<div class="provider-health"><strong>${escapeHTML(simpleLabel(provider.name))}</strong><span class="${provider.health?.ok ? "health-ok" : "health-bad"}">${status}</span><small>${available} 个可用模型 · ${escapeHTML(provider.health?.detail || provider.detail || "无详情")}</small></div>`;
+  }).join("") : "没有注册供应商";
+  $("skillCatalog").classList.toggle("empty-state", !state.operations.skills.length);
+  $("skillCatalog").innerHTML = state.operations.skills.length ? state.operations.skills.map((skill) => `
+    <div class="skill-item"><strong>${escapeHTML(skill.name)} · ${escapeHTML(skill.version)}</strong><small>${escapeHTML(skill.category)} · ${escapeHTML(skill.description)}</small></div>`).join("") : "没有注册技能";
+}
+
+async function loadOperations() {
+  const [providers, skills] = await Promise.all([request("/v1/providers"), request("/v1/skills")]);
+  const health = await Promise.all(providers.map((provider) => request(`/v1/providers/${encodeURIComponent(provider.name)}/health`)
+    .catch((error) => ({ ok: false, detail: error.message }))));
+  state.operations.providers = providers.map((provider, index) => ({ ...provider, health: health[index] }));
+  state.operations.skills = skills;
+  renderProviders();
+  syncOperationsContext();
+}
+
+function selectedJobId() {
+  return $("operationsJobId").value.trim();
+}
+
+function renderGenerationControl(job) {
+  state.operations.job = job;
+  if (!job) {
+    $("operationsJobMetric").textContent = "未选择";
+    $("generationControlStatus").textContent = "输入任务 ID，或从生成结果中带入任务。";
+    ["retryJobBtn", "cancelJobBtn", "reconcileJobBtn"].forEach((id) => { $(id).disabled = true; });
+    return;
+  }
+  $("operationsJobMetric").textContent = simpleLabel(job.status);
+  $("operationsJobId").value = job.id;
+  $("generationControlStatus").innerHTML = `<strong>${escapeHTML(simpleLabel(job.status))}</strong><br>供应商 ${escapeHTML(simpleLabel(job.provider))} · 模型 ${escapeHTML(job.model || "—")}<br>提交 ${escapeHTML(simpleLabel(job.submission_state))} · 计费 ${escapeHTML(simpleLabel(job.credit_status))}<br>尝试 ${Number(job.attempt_count || 0)} 次${job.error_message ? `<br><span class="health-bad">${escapeHTML(job.error_message)}</span>` : ""}`;
+  $("retryJobBtn").disabled = job.safe_to_retry !== true;
+  $("cancelJobBtn").disabled = !["QUEUED", "SUBMITTED", "RUNNING", "RETRY_WAIT"].includes(job.status);
+  $("reconcileJobBtn").disabled = !["SENT_UNCONFIRMED", "SUBMITTED"].includes(job.submission_state) && !["FAILED", "RUNNING"].includes(job.status);
+  const events = job.events || [];
+  $("generationEvents").classList.toggle("empty-state", !events.length);
+  $("generationEvents").innerHTML = events.length ? events.map((event) => `<div class="event-item"><strong>${escapeHTML(simpleLabel(event.type))}</strong><small>${escapeHTML(event.created_at || "")}</small><div>${jsonView(event.detail || {})}</div></div>`).join("") : "该任务暂无事件";
+}
+
+async function loadGenerationJob() {
+  const id = selectedJobId();
+  if (!id) return toast("请输入生成任务 ID");
+  renderGenerationControl(await request(`/v1/generations/${encodeURIComponent(id)}`));
+}
+
+async function mutateGenerationJob(action) {
+  const id = selectedJobId();
+  if (!id) return toast("请先读取生成任务");
+  await request(`/v1/generations/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" });
+  await loadGenerationJob();
+  toast(({ retry: "任务已进入安全重试", cancel: "取消请求已处理", reconcile: "任务状态已对账" })[action]);
+}
+
+async function loadShotAudit() {
+  const shotId = $("operationsShotSelect").value;
+  if (!shotId) return toast("请先选择镜头");
+  const [cost, decisions, candidates] = await Promise.all([
+    request(`/v1/shots/${shotId}/cost`).catch(() => null),
+    request(`/v1/shots/${shotId}/decisions`),
+    request(`/v1/shots/${shotId}/candidates`),
+  ]);
+  const transitionsByCandidate = await Promise.all(candidates.map((candidate) =>
+    request(`/v1/shots/${shotId}/candidates/${candidate.id}/state-transitions`).catch(() => [])));
+  const transitions = transitionsByCandidate.flat();
+  $("shotCostView").classList.toggle("empty-state", !cost);
+  $("shotCostView").innerHTML = cost ? `<pre>${jsonView(cost)}</pre>` : "这个镜头还没有费用记录";
+  $("shotDecisionList").classList.toggle("empty-state", !decisions.length);
+  $("shotDecisionList").innerHTML = decisions.length ? decisions.map((decision) => `<div class="event-item"><strong>${escapeHTML(simpleLabel(decision.decision_type))} → ${escapeHTML(simpleLabel(decision.selected_action))}</strong><small>${escapeHTML(decision.created_at || "")} · policy ${escapeHTML(decision.policy_version || "—")}</small><div>${jsonView({ reasons: decision.reason_codes, input: decision.input_features })}</div></div>`).join("") : "这个镜头还没有策略决策";
+  $("stateTransitionList").classList.toggle("empty-state", !transitions.length);
+  $("stateTransitionList").innerHTML = transitions.length ? transitions.map((transition) => `<div class="event-item"><strong>v${escapeHTML(transition.base_state_version_id || "初始")} → v${escapeHTML(transition.target_version || "待提交")}</strong><small>${escapeHTML(transition.timeline_scope_key || "main")} · ${escapeHTML(transition.commit_status || transition.status || "")}</small><div>${jsonView({ changed_paths: transition.changed_paths, patch: transition.patch, validations: transition.validations })}</div></div>`).join("") : "这个镜头还没有角色状态迁移";
+}
+
+async function loadNarrativeState() {
+  if (!state.project) return toast("请先创建项目");
+  const characterId = $("operationsCharacterSelect").value;
+  if (!characterId) return toast("请先选择角色");
+  const scope = $("narrativeScope").value.trim() || "main";
+  try {
+    const result = await request(`/v1/projects/${state.project.id}/characters/${characterId}/narrative-state?timeline_scope_key=${encodeURIComponent(scope)}`);
+    $("narrativeStateView").classList.remove("empty-state");
+    $("narrativeStateView").innerHTML = `<strong>当前版本 v${escapeHTML(result.narrative_state?.version || result.version || "—")}</strong><pre>${jsonView(result)}</pre>`;
+  } catch (error) {
+    $("narrativeStateView").classList.add("empty-state");
+    $("narrativeStateView").textContent = `尚未初始化：${error.message}`;
+  }
+}
+
+async function initializeNarrativeState() {
+  if (!state.project || !state.shot) return toast("请先选择项目和镜头");
+  const characterId = $("operationsCharacterSelect").value;
+  const candidateId = $("narrativeCandidateSelect").value;
+  const reason = $("narrativeReason").value.trim();
+  if (!characterId || !candidateId) return toast("请选择角色和已采用候选");
+  if (!reason || !$("narrativeConfirm").checked) return toast("请填写理由并明确勾选确认");
+  let narrativeState;
+  try { narrativeState = JSON.parse($("narrativeStateInput").value); }
+  catch (_error) { return toast("状态 JSON 格式不正确"); }
+  await request(`/v1/characters/${characterId}/narrative-state/initialize`, {
+    method: "POST",
+    body: JSON.stringify({
+      project_id: state.project.id,
+      shot_id: state.shot.id,
+      candidate_id: candidateId,
+      timeline_scope_key: $("narrativeScope").value.trim() || "main",
+      narrative_state: narrativeState,
+      reason,
+      explicit_confirmation: true,
+    }),
+  });
+  $("narrativeConfirm").checked = false;
+  await loadNarrativeState();
+  toast("角色叙事状态已初始化并留下确认记录");
+}
+
+async function sha256File(file) {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function directUploadAsset() {
+  if (!state.project) return toast("请先创建项目");
+  const file = $("directUploadFile").files[0];
+  if (!file) return toast("请选择要上传的文件");
+  const button = $("directUploadBtn");
+  button.disabled = true;
+  button.textContent = "正在计算校验值…";
+  try {
+    const digest = await sha256File(file);
+    const scope = $("directUploadScope").value;
+    const payload = {
+      project_id: state.project.id,
+      asset_type: $("directUploadType").value,
+      filename: file.name,
+      mime_type: file.type || "application/octet-stream",
+      sha256: digest,
+      size_bytes: file.size,
+      ...(scope === "shot" && state.shot ? { shot_id: state.shot.id } : {}),
+      ...(scope === "character" && $("operationsCharacterSelect").value ? { character_id: $("operationsCharacterSelect").value } : {}),
+    };
+    button.textContent = "正在申请上传授权…";
+    const authorization = await request("/v1/assets/uploads", {
+      method: "POST",
+      headers: { "Idempotency-Key": `web-upload-${digest}-${file.size}` },
+      body: JSON.stringify(payload),
+    });
+    if (!authorization.existing_asset_id) {
+      button.textContent = "正在直传对象存储…";
+      const upload = await fetch(authorization.url, {
+        method: authorization.method || "PUT",
+        headers: authorization.headers || {},
+        body: file,
+      });
+      if (!upload.ok) throw new Error(`对象存储上传失败 (${upload.status})`);
+    }
+    button.textContent = "正在完成服务端校验…";
+    const asset = await request(`/v1/assets/uploads/${authorization.upload_id}/complete`, { method: "POST", body: "{}" });
+    $("directUploadStatus").classList.remove("empty-state");
+    $("directUploadStatus").innerHTML = `<strong>${asset.reused ? "已复用相同内容" : "上传完成"}</strong><br>资产 ${escapeHTML(asset.id)}<br>SHA-256 ${escapeHTML(asset.sha256)}<br>${escapeHTML(asset.storage_key)}`;
+    $("directUploadFile").value = "";
+    toast("文件已校验并登记为项目资产");
+  } catch (error) {
+    const message = error instanceof TypeError && error.message === "Failed to fetch"
+      ? "对象存储拒绝了浏览器跨域上传。请为存储桶配置允许当前 Web 来源、PUT 和预签名请求头的 CORS 规则。"
+      : error.message;
+    $("directUploadStatus").classList.remove("empty-state");
+    $("directUploadStatus").innerHTML = `<strong>上传未完成</strong><br>${escapeHTML(message)}`;
+    throw new Error(message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "校验并上传";
+  }
+}
+
+function openPasswordResetDialog() {
+  $("resetEmail").value = $("authEmail").value.trim();
+  $("resetToken").value = "";
+  $("resetNewPassword").value = "";
+  $("passwordResetStatus").textContent = "";
+  $("passwordResetError").textContent = "";
+  if (!$("passwordResetDialog").open) $("passwordResetDialog").showModal();
+}
+
+async function requestPasswordReset() {
+  const email = $("resetEmail").value.trim();
+  if (!email) return;
+  $("passwordResetError").textContent = "";
+  const result = await request("/api/auth/password-reset/request", { method: "POST", body: JSON.stringify({ email }) });
+  $("passwordResetStatus").textContent = result.message;
+  if (result.reset_token) {
+    $("resetToken").value = result.reset_token;
+    $("passwordResetStatus").textContent += "；开发环境令牌已自动填入。";
+  }
+}
+
+async function confirmPasswordReset(event) {
+  event.preventDefault();
+  $("passwordResetError").textContent = "";
+  try {
+    const result = await request("/api/auth/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token: $("resetToken").value.trim(), new_password: $("resetNewPassword").value }),
+    });
+    $("passwordResetStatus").textContent = result.message;
+    $("authEmail").value = $("resetEmail").value.trim();
+    $("passwordResetDialog").close();
+    toast("密码已重置，请使用新密码登录");
+  } catch (error) {
+    $("passwordResetError").textContent = error.message;
+  }
+}
+
 document.querySelectorAll(".inspector-tabs button").forEach((button) => button.addEventListener("click", () => {
   document.querySelectorAll(".inspector-tabs button,.tab-panel").forEach((item) => item.classList.remove("active"));
   button.classList.add("active"); $(`tab-${button.dataset.tab}`).classList.add("active");
@@ -1031,6 +1325,10 @@ $("continuityBtn").addEventListener("click", () => continuity().catch((error) =>
 $("projectSelect").addEventListener("change", (event) => selectProject(event.target.value).catch((error) => toast(error.message)));
 $("authForm").addEventListener("submit", submitAuth);
 $("authModeBtn").addEventListener("click", () => setAuthMode(state.authMode === "login" ? "register" : "login"));
+$("forgotPasswordBtn").addEventListener("click", openPasswordResetDialog);
+$("passwordResetForm").addEventListener("submit", confirmPasswordReset);
+$("requestResetBtn").addEventListener("click", () => requestPasswordReset().catch((error) => { $("passwordResetError").textContent = error.message; }));
+$("closePasswordResetBtn").addEventListener("click", () => $("passwordResetDialog").close());
 $("logoutBtn").addEventListener("click", logout);
 window.addEventListener("ai-director:plan-changed", (event) => {
   const workspace = state.authUser?.workspaces?.find(
@@ -1044,6 +1342,7 @@ window.addEventListener("ai-director:plan-changed", (event) => {
 document.querySelectorAll("[data-mode]").forEach((button) => button.addEventListener("click", () => switchMode(button.dataset.mode)));
 document.querySelectorAll("[data-media]").forEach((button) => button.addEventListener("click", () => setPassengerMedia(button.dataset.media)));
 $("correctImagePromptBtn").addEventListener("click", () => correctPassengerPrompt().catch((error) => toast(error.message)));
+$("refinePromptBtn").addEventListener("click", () => refinePassengerPrompt().catch((error) => toast(error.message)));
 $("undoImagePromptBtn").addEventListener("click", undoPassengerPrompt);
 $("passengerGenerateBtn").addEventListener("click", () => generatePassenger().catch((error) => toast(error.message)));
 $("passengerRefreshBtn").addEventListener("click", () => refreshPassengerJob().catch((error) => toast(error.message)));
@@ -1058,6 +1357,22 @@ $("passengerReference").addEventListener("change", () => {
   state.passengerReferenceUpload = null;
   updatePassengerCost();
 });
+$("operationsRefreshBtn").addEventListener("click", () => loadOperations().catch((error) => toast(error.message)));
+$("loadJobBtn").addEventListener("click", () => loadGenerationJob().catch((error) => toast(error.message)));
+$("retryJobBtn").addEventListener("click", () => mutateGenerationJob("retry").catch((error) => toast(error.message)));
+$("cancelJobBtn").addEventListener("click", () => mutateGenerationJob("cancel").catch((error) => toast(error.message)));
+$("reconcileJobBtn").addEventListener("click", () => mutateGenerationJob("reconcile").catch((error) => toast(error.message)));
+$("operationsShotSelect").addEventListener("change", (event) => {
+  if (event.target.value) selectShot(event.target.value).then(loadShotAudit).catch((error) => toast(error.message));
+});
+$("loadShotAuditBtn").addEventListener("click", () => loadShotAudit().catch((error) => toast(error.message)));
+$("operationsCharacterSelect").addEventListener("change", (event) => {
+  state.selectedCharacterId = event.target.value || null;
+  renderCharacters();
+});
+$("loadNarrativeBtn").addEventListener("click", loadNarrativeState);
+$("initializeNarrativeBtn").addEventListener("click", () => initializeNarrativeState().catch((error) => toast(error.message)));
+$("directUploadBtn").addEventListener("click", () => directUploadAsset().catch((error) => toast(error.message)));
 
 switchMode("passenger"); setPassengerMedia("image");
 setAuthMode("login"); bootstrapAuth().catch((error) => toast(error.message));

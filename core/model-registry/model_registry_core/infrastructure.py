@@ -307,6 +307,58 @@ class ModelInfrastructureService:
                 raise LookupError(f"model definition not found: {normalized_name}")
             return self._runtime_state(*pair)
 
+    def all_runtime_models(self) -> list[RuntimeModelState]:
+        """Every registered model, whatever its provider or enablement."""
+
+        with self.database.session() as session:
+            rows = session.execute(
+                select(ModelDefinition, ModelCapabilityProfileRow)
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
+                .order_by(ModelDefinition.provider, ModelDefinition.logical_name)
+            ).all()
+            return [self._runtime_state(*row) for row in rows]
+
+    def set_enablement(
+        self,
+        logical_name: str,
+        *,
+        enabled: bool,
+        live_enabled: bool,
+    ) -> RuntimeModelConfiguration:
+        """Change only enablement, leaving the execution ID untouched.
+
+        `configure_runtime_model` takes a `provider_model_id` because it is for
+        *configuring* a model. Reconciling one that is already configured must
+        not restate its execution ID — doing that is how a reconciliation pass
+        silently overwrites the model an administrator chose.
+        """
+
+        normalized = logical_name.strip()
+        if not normalized:
+            raise ValueError("logical_name is required")
+        if live_enabled and not enabled:
+            raise ValueError("live_enabled requires enabled=true")
+        with self.database.session() as session:
+            definition = session.scalar(
+                select(ModelDefinition).where(ModelDefinition.logical_name == normalized)
+            )
+            if definition is None:
+                raise LookupError(f"model definition not found: {normalized}")
+            if enabled and definition.provider_model_id.startswith("CONFIGURE_"):
+                raise ValueError("a placeholder provider model ID cannot be enabled")
+            definition.enabled = enabled
+            definition.live_enabled = live_enabled
+            session.flush()
+            return RuntimeModelConfiguration(
+                logical_name=definition.logical_name,
+                provider_model_id=definition.provider_model_id,
+                enabled=definition.enabled,
+                live_enabled=definition.live_enabled,
+            )
+
     def runtime_models(self, provider: str) -> list[RuntimeModelState]:
         normalized_provider = provider.strip()
         if not normalized_provider:

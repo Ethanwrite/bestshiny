@@ -48,6 +48,7 @@ from production_domain.models import (
     utcnow,
 )
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 _SHA256_LENGTH = 64
@@ -59,6 +60,15 @@ class DirectUploadUnsupported(RuntimeError):
 
 class DirectUploadConflict(RuntimeError):
     """The upload is not in a state that can be completed."""
+
+
+class DirectUploadExpired(RuntimeError):
+    """The authorized window closed before the client finished.
+
+    Distinct from a conflict because the caller must do something with the
+    remains: the row can never complete, so its quota hold is capacity no
+    upload will ever use.
+    """
 
 
 class DirectUploadNotFinished(RuntimeError):
@@ -73,6 +83,17 @@ class AuthorizedUpload:
     # Set when this exact content already exists for the project: the client can
     # skip the transfer entirely rather than re-uploading bytes we already hold.
     existing_asset_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CompletionClaim:
+    """Who owns this completion, and what they must settle."""
+
+    claimed: bool
+    reservation_id: str | None = None
+    # Set when another request already completed this upload: its asset, not a
+    # second one.
+    media_asset_id: str | None = None
 
 
 class DirectUploadService:
@@ -144,24 +165,6 @@ class DirectUploadService:
                     DirectUpload.idempotency_key == idempotency_key,
                 )
             )
-            if existing_upload is not None:
-                if (
-                    existing_upload.sha256 != digest
-                    or existing_upload.asset_type != normalized_type
-                    or existing_upload.storage_key != storage_key
-                ):
-                    raise DirectUploadConflict(
-                        "Idempotency-Key was already used for a different upload"
-                    )
-                if existing_upload.status != DirectUploadStatus.PENDING.value:
-                    raise DirectUploadConflict("this upload has already been completed")
-                upload_id = existing_upload.id
-                expires_at = _aware(existing_upload.expires_at)
-                replay = True
-            else:
-                upload_id, expires_at, replay = new_id(), utcnow() + timedelta(
-                    seconds=self.ttl_seconds
-                ), False
             duplicate = session.scalar(
                 select(MediaAsset).where(
                     MediaAsset.project_id == project_id,
@@ -171,47 +174,140 @@ class DirectUploadService:
                 )
             )
             duplicate_id = duplicate.id if duplicate else None
+            if existing_upload is not None:
+                session.expunge(existing_upload)
 
+        if existing_upload is not None:
+            return self._replay(
+                existing_upload,
+                digest=digest,
+                asset_type=normalized_type,
+                storage_key=storage_key,
+                mime_type=mime_type,
+                duplicate_id=duplicate_id,
+            )
+
+        upload_id = new_id()
+        expires_at = utcnow() + timedelta(seconds=self.ttl_seconds)
+        presigned = self._presign(storage_key, digest, mime_type, self.ttl_seconds)
+        try:
+            with self.database.session() as session:
+                session.add(
+                    DirectUpload(
+                        id=upload_id,
+                        project_id=project_id,
+                        workspace_id=workspace_id,
+                        created_by_user_id=created_by_user_id,
+                        idempotency_key=idempotency_key,
+                        asset_type=normalized_type,
+                        filename=safe_name,
+                        mime_type=mime_type,
+                        sha256=digest,
+                        declared_size_bytes=size_bytes,
+                        storage_key=storage_key,
+                        lineage_key=lineage_key,
+                        shot_id=shot_id,
+                        character_id=character_id,
+                        storage_reservation_id=reservation_id,
+                        status=DirectUploadStatus.PENDING.value,
+                        expires_at=expires_at,
+                        metadata_json={"service_version": self.version},
+                    )
+                )
+                session.flush()
+        except IntegrityError:
+            # A concurrent first authorization won this Idempotency-Key. It is
+            # the same upload, so this is a replay rather than a failure — the
+            # read and the insert are separate transactions, and without this
+            # the loser surfaced a raw IntegrityError as a 500. A workspace-
+            # backed project is serialized earlier by the reservation's unique
+            # constraint; a project with no workspace has no such guard.
+            with self.database.session() as session:
+                winner = session.scalar(
+                    select(DirectUpload).where(
+                        DirectUpload.project_id == project_id,
+                        DirectUpload.idempotency_key == idempotency_key,
+                    )
+                )
+                if winner is None:
+                    raise
+                session.expunge(winner)
+            return self._replay(
+                winner,
+                digest=digest,
+                asset_type=normalized_type,
+                storage_key=storage_key,
+                mime_type=mime_type,
+                duplicate_id=duplicate_id,
+            )
+        return AuthorizedUpload(upload_id, presigned, expires_at, duplicate_id)
+
+    def _presign(self, storage_key: str, digest: str, mime_type: str, expires_in: int) -> PresignedUpload:
         presigned = self.storage.presigned_upload(
             storage_key,
             sha256=digest,
             mime_type=mime_type,
-            expires_in=self.ttl_seconds,
+            expires_in=expires_in,
         )
         if presigned is None:
             raise DirectUploadUnsupported(
                 "the configured storage backend cannot accept a direct upload; "
                 "configure S3-compatible storage, or use the multipart upload endpoint"
             )
+        return presigned
 
-        if replay:
-            return AuthorizedUpload(upload_id, presigned, expires_at, duplicate_id)
+    def _replay(
+        self,
+        upload: DirectUpload,
+        *,
+        digest: str,
+        asset_type: str,
+        storage_key: str,
+        mime_type: str,
+        duplicate_id: str | None,
+    ) -> AuthorizedUpload:
+        """Re-issue the credential for an upload this key already authorized."""
+
+        if upload.sha256 != digest or upload.asset_type != asset_type or upload.storage_key != storage_key:
+            raise DirectUploadConflict("Idempotency-Key was already used for a different upload")
+        if upload.status != DirectUploadStatus.PENDING.value:
+            raise DirectUploadConflict(
+                f"this upload is {upload.status.lower()} and cannot be re-authorized"
+            )
+        expires_at = _aware(upload.expires_at)
+        # The row's deadline is authoritative, so a replay is presigned for the
+        # time that is left rather than a fresh full TTL. Handing out a URL that
+        # outlives the deadline this call reports would make the response a lie
+        # about when the window closes.
+        expires_in = int((expires_at - utcnow()).total_seconds())
+        if expires_in <= 0:
+            raise DirectUploadExpired(
+                "the authorized upload window has closed; authorize again with a new "
+                "Idempotency-Key"
+            )
+        presigned = self._presign(storage_key, digest, mime_type, expires_in)
+        return AuthorizedUpload(upload.id, presigned, expires_at, duplicate_id)
+
+    def find_by_idempotency_key(
+        self, *, project_id: str, idempotency_key: str
+    ) -> DirectUpload | None:
+        """The upload this key already authorized, whatever state it is in.
+
+        A caller holding a quota reservation needs this *before* it reserves:
+        re-authorizing is a replay of one upload, not a second one, and the
+        hold it already owns is the hold it keeps.
+        """
 
         with self.database.session() as session:
-            session.add(
-                DirectUpload(
-                    id=upload_id,
-                    project_id=project_id,
-                    workspace_id=workspace_id,
-                    created_by_user_id=created_by_user_id,
-                    idempotency_key=idempotency_key,
-                    asset_type=normalized_type,
-                    filename=safe_name,
-                    mime_type=mime_type,
-                    sha256=digest,
-                    declared_size_bytes=size_bytes,
-                    storage_key=storage_key,
-                    lineage_key=lineage_key,
-                    shot_id=shot_id,
-                    character_id=character_id,
-                    storage_reservation_id=reservation_id,
-                    status=DirectUploadStatus.PENDING.value,
-                    expires_at=expires_at,
-                    metadata_json={"service_version": self.version},
+            upload = session.scalar(
+                select(DirectUpload).where(
+                    DirectUpload.project_id == project_id,
+                    DirectUpload.idempotency_key == idempotency_key,
                 )
             )
-            session.flush()
-        return AuthorizedUpload(upload_id, presigned, expires_at, duplicate_id)
+            if upload is not None:
+                session.expunge(upload)
+            return upload
 
     def pending(self, upload_id: str) -> DirectUpload:
         with self.database.session() as session:
@@ -249,12 +345,67 @@ class DirectUploadService:
         )
         return stat.size, validated.mime_type
 
+    def claim_completion(self, session: Session, upload_id: str) -> CompletionClaim:
+        """Take exclusive ownership of one upload's completion.
+
+        Two requests can both find the object in storage and both try to adopt
+        it. The `media_assets` unique constraint resolves *that* — one of them is
+        told the asset was reused. What must not happen twice is the
+        **settlement**: the caller told `reused=True` settles zero bytes, and if
+        it settles first the other's settlement is swallowed as a replay and the
+        workspace never accounts for the object at all.
+
+        So the row is locked and exactly one caller moves it out of `PENDING`.
+        The loser is handed the winner's asset instead of a second accounting.
+
+        The caller owns the session on purpose: the claim, the asset row and the
+        quota settlement are one transaction, so a process death between them
+        rolls back to a `PENDING` upload with its hold intact rather than
+        leaving storage that is real and uncounted.
+        """
+
+        upload = session.get(DirectUpload, upload_id, with_for_update=True)
+        if upload is None:  # pragma: no cover - guarded by the caller.
+            raise LookupError("upload not found")
+        if upload.status != DirectUploadStatus.PENDING.value:
+            return CompletionClaim(False, media_asset_id=upload.media_asset_id)
+        return CompletionClaim(True, reservation_id=upload.storage_reservation_id)
+
     def mark_completed(self, session: Session, upload_id: str, *, media_asset_id: str) -> None:
+        """Record the adopted asset. Only the holder of the claim may call this."""
+
         upload = session.get(DirectUpload, upload_id)
         if upload is None:  # pragma: no cover - guarded by the caller.
             raise LookupError("upload not found")
         upload.status = DirectUploadStatus.COMPLETED.value
         upload.media_asset_id = media_asset_id
+
+    def expired(self, *, limit: int = 200, now: datetime | None = None) -> list[DirectUpload]:
+        """`PENDING` uploads whose authorized window has closed.
+
+        These can never complete: the presigned PUT they were issued has
+        expired, so no object can still arrive under that authorization. Until
+        something sweeps them the row, its quota hold and any object the client
+        did manage to write all persist forever — `expires_at` was written and
+        indexed and nothing ever read it.
+        """
+
+        deadline = now or utcnow()
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(DirectUpload)
+                    .where(
+                        DirectUpload.status == DirectUploadStatus.PENDING.value,
+                        DirectUpload.expires_at < deadline,
+                    )
+                    .order_by(DirectUpload.expires_at)
+                    .limit(max(1, limit))
+                )
+            )
+            for row in rows:
+                session.expunge(row)
+            return rows
 
     def abandon(self, upload_id: str) -> None:
         with self.database.session() as session:
@@ -270,7 +421,9 @@ def _aware(value: datetime) -> datetime:
 
 __all__ = [
     "AuthorizedUpload",
+    "CompletionClaim",
     "DirectUploadConflict",
+    "DirectUploadExpired",
     "DirectUploadNotFinished",
     "DirectUploadService",
     "DirectUploadUnsupported",

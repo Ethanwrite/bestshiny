@@ -1,6 +1,8 @@
 from .direct_upload import (
     AuthorizedUpload,
+    CompletionClaim,
     DirectUploadConflict,
+    DirectUploadExpired,
     DirectUploadNotFinished,
     DirectUploadService,
     DirectUploadUnsupported,
@@ -20,6 +22,7 @@ from .registry import (
     ProviderMediaValidationFailed,
     ProviderReferenceUrlUnavailable,
     RemoteMediaSecurityError,
+    lineage_key,
 )
 from .renditions import (
     RenditionDerivationFailed,
@@ -29,7 +32,9 @@ from .renditions import (
 
 __all__ = [
     "AuthorizedUpload",
+    "CompletionClaim",
     "DirectUploadConflict",
+    "DirectUploadExpired",
     "DirectUploadNotFinished",
     "DirectUploadService",
     "DirectUploadUnsupported",
@@ -41,6 +46,7 @@ __all__ = [
     "ProviderMediaValidationFailed",
     "ProviderReferenceUrlUnavailable",
     "RemoteMediaSecurityError",
+    "lineage_key",
     "RenditionDerivationFailed",
     "RenditionResolver",
     "ResolvedRendition",

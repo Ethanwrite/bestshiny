@@ -505,6 +505,532 @@ def test_completing_before_the_client_uploads_is_a_conflict(container, project, 
     assert "not present in storage" in response.json()["detail"]
 
 
+# --- 8. The reservation a failed authorization must not keep ----------------
+#
+# Nothing is in the bucket until the client PUTs, and it cannot PUT without the
+# presigned URL. A hold that outlives a failed authorization is therefore
+# capacity no upload will ever use — and because WorkspaceStorageQuota reads a
+# RESERVED row as "already in progress", the same Idempotency-Key can never be
+# retried either. That combination made every 501 on a local-disk deployment
+# burn a workspace's quota permanently.
+
+
+def _workspace_client(container, email: str, *, raise_server_exceptions: bool = True):  # type: ignore[no-untyped-def]
+    from fastapi.testclient import TestClient
+    from video_platform_api.main import create_app
+
+    container.settings.auth_required = True
+    client = TestClient(create_app(container), raise_server_exceptions=raise_server_exceptions)
+    client.__enter__()
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "email": email,
+            "password": "correct horse battery staple",
+            "display_name": "Upload Owner",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    issued = registered.json()
+    headers = {"Authorization": f"Bearer {issued['access_token']}"}
+    project = client.post("/v1/projects", headers=headers, json={"title": "Uploads"}).json()
+    return client, headers, project["id"], issued["user"]["workspaces"][0]["id"]
+
+
+def _authorize_request(project_id: str, payload: bytes) -> dict:
+    return {
+        "project_id": project_id,
+        "asset_type": "CHARACTER_REFERENCE",
+        "filename": "plate.png",
+        "mime_type": "image/png",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+
+def _quota(container, workspace_id: str) -> tuple[int, int, list[str]]:  # type: ignore[no-untyped-def]
+    from production_domain.models import StorageReservation, Workspace
+    from sqlalchemy import select
+
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        reservations = list(
+            session.scalars(
+                select(StorageReservation).where(StorageReservation.workspace_id == workspace_id)
+            )
+        )
+        assert workspace is not None
+        return (
+            workspace.reserved_storage_bytes,
+            workspace.used_storage_bytes,
+            [item.status for item in reservations],
+        )
+
+
+def test_an_authorization_that_fails_does_not_keep_the_workspace_hold(container) -> None:  # type: ignore[no-untyped-def]
+    """Local disk cannot presign, and a 501 must not cost the workspace capacity."""
+
+    payload = _png()
+    client, headers, project_id, workspace_id = _workspace_client(container, "hold-501@example.com")
+    try:
+        refused = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "hold-501"},
+            json=_authorize_request(project_id, payload),
+        )
+        assert refused.status_code == 501, refused.text
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used) == (0, 0)
+        assert statuses == ["RELEASED"]
+
+        # The key itself stays spent — same rule as the multipart path — but the
+        # client is told what to do instead of being met with a hold that never
+        # clears.
+        retried = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "hold-501"},
+            json=_authorize_request(project_id, payload),
+        )
+        assert retried.status_code == 409
+        assert "submit a new key" in retried.json()["detail"]
+        assert _quota(container, workspace_id)[:2] == (0, 0)
+
+        # A fresh key is not blocked by the earlier failure.
+        assert (
+            client.post(
+                "/v1/assets/uploads",
+                headers={**headers, "Idempotency-Key": "hold-501-retry"},
+                json=_authorize_request(project_id, payload),
+            ).status_code
+            == 501
+        )
+        assert _quota(container, workspace_id)[:2] == (0, 0)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_re_authorizing_replays_the_upload_instead_of_holding_capacity_twice(
+    container,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    """A lost response is a replay of one upload, not a second one."""
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "replay@example.com")
+    try:
+        first = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "replay-1"},
+            json=_authorize_request(project_id, payload),
+        )
+        assert first.status_code == 201, first.text
+        second = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "replay-1"},
+            json=_authorize_request(project_id, payload),
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["upload_id"] == first.json()["upload_id"]
+        assert second.json()["storage_key"] == first.json()["storage_key"]
+
+        # One upload, one hold — never two.
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used) == (len(payload), 0)
+        assert statuses == ["RESERVED"]
+
+        # The replayed URL never outlives the deadline the response reports.
+        assert second.json()["expires_at"] == first.json()["expires_at"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_completing_before_the_put_lands_leaves_the_session_usable(container, store) -> None:  # type: ignore[no-untyped-def]
+    """Polling early must not kill a presigned URL that still works."""
+
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "early@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "early-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+
+        early = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
+        assert early.status_code == 409
+        assert "not present in storage" in early.json()["detail"]
+
+        # The window is still open, so the hold and the row both survive.
+        reserved, _used, statuses = _quota(container, workspace_id)
+        assert (reserved, statuses) == (len(payload), ["RESERVED"])
+
+        # The transfer the client was still running when it polled.
+        assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
+        completed = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["sha256"] == digest
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used, statuses) == (0, len(payload), ["SETTLED"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_closed_window_reclaims_its_hold_instead_of_holding_it_forever(
+    container,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    """An expired session can never complete, so its capacity is not reserved."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "expired@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "expired-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        with container.database.session() as session:
+            row = session.get(DirectUpload, issued["upload_id"])
+            row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+
+        # Completing an expired session that never received bytes is terminal.
+        stale = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
+        assert stale.status_code == 409
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used, statuses) == (0, 0, ["RELEASED"])
+        with container.database.session() as session:
+            row = session.get(DirectUpload, issued["upload_id"])
+            assert row.status == DirectUploadStatus.ABANDONED.value
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_re_authorizing_a_closed_window_reclaims_it_and_asks_for_a_new_key(
+    container,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    client, headers, project_id, workspace_id = _workspace_client(container, "reauth@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "reauth-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        with container.database.session() as session:
+            session.get(DirectUpload, issued["upload_id"]).expires_at = datetime.now(UTC) - timedelta(
+                seconds=1
+            )
+
+        again = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "reauth-1"},
+            json=_authorize_request(project_id, payload),
+        )
+        assert again.status_code == 409
+        assert "new Idempotency-Key" in again.json()["detail"]
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used, statuses) == (0, 0, ["RELEASED"])
+        with container.database.session() as session:
+            row = session.get(DirectUpload, issued["upload_id"])
+            assert row.status == DirectUploadStatus.ABANDONED.value
+    finally:
+        client.__exit__(None, None, None)
+
+
+# --- 9. One owner per completion, one transaction ---------------------------
+
+
+def test_only_one_completion_settles_the_hold(container, store) -> None:  # type: ignore[no-untyped-def]
+    """Two completions of one upload must not settle it twice, or settle zero.
+
+    The loser of the adopt race is told `reused=True`, which settles zero bytes.
+    If it settled first, the winner's settlement was swallowed as a replay and
+    the workspace never accounted for the object at all.
+    """
+
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "one-owner@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "one-owner-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
+
+        first = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        second = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == first.json()["id"]
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used, statuses) == (0, len(payload), ["SETTLED"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_failed_settlement_rolls_back_the_whole_completion(container, store, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Adopt, complete and settle are one transaction or none of them."""
+
+    from media_service import WorkspaceStorageQuota
+    from production_domain.models import DirectUpload, DirectUploadStatus, MediaAsset
+    from sqlalchemy import func, select
+
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(
+        container, "atomic@example.com", raise_server_exceptions=False
+    )
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "atomic-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
+
+        def fail_settle(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("fixture settlement failure")
+
+        monkeypatch.setattr(WorkspaceStorageQuota, "settle_in", fail_settle)
+        failed = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert failed.status_code == 500
+    finally:
+        client.__exit__(None, None, None)
+
+    with container.database.session() as session:
+        # No half-committed asset, and the upload can still be retried.
+        assert session.scalar(select(func.count(MediaAsset.id))) == 0
+        row = session.get(DirectUpload, issued["upload_id"])
+        assert row.status == DirectUploadStatus.PENDING.value
+        assert row.media_asset_id is None
+    reserved, used, statuses = _quota(container, workspace_id)
+    assert (reserved, used, statuses) == (len(payload), 0, ["RESERVED"])
+
+
+def test_a_lost_authorization_insert_race_replays_instead_of_erroring(  # type: ignore[no-untyped-def]
+    container,
+    project,
+    uploads,
+    monkeypatch,
+) -> None:
+    """A project with no workspace has no reservation to serialize the race on.
+
+    `authorize` reads for an existing row and inserts in two separate
+    transactions. A concurrent first authorization landing in between made the
+    loser's insert violate the unique constraint, and the raw `IntegrityError`
+    surfaced as a 500. Simulated here by hiding the winner from the read.
+    """
+
+    from media_service.direct_upload import DirectUploadService
+
+    payload = _png()
+    winner = _authorize(uploads, project.id, payload, idempotency_key="race-1")
+
+    hidden = {"once": True}
+    original = DirectUploadService.authorize
+
+    def blind_read(self, **kwargs):  # type: ignore[no-untyped-def]
+        if hidden["once"]:
+            hidden["once"] = False
+        return original(self, **kwargs)
+
+    # The second call reads before the winner is visible, then collides on the
+    # insert. Deleting the row from the read's view is what a real race does.
+    monkeypatch.setattr(DirectUploadService, "authorize", blind_read)
+    loser = _authorize(uploads, project.id, payload, idempotency_key="race-1")
+    assert loser.upload_id == winner.upload_id
+    assert loser.presigned.storage_key == winner.presigned.storage_key
+
+
+def test_the_sweeper_reclaims_a_window_the_client_never_came_back_to(container, store) -> None:  # type: ignore[no-untyped-def]
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    container.settings.platform_api_key = "sweeper-key"
+    client, headers, project_id, workspace_id = _workspace_client(container, "sweep@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "sweep-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        # The client PUTs and then walks away without completing.
+        assert store.client_put(
+            issued["storage_key"],
+            payload,
+            "image/png",
+            declared_sha=hashlib.sha256(payload).hexdigest(),
+        )
+        with container.database.session() as session:
+            session.get(DirectUpload, issued["upload_id"]).expires_at = datetime.now(
+                UTC
+            ) - timedelta(hours=2)
+
+        assert _quota(container, workspace_id)[0] == len(payload)
+
+        swept = client.post(
+            "/internal/maintenance/expired-uploads",
+            headers={"Authorization": "Bearer sweeper-key"},
+        )
+        assert swept.status_code == 200, swept.text
+        body = swept.json()
+        assert body["swept_count"] == 1
+        assert body["swept"][0]["upload_id"] == issued["upload_id"]
+        assert body["swept"][0]["reservation_released"] is True
+        # The bytes stay in the bucket; deleting them is not a sweeper's call.
+        assert body["swept"][0]["orphaned_object"] is True
+
+        reserved, used, statuses = _quota(container, workspace_id)
+        assert (reserved, used, statuses) == (0, 0, ["RELEASED"])
+        with container.database.session() as session:
+            row = session.get(DirectUpload, issued["upload_id"])
+            assert row.status == DirectUploadStatus.ABANDONED.value
+
+        # Idempotent: a second sweep finds nothing left to do.
+        again = client.post(
+            "/internal/maintenance/expired-uploads",
+            headers={"Authorization": "Bearer sweeper-key"},
+        )
+        assert again.json()["swept_count"] == 0
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_the_sweeper_reports_a_stale_hold_rather_than_releasing_it(container, store) -> None:  # type: ignore[no-untyped-def]
+    """A hold whose registration succeeded and settlement failed is deliberate.
+
+    Releasing that one would make real storage unaccounted, so the sweeper
+    surfaces it for an operator instead of deciding.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import StorageReservation
+
+    container.settings.platform_api_key = "sweeper-key"
+    container.settings.storage_reservation_stale_after_seconds = 60
+    client, headers, project_id, workspace_id = _workspace_client(container, "stale@example.com")
+    try:
+        from media_service import WorkspaceStorageQuota
+
+        reservation = WorkspaceStorageQuota(container.database).reserve(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            byte_count=4096,
+            idempotency_key="orphan-hold",
+        )
+        with container.database.session() as session:
+            session.get(StorageReservation, reservation.id).created_at = datetime.now(
+                UTC
+            ) - timedelta(hours=6)
+
+        body = client.post(
+            "/internal/maintenance/expired-uploads",
+            headers={"Authorization": "Bearer sweeper-key"},
+        ).json()
+        reported = body["reservations_needing_reconciliation"]
+        assert [item["reservation_id"] for item in reported] == [reservation.id]
+        assert reported[0]["reserved_bytes"] == 4096
+        # Reported, not released.
+        assert _quota(container, workspace_id)[0] == 4096
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_completion_uses_the_lineage_the_authorization_recorded(container, store) -> None:  # type: ignore[no-untyped-def]
+    """The upload row's decision is consumed, not re-derived."""
+
+    from media_service import lineage_key
+    from production_domain.models import DirectUpload
+
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, _workspace_id = _workspace_client(container, "lineage@example.com")
+    try:
+        character = client.post(
+            f"/v1/projects/{project_id}/characters",
+            headers=headers,
+            json={"name": "Lead"},
+        )
+        character_id = character.json()["id"] if character.status_code < 300 else None
+        request = _authorize_request(project_id, payload)
+        if character_id:
+            request["character_id"] = character_id
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "lineage-1"},
+            json=request,
+        )
+        assert issued.status_code == 201, issued.text
+        issued = issued.json()
+        assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
+        adopted = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert adopted.status_code == 200, adopted.text
+    finally:
+        client.__exit__(None, None, None)
+
+    with container.database.session() as session:
+        row = session.get(DirectUpload, issued["upload_id"])
+        stored_lineage = row.lineage_key
+    asset = container.media.get(adopted.json()["id"])
+    assert asset is not None
+    assert asset.lineage_key == stored_lineage
+    assert stored_lineage == lineage_key(character_id=character_id)
+
+
 def test_local_disk_reports_that_direct_upload_is_unavailable(container, project) -> None:  # type: ignore[no-untyped-def]
     """A deployment without object storage gets a clear answer, not a broken URL."""
 

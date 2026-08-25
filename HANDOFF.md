@@ -10,14 +10,27 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q       610 passed, 2 skipped, 61 warnings
+.venv/bin/python -m pytest -q       643 passed, 5 skipped, 62 warnings
 .venv/bin/ruff check .             All checks passed
 .venv/bin/python -m mypy           Success: 133 source files
-.venv/bin/python -m alembic heads  0037_direct_uploads (single head)
+.venv/bin/python -m alembic heads  0038_reference_voice_capability (single head)
 ```
 
-The 2 skipped are the opt-in live image tests; they need `--run-live-provider` *and* the
+The 5 skipped are the opt-in live tests; they need `--run-live-provider` *and* the
 three-part gate. No provider was ever called live. Known spend: **USD 0**.
+
+Two further gates, both offline:
+
+```
+.venv/bin/python scripts/preflight_live.py                      what a live run could and could not do
+.venv/bin/python scripts/simulate_short_story.py                3-shot end-to-end, style lock enforced
+.venv/bin/python -m pytest --run-live-provider -m live_provider \
+    tests/live/test_wan_video_live.py -k "not smallest_t2v"     2 passed — free, no socket
+```
+
+`preflight_live.py` is the one to run before flipping the gate. It reads the same `Settings`
+the application does, opens no socket, prints no secret, and answers per path: would this
+reach the provider, fail closed here, or fail *at* the provider after being billed.
 
 ## 2. 2026-08-23 — the image path
 
@@ -226,6 +239,201 @@ This matters more than it sounds: `ProjectStyleLock` is append-only and
 re-locking is forbidden by database trigger. A style locked before layer 2 can
 actually run keeps the single gate **permanently**. Lock the styles that matter
 only after `PROVIDER_MODE=live`.
+
+## 4b. Wan 2.7's three modes, and the upload state machine
+
+### Wan 2.7 is three DashScope models
+
+The adapter already inferred a mode from the request shape — a reference video means r2v, a
+first frame means i2v, text alone means t2v — and mapped each to its own DashScope model ID.
+Two of the three IDs were undated placeholders. All three are now the reviewed runtime IDs:
+
+| Mode | Model | Accepts |
+| --- | --- | --- |
+| T2V | `wan2.7-t2v-2026-06-12` | text, optionally images |
+| I2V | `wan2.7-i2v-2026-04-25` | images, optionally text and audio |
+| R2V | `wan2.7-r2v-2026-06-12` | image/video references plus text |
+
+`.env` and `.env.example` carry all three, and `tests/test_provider_payload_contracts.py` pins
+both the mapping and the mode inference, so a rename cannot happen quietly.
+
+**The capability profile was the half that was actually missing.** `wan-2.7-official` declared
+`supports_t2v` and nothing else, so `VideoModelRouter` and `CapabilityResolver` would never
+select Wan for an image-to-video or reference-to-video shot: the adapter's i2v and r2v paths
+were reachable only by naming the model explicitly. `wan-2.7-manual-v2` declares i2v, v2v,
+start frame, reference images and audio. Registry defaults seed new databases only, so an
+existing database keeps the old profile until it is updated through the registry API — that is
+`docs/OPEN_ISSUES.md` §2.5, not a new problem.
+
+**Wan 3.0 lost its built-in default.** `wan-3.0` mapped to `wan3.0-video`, an ID never verified
+against DashScope. Wan 3.0 is invitation-only Beta, so a routed shot would have posted a guess
+to a model the account cannot call. It now fails closed and names `WAN_VIDEO_MODEL_KEYS`, the
+same rule Google Flow follows. The model definition and its FALLBACK binding stay registered as
+capability records.
+
+### The direct-upload chain had three defects, all in the same seam
+
+The seam is that the quota hold is taken by the *route* while the state machine is owned by
+`DirectUploadService`, and the two disagreed about what a failure means.
+
+**A failed authorization kept the hold.** `reserve()` runs before `authorize()`, and nothing
+released it when `authorize()` raised. Every failure after the reservation — a malformed digest,
+an over-size declaration, a transient presign failure, and the `501` that local disk returns on
+**every** attempt while `S3_*` is unset — permanently consumed workspace capacity. Worse, the
+reservation stayed `RESERVED`, and `WorkspaceStorageQuota` answers a `RESERVED` key with "upload
+is already in progress", so the client could never retry that key either. Reproduced end to end
+before the fix: one `501`, 120 bytes held, `409` forever after. The route now releases in a
+`finally`, and only a hold *that call* created — a replay must not release the hold belonging to
+the authorization it is replaying.
+
+**Re-authorizing was impossible for any workspace-backed project.** `DirectUploadService` has an
+explicit replay path, and `test_an_authorization_replay_returns_the_same_upload` covers it — with
+`workspace_id=None`. Through the route, `reserve()` was reached first and answered `409`. That
+rule is right for a multipart upload, which really is in flight through this process, and wrong
+for one the client holds its own presigned URL for: a lost response or a page reload is a replay
+of one upload, not a second one. The route now finds the upload before reserving and reuses the
+hold it already owns.
+
+**Completing early destroyed a live session.** A missing object raised `DirectUploadNotFinished`,
+and the completion handler released the hold and marked the row `ABANDONED` — while the presigned
+PUT was still valid. A client that polled before its transfer finished lost the session, and the
+bytes it then wrote had no row left to adopt them. A transient `read_prefix` failure did the
+same. "Not there yet" is now distinguished from "cannot succeed": the row and its hold survive
+while the window is open, and only a closed window is terminal. Re-authorizing a closed window
+reclaims it too, which is the one place a stale hold is observable.
+
+That last change is also what gives `expires_at` any meaning. It was written and indexed and no
+query read it. It is still not swept — an upload authorized and walked away from keeps its row,
+its object and its hold until the client returns — and `docs/OPEN_ISSUES.md` §2.11 has been
+corrected, because it claimed the hold expired on its own. It does not.
+
+Five regression tests in `tests/test_direct_upload.py` cover these; four of them fail against
+the previous code.
+
+## 4c. The Wan media plane, and single-owner completion
+
+### Wan was throwing away references it had already paid to resolve
+
+`_video_payload` read a reference video and a first frame. It never read
+`reference_images` or `reference_urls` — the list the Gateway resolves, presigns
+and bills for — so those inputs were dropped, silently, and the generation ran
+without them. A shot built on four character plates rendered as if it had none.
+Declaring `supports_reference_image` in the registry (previous section) would
+have made that reachable by routing rather than only by hand.
+
+Wan 2.7 carries every non-text input in one `media` array. Those were three
+different instructions flattened into `img_url` and `video_url`:
+
+| Role | What it means |
+| --- | --- |
+| `first_frame` / `last_frame` | the bracket frames of a shot |
+| `first_clip` | footage the shot **continues from** |
+| `reference_video` | footage the shot only takes motion or grade **from** |
+| `reference_image` | a still that fixes identity |
+| `reference_voice` | a voice the model conditions on — declared unsupported on 2.7 |
+
+**The role is internal only.** On the wire each entry carries the two official
+fields, `type` and `url`, and nothing else. The role still has to exist here —
+it picks the model, enforces the per-role bounds and orders the array — but it
+is dropped at the boundary. Which means **array position is the only role signal
+the provider receives**, so the ordering is part of the contract, not tidiness:
+the first frame leads, references follow.
+
+The mode matrix, per the deployment documentation:
+
+| Mode | Accepts | Framing sent |
+| --- | --- | --- |
+| T2V | `reference_image` | `resolution` + `ratio` |
+| I2V | `first_frame`, `last_frame`, `first_clip`, `reference_image` | `resolution` |
+| R2V | `first_frame` **+** `reference_image`/`reference_video` | `resolution`, `ratio` only without a first frame |
+
+R2V taking a first frame *alongside* its references is the point of the mode,
+and an earlier pass here had it backwards — that combination was rejected as
+inexpressible. It is now what selects R2V.
+
+Continuation belongs to I2V: a clip the shot grows out of is the same kind of
+input as a frame it grows out of. So continuing from footage and *referencing*
+footage select different models, and asking for both is refused rather than
+silently resolved to one.
+
+Bounds are the published ones, enforced before billing: one first frame, five
+reference assets counting images and videos together. A drift gate asserts the
+adapter's constants and accepted-role sets against the registry, because two
+copies of one published limit is exactly how an over-long reference list ends up
+refused in one place and routed in the other.
+
+Two further rules keep the payload honest. Every media URL must be fetchable —
+an unresolved asset ID reaching DashScope spends a generation on an input the
+provider cannot read. And **a mode that cannot carry every supplied input is
+rejected, not trimmed**.
+
+### A capability flag is a promise the wire has to keep
+
+`supports_audio` has always meant native audio **out** — the router reads it for
+`requires_native_audio`. There was no flag at all for an audio asset carried
+**in**, which meant a profile could imply voice conditioning that no adapter was
+able to send. That is the same defect class as the reference images this adapter
+used to discard, one level up.
+
+`supports_reference_voice` is now its own capability (migration `0038`,
+defaulting false everywhere). It is `false` for Wan 2.7, so no mode accepts a
+`reference_voice` and a request carrying one fails closed before billing. The
+serializer can nonetheless express one — `{"type": "audio", "url": …}`, still
+only the two official fields — because the gate belongs in the declaration, not
+in a whitelist that quietly cannot represent the thing.
+
+`test_wan_declared_capabilities_are_ones_the_wire_can_actually_carry` binds the
+two together in **both** directions: a flag set true with no mode accepting its
+role is a promise the adapter would refuse, and a mode accepting a role no flag
+claims is an input nobody authorised.
+
+Framing was wrong too. `parameters.size` was receiving `"720p"` — a tier label
+in a field that takes pixel dimensions — and `size` is not in the published
+parameter set at all, so nothing sends it now. A caller asking for exact pixels
+is refused rather than silently ignored.
+
+The profile is `wan-2.7-manual-v3`, which separates continuation
+(`supports_video_extension`, I2V), reference (`supports_v2v`,
+`supports_reference_image`, `supports_multi_reference`,
+`supports_character_reference`), voice (`supports_reference_voice`, false) and
+edit (explicitly `supported: false`).
+
+### Completion has one owner and one transaction
+
+Two requests could both find the object and both adopt it. The `media_assets`
+unique constraint resolved *that* — one was told `reused=True` — but that caller
+settles **zero** bytes, so if it settled first the winner's settlement was
+swallowed as a replay and the workspace never accounted for the object. The
+upload row is now locked and exactly one caller leaves `PENDING`; the loser is
+handed the winner's asset. Adopt, completion and settlement share one
+transaction, so a process death between them rolls back to a `PENDING` upload
+with its hold intact instead of leaving storage that is real and uncounted.
+
+**That required removing a SAVEPOINT, and the reason is worth knowing.** Under
+pysqlite, work inside `session.begin_nested()` survives a rollback of the
+enclosing transaction. Verified directly: a plain insert rolls back, the same
+insert inside a savepoint does not. So the "one transaction" would have been a
+claim rather than a fact on the default database. `adopt_stored_object_in` now
+reads before it inserts and uses no savepoint. The documented driver workaround
+was tried and reverted — it makes every transaction take a write lock, and the
+concurrency suites either fail on `database is locked` or hang. Seven other
+call sites still rely on savepoints; that is now `docs/OPEN_ISSUES.md` §2.12.
+
+### Three smaller ones in the same chain
+
+- **A lost authorize race is a replay, not a 500.** The existence check and the
+  insert are separate transactions. A workspace-backed project is serialized by
+  the reservation's unique constraint; a project with no workspace had no guard,
+  so the loser surfaced a raw `IntegrityError`.
+- **`POST /internal/maintenance/expired-uploads`** reclaims uploads whose window
+  closed and whose client never came back. Deliberately an endpoint rather than
+  a loop: sweeping quota is an operational action on a schedule an operator
+  owns. It does not delete the orphaned object, and it *reports* stale holds
+  rather than releasing them — a hold whose registration succeeded and whose
+  settlement failed must survive, and only an operator can tell the two apart.
+- **One lineage key.** `media_service.lineage_key` is the single definition, and
+  completion consumes the value the authorization already stored on the upload
+  row. Deriving it twice made deduplication depend on two formulas agreeing.
 
 ## 5. Also closed on 2026-08-23
 

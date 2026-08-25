@@ -246,3 +246,48 @@ def test_edge_role_binding_can_only_resolve_low_criticality(container) -> None:
                 ModelRole.PROMPT_REFINER_LOW_COST,
                 asset_criticality=criticality,
             )
+
+
+def test_live_reconciliation_reports_before_it_writes(container) -> None:  # type: ignore[no-untyped-def]
+    """Adding a credential and restarting used to open nothing.
+
+    Startup seeds the registry once and deliberately never replays defaults over
+    an administrator's changes. The cost was that a model disabled for want of a
+    credential stayed disabled after the credential arrived, with no operator
+    path to open it. This is that path, and it reports before it writes.
+    """
+
+    from fastapi.testclient import TestClient
+    from video_platform_api.main import create_app
+
+    container.settings.platform_api_key = "reconcile-key"
+    headers = {"Authorization": "Bearer reconcile-key"}
+    with TestClient(create_app(container)) as client:
+        report = client.post("/internal/models/reconcile-live", headers=headers)
+        assert report.status_code == 200, report.text
+        body = report.json()
+
+    # The gate is shut in this environment, so nothing may be opened.
+    assert body["applied"] is False
+    assert body["live_gate_ready"] is False
+    assert body["models"], "every registered model must be accounted for"
+    assert all(row["live_enabled"] is False for row in body["models"])
+    # Every model is reported, each with a reason it is not live.
+    assert {row["logical_name"] for row in body["models"]} == {
+        state.logical_name for state in container.model_infrastructure.all_runtime_models()
+    }
+    assert all(row["blocked_by"] for row in body["models"] if not row["live_enabled"])
+
+
+def test_reconciliation_never_restates_an_administrator_model_id(container) -> None:  # type: ignore[no-untyped-def]
+    """Only enablement moves. The execution ID is an operator's choice."""
+
+    infrastructure = container.model_infrastructure
+    before = infrastructure.runtime_model("wan-2.7-official")
+    infrastructure.set_enablement("wan-2.7-official", enabled=True, live_enabled=False)
+    after = infrastructure.runtime_model("wan-2.7-official")
+    assert after.provider_model_id == before.provider_model_id
+    assert after.enabled is True and after.live_enabled is False
+
+    with pytest.raises(ValueError, match="live_enabled requires enabled"):
+        infrastructure.set_enablement("wan-2.7-official", enabled=False, live_enabled=True)

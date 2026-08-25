@@ -90,6 +90,34 @@ class _ProviderMediaBindingContext:
     claim_token: str | None
 
 
+def lineage_key(
+    *,
+    character_id: str | None = None,
+    scene_id: str | None = None,
+    shot_id: str | None = None,
+    parent_asset_id: str | None = None,
+    generation_candidate_id: str | None = None,
+) -> str:
+    """The scope one media asset is deduplicated within.
+
+    The single definition on purpose. This value decides whether an upload is a
+    duplicate of one the project already holds, and it used to be computed by
+    two independent formulas — one here and one in the API's upload route — that
+    agreed only because their association order happened to match. A change to
+    either would not have failed; it would have turned deduplication off.
+    """
+
+    associations = (
+        ("candidate", generation_candidate_id),
+        ("shot", shot_id),
+        ("parent", parent_asset_id),
+        ("character", character_id),
+        ("scene", scene_id),
+    )
+    parts = [f"{name}:{value}" for name, value in associations if value]
+    return "|".join(parts) if parts else "shared"
+
+
 class MediaRegistry:
     def __init__(
         self,
@@ -227,15 +255,13 @@ class MediaRegistry:
         parent_asset_id: str | None,
         generation_candidate_id: str | None,
     ) -> str:
-        associations = (
-            ("candidate", generation_candidate_id),
-            ("shot", shot_id),
-            ("parent", parent_asset_id),
-            ("character", character_id),
-            ("scene", scene_id),
+        return lineage_key(
+            character_id=character_id,
+            scene_id=scene_id,
+            shot_id=shot_id,
+            parent_asset_id=parent_asset_id,
+            generation_candidate_id=generation_candidate_id,
         )
-        parts = [f"{name}:{value}" for name, value in associations if value]
-        return "|".join(parts) if parts else "shared"
 
     @staticmethod
     def _image_dimensions(path: str, mime_type: str) -> tuple[int | None, int | None]:
@@ -1007,6 +1033,37 @@ class MediaRegistry:
         shot_id: str | None = None,
         character_id: str | None = None,
         metadata: dict | None = None,
+        lineage_key: str | None = None,
+    ) -> tuple[MediaAsset, bool]:
+        with self.database.session() as session:
+            return self.adopt_stored_object_in(
+                session,
+                project_id,
+                asset_type,
+                storage_key,
+                sha256=sha256,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                shot_id=shot_id,
+                character_id=character_id,
+                metadata=metadata,
+                lineage_key=lineage_key,
+            )
+
+    def adopt_stored_object_in(
+        self,
+        session: Session,
+        project_id: str,
+        asset_type: str,
+        storage_key: str,
+        *,
+        sha256: str,
+        mime_type: str,
+        size_bytes: int,
+        shot_id: str | None = None,
+        character_id: str | None = None,
+        metadata: dict | None = None,
+        lineage_key: str | None = None,
     ) -> tuple[MediaAsset, bool]:
         """Register an object the client already uploaded straight to storage.
 
@@ -1014,51 +1071,66 @@ class MediaRegistry:
         there. This only records what they are. Dimensions are read from a
         bounded header prefix rather than by opening the whole object, for the
         same reason the upload skipped this process in the first place.
+
+        ``lineage_key`` is passed by the direct-upload path rather than
+        recomputed: the authorization already decided it, wrote it to the
+        upload row, and deduplicated against it. Deriving it a second time here
+        made dedupe depend on two formulas agreeing.
+
+        The session is the caller's, so registering the asset, completing the
+        upload row and settling the quota hold commit as one transaction.
         """
 
         width, height = self._dimensions_from_header(storage_key, mime_type)
-        lineage_key = self._lineage_key(
-            character_id=character_id,
-            scene_id=None,
-            shot_id=shot_id,
-            parent_asset_id=None,
-            generation_candidate_id=None,
-        )
-        with self.database.session() as session:
-            asset = MediaAsset(
-                project_id=project_id,
-                asset_type=asset_type,
-                sha256=sha256,
-                lineage_key=lineage_key,
-                storage_key=storage_key,
-                local_path=None,
-                public_url=None,
-                mime_type=mime_type,
-                size_bytes=size_bytes,
-                width=width,
-                height=height,
-                duration=None,
-                shot_id=shot_id,
+        resolved_lineage = (
+            lineage_key
+            if lineage_key is not None
+            else self._lineage_key(
                 character_id=character_id,
-                metadata_json={"source": "direct_upload", **(metadata or {})},
+                scene_id=None,
+                shot_id=shot_id,
+                parent_asset_id=None,
+                generation_candidate_id=None,
             )
-            try:
-                with session.begin_nested():
-                    session.add(asset)
-                    session.flush()
-            except IntegrityError:
-                winner = session.scalar(
-                    select(MediaAsset).where(
-                        MediaAsset.project_id == project_id,
-                        MediaAsset.sha256 == sha256,
-                        MediaAsset.asset_type == asset_type,
-                        MediaAsset.lineage_key == lineage_key,
-                    )
-                )
-                if winner is None:
-                    raise
-                return winner, True
-            return asset, False
+        )
+        # Deliberately no SAVEPOINT here. This runs inside a transaction the
+        # caller also uses to complete the upload row and settle the quota hold,
+        # and under pysqlite a `begin_nested()` insert survives a rollback of
+        # the enclosing transaction — which would leave exactly the half-
+        # committed state the single transaction exists to prevent. A read
+        # before the insert covers the duplicate; a genuine collision in the
+        # window between them rolls the whole completion back, and the retry
+        # finds the winner on this same read.
+        existing = session.scalar(
+            select(MediaAsset).where(
+                MediaAsset.project_id == project_id,
+                MediaAsset.sha256 == sha256,
+                MediaAsset.asset_type == asset_type,
+                MediaAsset.lineage_key == resolved_lineage,
+            )
+        )
+        if existing is not None:
+            return existing, True
+        asset = MediaAsset(
+            project_id=project_id,
+            asset_type=asset_type,
+            sha256=sha256,
+            lineage_key=resolved_lineage,
+            storage_key=storage_key,
+            local_path=None,
+            public_url=None,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            width=width,
+            height=height,
+            duration=None,
+            shot_id=shot_id,
+            character_id=character_id,
+            metadata_json={"source": "direct_upload", **(metadata or {})},
+        )
+        session.add(asset)
+        session.flush()
+        return asset, False
 
     def _dimensions_from_header(self, storage_key: str, mime_type: str) -> tuple[int | None, int | None]:
         if not mime_type.startswith("image/"):

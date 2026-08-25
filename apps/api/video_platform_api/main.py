@@ -5,6 +5,7 @@ import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,6 +45,7 @@ from generation_gateway.gateway import UnsafeRetry
 from image_prompt_core import ImagePromptCorrectRequest
 from media_service import (
     DirectUploadConflict,
+    DirectUploadExpired,
     DirectUploadNotFinished,
     DirectUploadUnsupported,
     ProviderMediaReconciliationConflict,
@@ -51,6 +53,7 @@ from media_service import (
     StorageReservationConflict,
     WorkspaceStorageQuota,
     WorkspaceStorageQuotaExceeded,
+    lineage_key,
 )
 from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
 from model_registry_core import ModelRole, ShotRequirements
@@ -86,6 +89,7 @@ from production_domain.models import (
     CharacterIdentityVersion,
     CostRecord,
     DecisionRecord,
+    DirectUpload,
     DirectUploadStatus,
     Episode,
     GenerationCandidate,
@@ -101,12 +105,14 @@ from production_domain.models import (
     QAResult,
     Scene,
     Shot,
+    StorageReservation,
     TimelineState,
     User,
     WorkerStatus,
     Workspace,
+    utcnow,
 )
-from provider_sdk import FactLockSet
+from provider_sdk import LIVE_PROVIDER_CONFIRMATION, FactLockSet
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
@@ -1522,13 +1528,16 @@ def create_app(container: Container | None = None) -> FastAPI:
             "reused": reused,
         }
 
+    def _aware_utc(value: datetime) -> datetime:
+        """SQLite hands back naive datetimes; a deadline must still compare."""
+
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
     def _upload_lineage(shot_id: str | None, character_id: str | None) -> str:
-        parts = []
-        if shot_id:
-            parts.append(f"shot:{shot_id}")
-        if character_id:
-            parts.append(f"character:{character_id}")
-        return "|".join(parts) or "shared"
+        # `media_service.lineage_key` is the only definition of this. The route
+        # used to carry its own, and dedupe worked only while the two happened
+        # to order their associations the same way.
+        return lineage_key(shot_id=shot_id, character_id=character_id)
 
     def _upload_scope(principal: AuthPrincipal, body: DirectUploadAuthorize) -> str | None:
         auth.require_project(principal, body.project_id, write=True)
@@ -1567,7 +1576,13 @@ def create_app(container: Container | None = None) -> FastAPI:
             f"direct-upload-{secrets.token_urlsafe(24)}"
         )
         lineage_key = _upload_lineage(body.shot_id, body.character_id)
+        in_flight = None
         reservation_id: str | None = None
+        # Only a hold *this* call created may be released by it; a replay keeps
+        # the hold the original authorization already owns.
+        held_reservation_id: str | None = None
+        expired_upload = None
+        authorized = None
         try:
             # The quota hold is taken on the *declared* size before the client
             # is allowed to transfer, so a workspace cannot exceed its capacity
@@ -1578,14 +1593,25 @@ def create_app(container: Container | None = None) -> FastAPI:
                 asset_type=body.asset_type.strip().upper(),
                 lineage_key=lineage_key,
             )
-            if workspace_id and duplicate is None:
+            # A client that lost the response may legitimately ask again, and
+            # re-authorizing is a replay of one upload rather than a second one.
+            # The reservation must not be re-taken for it: WorkspaceStorageQuota
+            # reads a RESERVED row as "already in progress", which is right for a
+            # multipart upload passing through this process and wrong for one the
+            # client holds its own presigned URL for.
+            in_flight = container.direct_uploads.find_by_idempotency_key(
+                project_id=body.project_id, idempotency_key=idempotency_key
+            )
+            if in_flight is not None:
+                reservation_id = in_flight.storage_reservation_id
+            elif workspace_id and duplicate is None:
                 reservation = storage_quota.reserve(
                     workspace_id=workspace_id,
                     project_id=body.project_id,
                     byte_count=body.size_bytes,
                     idempotency_key=idempotency_key,
                 )
-                reservation_id = reservation.id
+                reservation_id = held_reservation_id = reservation.id
             authorized = container.direct_uploads.authorize(
                 project_id=body.project_id,
                 workspace_id=workspace_id,
@@ -1601,6 +1627,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                 character_id=body.character_id,
                 reservation_id=reservation_id,
             )
+        except DirectUploadExpired as exc:
+            expired_upload = in_flight
+            raise HTTPException(409, str(exc)) from exc
         except DirectUploadUnsupported as exc:
             raise HTTPException(501, str(exc)) from exc
         except DirectUploadConflict as exc:
@@ -1613,6 +1642,20 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(413, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+        finally:
+            # No presigned URL was returned, so the client cannot PUT and no
+            # object can appear. A hold kept past that point is capacity no
+            # upload will ever use — and while it stays RESERVED this
+            # Idempotency-Key can never be retried either.
+            if authorized is None and held_reservation_id:
+                storage_quota.release(held_reservation_id)
+            # An expired session is the one place a stale hold is observable,
+            # so it is also the one place it can be reclaimed. Everything else
+            # abandoned mid-flight still needs a sweeper.
+            if expired_upload is not None:
+                container.direct_uploads.abandon(expired_upload.id)
+                if expired_upload.storage_reservation_id:
+                    storage_quota.release(expired_upload.storage_reservation_id)
         return {
             "upload_id": authorized.upload_id,
             "url": authorized.presigned.url,
@@ -1651,31 +1694,60 @@ def create_app(container: Container | None = None) -> FastAPI:
 
         adopted: MediaAsset | None = None
         reused = False
+        # "Not there yet" is not a failed upload. Set while the presigned PUT is
+        # still live, so a client that polls too early keeps its session.
+        recoverable = False
         try:
+            # Storage I/O stays outside the transaction: no row lock is held
+            # across a network call.
             size_bytes, mime_type = container.direct_uploads.verify_object(upload)
-            adopted, reused = container.media.adopt_stored_object(
-                upload.project_id,
-                upload.asset_type,
-                upload.storage_key,
-                sha256=upload.sha256,
-                mime_type=mime_type,
-                size_bytes=size_bytes,
-                shot_id=upload.shot_id,
-                character_id=upload.character_id,
-                metadata={"upload_id": upload.id},
-            )
             with container.database.session() as session:
+                # Locking the upload row first is what makes the rest single
+                # -owner. Two requests can both see the object and both try to
+                # adopt it; only one may settle the hold.
+                claim = container.direct_uploads.claim_completion(session, upload.id)
+                if not claim.claimed:
+                    winner = (
+                        container.media.get(claim.media_asset_id) if claim.media_asset_id else None
+                    )
+                    if winner is not None:
+                        return _asset_view(winner, reused=True)
+                    raise HTTPException(409, "this upload can no longer be completed")
+                adopted, reused = container.media.adopt_stored_object_in(
+                    session,
+                    upload.project_id,
+                    upload.asset_type,
+                    upload.storage_key,
+                    sha256=upload.sha256,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    shot_id=upload.shot_id,
+                    character_id=upload.character_id,
+                    metadata={"upload_id": upload.id},
+                    # The value the authorization already decided and dedupli-
+                    # cated against, not a second derivation of it.
+                    lineage_key=upload.lineage_key,
+                )
                 container.direct_uploads.mark_completed(
                     session, upload.id, media_asset_id=adopted.id
                 )
-            if upload.storage_reservation_id:
-                storage_quota.settle(
-                    upload.storage_reservation_id,
-                    asset_id=adopted.id,
-                    storage_key=adopted.storage_key,
-                    used_bytes=0 if reused else size_bytes,
-                )
+                if claim.reservation_id:
+                    # Same transaction as the asset row and the status change,
+                    # so a crash between them cannot leave real storage
+                    # unaccounted.
+                    storage_quota.settle_in(
+                        session,
+                        claim.reservation_id,
+                        asset_id=adopted.id,
+                        storage_key=adopted.storage_key,
+                        used_bytes=0 if reused else size_bytes,
+                    )
         except DirectUploadNotFinished as exc:
+            # The object is absent. While the presigned PUT is still live that
+            # means the client has not finished, not that it failed: abandoning
+            # the row here would kill a URL that still works and leave the bytes
+            # it later writes with no row to adopt them.
+            recoverable = _aware_utc(upload.expires_at) > utcnow()
             raise HTTPException(409, str(exc)) from exc
         except StorageLimitExceeded as exc:
             raise HTTPException(413, str(exc)) from exc
@@ -1685,11 +1757,162 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(422, str(exc)) from exc
         finally:
             # A rejected object leaves no asset, so the hold must not survive as
-            # unaccounted capacity.
-            if adopted is None and upload.storage_reservation_id:
-                storage_quota.release(upload.storage_reservation_id)
+            # unaccounted capacity. The row is abandoned whether or not it held
+            # one — a workspace-less project still must not keep a PENDING row
+            # that can never complete.
+            if adopted is None and not recoverable:
                 container.direct_uploads.abandon(upload.id)
+                if upload.storage_reservation_id:
+                    storage_quota.release(upload.storage_reservation_id)
         return _asset_view(adopted, reused=reused)
+
+    @app.post(
+        "/internal/models/reconcile-live",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def reconcile_live_models(apply: bool = False):
+        """Re-derive every model's `live_enabled` from the credentials present now.
+
+        Startup seeds the registry once and then deliberately never replays
+        defaults over an administrator's changes, which is right — but it left
+        no way at all to *open* a model after its credential arrived. Adding a
+        key to `.env` and restarting did nothing, because reconciliation only
+        ran for models this startup happened to create. That is the gap between
+        "the credentials are in place" and "the platform will use them".
+
+        Only `live_enabled` moves. `enabled` is a routing decision an operator
+        owns, and the execution ID is never restated, so this cannot overwrite
+        an administrator's chosen model.
+
+        Reports by default. Pass `?apply=true` to write.
+        """
+
+        live_gate_ready = (
+            container.settings.provider_mode == "live"
+            and container.settings.allow_live_provider_calls is True
+            and container.settings.live_provider_confirmation == LIVE_PROVIDER_CONFIRMATION
+        )
+        rows: list[dict[str, Any]] = []
+        changed = 0
+        for state in container.model_infrastructure.all_runtime_models():
+            try:
+                provider = container.providers.get(state.provider)
+            except LookupError:
+                transport, reason = False, "provider has no transport in this deployment"
+            else:
+                transport = bool(getattr(provider, "configured", True))
+                reason = "" if transport else "provider credential or model ID is not configured"
+            target = bool(state.enabled and transport and live_gate_ready)
+            if not target and not reason:
+                reason = "" if state.enabled else "model is disabled"
+                if live_gate_ready is False:
+                    reason = "live gate is closed"
+            moved = target != state.live_enabled
+            if moved and apply:
+                container.model_infrastructure.set_enablement(
+                    state.logical_name, enabled=state.enabled, live_enabled=target
+                )
+                changed += 1
+            rows.append(
+                {
+                    "logical_name": state.logical_name,
+                    "provider": state.provider,
+                    "enabled": state.enabled,
+                    "live_enabled": target if apply else state.live_enabled,
+                    "would_change": moved,
+                    "blocked_by": reason or None,
+                }
+            )
+        return {
+            "applied": apply,
+            "live_gate_ready": live_gate_ready,
+            "changed": changed if apply else sum(1 for row in rows if row["would_change"]),
+            "models": rows,
+        }
+
+    @app.post(
+        "/internal/maintenance/expired-uploads",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_expired_uploads(limit: int = 200):
+        """Reclaim uploads whose authorized window closed without completing.
+
+        A client that authorizes and walks away leaves a `PENDING` row, a quota
+        hold, and possibly an object it did PUT. Nothing observed any of that:
+        `expires_at` was written and indexed and no query read it, so the hold
+        was capacity the workspace never got back.
+
+        Two paths reclaim a hold when the client returns — completing an expired
+        session, and re-authorizing one. This is the path for the client that
+        never returns. It is deliberately an endpoint rather than a background
+        loop inside the API: sweeping is an operational action with a schedule
+        an operator owns, and a loop that quietly releases quota is worse than
+        one that has to be invoked.
+
+        The object itself is **not** deleted. Removing bytes a user may have
+        paid to upload is not a decision a sweeper should make.
+        """
+
+        swept: list[dict[str, Any]] = []
+        for upload in container.direct_uploads.expired(limit=limit):
+            released = False
+            # Only a hold with no asset behind it. An upload that registered its
+            # asset and then failed to settle keeps its hold on purpose.
+            if upload.storage_reservation_id and upload.media_asset_id is None:
+                try:
+                    released = storage_quota.release(upload.storage_reservation_id)
+                except (LookupError, StorageReservationConflict):
+                    released = False
+            container.direct_uploads.abandon(upload.id)
+            swept.append(
+                {
+                    "upload_id": upload.id,
+                    "project_id": upload.project_id,
+                    "storage_key": upload.storage_key,
+                    "expires_at": _aware_utc(upload.expires_at).isoformat(),
+                    "reservation_released": released,
+                    # The bucket still holds whatever the client wrote.
+                    "orphaned_object": True,
+                }
+            )
+
+        stale_after = utcnow() - timedelta(
+            seconds=max(60, container.settings.storage_reservation_stale_after_seconds)
+        )
+        with container.database.session() as session:
+            accounted = set(
+                session.scalars(
+                    select(DirectUpload.storage_reservation_id).where(
+                        DirectUpload.status == DirectUploadStatus.PENDING.value,
+                        DirectUpload.storage_reservation_id.is_not(None),
+                    )
+                )
+            )
+            stale = [
+                {
+                    "reservation_id": item.id,
+                    "workspace_id": item.workspace_id,
+                    "project_id": item.project_id,
+                    "reserved_bytes": item.reserved_bytes,
+                    "created_at": _aware_utc(item.created_at).isoformat(),
+                }
+                for item in session.scalars(
+                    select(StorageReservation).where(
+                        StorageReservation.status == "RESERVED",
+                        StorageReservation.created_at < stale_after,
+                    )
+                )
+                if item.id not in accounted
+            ]
+        return {
+            "swept": swept,
+            "swept_count": len(swept),
+            # Reported, never released. A hold this old with no PENDING upload
+            # behind it is either a process that died mid-request or a
+            # registration whose settlement failed — and those two need
+            # opposite actions, which only an operator can tell apart.
+            "reservations_needing_reconciliation": stale,
+        }
 
     @app.post("/v1/assets")
     async def upload_asset(

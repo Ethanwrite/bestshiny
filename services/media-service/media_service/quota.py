@@ -7,6 +7,7 @@ from platform_shared import affected_rows
 from production_domain.models import StorageReservation, Workspace, utcnow
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 
 class WorkspaceStorageQuotaExceeded(RuntimeError):
@@ -146,38 +147,62 @@ class WorkspaceStorageQuota:
         used_bytes: int,
     ) -> StorageQuotaReservation:
         with self.database.session() as session:
-            reservation = session.get(StorageReservation, reservation_id, with_for_update=True)
-            if reservation is None:
-                raise LookupError("storage reservation not found")
-            if used_bytes < 0 or used_bytes > reservation.reserved_bytes:
-                raise ValueError("settled bytes must be within the reserved capacity")
-            if reservation.status == "SETTLED":
-                if reservation.asset_id != asset_id or reservation.storage_key != storage_key:
-                    raise StorageReservationConflict("reservation was settled for another asset")
-                return self._view(reservation, replayed=True)
-            if reservation.status != "RESERVED":
-                raise StorageReservationConflict("released reservation cannot be settled")
-
-            workspace_update = session.execute(
-                update(Workspace)
-                .where(
-                    Workspace.id == reservation.workspace_id,
-                    Workspace.reserved_storage_bytes >= reservation.reserved_bytes,
-                    Workspace.used_storage_bytes + used_bytes <= Workspace.max_storage_bytes,
-                )
-                .values(
-                    reserved_storage_bytes=(Workspace.reserved_storage_bytes - reservation.reserved_bytes),
-                    used_storage_bytes=Workspace.used_storage_bytes + used_bytes,
-                )
+            return self.settle_in(
+                session,
+                reservation_id,
+                asset_id=asset_id,
+                storage_key=storage_key,
+                used_bytes=used_bytes,
             )
-            if affected_rows(workspace_update) != 1:
-                raise StorageReservationConflict("workspace storage counters changed unexpectedly")
-            reservation.status = "SETTLED"
-            reservation.asset_id = asset_id
-            reservation.storage_key = storage_key
-            reservation.settled_at = utcnow()
-            session.flush()
-            return self._view(reservation)
+
+    def settle_in(
+        self,
+        session: Session,
+        reservation_id: str,
+        *,
+        asset_id: str,
+        storage_key: str,
+        used_bytes: int,
+    ) -> StorageQuotaReservation:
+        """Settle inside a transaction the caller owns.
+
+        A direct upload registers the asset, marks its upload row completed and
+        settles the hold; those three must commit or roll back together, or a
+        crash between them leaves storage that is real and unaccounted.
+        """
+
+        reservation = session.get(StorageReservation, reservation_id, with_for_update=True)
+        if reservation is None:
+            raise LookupError("storage reservation not found")
+        if used_bytes < 0 or used_bytes > reservation.reserved_bytes:
+            raise ValueError("settled bytes must be within the reserved capacity")
+        if reservation.status == "SETTLED":
+            if reservation.asset_id != asset_id or reservation.storage_key != storage_key:
+                raise StorageReservationConflict("reservation was settled for another asset")
+            return self._view(reservation, replayed=True)
+        if reservation.status != "RESERVED":
+            raise StorageReservationConflict("released reservation cannot be settled")
+
+        workspace_update = session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == reservation.workspace_id,
+                Workspace.reserved_storage_bytes >= reservation.reserved_bytes,
+                Workspace.used_storage_bytes + used_bytes <= Workspace.max_storage_bytes,
+            )
+            .values(
+                reserved_storage_bytes=(Workspace.reserved_storage_bytes - reservation.reserved_bytes),
+                used_storage_bytes=Workspace.used_storage_bytes + used_bytes,
+            )
+        )
+        if affected_rows(workspace_update) != 1:
+            raise StorageReservationConflict("workspace storage counters changed unexpectedly")
+        reservation.status = "SETTLED"
+        reservation.asset_id = asset_id
+        reservation.storage_key = storage_key
+        reservation.settled_at = utcnow()
+        session.flush()
+        return self._view(reservation)
 
     def record_deduplicated(
         self,

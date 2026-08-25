@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # How long an authorized direct upload stays open. It bounds both the
     # presigned PUT and the quota hold taken against it.
     direct_upload_ttl_seconds: int = 3600
+    # A RESERVED storage hold older than this that no PENDING upload accounts
+    # for is reported for reconciliation. It is never released automatically:
+    # a hold can outlive its request deliberately, when registration succeeded
+    # and settlement failed, and releasing that one would make real storage
+    # unaccounted.
+    storage_reservation_stale_after_seconds: int = 86_400
     web_origins: str = "http://localhost:3000,http://127.0.0.1:18081"
     platform_api_key: str = ""
     deployment_environment: Literal["development", "test", "production"] = "production"

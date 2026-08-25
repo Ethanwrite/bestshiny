@@ -17,7 +17,24 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ```
 
 The 5 skipped are the opt-in live tests; they need `--run-live-provider` *and* the
-three-part gate. No provider was ever called live. Known spend: **USD 0**.
+three-part gate.
+
+**Wan 2.7 T2V is verified live** (2026-08-25). `PROVIDER_MODE=live` on the user's
+instruction; task `285f787d-c1fe-40c5-8893-6e1f89adbb70` submitted, polled and
+`COMPLETED` with a fetchable `video/mp4` artefact — auth, the `media[]` body, the
+DashScope async protocol and the poll parsing all confirmed against the real
+service. Known spend is **no longer USD 0**: one 5s 720P clip.
+
+Two things that run cost nothing and were both wrong beforehand:
+
+- `WAN_API_KEY` in `.env` was **truncated** — 73 of 115 characters. DashScope
+  answered `Invalid API-key provided`, and that was read here as a revoked key
+  rather than a bad copy. The key was always valid.
+- The resolution table carried 480P/540P/1440P/2160P as a generic normalisation
+  map. Wan accepts `720P` and `1080P` only, exactly as `supported_resolutions`
+  in the registry already said. A 480P task was accepted and then failed
+  validation at the provider — a wasted round trip for something knowable
+  locally. The adapter now refuses it before submission.
 
 Two further gates, both offline:
 

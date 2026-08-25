@@ -238,14 +238,15 @@ MAX_REFERENCE_ASSETS = 5
 # Wan expresses framing through a resolution tier, not through the "720p" label
 # the platform's shot spec uses. The previous payload posted that label straight
 # into `size`, a field that takes pixel dimensions.
+# The tiers Wan 2.7 actually accepts, and only those. An earlier version of this
+# table carried 480P, 540P, 1440P and 2160P as a generic normalisation map; a
+# live submission was accepted and then failed with
+# `Input should be '1080P' or '720P': parameters.resolution`, which is a wasted
+# round trip for something knowable here. It matches `supported_resolutions` in
+# the registry profile, and `test_model_routing_integrity` holds the two together.
 _RESOLUTIONS: dict[str, str] = {
-    "480p": "480P",
-    "540p": "540P",
     "720p": "720P",
     "1080p": "1080P",
-    "1440p": "1440P",
-    "2160p": "2160P",
-    "4k": "2160P",
 }
 
 

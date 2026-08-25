@@ -44,14 +44,15 @@ pytestmark = pytest.mark.live_provider
 
 SYNTHESIS = ("POST", "/services/aigc/video-generation/video-synthesis")
 
-# The smallest thing worth asking for: no references, shortest duration, lowest
-# tier. A prompt with one subject and one action, because a multi-beat prompt is
-# the documented failure mode and would make a transport test into a quality one.
+# The smallest thing worth asking for: no references, shortest duration, and the
+# lowest tier Wan 2.7 publishes — 720P; it rejects anything below. One subject,
+# one action, because a multi-beat prompt is the documented failure mode and
+# would turn a transport test into a quality one.
 SMALLEST_T2V = {
     "model": "wan-2.7",
     "prompt": "a plain matte grey ceramic cube rotating slowly on a white surface, flat lighting",
     "duration": 5,
-    "resolution": "480p",
+    "resolution": "720p",
     "aspect_ratio": "16:9",
 }
 
@@ -133,7 +134,7 @@ async def test_the_reviewed_model_ids_are_the_ones_that_get_posted() -> None:
     provider, transport = _recording_provider()
     await provider.generate_video({**SMALLEST_T2V}, account_id="", worker_id="")
     parameters = transport.requests[0].json_body["parameters"]
-    assert parameters["resolution"] == "480P"
+    assert parameters["resolution"] == "720P"
     assert parameters["ratio"] == "16:9"
     assert "size" not in parameters
 

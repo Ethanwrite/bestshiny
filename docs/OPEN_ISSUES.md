@@ -210,7 +210,7 @@ the first live batch rather than trusting the default.
 | # | Item | Blocked by |
 | --- | --- | --- |
 | 3.1 | **Model-backed prompt compilation.** `compile_input()` is deterministic; `skill_contract()` never calls a model. Steps are in `HANDOFF.md` §8. | §1.7 decision |
-| 3.2 | **Live provider evidence.** No provider has been called. The image path now has a one-command opt-in route (§1.2); video, chat and embedding roles do not. | §1.1 gate |
+| 3.2 | **Live provider evidence.** Wan 2.7 **T2V is verified live** — submitted, polled, `COMPLETED` with a `video/mp4` artefact on 2026-08-25. I2V and R2V remain unverified because both carry a reference and `S3_*` is still unset (§1.3). Image, chat and embedding roles have never been called. | §1.3 for I2V/R2V |
 | 3.3 | **Omni reference file** in `skills/model-prompting/references/`. Wan 3.0's 30s envelope, the Seedance 2.5 entry and a GPT Image 2 entry have landed. | §1.5 |
 | 3.4 | **A client that uses the direct-upload endpoints.** The server side is complete (`POST /v1/assets/uploads` + `/complete`); the Web UI still posts multipart to `POST /v1/assets`. Nothing is broken — the streaming path remains — but the benefit only arrives once the client performs its own PUT. | — |
 | 3.5 | **No live evidence for the semantic style layer.** `google/gemini-embedding-2` has never been called; the tests use a deterministic stub. Its real vector geometry — and therefore the right value for `semantic_similarity_threshold`, currently 0.80 — is uncalibrated. | §1.1 gate |

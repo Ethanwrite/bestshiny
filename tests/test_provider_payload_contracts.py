@@ -1012,7 +1012,9 @@ async def test_wan_sends_a_resolution_tier_and_never_a_pixel_size() -> None:
 
     assert _resolution("720p") == "720P"
     assert _resolution("1080P") == "1080P"
-    for rejected in ("1280*720", "1280x720", "cinema"):
+    # Wan publishes 720P and 1080P only; anything else is refused here rather than
+    # accepted as a task that then fails validation at the provider.
+    for rejected in ("480p", "2160p", "1280*720", "1280x720", "cinema"):
         with pytest.raises(ProviderError):
             _resolution(rejected)
 

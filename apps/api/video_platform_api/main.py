@@ -112,7 +112,7 @@ from production_domain.models import (
     Workspace,
     utcnow,
 )
-from provider_sdk import LIVE_PROVIDER_CONFIRMATION, FactLockSet
+from provider_sdk import LIVE_PROVIDER_CONFIRMATION, FactLockSet, NotConfiguredProvider
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
@@ -1795,13 +1795,26 @@ def create_app(container: Container | None = None) -> FastAPI:
         rows: list[dict[str, Any]] = []
         changed = 0
         for state in container.model_infrastructure.all_runtime_models():
+            provider: object | None
             try:
                 provider = container.providers.get(state.provider)
             except LookupError:
-                transport, reason = False, "provider has no transport in this deployment"
+                # The generation router holds image/video adapters only. A
+                # chat-only or embedding-only provider lives in the capability
+                # catalogue instead, and is no less configured for it.
+                provider = container.provider_capabilities.implementation(state.provider)
+            if provider is None:
+                transport, reason = False, "provider has no adapter in this deployment"
             else:
-                transport = bool(getattr(provider, "configured", True))
-                reason = "" if transport else "provider credential or model ID is not configured"
+                if isinstance(provider, NotConfiguredProvider):
+                    # A stub answers every call with PROVIDER_NOT_CONFIGURED and
+                    # carries no `configured` attribute, so a getattr default of
+                    # True would mark it live and let the router pick something
+                    # that cannot dispatch.
+                    transport, reason = False, "provider is a reserved stub with no transport"
+                else:
+                    transport = bool(getattr(provider, "configured", True))
+                    reason = "" if transport else "provider credential or model ID is not configured"
             target = bool(state.enabled and transport and live_gate_ready)
             if not target and not reason:
                 reason = "" if state.enabled else "model is disabled"

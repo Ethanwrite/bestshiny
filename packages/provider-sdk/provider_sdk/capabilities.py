@@ -77,6 +77,17 @@ class ProviderCapabilityCatalog:
             )
         return implementation
 
+    def implementation(self, provider: str) -> object | None:
+        """The registered adapter, whatever interfaces it implements.
+
+        `resolve` answers "can this provider serve this capability"; this
+        answers the narrower "is there an adapter here at all". A chat-only
+        model has no entry in the generation router, and reading its absence
+        there as "no transport" marks a perfectly configured model dead.
+        """
+
+        return self._providers.get(provider)
+
     def capabilities(self, provider: str) -> frozenset[str]:
         return self._capabilities.get(provider, frozenset())
 

@@ -139,7 +139,31 @@ def main() -> int:
         and settings.s3_access_key_id.strip()
         and settings.s3_secret_access_key.strip()
     )
-    print(_line("S3 object storage", READY if s3_ready else BLOCKED, settings.s3_bucket or ""))
+    # Configured is not the same as reachable. A bucket on localhost presigns
+    # perfectly and hands the provider a URL it cannot resolve, so the shot is
+    # submitted, billed and then fails at the far end — the one outcome this
+    # script exists to catch.
+    s3_host = urlsplit(settings.s3_endpoint_url).hostname or ""
+    s3_private = s3_host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} or s3_host.startswith(
+        ("192.168.", "10.", "172.16.", "host.docker.")
+    )
+    if s3_ready and s3_private:
+        print(
+            _line(
+                "S3 object storage",
+                RISK,
+                f"{s3_host} is not routable from outside this machine",
+            )
+        )
+        print(
+            _line(
+                "  → provider fetch",
+                BLOCKED,
+                "Alibaba cannot resolve this; I2V/R2V would submit, bill, then fail",
+            )
+        )
+    else:
+        print(_line("S3 object storage", READY if s3_ready else BLOCKED, settings.s3_bucket or ""))
     public = settings.public_base_url.strip()
     host = urlsplit(public).hostname or ""
     https = urlsplit(public).scheme == "https"
@@ -168,6 +192,8 @@ def main() -> int:
             print(_line(label, BLOCKED, "transport or model ID not configured"))
         elif needs_reference and not s3_ready:
             print(_line(label, BLOCKED, "needs object storage for its reference URLs"))
+        elif needs_reference and s3_private:
+            print(_line(label, BLOCKED, "reference URLs point at a host the provider cannot reach"))
         elif not gate_open:
             print(_line(label, RISK, "configured; blocked only by the live gate"))
         else:
@@ -182,19 +208,34 @@ def main() -> int:
 
     print("\n=== Verdict " + "=" * 63)
     blockers: list[str] = []
-    if not production_ready:
+    secrets_ready = bool(settings.platform_api_key.strip() and settings.credential_encryption_key.strip())
+    if not secrets_ready:
         blockers.append(
-            "Production mode. The container refuses to boot without PLATFORM_API_KEY and\n"
-            "    CREDENTIAL_ENCRYPTION_KEY. Generate both yourself; nothing here writes a secret:\n"
-            "      python -c \"import secrets; print(secrets.token_urlsafe(48))\"        # PLATFORM_API_KEY\n"
+            "Production secrets. The container refuses to boot without PLATFORM_API_KEY and\n"
+            "    CREDENTIAL_ENCRYPTION_KEY:\n"
+            "      python -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
             "      python -c \"from cryptography.fernet import Fernet;"
-            ' print(Fernet.generate_key().decode())\"  # CREDENTIAL_ENCRYPTION_KEY'
+            ' print(Fernet.generate_key().decode())\"'
+        )
+    elif not production_ready:
+        blockers.append(
+            "DEPLOYMENT_ENVIRONMENT=production. Both secrets are in place, so this is now\n"
+            "    one line — but production sets Secure cookies, which a browser will not send\n"
+            "    over http. Flip it once PUBLIC_BASE_URL is HTTPS, not before."
         )
     if not s3_ready:
         blockers.append(
             "Object storage. Only Wan T2V works without it: every I2V and R2V shot carries a\n"
             "    reference the provider fetches itself, and there is no URL Alibaba can reach.\n"
             "    Direct uploads answer 501 for the same reason."
+        )
+    elif s3_private:
+        blockers.append(
+            "A publicly reachable bucket. The storage plane is real and verified — presign,\n"
+            "    digest enforcement, HEAD, range read and reference URLs all work — but the\n"
+            "    endpoint is local, so a provider cannot fetch what it hands out. Direct\n"
+            "    uploads and the rendition plane are fully testable now; live I2V/R2V needs\n"
+            "    Alibaba OSS, R2 or S3 with an HTTPS endpoint."
         )
     if not gate_open:
         blockers.append(

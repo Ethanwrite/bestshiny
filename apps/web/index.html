@@ -3,14 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Director — 智能导演工作台</title>
+    <title>Best Shiny — Studio Workbench</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect rx=%2216%22 width=%2264%22 height=%2264%22 fill=%22%2339e7ff%22/><path d=%22M16 21h32M16 32h24M16 43h32%22 stroke=%22%23070a12%22 stroke-width=%225%22/></svg>" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
       <div class="auth-card">
-        <div class="auth-brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><strong>AI 视觉制作</strong><small>你的商业化智能导演工作台</small></div></div>
+        <div class="auth-brand"><div class="brand-mark" aria-hidden="true">B</div><div><strong>Best Shiny</strong><small>STUDIO WORKBENCH · V2.0</small></div></div>
         <span class="eyebrow">安全工作空间</span>
         <h1 id="authTitle">登录工作空间</h1>
         <p id="authDescription">登录后只会看到你所在工作空间的项目与素材。</p>
@@ -31,8 +34,8 @@
     <div id="appShell" class="app-shell auth-locked">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-mark"><span></span><span></span><span></span></div>
-          <div><strong>AI 视觉制作</strong><small>自主创作与智能导演</small></div>
+          <div class="brand-mark" aria-hidden="true">B</div>
+          <div><strong>Best Shiny</strong><small>STUDIO WORKBENCH · V2.0</small></div>
         </div>
         <div class="project-switcher">
           <span class="eyebrow">当前项目</span>
@@ -41,7 +44,7 @@
         <div class="top-actions">
           <span id="accountName" class="account-name"></span>
           <span id="systemStatus" class="status-pill"><i></i>系统检查中</span>
-          <button id="walletBtn" class="button secondary" type="button">Upgrade to Pro</button>
+          <button id="walletBtn" class="button secondary wallet-trigger" type="button">充值积分</button>
           <button id="newProjectBtn" class="button secondary">新建项目</button>
           <button id="logoutBtn" class="button secondary logout-button">退出</button>
           <button id="generateBtn" class="button primary hidden">生成 / 重做当前镜头</button>
@@ -56,7 +59,7 @@
 
       <section id="passengerWorkspace" class="passenger-workspace">
         <div class="passenger-hero">
-          <div><span class="eyebrow">自主创作</span><h1>自主视觉创作</h1><p>你决定创意和生成方式。图片可以一键补全画面细节；视频会按你的原意提交。</p></div>
+          <div><span class="eyebrow">STUDIO</span><h1>视觉创作工作台</h1><p>从提示词、参考素材到镜头计划，在一个连续的制作界面中完成。</p></div>
           <div class="media-toggle" role="tablist"><button class="active" data-media="image">生成图片</button><button data-media="video">生成视频</button></div>
         </div>
         <div class="passenger-grid">

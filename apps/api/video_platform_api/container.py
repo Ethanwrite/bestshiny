@@ -204,6 +204,8 @@ def build_container(settings: Settings | None = None) -> Container:
             secret_access_key=settings.s3_secret_access_key,
             public_base_url=settings.public_base_url,
             max_object_bytes=settings.max_upload_bytes,
+            addressing_style=settings.s3_addressing_style,
+            enforce_checksum=settings.s3_enforce_upload_checksum,
         )
     else:
         storage = LocalStorage(

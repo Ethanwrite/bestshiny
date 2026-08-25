@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     s3_bucket: str = "ai-director-media"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+    # "virtual" for Alibaba OSS (bucket.s3.oss-<region>.aliyuncs.com), "path" for
+    # MinIO, "auto" to let boto3 guess. Stating it beats discovering a 404.
+    s3_addressing_style: Literal["auto", "virtual", "path"] = "auto"
+    # Bind x-amz-checksum-sha256 into the presigned PUT so the store rejects
+    # bytes that do not hash to the declared digest. Turn off only for a store
+    # that does not implement it, and know that the content-addressed key then
+    # names content the object is merely claimed to hold.
+    s3_enforce_upload_checksum: bool = True
     public_base_url: str = "http://localhost:8080"
     # How long a provider-facing reference URL stays valid. It is a short-lived
     # object-storage credential, never a stored field on the asset row.

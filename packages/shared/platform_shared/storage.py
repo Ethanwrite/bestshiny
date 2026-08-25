@@ -268,21 +268,36 @@ class S3CompatibleStorage:
         secret_access_key: str = "",
         public_base_url: str = "",
         max_object_bytes: int = 100 * 1024 * 1024,
+        addressing_style: str = "auto",
+        enforce_checksum: bool = True,
     ):
         import boto3
+        from botocore.config import Config
 
         self.bucket = bucket
         self.cache_root = cache_root.expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.public_base_url = public_base_url.rstrip("/")
         self.max_object_bytes = max(1, max_object_bytes)
+        # Alibaba OSS's S3-compatible endpoint addresses buckets virtual-hosted
+        # (`bucket.s3.oss-<region>.aliyuncs.com`); MinIO wants path style. boto3's
+        # "auto" guesses from the endpoint and guesses wrong often enough that
+        # this is worth stating rather than discovering as a 404 on every object.
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint_url or None,
             region_name=region,
             aws_access_key_id=access_key_id or None,
             aws_secret_access_key=secret_access_key or None,
+            config=Config(s3={"addressing_style": addressing_style}),
         )
+        # `x-amz-checksum-sha256` is what makes a client-declared digest safe to
+        # content-address a key with: the store rejects bytes that do not hash to
+        # it. It is a 2022 addition to the S3 API and not every compatible
+        # implementation carries it. Turning it off is a deliberate, recorded
+        # downgrade — the key then names content the object is only *claimed* to
+        # hold — so verify with `scripts/verify_object_storage.py` before doing it.
+        self.enforce_checksum = enforce_checksum
 
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject:
         safe_name = Path(filename).name or "asset.bin"
@@ -376,25 +391,30 @@ class S3CompatibleStorage:
         """
 
         checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
+        params: dict[str, str] = {
+            "Bucket": self.bucket,
+            "Key": key,
+            "ContentType": mime_type,
+        }
+        if self.enforce_checksum:
+            params["ChecksumSHA256"] = checksum
         try:
             url = self.client.generate_presigned_url(
                 "put_object",
-                Params={
-                    "Bucket": self.bucket,
-                    "Key": key,
-                    "ContentType": mime_type,
-                    "ChecksumSHA256": checksum,
-                },
+                Params=params,
                 ExpiresIn=max(1, expires_in),
             )
         except Exception:
             return None
         if not url:
             return None
+        headers = {"Content-Type": mime_type}
+        if self.enforce_checksum:
+            headers["x-amz-checksum-sha256"] = checksum
         return PresignedUpload(
             url=str(url),
             method="PUT",
-            headers={"Content-Type": mime_type, "x-amz-checksum-sha256": checksum},
+            headers=headers,
             storage_key=key,
             expires_in=max(1, expires_in),
         )

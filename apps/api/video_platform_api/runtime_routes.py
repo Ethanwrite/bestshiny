@@ -189,6 +189,21 @@ class CreditReconcileRequest(BaseModel):
     evidence_reference: str | None = Field(default=None, max_length=500)
 
 
+class LiveCanaryUsageReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["CONFIRM_PROVIDER_NOT_CREATED", "SETTLE_ACTUAL_COST"]
+    actual_cost_usd: Decimal | None = Field(
+        default=None,
+        ge=0,
+        max_digits=14,
+        decimal_places=6,
+    )
+    reason: str = Field(min_length=3, max_length=240)
+    explicit_confirmation: Literal[True]
+    evidence_reference: str = Field(min_length=3, max_length=500)
+
+
 class ProviderBudgetReconcileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1293,6 +1308,56 @@ def register_runtime_routes(
             )
         return {
             **_live_canary_permit_view(stored_permit, usages),
+            "audit_decision_id": audit_decision_id,
+            "replayed": replayed,
+        }
+
+    @internal_router.post("/internal/live-canary-usages/{usage_id}/reconcile")
+    def reconcile_live_canary_usage(
+        usage_id: str,
+        body: LiveCanaryUsageReconcileRequest,
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key", max_length=200),
+        ] = None,
+    ):
+        """Close an UNCERTAIN canary usage with what the provider's console shows."""
+
+        if not idempotency_key or not idempotency_key.strip():
+            raise HTTPException(400, "Idempotency-Key is required")
+        try:
+            reservation, audit_decision_id, replayed = container.live_canary.reconcile_uncertain(
+                usage_id,
+                action=body.action,
+                actual_cost_usd=body.actual_cost_usd,
+                idempotency_key=idempotency_key,
+                reason=body.reason,
+                evidence_reference=body.evidence_reference,
+                actor_type="PLATFORM_API_KEY",
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except LiveCanaryConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        with container.database.session() as session:
+            permit = session.get(LiveCanaryPermit, reservation.permit_id)
+            if permit is None:  # pragma: no cover - transaction invariant.
+                raise RuntimeError("live canary permit disappeared after reconciliation")
+            usages = list(
+                session.scalars(
+                    select(LiveCanaryUsage)
+                    .where(LiveCanaryUsage.permit_id == reservation.permit_id)
+                    .order_by(LiveCanaryUsage.created_at, LiveCanaryUsage.id)
+                )
+            )
+            permit_view = _live_canary_permit_view(permit, usages)
+        return {
+            "usage_id": reservation.usage_id,
+            "usage_status": reservation.status,
+            "action": body.action,
+            "permit": permit_view,
             "audit_decision_id": audit_decision_id,
             "replayed": replayed,
         }

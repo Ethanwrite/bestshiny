@@ -593,3 +593,108 @@ def test_live_canary_permit_api_creates_audited_offline_permit_and_lists_usage(
             )
             == 1
         )
+
+
+def test_live_canary_usage_reconciliation_frees_the_hold_and_audits_the_finding(
+    container,  # type: ignore[no-untyped-def]
+) -> None:
+    """An UNCERTAIN usage that never reached the provider settles at zero.
+
+    The hold exists because a crossed boundary looks the same from here whether
+    it was billed or refused. Once an operator has read the provider's console,
+    keeping the estimate reserved is no longer caution — it spends the audit's
+    global ceiling on an attempt that cost nothing.
+    """
+
+    expires_at = datetime.now(UTC) + timedelta(hours=2)
+    permit, _, _ = container.live_canary.create_authorized(
+        provider="offline-fixture",
+        model="fixture-model-v1",
+        max_requests=1,
+        max_cost_usd="0.500000",
+        expires_at=expires_at,
+        purpose="Offline reconciliation fixture",
+        explicit_confirmation=True,
+        actor_type="PLATFORM_API_KEY",
+        idempotency_key="offline-reconcile-permit-1",
+    )
+    reservation = container.live_canary.reserve(
+        permit.id,
+        provider="offline-fixture",
+        model="fixture-model-v1",
+        estimated_cost_usd="0.500000",
+        idempotency_key="offline-reconcile-operation",
+    )
+    container.live_canary.mark_uncertain(
+        reservation.usage_id,
+        evidence_reference="offline-boundary-fixture",
+    )
+
+    path = f"/internal/live-canary-usages/{reservation.usage_id}/reconcile"
+    body = {
+        "action": "CONFIRM_PROVIDER_NOT_CREATED",
+        "reason": "provider refused before creating a job",
+        "explicit_confirmation": True,
+        "evidence_reference": "offline-console-read",
+    }
+    headers = {**_internal_headers(container), "Idempotency-Key": "offline-reconcile-1"}
+    with TestClient(create_app(container)) as client:
+        assert client.post(path, json=body).status_code == 401
+        missing_key = client.post(path, headers=_internal_headers(container), json=body)
+        priced = client.post(
+            path,
+            headers={**_internal_headers(container), "Idempotency-Key": "offline-reconcile-priced"},
+            json={**body, "actual_cost_usd": "0.010000"},
+        )
+        settled = client.post(path, headers=headers, json=body)
+        replayed = client.post(path, headers=headers, json=body)
+        conflict = client.post(
+            path,
+            headers=headers,
+            json={**body, "action": "SETTLE_ACTUAL_COST", "actual_cost_usd": "0.010000"},
+        )
+        repeated = client.post(
+            path,
+            headers={**_internal_headers(container), "Idempotency-Key": "offline-reconcile-2"},
+            json=body,
+        )
+
+    assert missing_key.status_code == 400
+    # Zero is the whole claim of this action; a cost alongside it is a contradiction.
+    assert priced.status_code == 422, priced.text
+    assert settled.status_code == 200, settled.text
+    payload = settled.json()
+    assert payload["usage_status"] == "SETTLED"
+    assert payload["replayed"] is False
+    assert payload["permit"]["reserved_cost_usd"] == "0.000000"
+    assert payload["permit"]["actual_cost_usd"] == "0.000000"
+    # The attempt still happened, so it still counts against the request ceiling.
+    assert payload["permit"]["used_requests"] == 1
+    assert payload["permit"]["requires_reconciliation"] is False
+    assert payload["permit"]["usage_status"] == "SETTLED"
+    assert replayed.status_code == 200
+    assert replayed.json()["replayed"] is True
+    assert replayed.json()["audit_decision_id"] == payload["audit_decision_id"]
+    assert conflict.status_code == 409
+    # A second, different key finds nothing left to reconcile.
+    assert repeated.status_code == 409
+
+    serialized = json.dumps(payload)
+    for forbidden in (
+        container.settings.platform_api_key,
+        "offline-reconcile-1",
+        "offline-console-read",
+    ):
+        assert forbidden not in serialized
+
+    with container.database.session() as session:
+        audit = session.get(DecisionRecord, payload["audit_decision_id"])
+        assert audit is not None
+        assert audit.decision_type == "LIVE_CANARY_USAGE_RECONCILED"
+        assert audit.selected_action == "CONFIRM_PROVIDER_NOT_CREATED"
+        assert audit.input_features["usage_id"] == reservation.usage_id
+        assert audit.input_features["actual_cost_usd"] == "0.000000"
+        assert audit.input_features["previous_status"] == "UNCERTAIN"
+        assert audit.input_features["server_actor"] == "PLATFORM_API_KEY"
+        assert len(audit.input_features["idempotency_key_hash"]) == 64
+        assert audit.input_features["idempotency_key_hash"] != "offline-reconcile-1"

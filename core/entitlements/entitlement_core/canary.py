@@ -20,6 +20,10 @@ _CANARY_AUTHORIZATION_NAMESPACE = uuid5(
     NAMESPACE_URL,
     "ai-director-platform/live-canary-permit-authorization/v1",
 )
+_CANARY_RECONCILIATION_NAMESPACE = uuid5(
+    NAMESPACE_URL,
+    "ai-director-platform/live-canary-usage-reconciliation/v1",
+)
 
 
 class LiveCanaryDenied(RuntimeError):
@@ -567,6 +571,139 @@ class LiveCanaryPermitService:
             ):
                 permit.status = "EXHAUSTED"
             return self._view(usage, replayed=False)
+
+    def reconcile_uncertain(
+        self,
+        usage_id: str,
+        *,
+        action: str,
+        actual_cost_usd: Decimal | str | float | None,
+        idempotency_key: str,
+        reason: str,
+        evidence_reference: str,
+        actor_type: str = "PLATFORM_API_KEY",
+    ) -> tuple[CanaryReservation, str, bool]:
+        """Close an UNCERTAIN usage with an operator's finding, and audit it.
+
+        A usage goes UNCERTAIN the moment the request crosses the provider
+        boundary, because from inside this process a timeout and a billed
+        generation look identical. Only an operator reading the provider's own
+        console can tell them apart, and until they do the permit keeps the
+        whole estimate held in `reserved_cost_usd` — which is correct while the
+        answer is unknown and wrong forever afterwards. A refused canary that is
+        never reconciled goes on consuming the audit's global ceiling for
+        attempts that cost nothing.
+
+        `CONFIRM_PROVIDER_NOT_CREATED` records that finding: the attempt
+        happened and stays counted against `used_requests`, and it settles at
+        USD 0 because the provider created no job. `SETTLE_ACTUAL_COST` records
+        the other one, at the figure the provider's own billing shows. Neither
+        can be replayed into the other.
+        """
+
+        if action not in {"CONFIRM_PROVIDER_NOT_CREATED", "SETTLE_ACTUAL_COST"}:
+            raise ValueError("unsupported live canary usage reconciliation action")
+        if actor_type != "PLATFORM_API_KEY":
+            raise ValueError("live canary reconciliation requires the PLATFORM_API_KEY actor")
+        key = idempotency_key.strip()
+        if not key or len(key) > 200:
+            raise ValueError("a bounded Idempotency-Key is required")
+        detail = reason.strip()
+        if not detail:
+            raise ValueError("live canary reconciliation requires a reason")
+        evidence = evidence_reference.strip()
+        if not evidence:
+            raise ValueError("live canary reconciliation requires evidence_reference")
+        if action == "CONFIRM_PROVIDER_NOT_CREATED":
+            if actual_cost_usd is not None and _money(actual_cost_usd) != Decimal("0"):
+                raise ValueError("CONFIRM_PROVIDER_NOT_CREATED settles at zero cost")
+            actual = Decimal("0").quantize(_MONEY)
+        else:
+            if actual_cost_usd is None:
+                raise ValueError("SETTLE_ACTUAL_COST requires actual_cost_usd")
+            actual = _money(actual_cost_usd)
+
+        idempotency_key_hash = hashlib.sha256(key.encode()).hexdigest()
+        audit_id = str(uuid5(_CANARY_RECONCILIATION_NAMESPACE, idempotency_key_hash))
+        request_facts = {
+            "usage_id": usage_id,
+            "action": action,
+            "actual_cost_usd": format(actual, "f"),
+            "evidence_reference": evidence,
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(request_facts, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+        with _CANARY_LOCK, self.database.session() as session:
+            audit = session.get(DecisionRecord, audit_id)
+            if audit is not None:
+                features = audit.input_features if isinstance(audit.input_features, dict) else {}
+                if (
+                    audit.decision_type != "LIVE_CANARY_USAGE_RECONCILED"
+                    or features.get("request_hash") != request_hash
+                ):
+                    raise LiveCanaryConflict(
+                        "Idempotency-Key was already used for a different live canary finding"
+                    )
+                usage = session.scalar(select(LiveCanaryUsage).where(LiveCanaryUsage.id == usage_id))
+                if usage is None:
+                    raise RuntimeError("live canary reconciliation audit points to a missing usage")
+                return self._view(usage, replayed=True), audit_id, True
+
+            usage = session.scalar(
+                select(LiveCanaryUsage).where(LiveCanaryUsage.id == usage_id).with_for_update()
+            )
+            if usage is None:
+                raise LookupError("live canary usage not found")
+            if usage.status != "UNCERTAIN":
+                raise LiveCanaryConflict(
+                    f"live canary reconciliation requires UNCERTAIN, got {usage.status}"
+                )
+            permit = session.scalar(
+                select(LiveCanaryPermit).where(LiveCanaryPermit.id == usage.permit_id).with_for_update()
+            )
+            if permit is None:
+                raise RuntimeError("canary permit disappeared")
+            previous_status = usage.status
+            permit.reserved_cost_usd = _money(
+                max(Decimal("0"), permit.reserved_cost_usd - usage.estimated_cost_usd)
+            )
+            permit.actual_cost_usd = _money(permit.actual_cost_usd + actual)
+            permit.version += 1
+            usage.actual_cost_usd = actual
+            usage.evidence_reference = evidence
+            usage.status = "SETTLED"
+            if (
+                permit.used_requests >= permit.max_requests
+                or permit.actual_cost_usd + permit.reserved_cost_usd >= permit.max_cost_usd
+            ):
+                permit.status = "EXHAUSTED"
+            session.add(
+                DecisionRecord(
+                    id=audit_id,
+                    project_id=None,
+                    shot_id=None,
+                    decision_type="LIVE_CANARY_USAGE_RECONCILED",
+                    input_features={
+                        **request_facts,
+                        "permit_id": permit.id,
+                        "provider": permit.provider,
+                        "model": permit.model,
+                        "previous_status": previous_status,
+                        "reason": detail[:240],
+                        "request_hash": request_hash,
+                        "idempotency_key_hash": idempotency_key_hash,
+                        "server_actor": actor_type,
+                    },
+                    selected_action=action,
+                    reason_codes=["EXPLICIT_INTERNAL_CANARY_RECONCILIATION"],
+                    model_version="live-canary-permit-v1",
+                    policy_version="live-canary-permit-v1",
+                )
+            )
+            session.flush()
+            return self._view(usage, replayed=False), audit_id, False
 
     def mark_uncertain(self, usage_id: str, *, evidence_reference: str = "") -> CanaryReservation:
         with _CANARY_LOCK, self.database.session() as session:

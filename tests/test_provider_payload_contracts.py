@@ -624,6 +624,10 @@ async def test_openrouter_video_never_forwards_internal_platform_fields() -> Non
         "resolution",
         "image_url",
         "reference_images",
+        # Stated rather than inherited: OpenRouter defaults this to true and
+        # bills the audio rate for it, which is double the silent rate on
+        # Veo 3.1. It is a cost-affecting field, so it belongs on the wire.
+        "generate_audio",
     }
 
 
@@ -1714,6 +1718,9 @@ async def test_gpt_image_2_wire_request_is_post_v1_images_with_the_canonical_mod
     assert sent.json_body == {
         "model": "openai/gpt-image-2",
         "prompt": "A red apple on a white studio background",
+        # Cost-affecting, so never left to the provider's `auto`: it selects
+        # across 196 to 7024 output tokens without saying which it chose.
+        "quality": "low",
     }
     assert sent.json_body["model"] != "openai/gpt-5.4-image-2"
     assert "messages" not in sent.json_body
@@ -1877,3 +1884,71 @@ async def test_seedance_refuses_to_ask_for_two_mutually_exclusive_modes() -> Non
             worker_id="",
         )
     assert "requires a first_frame" in str(second.value)
+
+
+# --- 8. Cost-affecting parameters are stated, not inherited ------------------
+
+
+@pytest.mark.asyncio
+async def test_image_quality_is_sent_explicitly_rather_than_left_to_auto() -> None:
+    """`auto` is unpriceable: it picks across a 36x range without saying so.
+
+    196 output tokens at `low` against 7024 at `high`, same request. Leaving the
+    parameter off meant the reservation had to be a ceiling; naming it makes the
+    quote exact.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(
+            200, {"data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}]}
+        )
+
+    provider = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), image_quality="low"
+    )
+    await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "a red apple"}, account_id="", worker_id=""
+    )
+    assert recorded[0].json_body["quality"] == "low"
+
+    # A caller who states one keeps it: this is a default, not an override.
+    await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "a red apple", "quality": "high"},
+        account_id="",
+        worker_id="",
+    )
+    assert recorded[1].json_body["quality"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_generate_audio_is_sent_explicitly_because_it_doubles_the_bill() -> None:
+    """OpenRouter defaults it to true and charges the audio rate for it.
+
+    On google/veo-3.1 that is 0.40 USD/s against 0.20 — a factor of two decided
+    by a field nobody sent.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(202, {"id": "video-1"})
+
+    provider = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), video_generate_audio=True
+    )
+    await provider.generate_video(
+        {"model": "google/veo-3.1", "prompt": "a lantern"}, account_id="", worker_id=""
+    )
+    assert recorded[0].json_body["generate_audio"] is True
+
+    silent = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), video_generate_audio=False
+    )
+    await silent.generate_video(
+        {"model": "google/veo-3.1", "prompt": "a lantern"}, account_id="", worker_id=""
+    )
+    assert recorded[1].json_body["generate_audio"] is False

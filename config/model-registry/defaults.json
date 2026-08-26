@@ -498,7 +498,7 @@
         "supports_audio": true,
         "supports_text_rendering": true,
         "max_reference_images": 4,
-        "min_duration": 1,
+        "min_duration": 3,
         "max_duration": 15,
         "supported_aspect_ratios": [
           "9:16",
@@ -506,8 +506,7 @@
           "1:1"
         ],
         "supported_resolutions": [
-          "720p",
-          "1080p"
+          "720p"
         ],
         "physics_prior": 0.9,
         "identity_prior": 0.88,
@@ -580,7 +579,7 @@
         "supports_audio": true,
         "supports_text_rendering": true,
         "max_reference_images": 4,
-        "min_duration": 1,
+        "min_duration": 3,
         "max_duration": 15,
         "supported_aspect_ratios": [
           "9:16",
@@ -588,8 +587,7 @@
           "1:1"
         ],
         "supported_resolutions": [
-          "720p",
-          "1080p"
+          "720p"
         ],
         "physics_prior": 0.92,
         "identity_prior": 0.9,

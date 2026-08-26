@@ -327,16 +327,16 @@ USD_PER_OUTPUT_TOKEN = 0.00003
 TOKENS_PER_IMAGE = {"low": 196, "medium": 1756, "high": 7024}
 
 
-def test_migration_prices_gpt_image_2_at_the_ceiling_auto_can_bill(tmp_path, monkeypatch) -> None:
-    """Nothing sends an explicit quality, so the reservation must cover the worst case.
+def test_migration_prices_gpt_image_2_for_the_quality_it_sends(tmp_path, monkeypatch) -> None:
+    """The estimate is exact for the quality the adapter states, not a ceiling.
 
-    OpenRouter bills this model per output_image token, and the token count
-    depends on a quality this platform never states: `PassengerGenerationCommand`
-    has no field for it. `auto` may resolve to low (196 tokens), medium (1756) or
-    high (7024), a 36x spread. A reservation smaller than the bill is the one
-    error that cannot be corrected after the fact, so the estimate takes the
-    ceiling. The replaced placeholder, 0.1248, sat between medium and high and
-    matched neither.
+    OpenRouter bills this model per output_image token, and the token count is
+    decided by `quality`: 196 at low against 7024 at high, a 36x spread. The
+    adapter left the field off, so the provider's `auto` chose and 0045 had to
+    reserve at the ceiling to stay safe. Now the adapter states it, so the
+    estimate is the price of the request rather than the worst request it could
+    have been. The placeholder both replaced, 0.1248, sat between medium and high
+    and matched neither.
     """
 
     database_path = tmp_path / "gpt-image-2-pricing.db"
@@ -361,9 +361,9 @@ def test_migration_prices_gpt_image_2_at_the_ceiling_auto_can_bill(tmp_path, mon
     row = rows[0]
     assert float(row["unit_price"]) == pytest.approx(USD_PER_OUTPUT_TOKEN)
     assert float(row["estimate_unit_price"]) == pytest.approx(
-        TOKENS_PER_IMAGE["high"] * USD_PER_OUTPUT_TOKEN
+        TOKENS_PER_IMAGE["low"] * USD_PER_OUTPUT_TOKEN
     )
-    assert float(row["estimate_unit_price"]) == pytest.approx(0.21072)
+    assert float(row["estimate_unit_price"]) == pytest.approx(0.00588)
     assert row["estimate_unit"] == "image"
     assert row["billing_unit"] == "token"
     assert row["currency"] == "USD"
@@ -375,3 +375,112 @@ def test_migration_prices_gpt_image_2_at_the_ceiling_auto_can_bill(tmp_path, mon
     assert (row["input_mode"], row["resolution"]) == ("default", "")
     # The unsourced placeholder it replaces.
     assert float(row["estimate_unit_price"]) != pytest.approx(0.1248)
+
+
+# OpenRouter's live SKU table, read 2026-08-26. Audio-on rates, because nothing
+# in this platform sends `generate_audio` and OpenRouter defaults it to true.
+OPENROUTER_VIDEO_USD_PER_SECOND = {
+    "google/veo-3.1": {"720p": 0.40, "1080p": 0.40},
+    "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12},
+    "google/veo-3.1-lite": {"720p": 0.05, "1080p": 0.08},
+    "kwaivgi/kling-v3.0-pro": {"720p": 0.168},
+    "kwaivgi/kling-v3.0-std": {"720p": 0.126},
+    "x-ai/grok-imagine-video": {"480p": 0.05, "720p": 0.07},
+}
+
+
+def test_one_resolution_multiplier_could_never_have_fitted_these_models() -> None:
+    """The 1080p/720p ratio differs per model inside a single vendor family.
+
+    The engine used to scale every model's 720p price by 1.30 to reach 1080p.
+    Three Veo models from the same vendor, priced by the same reseller on the
+    same day, disagree with that number and with each other — which is why the
+    multiplier is gone rather than retuned.
+    """
+
+    ratios = {
+        model: rates["1080p"] / rates["720p"]
+        for model, rates in OPENROUTER_VIDEO_USD_PER_SECOND.items()
+        if "1080p" in rates and "720p" in rates
+    }
+    assert ratios["google/veo-3.1"] == pytest.approx(1.0)
+    assert ratios["google/veo-3.1-fast"] == pytest.approx(1.2)
+    assert ratios["google/veo-3.1-lite"] == pytest.approx(1.6)
+    # No single constant satisfies all three, and 1.30 satisfies none of them.
+    assert len(set(round(value, 3) for value in ratios.values())) == 3
+    assert all(value != pytest.approx(1.30) for value in ratios.values())
+
+
+def test_kling_is_held_to_the_single_resolution_openrouter_lists(container) -> None:
+    """The registry allowed 1080p on a model OpenRouter only serves at 720p.
+
+    It would have priced and submitted a resolution the provider does not accept,
+    and the minimum duration was 1s against a real minimum of 3s.
+
+    Read through the seeded registry rather than a bare migration on purpose. The
+    migration corrects rows that already exist; a fresh deployment gets these
+    values from `config/model-registry/defaults.json`, so fixing only the
+    migration would leave every new install wrong in exactly the way this test
+    exists to catch.
+    """
+
+    from production_domain.models import ModelCapabilityProfile
+
+    with container.database.session() as session:
+        rows = session.execute(
+            select(ModelDefinition, ModelCapabilityProfile)
+            .join(
+                ModelCapabilityProfile,
+                ModelCapabilityProfile.model_definition_id == ModelDefinition.id,
+            )
+            .where(
+                ModelDefinition.logical_name.in_(
+                    ["kling-3-pro-openrouter", "kling-3-standard-openrouter"]
+                )
+            )
+        ).all()
+        assert len(rows) == 2
+        for definition, profile in rows:
+            assert profile.supported_resolutions == ["720p"], definition.logical_name
+            assert float(profile.min_duration) == pytest.approx(3.0), definition.logical_name
+            assert float(profile.max_duration) == pytest.approx(15.0), definition.logical_name
+
+
+def test_the_quoted_image_price_is_the_quality_the_wire_actually_sends(
+    tmp_path, monkeypatch
+) -> None:
+    """The quote and the request must name the same thing.
+
+    0045 reserved at the `high` ceiling because the wire said nothing; 0046 sends
+    `low` and prices `low`. If someone raises `OPENROUTER_IMAGE_QUALITY` without
+    repricing the profile, the platform goes back to quoting one request and
+    submitting another — quietly, and in the direction that under-reserves. This
+    is the tie that makes that loud.
+    """
+
+    from platform_shared import Settings
+
+    configured = Settings(_env_file=None).openrouter_image_quality
+    tokens = {"low": 196, "medium": 1756, "high": 7024}[configured]
+    expected_usd = tokens * 0.00003
+
+    database_path = tmp_path / "image-quality-tie.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        seeded = connection.execute(
+            sa.text(
+                "select estimate_unit_price from model_pricing_profiles "
+                "where provider_model_id = 'openai/gpt-image-2'"
+            )
+        ).scalar()
+    engine.dispose()
+
+    assert float(seeded) == pytest.approx(expected_usd), (
+        f"OPENROUTER_IMAGE_QUALITY={configured} costs {expected_usd} USD per image, "
+        f"but the pricing profile charges {seeded}"
+    )

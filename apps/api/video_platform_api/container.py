@@ -296,6 +296,8 @@ def build_container(settings: Settings | None = None) -> Container:
         base_url=settings.openrouter_base_url,
         timeout_seconds=settings.provider_http_timeout_seconds,
         image_model_envelopes=settings.openrouter_image_model_keys,
+        image_quality=settings.openrouter_image_quality,
+        video_generate_audio=settings.openrouter_video_generate_audio,
         transport_settings=live_provider_settings,
     )
     wan = WanProvider(

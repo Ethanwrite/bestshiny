@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     # Reviewed built-ins already cover the shipped image models; a model absent
     # from the merged table is rejected instead of guessed at.
     openrouter_image_model_keys: str = ""
+    # Cost-affecting and therefore never left to the provider. gpt-image-2 bills
+    # per output token, and quality moves that from 196 tokens to 7024 — a 36x
+    # range that the provider default (auto) picks from without telling anyone.
+    # The pricing profile is written for the value set here, so changing it must
+    # be accompanied by a repriced profile; a test ties the two together.
+    openrouter_image_quality: Literal["low", "medium", "high"] = "low"
+    # OpenRouter defaults this to true and bills the audio rate for it, which is
+    # double the silent rate on Veo 3.1. Stated explicitly so the bill matches
+    # the quote rather than a default that can move.
+    openrouter_video_generate_audio: bool = True
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model_id: str = ""

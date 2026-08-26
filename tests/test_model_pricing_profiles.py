@@ -316,3 +316,62 @@ def test_video_input_rates_are_deliberately_absent_rather_than_estimated(tmp_pat
         ).scalars().all()
     engine.dispose()
     assert set(modes) == {"no_video_input"}
+
+
+GPT_IMAGE_2 = "openai/gpt-image-2"
+GPT_IMAGE_2_DESCRIPTOR = (
+    "https://openrouter.ai/api/v1/images/models/openai/gpt-image-2/endpoints"
+)
+# OpenRouter output_image rate x OpenAI's published 1024x1024 token counts.
+USD_PER_OUTPUT_TOKEN = 0.00003
+TOKENS_PER_IMAGE = {"low": 196, "medium": 1756, "high": 7024}
+
+
+def test_migration_prices_gpt_image_2_at_the_ceiling_auto_can_bill(tmp_path, monkeypatch) -> None:
+    """Nothing sends an explicit quality, so the reservation must cover the worst case.
+
+    OpenRouter bills this model per output_image token, and the token count
+    depends on a quality this platform never states: `PassengerGenerationCommand`
+    has no field for it. `auto` may resolve to low (196 tokens), medium (1756) or
+    high (7024), a 36x spread. A reservation smaller than the bill is the one
+    error that cannot be corrected after the fact, so the estimate takes the
+    ceiling. The replaced placeholder, 0.1248, sat between medium and high and
+    matched neither.
+    """
+
+    database_path = tmp_path / "gpt-image-2-pricing.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.text(
+                "select input_mode, resolution, currency, billing_unit, unit_price, "
+                "estimate_unit, estimate_unit_price, usd_per_currency, source_url "
+                "from model_pricing_profiles where provider_model_id = :model"
+            ),
+            {"model": GPT_IMAGE_2},
+        ).mappings().all()
+    engine.dispose()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert float(row["unit_price"]) == pytest.approx(USD_PER_OUTPUT_TOKEN)
+    assert float(row["estimate_unit_price"]) == pytest.approx(
+        TOKENS_PER_IMAGE["high"] * USD_PER_OUTPUT_TOKEN
+    )
+    assert float(row["estimate_unit_price"]) == pytest.approx(0.21072)
+    assert row["estimate_unit"] == "image"
+    assert row["billing_unit"] == "token"
+    assert row["currency"] == "USD"
+    assert float(row["usd_per_currency"]) == pytest.approx(1.0)
+    assert row["source_url"] == GPT_IMAGE_2_DESCRIPTOR
+    # Images carry no video-input axis and this model prices per image rather
+    # than per resolution tier, so one default row answers every request the
+    # platform can currently build.
+    assert (row["input_mode"], row["resolution"]) == ("default", "")
+    # The unsourced placeholder it replaces.
+    assert float(row["estimate_unit_price"]) != pytest.approx(0.1248)

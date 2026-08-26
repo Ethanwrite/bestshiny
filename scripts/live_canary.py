@@ -76,6 +76,10 @@ TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}
 # a typo in a per-model ceiling, or a model run twice, is caught here instead.
 GLOBAL_CANARY_COST_CEILING_USD = Decimal("10")
 
+# The listing endpoint's hard cap. Asking for exactly it turns "there are more
+# than this" into something the caller can see rather than silently under-count.
+_PERMIT_PAGE = 100
+
 
 @dataclass(frozen=True)
 class Target:
@@ -239,6 +243,29 @@ def _report_events(engine, job_id: str, report: Report) -> None:  # type: ignore
     report.evidence["credit_events"] = [event["event_type"] for event in events]
 
 
+def _permit_exposure(permit: dict[str, Any]) -> Decimal:
+    """What this permit can still cost, plus whatever it already drew.
+
+    A permit that is still ACTIVE is worth its whole authorisation: nothing has
+    stopped it from drawing the rest of it. A permit that is EXHAUSTED or
+    EXPIRED can never draw again, so it is worth what it actually drew, plus
+    anything still held against a usage nobody has reconciled — an UNCERTAIN
+    usage might yet turn out to have been billed.
+
+    Charging a dead permit its full authorisation for ever is the rule that
+    would have ended this audit before it began: two refused attempts, USD 8 of
+    ceilings, USD 0 billed, and every remaining model locked out of a budget
+    none of them had spent.
+    """
+
+    authorised = Decimal(str(permit.get("max_cost_usd") or "0"))
+    actual = Decimal(str(permit.get("actual_cost_usd") or "0"))
+    held = Decimal(str(permit.get("reserved_cost_usd") or "0"))
+    if str(permit.get("status")) == "ACTIVE":
+        return max(authorised, actual + held)
+    return actual + held
+
+
 def _global_ceiling_remaining(settings: Settings, api: str, report: Report) -> Decimal | None:
     """Refuse to mint another permit once the audit as a whole has spent enough.
 
@@ -246,22 +273,35 @@ def _global_ceiling_remaining(settings: Settings, api: str, report: Report) -> D
     and a sequence is exactly what a model-by-model audit is.
     """
 
-    status, body = _call(f"{api}/internal/live-canary-permits", token=settings.platform_api_key)
+    status, body = _call(
+        f"{api}/internal/live-canary-permits?limit={_PERMIT_PAGE}",
+        token=settings.platform_api_key,
+    )
     if status != 200:
         report.say(FAIL, "global ceiling", f"cannot read permits: HTTP {status}")
         return None
-    committed = Decimal("0")
-    for permit in body.get("items", body if isinstance(body, list) else []):
-        if not isinstance(permit, dict):
-            continue
-        # What a permit authorises is what it can still cost, so the ceiling is
-        # measured against the authorisation, not against what has been drawn.
-        committed += Decimal(str(permit.get("max_cost_usd") or "0"))
+    # The endpoint answers `{"limit": n, "permits": [...]}`. Reading the wrong
+    # key here did not raise: it defaulted to an empty list, so the ceiling
+    # counted nothing and authorised everything.
+    listed = body.get("permits")
+    if not isinstance(listed, list):
+        report.say(FAIL, "global ceiling", f"permit listing has no permits array: {sorted(body)}")
+        return None
+    if len(listed) >= _PERMIT_PAGE:
+        # A ceiling computed from part of the history is not a ceiling.
+        report.say(FAIL, "global ceiling", f"{len(listed)} permits fills the page; cannot total them")
+        return None
+    committed = sum((_permit_exposure(item) for item in listed if isinstance(item, dict)), Decimal("0"))
+    drawn = sum(
+        (Decimal(str(item.get("actual_cost_usd") or "0")) for item in listed if isinstance(item, dict)),
+        Decimal("0"),
+    )
     remaining = GLOBAL_CANARY_COST_CEILING_USD - committed
     report.say(
         OK if remaining > 0 else FAIL,
         "global ceiling",
-        f"USD {committed} of {GLOBAL_CANARY_COST_CEILING_USD} authorised, USD {remaining} left",
+        f"USD {committed} of {GLOBAL_CANARY_COST_CEILING_USD} exposed across {len(listed)} permit(s), "
+        f"USD {drawn} actually drawn, USD {remaining} left",
     )
     return remaining if remaining > 0 else None
 

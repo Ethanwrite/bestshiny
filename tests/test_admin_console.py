@@ -16,6 +16,7 @@ from production_domain.models import (
     User,
     Workspace,
 )
+from provider_sdk import ProviderHealth
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from video_platform_api.main import create_app
@@ -325,3 +326,101 @@ def test_model_live_gate_router_switch_and_audit(container, monkeypatch) -> None
             "MODEL_METADATA_CHANGED",
             "MODEL_CAPABILITIES_CHANGED",
         } <= actions
+
+
+def test_probe_reporting_not_configured_is_not_badged_down(container, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """QA-009 — a provider the registry accepts but whose probe finds no transport.
+
+    `is_configured()` is a cheap registry check: a real adapter is wired in. The
+    probe is the one that reaches for the transport, and when it comes back
+    `NOT_CONFIGURED` that is the absence of configuration, not a fault. Collapsing
+    it to `DOWN` painted an unconfigured provider red on Providers and System
+    Health, which is the one colour rule the console reserves for real failure.
+    """
+
+    container.settings.auth_required = True
+    provider = "google_flow"
+    adapter = container.providers.get(provider)
+    monkeypatch.setattr(container.providers, "is_configured", lambda name: name == provider)
+
+    async def unconfigured() -> ProviderHealth:
+        return ProviderHealth(False, "NOT_CONFIGURED", {"status": "NOT_CONFIGURED", "live_gate": False})
+
+    monkeypatch.setattr(adapter, "health", unconfigured, raising=False)
+
+    with TestClient(create_app(container)) as client:
+        issued = _register(client, "probe-semantics@example.com")
+        _promote(container, issued["user"]["id"])
+        headers = _headers(issued)
+
+        listed = client.get("/api/admin/providers", headers=headers)
+        assert listed.status_code == 200, listed.text
+        item = next(row for row in listed.json()["items"] if row["name"] == provider)
+        assert item["configured"] is True
+        assert item["health"] == "NOT_CONFIGURED"
+        assert item["detail"] == "No generation transport is configured"
+
+        probed = client.post(f"/api/admin/providers/{provider}/probe", headers=headers, json={})
+        assert probed.status_code == 200, probed.text
+        assert probed.json()["status"] == "NOT_CONFIGURED"
+        assert probed.json()["billable"] is False
+
+        dashboard = client.get("/api/admin/dashboard", headers=headers)
+        assert dashboard.status_code == 200, dashboard.text
+        counts = dashboard.json()["providers"]
+        assert counts["NOT_CONFIGURED"] >= 1
+        assert counts["DOWN"] == 0
+
+
+def test_probe_that_actually_fails_still_reads_down(container, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The other half of QA-009: a real failure must stay red."""
+
+    container.settings.auth_required = True
+    provider = "google_flow"
+    adapter = container.providers.get(provider)
+    monkeypatch.setattr(container.providers, "is_configured", lambda name: name == provider)
+
+    async def no_workers() -> ProviderHealth:
+        return ProviderHealth(False, "No connected Google Flow browser worker")
+
+    monkeypatch.setattr(adapter, "health", no_workers, raising=False)
+
+    with TestClient(create_app(container)) as client:
+        issued = _register(client, "probe-failure@example.com")
+        _promote(container, issued["user"]["id"])
+        headers = _headers(issued)
+
+        item = next(
+            row
+            for row in client.get("/api/admin/providers", headers=headers).json()["items"]
+            if row["name"] == provider
+        )
+        assert item["health"] == "DOWN"
+        assert item["detail"] == "No connected Google Flow browser worker"
+
+        probed = client.post(f"/api/admin/providers/{provider}/probe", headers=headers, json={})
+        assert probed.json()["status"] == "DOWN"
+
+
+def test_dashboard_returns_every_connection_it_takes(container) -> None:  # type: ignore[no-untyped-def]
+    """The dashboard used to leave a PostgreSQL backend `idle in transaction`.
+
+    Two of its panels were computed by a closure defined inside the session's
+    `with` block but *called* from the response literal below it. By then
+    `Database.session()` had closed the session, so each call quietly opened a
+    new transaction on a new connection that nothing committed or closed — one
+    stranded backend, holding its locks, per dashboard load. On SQLite that is
+    invisible. On PostgreSQL it blocked DDL: the test suite's own
+    `DROP SCHEMA ... CASCADE` waited on it forever.
+
+    Checking the pool says exactly that, and says it on either engine.
+    """
+
+    container.settings.auth_required = True
+    with TestClient(create_app(container)) as client:
+        issued = _register(client, "dashboard-pool@example.com")
+        _promote(container, issued["user"]["id"])
+        response = client.get("/api/admin/dashboard", headers=_headers(issued))
+        assert response.status_code == 200, response.text
+        assert response.json()["jobs_today"]["total"] == 0
+        assert container.database.engine.pool.checkedout() == 0

@@ -34,6 +34,7 @@ from production_domain.models import (
     WorkspaceCreditEvent,
     WorkspaceCreditLedgerEntry,
 )
+from provider_sdk import ProviderHealth
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import case, desc, func, literal, or_, select, text, union_all
 
@@ -53,6 +54,35 @@ def _safe_text(value: str | None, limit: int = 800) -> str | None:
     if value is None:
         return None
     return _SECRET_TEXT.sub(r"\1[REDACTED]", value)[:limit]
+
+
+_NOT_CONFIGURED_DETAIL = "No generation transport is configured"
+
+
+def _probe_status(health: ProviderHealth) -> str:
+    """What a finished probe means, without collapsing absence into failure.
+
+    Every adapter reports a missing transport the same way — `ProviderHealth(
+    False, "NOT_CONFIGURED", {"status": "NOT_CONFIGURED", ...})` — so `ok=False`
+    covers two different facts: "this provider is broken" and "this provider was
+    never wired up". Mapping both to `DOWN` badges an unconfigured provider red
+    on Providers and System Health, and red is reserved here for real failure.
+    The probe knows which of the two it is, so its own verdict wins over the
+    registry's cheaper `is_configured()` guess.
+    """
+
+    if health.ok:
+        return "HEALTHY"
+    reported = str(health.metadata.get("status") or health.detail or "").strip().upper()
+    return "NOT_CONFIGURED" if reported == "NOT_CONFIGURED" else "DOWN"
+
+
+def _probe_detail(health: ProviderHealth, status: str) -> str | None:
+    """The probe's own words, except when they only repeat the badge."""
+
+    if status == "NOT_CONFIGURED" and health.detail.strip().upper() == "NOT_CONFIGURED":
+        return _NOT_CONFIGURED_DETAIL
+    return _safe_text(health.detail)
 
 
 def _page(items: list[Any], *, total: int, limit: int, offset: int) -> dict[str, Any]:
@@ -310,6 +340,13 @@ def register_admin_routes(
             disabled_providers = set(
                 session.scalars(select(ProviderControl.provider).where(ProviderControl.enabled.is_(False)))
             )
+            # Called here, not in the response literal below. `Database.session()`
+            # closes the session on exit, and a query issued afterwards silently
+            # opens a *new* transaction on a *new* connection that nothing ever
+            # commits or closes — one PostgreSQL backend stranded `idle in
+            # transaction`, holding its locks, for every dashboard load.
+            jobs_today = job_window(today)
+            jobs_7d = job_window(week)
         provider_counts = {"HEALTHY": 0, "DEGRADED": 0, "DOWN": 0, "NOT_CONFIGURED": 0}
         for name in container.providers.list():
             if not container.providers.is_configured(name):
@@ -320,7 +357,7 @@ def register_admin_routes(
                 continue
             try:
                 probe = await container.providers.get(name).health()
-                provider_counts["HEALTHY" if probe.ok else "DOWN"] += 1
+                provider_counts[_probe_status(probe)] += 1
             except Exception:  # A failed probe is data for this aggregation.
                 provider_counts["DOWN"] += 1
         return {
@@ -332,8 +369,8 @@ def register_admin_routes(
                 "account_status_active": account_active_users,
                 "plans": plan_rows,
             },
-            "jobs_today": job_window(today),
-            "jobs_7d": job_window(week),
+            "jobs_today": jobs_today,
+            "jobs_7d": jobs_7d,
             "credits_consumed_7d": credits_7d,
             "revenue_7d": {
                 "amount_usdc": revenue_micro / 1_000_000,
@@ -1021,7 +1058,7 @@ def register_admin_routes(
                 cred for cred in credentials if cred.provider == name and cred.status != "REVOKED"
             ]
             health_status = "NOT_CONFIGURED"
-            detail = "No generation transport is configured"
+            detail: str | None = _NOT_CONFIGURED_DETAIL
             if configured and control is not None and not control.enabled:
                 health_status, detail = (
                     "BLOCKED",
@@ -1030,8 +1067,8 @@ def register_admin_routes(
             elif configured:
                 try:
                     health = await container.providers.get(name).health()
-                    health_status = "HEALTHY" if health.ok else "DOWN"
-                    detail = health.detail
+                    health_status = _probe_status(health)
+                    detail = _probe_detail(health, health_status)
                 except Exception as exc:
                     health_status, detail = "DOWN", _safe_text(str(exc)) or "probe failed"
             matching_accounts = [account for account in accounts if account.provider == name]
@@ -1112,12 +1149,13 @@ def register_admin_routes(
             }
         try:
             health = await container.providers.get(provider).health()
+            probe_status = _probe_status(health)
             return {
                 "provider": provider,
-                "status": "HEALTHY" if health.ok else "DOWN",
+                "status": probe_status,
                 "billable": False,
                 "checked_at": datetime.now(UTC),
-                "detail": _safe_text(health.detail),
+                "detail": _probe_detail(health, probe_status),
             }
         except Exception as exc:
             return {

@@ -658,6 +658,16 @@ async def test_openrouter_video_consumes_gateway_resolved_reference_urls() -> No
 
 @pytest.mark.asyncio
 async def test_seedance_video_consumes_gateway_resolved_reference_urls() -> None:
+    """The Gateway's resolved URLs reach Ark — in one mode at a time.
+
+    This used to assert that a start frame and a reference image were flattened
+    into a single role-less image list. Ark treats first/last-frame and
+    omni-reference as mutually exclusive modes, so that request was never one it
+    could honour; the assertion was pinning the defect. Each mode is checked on
+    its own here, and the combination is refused before submission by
+    `test_seedance_refuses_to_ask_for_two_mutually_exclusive_modes`.
+    """
+
     from seedance_provider import SeedanceProvider
 
     transport = MockProviderTransport(
@@ -665,19 +675,34 @@ async def test_seedance_video_consumes_gateway_resolved_reference_urls() -> None
     )
     provider = SeedanceProvider(transport=transport, seedance_model_id="doubao-seedance-2-5-260628")
     await provider.generate_video(
-        {
-            "prompt": "one action",
-            "start_frame_url": "https://media.invalid/start.png",
-            "reference_urls": ["https://media.invalid/reference.png"],
-        },
+        {"prompt": "one action", "start_frame_url": "https://media.invalid/start.png"},
         account_id="",
         worker_id="",
     )
+    frame_body = transport.requests[0].json_body
+    assert frame_body is not None
+    assert [item for item in frame_body["content"] if item["type"] == "image_url"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://media.invalid/start.png"},
+            "role": "first_frame",
+        }
+    ]
 
-    body = transport.requests[0].json_body
-    assert body is not None
-    image_urls = [item["image_url"]["url"] for item in body["content"] if item["type"] == "image_url"]
-    assert image_urls == ["https://media.invalid/start.png", "https://media.invalid/reference.png"]
+    await provider.generate_video(
+        {"prompt": "one action", "reference_urls": ["https://media.invalid/reference.png"]},
+        account_id="",
+        worker_id="",
+    )
+    reference_body = transport.requests[1].json_body
+    assert reference_body is not None
+    assert [item for item in reference_body["content"] if item["type"] == "image_url"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://media.invalid/reference.png"},
+            "role": "reference_image",
+        }
+    ]
 
 
 # --- 3b. Wan 2.7 runtime model keys -----------------------------------------
@@ -1716,3 +1741,139 @@ async def test_gpt_image_2_capability_discovery_uses_the_images_model_index() ->
     assert [(item.method, item.path) for item in recorded] == [("GET", "/images/models")]
     assert recorded[0].path != "/models"
     assert [entry["id"] for entry in described["data"]] == ["openai/gpt-image-2"]
+
+
+# --- 7. Seedance 2.5 on Volcengine Ark: the request that leaves this process --
+
+
+def _seedance(transport: MockProviderTransport) -> Any:
+    from seedance_provider import SeedanceProvider
+
+    return SeedanceProvider(transport=transport, seedance_model_id="doubao-seedance-2-5-260628")
+
+
+@pytest.mark.asyncio
+async def test_seedance_wire_request_names_the_ark_model_not_the_logical_name() -> None:
+    """The registry used to submit `seedance-2.5`, which names nothing anywhere.
+
+    That string is this platform's internal logical name. Ark publishes the model
+    as `doubao-seedance-2-5-260628` and answered the live submission with "model
+    or endpoint does not exist". BytePlus publishes a similarly-shaped
+    `dreamina-seedance-2-5-260628` on a different host; writing that here would
+    be the same class of mistake in the other direction.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-1"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {"prompt": "a paper lantern rising", "duration": 4, "resolution": "720p", "aspect_ratio": "9:16"},
+        account_id="",
+        worker_id="",
+    )
+
+    sent = recorded[0]
+    assert (sent.method, sent.path) == ("POST", "/contents/generations/tasks")
+    assert f"https://ark.cn-beijing.volces.com/api/v3{sent.path}" == (
+        "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
+    )
+    assert sent.json_body is not None
+    assert sent.json_body["model"] == "doubao-seedance-2-5-260628"
+    assert sent.json_body["model"] not in {"seedance-2.5", "dreamina-seedance-2-5-260628"}
+    assert sent.json_body["duration"] == 4
+    assert sent.json_body["resolution"] == "720p"
+    assert sent.json_body["ratio"] == "9:16"
+    assert sent.json_body["content"] == [{"type": "text", "text": "a paper lantern rising"}]
+
+
+@pytest.mark.asyncio
+async def test_seedance_reference_images_carry_the_role_ark_requires() -> None:
+    """`role` is a sibling of `image_url`, and an omni-reference needs it.
+
+    Role-less images left the model to infer what each picture was for. Ark
+    distinguishes `first_frame`, `last_frame` and `reference_image` explicitly.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-2"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {
+            "prompt": "she turns to the window",
+            "reference_urls": ["https://example.test/a.png", "https://example.test/b.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+
+    content = recorded[0].json_body["content"]  # type: ignore[index]
+    assert content[0] == {"type": "text", "text": "she turns to the window"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://example.test/a.png"},
+        "role": "reference_image",
+    }
+    assert all(part.get("role") == "reference_image" for part in content[1:])
+
+
+@pytest.mark.asyncio
+async def test_seedance_first_and_last_frame_take_their_own_roles_and_adaptive_ratio() -> None:
+    """A supplied frame fixes the geometry, and Ark then accepts only `adaptive`."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-3"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {
+            "prompt": "the lantern drifts up",
+            "start_frame_url": "https://example.test/first.png",
+            "end_frame_url": "https://example.test/last.png",
+            "aspect_ratio": "9:16",
+        },
+        account_id="",
+        worker_id="",
+    )
+
+    body = recorded[0].json_body
+    assert body is not None
+    roles = [part.get("role") for part in body["content"] if part["type"] == "image_url"]
+    assert roles == ["first_frame", "last_frame"]
+    assert body["ratio"] == "adaptive"
+
+
+@pytest.mark.asyncio
+async def test_seedance_refuses_to_ask_for_two_mutually_exclusive_modes() -> None:
+    """Frames and omni-reference are separate modes; sending both is a request Ark cannot honour."""
+
+    provider = _seedance(MockProviderTransport({}))
+    with pytest.raises(ProviderError) as first:
+        await provider.generate_video(
+            {
+                "prompt": "x",
+                "start_frame_url": "https://example.test/first.png",
+                "reference_urls": ["https://example.test/ref.png"],
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "not both" in str(first.value)
+
+    with pytest.raises(ProviderError) as second:
+        await provider.generate_video(
+            {"prompt": "x", "end_frame_url": "https://example.test/last.png"},
+            account_id="",
+            worker_id="",
+        )
+    assert "requires a first_frame" in str(second.value)

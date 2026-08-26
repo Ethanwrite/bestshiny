@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from agent_runtime import AgentRuntime
@@ -79,6 +80,8 @@ from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from wan_provider import WanProvider
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_provider_media_hosts(value: str) -> dict[str, tuple[str, ...]]:
@@ -372,6 +375,27 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     provider_capabilities.register("deepseek", deepseek, {ProviderCapability.CHAT.value})
     newly_created_models = set(default_sync.model_names_created)
+
+    def report_declared_model_id(logical_name: str, declared: str) -> None:
+        """Say out loud when the environment and the registry disagree.
+
+        The registry wins — an operator override of `provider_model_id` has to
+        survive a restart, and a test pins that. The failure this guards against
+        is not the registry winning, it is nobody noticing: a corrected ID in
+        `.env` that never reached the row, and a model that goes on submitting a
+        name the provider does not have.
+        """
+
+        stored = model_infrastructure.declared_model_id_divergence(logical_name, declared)
+        if stored is not None:
+            logger.warning(
+                "model %s: environment declares provider model id %r but the registry holds %r; "
+                "the registry is authoritative — correct it deliberately if the environment is right",
+                logical_name,
+                declared.strip(),
+                stored,
+            )
+
     workspace_models = WorkspaceModelResolver(database, model_infrastructure)
     live_canary = LiveCanaryPermitService(database)
     model_roles = ModelRoleRuntime(
@@ -400,6 +424,7 @@ def build_container(settings: Settings | None = None) -> Container:
             )
 
     doubao_default = defaults_by_name["doubao-free-reasoner"]
+    report_declared_model_id(doubao_default.logical_name, settings.doubao_model_id)
     if doubao_default.logical_name in newly_created_models and settings.doubao_model_id.strip():
         doubao_ready = bool(settings.ark_api_key.strip() and settings.ark_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -411,6 +436,7 @@ def build_container(settings: Settings | None = None) -> Container:
 
     seedance_default = defaults_by_name["seedance-2.5-official"]
     seedance_runtime = model_infrastructure.runtime_model(seedance_default.logical_name)
+    report_declared_model_id(seedance_default.logical_name, settings.seedance_model_id)
     if seedance_default.logical_name in newly_created_models and settings.seedance_model_id.strip():
         seedance_ready = bool(settings.ark_api_key.strip() and settings.ark_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -442,6 +468,7 @@ def build_container(settings: Settings | None = None) -> Container:
     runtime_video_routes.append((wan_default.provider, wan_runtime.provider_model_id, wan_available))
 
     runapi_default = defaults_by_name["runapi-prompt-refiner-edge"]
+    report_declared_model_id(runapi_default.logical_name, settings.runapi_model_id)
     if runapi_default.logical_name in newly_created_models and settings.runapi_model_id.strip():
         runapi_ready = bool(settings.runapi_api_key.strip() and settings.runapi_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -482,6 +509,7 @@ def build_container(settings: Settings | None = None) -> Container:
     # The project's image model. Registered explicitly, like the Flow image
     # model, so only a reviewed ID can reach a provider transport.
     image_default = defaults_by_name["gpt-image-2-openrouter"]
+    report_declared_model_id(image_default.logical_name, settings.openrouter_image_model_id)
     if image_default.logical_name in newly_created_models and settings.openrouter_image_model_id.strip():
         image_ready = bool(settings.openrouter_api_key.strip() and settings.openrouter_base_url.strip())
         model_infrastructure.configure_runtime_model(

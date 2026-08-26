@@ -112,19 +112,22 @@ TARGETS = {
     "video": Target(
         name="video",
         provider="seedance",
-        model="seedance-2.5",
+        # Ark's published ID. `seedance-2.5` was this platform's logical name
+        # leaking into the field that names an execution target.
+        model="doubao-seedance-2-5-260628",
         max_requests=5,
         max_cost_usd="5",
         permit_hours=2,
         body={
             "media_type": "video",
             "provider": "seedance",
-            "model": "seedance-2.5",
+            "model": "doubao-seedance-2-5-260628",
             "prompt": "a paper lantern drifting upward over a wet street at night",
             "aspect_ratio": "9:16",
             "resolution": "720p",
-            # The Create canvas's own default. 0.09 USD/s × 4s × 1.2 service =
-            # 44 credits, which is the figure QA-018 recorded from the browser.
+            # Ark's minimum for this model is 4s, and the Create canvas defaults
+            # there too. At the corrected 0.2229 USD/s this is ~107 credits, not
+            # the 44 the old 0.09 placeholder produced.
             "duration": 4,
         },
         quote={"media_type": "video", "duration": 4, "resolution": "720p", "reference_count": 0},

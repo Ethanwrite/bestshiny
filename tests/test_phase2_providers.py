@@ -1429,3 +1429,54 @@ async def test_direct_api_provider_mock_gateway_reaches_submitted(
             "stores_provider_secret": False,
         }
         assert session.scalar(select(func.count(ProviderCredential.id))) == 0
+
+
+def test_declared_model_id_divergence_is_reported_and_never_silently_applied(tmp_path) -> None:
+    """The registry wins, but the disagreement stops being invisible.
+
+    An operator override of `provider_model_id` must survive a restart — that is
+    pinned by `test_container_restart_preserves_env_backed_model_admin_overrides`.
+    The defect was never that the registry won; it was that nothing said the two
+    disagreed. Seedance 2.5 sat with `.env` naming `doubao-seedance-2-5-260628`
+    and the row still holding the seeded placeholder `seedance-2.5`, and the
+    first report of it was Ark refusing a submission that had already reserved
+    credits.
+    """
+
+    database_url = f"sqlite:///{tmp_path / 'declared-divergence.db'}"
+    container = build_container(
+        Settings(
+            _env_file=None,
+            database_url=database_url,
+            storage_root=tmp_path / "media",
+            deployment_environment="test",
+            auth_required=False,
+            ark_api_key="unit-test-ark-placeholder",
+            seedance_model_id="doubao-seedance-2-5-260628",
+        )
+    )
+    infrastructure = container.model_infrastructure
+
+    # Agreement is silence.
+    assert (
+        infrastructure.declared_model_id_divergence(
+            "seedance-2.5-official", "doubao-seedance-2-5-260628"
+        )
+        is None
+    )
+
+    with container.database.session() as session:
+        definition = session.scalar(
+            select(ModelDefinition).where(ModelDefinition.logical_name == "seedance-2.5-official")
+        )
+        assert definition is not None
+        definition.provider_model_id = "seedance-2.5"
+
+    stored = infrastructure.declared_model_id_divergence(
+        "seedance-2.5-official", "doubao-seedance-2-5-260628"
+    )
+    assert stored == "seedance-2.5"
+
+    # Reporting must not be a disguised write.
+    after = infrastructure.runtime_model("seedance-2.5-official")
+    assert after.provider_model_id == "seedance-2.5"

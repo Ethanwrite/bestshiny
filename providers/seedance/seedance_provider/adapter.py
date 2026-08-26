@@ -197,14 +197,41 @@ def _seedance_payload(request: dict[str, Any], configured_model: str) -> dict[st
         content = []
         if prompt:
             content.append({"type": "text", "text": prompt})
-        references = [
+        first_frame = (
             request.get("first_frame_image")
             or request.get("start_frame")
-            or request.get("start_frame_url"),
-            *(request.get("reference_images") or request.get("reference_urls") or []),
-        ]
+            or request.get("start_frame_url")
+        )
+        last_frame = (
+            request.get("last_frame_image")
+            or request.get("end_frame")
+            or request.get("end_frame_url")
+        )
+        references = list(request.get("reference_images") or request.get("reference_urls") or [])
+        # `role` is a sibling of `image_url`, and Ark requires it: an omni-reference
+        # image without `role: reference_image` is not a reference, and a frame
+        # without `role: first_frame` is not a frame. Sending role-less images —
+        # which is what this adapter did — leaves the model to guess, and mixing a
+        # first frame into the same flat list as reference images asks for two
+        # mutually exclusive modes at once.
+        if references and (first_frame or last_frame):
+            raise _invalid(
+                "Seedance takes either first/last frames or omni-reference images, not both"
+            )
+        if last_frame and not first_frame:
+            raise _invalid("Seedance last_frame requires a first_frame in the same request")
+        if first_frame:
+            content.append(
+                {"type": "image_url", "image_url": {"url": str(first_frame)}, "role": "first_frame"}
+            )
+        if last_frame:
+            content.append(
+                {"type": "image_url", "image_url": {"url": str(last_frame)}, "role": "last_frame"}
+            )
         for reference in dict.fromkeys(str(item) for item in references if item):
-            content.append({"type": "image_url", "image_url": {"url": reference}})
+            content.append(
+                {"type": "image_url", "image_url": {"url": reference}, "role": "reference_image"}
+            )
     payload: dict[str, Any] = {"model": model, "content": content}
     mappings = {
         "aspect_ratio": "ratio",
@@ -227,7 +254,28 @@ def _seedance_payload(request: dict[str, Any], configured_model: str) -> dict[st
         payload["generate_audio"] = bool(audio)
     payload.setdefault("watermark", False)
     payload.setdefault("return_last_frame", True)
+    # Seedance 2.5 accepts `ratio` only as "adaptive" once a frame fixes the
+    # geometry (first-frame, first-and-last-frame, edit and extend). A supplied
+    # frame has already decided the aspect, so this is not overriding a caller's
+    # choice — it is declining to ask the same question twice with a second
+    # answer. Scoped to the 2.5 family on purpose: the rule is documented for
+    # 2.5, and quietly applying it to 2.0 would be guessing at a contract again.
+    if _is_seedance_2_5(model) and _has_frame_role(payload.get("content")):
+        payload["ratio"] = "adaptive"
     return payload
+
+
+def _is_seedance_2_5(model: str) -> bool:
+    return "seedance-2-5" in model or "seedance-2.5" in model
+
+
+def _has_frame_role(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(part, dict) and part.get("role") in {"first_frame", "last_frame"}
+        for part in content
+    )
 
 
 def _ark_job(provider_job_id: str, data: dict[str, Any]) -> ProviderJob:

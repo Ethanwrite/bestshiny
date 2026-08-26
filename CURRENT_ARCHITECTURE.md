@@ -1,12 +1,12 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-23
+Snapshot date: 2026-08-26
 Repository: `ai-director-platform`
-Branch: `main`
-Commit: `ea9d042` (working tree clean; no remote)
+Branch: `claude/production-readiness-postgres` (working tree clean; pushed to `origin`)
+Commit: `64ee277` — open on [PR #1](https://github.com/Ethanwrite/bestshiny/pull/1)
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0037_direct_uploads`
+Migration head: `0049_live_canary_status`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
@@ -798,16 +798,139 @@ request or cost exhaustion hard-stops.
 only creates authorization and audit data; it never executes a Provider. No canary permit was used for a real call
 in this phase.
 
-Actual Phase III canary status:
+Canary status is no longer a static list here. It is a column —
+`model_definitions.live_canary_status` — described under "Model pricing, and
+refusing to quote what is not priced" below. Known spend is **no longer USD 0**:
+Wan 2.7 T2V, I2V and R2V have each completed a real generation, and one
+`openai/gpt-image-2` attempt was refused by the provider's router before billing.
+
+## Model pricing, and refusing to quote what is not priced
+
+*Added 2026-08-26. Supersedes the single `estimated_per_second` per model and the
+platform-wide resolution multiplier described under "Production evidence and cost".*
+
+### Why the previous shape could not be correct
+
+A billable model carried one number and was scaled by a table shared across every
+provider:
+
+```python
+{"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}
+```
+
+Twelve billable models used that curve and exactly one had a recorded source. The
+curve is not mistuned; no constant exists. Three Veo models from one vendor, priced
+by one reseller on one day, have 1080p/720p ratios of **1.0, 1.2 and 1.6**;
+Volcengine Ark's Seedance 2.5 puts 1080p at **2.47x** and 480p at **0.44x**, and
+480p had no entry at all, so it was billed as though it were 720p.
+
+### `model_pricing_profiles`
+
+One row per **provider × model × input mode × resolution**, effective-dated:
 
 ```text
-RunAPI edge:        NOT EXECUTED
-OpenRouter role:    NOT EXECUTED
-Voyage embedding:  NOT EXECUTED
-Flow low-cost:      NOT EXECUTED
-Single video shot: NOT EXECUTED
-Known spend:        USD 0
+provider  provider_model_id  input_mode  resolution
+currency  billing_unit       unit_price          ← how the provider bills
+          estimate_unit      estimate_unit_price ← how it lets you plan
+usd_per_currency  fx_source  fx_checked_at
+estimate_formula  settlement_formula
+effective_from    effective_until
+source_url        source_checked_at   notes
 ```
+
+Two prices, not one, because providers bill on quantities nobody can know before
+the job exists — Ark settles on `usage.completion_tokens` — and publish a
+per-second or per-image figure so a reservation can be taken up front. Keeping
+`estimate_formula` and `settlement_formula` separate is what stops a reservation
+and a debit from quietly diverging.
+
+Price is stored in the provider's own currency and unit, because that is the only
+form in which it can be checked against the published page. The USD conversion
+carries its own rate, source and date, so a quote traces back to two dated facts
+rather than one rounded number.
+
+**Promotions are dated rows, never edits to a base price.** Ark's limited-time
+1080p rate is its own row with `effective_until`, and lapses without anyone acting.
+The narrowest price in force wins, promotion before list.
+
+### Fail-closed
+
+`model_definitions.pricing_status` defaults to `UNVERIFIED` and is *derived* from
+the profile table by `reconcile_pricing_status()` at boot, so it cannot drift into
+a claim nobody recomputes. In live mode an unpriced model raises
+`PricingUnverified` instead of quoting a placeholder; outside live mode the
+placeholder still serves development and the estimate reports which it used.
+
+`PricingUnverified` subclasses `ValueError` so the routes keep answering 400 — and
+because admission catches `ValueError` to price pre-commercial projects at zero, it
+is caught explicitly there. Otherwise "we do not know what this costs" would become
+"this is free", the one answer that is certainly wrong.
+
+### A logical name is not a provider model ID
+
+The standing rule existed and was violated three times: `seedance-2.5` and
+`seedream-5-0` were submitted as API model IDs and name nothing on any provider.
+Ark publishes `doubao-seedance-2-5-260628` and `doubao-seedream-5-0-260128`.
+`wan-2.7` is *not* an instance of this — it is a family key the adapter resolves
+per mode, and a test pins that mapping.
+
+Corrections land in **three** places or they are incomplete: the migration (rows
+that exist), `config/model-registry/defaults.json` (fresh deployments), and any
+pointer in `config/external-evidence/registry-v1.json`. A migration alone leaves
+every new install wrong.
+
+### Cost-affecting parameters are stated, not inherited
+
+A provider default that moves the price is never left unsent. `quality` on
+`openai/gpt-image-2` selects across 196–7024 output tokens — a 36x range — and
+OpenRouter defaults `generate_audio` to true, billing double the silent rate on
+Veo 3.1. Both are now explicit (`OPENROUTER_IMAGE_QUALITY`,
+`OPENROUTER_VIDEO_GENERATE_AUDIO`), and a test ties the configured image quality to
+the seeded price so the two cannot part company.
+
+### External facts
+
+Live provider facts — model IDs, endpoints, parameters, prices, deprecations — are
+researched through the local Grok CLI, **one provider per query**, never mixing IDs
+or rates across providers. Every figure is cross-checked against a first-party
+source before it reaches code: OpenRouter against its raw SKU JSON, Ark and
+DashScope against their published pricing pages and their own worked examples. A
+"cannot confirm" is honoured — the model stays `UNVERIFIED` rather than acquiring
+an estimate.
+
+### The live canary state machine
+
+`model_definitions.live_canary_status`, with `live_canary_detail` carrying the
+reason:
+
+```text
+NOT_RUN                no canary attempted
+VERIFIED_LIVE          one real generation completed and reconciled
+LIVE_BLOCKED_EXTERNAL  attempted, refused outside this codebase
+CONTRACT_INVALID       the provider rejected the request we build
+```
+
+`LIVE_BLOCKED_EXTERNAL` is the load-bearing one. Contract and pricing can be
+audited from a desk; a live canary needs a provider to accept one real request, and
+that can be refused by an account setting, a balance or a permission. Without
+somewhere to write that down, one blocked provider stalls every model behind it —
+and a model that was never proven becomes indistinguishable from one that was,
+since both merely lack a success record.
+
+Canary safety: one permit per model at `max_requests=1`, its ceiling sized to the
+model's published minimum plus a small margin, under a
+`GLOBAL_CANARY_COST_CEILING_USD` measured against what permits *authorise* rather
+than what they have drawn. Permit bounds are part of the idempotency key, so
+changing a ceiling mints a new permit instead of replaying the old one. **One
+attempt per model, ever, and no automatic retry** — a failure is reconciled and
+recorded, not repeated.
+
+### One item, one commit
+
+A shared migration that loads rows for several models verifies none of them. Each
+model earns its status by completing its own chain — official evidence, contract,
+pricing, fresh-deploy seed, recorder proof, tests, no-spend quote — and is then
+committed and pushed on its own. Batch the research; never batch the verdict.
 
 ## Data architecture and migrations
 

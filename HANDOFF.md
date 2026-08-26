@@ -1,6 +1,6 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-25 · Branch `main` · commit `ea9d042` · **NOT PRODUCTION-READY** · no remote
+Date: 2026-08-26 · Branch `claude/production-readiness-postgres` · commit `64ee277` · **NOT PRODUCTION-READY** · pushed to `origin`, open on [PR #1](https://github.com/Ethanwrite/bestshiny/pull/1)
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted
@@ -10,12 +10,12 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q                      709 passed, 9 skipped, 63 warnings   (SQLite)
+.venv/bin/python -m pytest -q                      761 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  711 passed, 7 skipped, 63 warnings   (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  763 passed, 7 skipped   (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 137 source files
-.venv/bin/python -m alembic heads                  0041_embedding_space (single head)
+.venv/bin/python -m mypy                           Success: 139 source files
+.venv/bin/python -m alembic heads                  0049_live_canary_status (single head)
 ```
 
 **Both halves must be green.** The PostgreSQL half needs `docker compose up -d postgres`. The SQLite
@@ -91,6 +91,187 @@ Two further gates, both offline:
 `preflight_live.py` is the one to run before flipping the gate. It reads the same `Settings`
 the application does, opens no socket, prints no secret, and answers per path: would this
 reach the provider, fail closed here, or fail *at* the provider after being billed.
+
+## 1b. 2026-08-26 — the all-models pricing audit
+
+Branch `claude/production-readiness-postgres`, tip `64ee277`, pushed, tree clean.
+Migration head **`0049_live_canary_status`**; `REQUIRED_SCHEMA_REVISION` matches it.
+Open on [PR #1](https://github.com/Ethanwrite/bestshiny/pull/1).
+
+### What started it
+
+`seedance-2.5` was submitted to Volcengine Ark as a provider model ID. It is this
+platform's *logical name* — §20 already forbids exactly that — and Ark answered
+"the model or endpoint does not exist". The reservation stranded, an operator had
+to reconcile it by hand, and no clip was produced.
+
+Pulling on it found the same defect twice more, and a pricing layer that could
+not have been right for anyone:
+
+| Registry held | Provider actually publishes |
+| --- | --- |
+| `seedance-2.5` | `doubao-seedance-2-5-260628` (Volcengine Ark) |
+| `seedream-5-0` | `doubao-seedream-5-0-260128` (Ark; the old string is the BytePlus stem) |
+| `wan-2.7` | correct — a family key the adapter resolves per mode, not a leak |
+
+### Pricing: one number per model, scaled by a table shared with every provider
+
+Every video was priced from a single `estimated_per_second` and then multiplied by
+
+```python
+{"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}
+```
+
+Twelve billable models shared that curve. **One of them had any recorded source.**
+Seedance 2.5 carried `0.09` USD/s against a published Ark rate of 1.512 CNY/s —
+roughly **40% of the real price, on every call, silently**.
+
+The multiplier is not mistuned, it is unfixable. Three Veo models, one vendor, one
+reseller, read the same day:
+
+```text
+google/veo-3.1        1080p / 720p = 1.0
+google/veo-3.1-fast   1080p / 720p = 1.2
+google/veo-3.1-lite   1080p / 720p = 1.6
+```
+
+Ark's Seedance 2.5 puts 1080p at **2.47x** and 480p at **0.44x**, and 480p had no
+entry at all, so it was billed as though it were 720p. No constant satisfies those.
+
+### What replaced it
+
+`model_pricing_profiles` (migration `0044`): a row per **provider × model × input
+mode × resolution**, holding the price in the provider's own currency and billing
+unit, the FX rate that reaches USD with its own source and date, and the URL and
+date it was read from. Two prices per row, not one — providers bill on things you
+cannot know in advance (Ark settles on `usage.completion_tokens`) and publish a
+per-second figure so a reservation can be taken up front. `estimate_formula` and
+`settlement_formula` are separate fields because conflating them is how a
+reservation and a debit stop agreeing.
+
+Promotions are dated rows, not edits to a base price: Ark's 1080p 72%-off row
+carries `effective_until` 2026-09-17 and lapses without anyone acting.
+
+**Fail-closed.** `pricing_status` defaults to `UNVERIFIED`, and in live mode an
+unpriced model raises `PricingUnverified` rather than quoting a placeholder.
+Outside live mode the placeholder still serves development, and the estimate says
+which of the two it used. `PricingUnverified` subclasses `ValueError` deliberately
+— the routes keep answering 400 — and admission is guarded so "we do not know what
+this costs" can never fall through to the zero-price legacy path.
+
+### Cost-affecting parameters are now stated, not inherited
+
+Two fields decided the bill and were left to provider defaults:
+
+- **`quality`** on gpt-image-2 — `auto` selects across 196 to 7024 output tokens, a
+  36x range. Now sent explicitly (`OPENROUTER_IMAGE_QUALITY`, default `low`), so
+  the estimate is exact at 0.00588 USD instead of a 0.21072 ceiling. A test ties
+  the configured quality to the seeded price.
+- **`generate_audio`** on the video path — OpenRouter defaults it to **true** and
+  bills the audio rate, double the silent rate on Veo 3.1.
+
+### External evidence
+
+Live facts come from the local Grok CLI (`/Users/a1-6/.grok/bin/grok -p "..."`),
+one provider per query, never mixing IDs or prices across providers. Every figure
+was then cross-checked against a first-party source before it reached code:
+OpenRouter rates against the raw SKU JSON at `GET /api/v1/videos/models` and the
+per-model `/endpoints` descriptor; Ark and DashScope against their published
+pricing pages, and their arithmetic against their own worked examples. Grok's
+"cannot confirm" answers were honoured — see the gaps below.
+
+### Status of all 12 billable live models
+
+| Model | Provider | Real ID | Pricing | Status |
+| --- | --- | --- | --- | --- |
+| veo-3.1 | openrouter | `google/veo-3.1` | 0.40 USD/s | VERIFIED_NO_SPEND |
+| veo-3.1-fast | openrouter | `google/veo-3.1-fast` | 0.10 / 0.12 | VERIFIED_NO_SPEND |
+| veo-3.1-lite | openrouter | `google/veo-3.1-lite` | 0.05 / 0.08 | VERIFIED_NO_SPEND |
+| kling-3-pro | openrouter | `kwaivgi/kling-v3.0-pro` | 0.168 USD/s | VERIFIED_NO_SPEND |
+| kling-3-standard | openrouter | `kwaivgi/kling-v3.0-std` | 0.126 USD/s | VERIFIED_NO_SPEND |
+| grok-imagine-video | openrouter | `x-ai/grok-imagine-video` | 0.05 / 0.07 | VERIFIED_NO_SPEND |
+| seedance-2.5 | seedance (Ark) | `doubao-seedance-2-5-260628` | 1.512 CNY/s | VERIFIED_NO_SPEND |
+| seedream-5.0 | seedance (Ark) | `doubao-seedream-5-0-260128` | 0.22 CNY/img | VERIFIED_NO_SPEND |
+| wan-2.7 | wan (DashScope) | `wan-2.7` family key | 0.6 CNY/s | VERIFIED_NO_SPEND |
+| gpt-image-2 | openrouter | `openai/gpt-image-2` | 0.00588 USD/img | **LIVE_BLOCKED_EXTERNAL** |
+| flow-veo-3.1 | google_flow | `flow-veo-3.1` | — | DISABLED |
+| flow-narwhal | google_flow | `NARWHAL` | — | DISABLED |
+
+`VERIFIED_NO_SPEND` means ID, wire format and price are confirmed and a no-spend
+quote succeeds — **not** that a real generation has ever run.
+
+### The canary state machine
+
+`live_canary_status` on `model_definitions` (migration `0049`), with
+`live_canary_detail` carrying the reason:
+
+```text
+NOT_RUN                no canary attempted
+VERIFIED_LIVE          one real generation completed and reconciled
+LIVE_BLOCKED_EXTERNAL  attempted, refused outside this codebase
+CONTRACT_INVALID       the provider rejected the request we build
+```
+
+`LIVE_BLOCKED_EXTERNAL` exists so one blocked provider cannot stall every model
+behind it, and so a model that was never proven is never later mistaken for one
+that was — without it, both simply lack a success record.
+
+Canary safety: one permit per model at `max_requests=1`, ceiling sized to the
+published minimum plus a small margin, and `GLOBAL_CANARY_COST_CEILING_USD = 10`
+measured against what permits *authorise* rather than what they have drawn. Permit
+bounds are part of the idempotency key, so changing a ceiling mints a new permit
+instead of replaying the old one. One attempt per model, never retried.
+
+### Gaps left open deliberately, rather than guessed
+
+- **Wan Singapore and Tokyo rates.** Only Beijing is seeded, because that is the
+  endpoint this deployment calls. Tokyo is *contradictory between two Alibaba
+  pages* — the per-model cards quote the USD conversion of the Beijing CNY figure
+  presented as CNY, and the pricing catalogue has no Japan row.
+- **Wan r2v.** Bills `min(input_seconds, 5) + output_seconds`, which a per-second
+  estimate cannot model.
+- **Ark video-input mode.** Published as a range. A range is not a price.
+- **Veo discrete durations.** 4/6/8 only; the capability profile holds min and max,
+  so 5 and 7 remain quotable and the provider would refuse them. Expressing a
+  discrete set needs a schema change.
+- **4K on veo-3.1 and -fast.** Supported upstream, not enabled here, unpriced.
+
+### External blockers — not fixable from this repository
+
+1. **OpenRouter account privacy setting.** `openai/gpt-image-2` has exactly one
+   upstream endpoint (OpenAI) and the account excludes it, so the router answers
+   "All providers have been ignored" before dispatch. One paid canary was run and
+   refused; account lifetime usage read `0.002365` USD **before and after,
+   unchanged**, so nothing was billed, and the reservation was reconciled
+   `CONFIRM_PROVIDER_NOT_CREATED`. Clear at <https://openrouter.ai/settings/privacy>.
+   This may block every OpenRouter model in phase two, so it is worth clearing
+   before spending.
+2. **44 CR held** on generation job `ae5f90e2-f93a-4087-9f6b-fb1c89340c15`,
+   `RECONCILIATION_REQUIRED`. Ark refused the pre-correction `seedance-2.5` ID, so
+   nothing was created; it needs an operator decision, not a code change.
+3. **Browser, admin-console and real-account operations** belong to the operator.
+   `scripts/canary_session.py` mints a short-lived session for the local QA account
+   rather than asking anyone to paste one.
+
+### Next execution order
+
+Phase one is complete. Phase two is the live canaries, one model at a time, one
+attempt each, no automatic retries, cheapest first:
+
+```text
+grok-imagine-video  $0.05     veo-3.1-lite  $0.20     seedream-5.0  $0.03
+wan-2.7             $0.35     veo-3.1-fast  $0.40     kling-std     $0.38
+kling-pro           $0.50     seedance-2.5  $0.89     veo-3.1       $1.60
+```
+
+Roughly **USD 4.40** in total, inside the USD 10 global ceiling. For each model:
+mint its own 1-request permit, run one canary, reconcile, record
+`VERIFIED_LIVE` or `LIVE_BLOCKED_EXTERNAL` with the reason, commit, push, then
+move to the next. Do not batch.
+
+Then: the two `google_flow` models (Flow is browser-driven with no published
+per-call rate — likely to stay unpriceable), and the resolution/duration schema
+gaps listed above.
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 
@@ -1261,8 +1442,14 @@ libraries — the ones `model-prompting` and `image-prompt-corrector` instruct a
 had never been in version control. A fresh clone would have had Skills pointing at files that
 were not there. The patterns are anchored now (`/references/`, `/data/`, `/output/`, `/dist/`).
 
-The repository has **no remote**, so nothing is pushed and "pushed" cannot be verified for any
-commit. Nothing outside this machine has a copy.
+**Superseded 2026-08-26.** The repository now has a remote
+(`https://github.com/Ethanwrite/bestshiny.git`). Work since `ea9d042` lives on
+`claude/production-readiness-postgres`, is pushed, and is open on
+[PR #1](https://github.com/Ethanwrite/bestshiny/pull/1). The tip is `64ee277`.
+
+The commit-per-workflow rule above held on that branch: every item — each fix, each
+model's pricing — is its own commit with its own gate run. See §20 for the rule it
+has since been sharpened into.
 
 ## 18. Model-backed prompt compilation (not started)
 
@@ -1296,3 +1483,19 @@ contract, so the technical precondition is met. Remaining steps:
 - A logical model name must never reach a provider as an API model ID.
 - Voyage is `ADVISORY` only — never identity, state, delta or commit authority.
 - The agent does not write credential values into files.
+- **One item, one commit, one push, then the next.** A shared migration that loads
+  rows for several models does not verify any of them; each model earns its status
+  by completing its own chain. Batch the research, never the verdict.
+- **A price without a source is not a price.** Every billable model carries a
+  `model_pricing_profiles` row naming the provider's currency, billing unit, FX
+  rate, source URL and the date it was read. In live mode an unpriced model is
+  refused, not estimated.
+- **State the parameters that decide the bill.** A provider default that moves the
+  price — `quality`, `generate_audio` — is never inherited, because a quote can
+  only be exact for a request that names them.
+- **External facts come from the Grok CLI, one provider per query**, and are
+  cross-checked against a first-party source before reaching code. An honest
+  "cannot confirm" leaves the model `UNVERIFIED`; it never becomes an estimate.
+- **One live canary per model, ever, and no automatic retry.** Each gets its own
+  `max_requests=1` permit under a global cost ceiling. A failure is reconciled and
+  recorded, not repeated.

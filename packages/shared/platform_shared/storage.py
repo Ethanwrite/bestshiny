@@ -308,7 +308,20 @@ class S3CompatibleStorage:
             region_name=region,
             aws_access_key_id=access_key_id or None,
             aws_secret_access_key=secret_access_key or None,
-            config=Config(s3={"addressing_style": addressing_style}),
+            config=Config(
+                s3={"addressing_style": addressing_style},
+                # botocore >= 1.36 adds a CRC32 trailer to every upload by
+                # default, which puts the body on the wire as
+                # STREAMING-UNSIGNED-PAYLOAD-TRAILER aws-chunked encoding.
+                # Alibaba OSS does not implement that encoding and answers
+                # PutObject with `NotImplemented`, so the default breaks every
+                # write. "when_required" still sends a checksum whenever the
+                # caller asks for one explicitly — which is exactly what
+                # `enforce_checksum` does on the presigned path below — so the
+                # integrity guarantee is unchanged; only the implicit trailer
+                # on plain uploads goes away.
+                request_checksum_calculation="when_required",
+            ),
         )
         # `x-amz-checksum-sha256` is what makes a client-declared digest safe to
         # content-address a key with: the store rejects bytes that do not hash to

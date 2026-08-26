@@ -38,6 +38,10 @@ Operator inputs, exported into the shell (never committed, never echoed):
     CANARY_ACCESS_TOKEN   bearer token for a workspace user that holds credits
     CANARY_PROJECT_ID     a project that user may write to
 
+`scripts/canary_session.py` resolves both from the local QA account:
+
+    eval "$(uv run python scripts/canary_session.py --export)"
+
 `PLATFORM_API_KEY`, `DATABASE_URL` and the `S3_*` settings are read from the
 same `Settings` the application uses.
 """

@@ -436,3 +436,54 @@ either engine:
 ```python
 assert container.database.engine.pool.checkedout() == 0
 ```
+
+### `scripts/canary_session.py` — the two values, from the local QA account
+
+`live_canary.py` refuses to invent a session, which left the operator pasting two
+values by hand. This resolves them from what is already in the database.
+
+It cannot return the token held in the browser — `auth_sessions` stores only
+`sha256(token)`, by design — so it mints a **fresh, short-lived** session for the
+same user through the application's own `AuthService`. No password is typed.
+
+```
+[ok  ] account       ui-rebuild-20260825@example.com (USER)
+[ok  ] workspace     Rebuild QA · PRO · 3000 CR
+[ok  ] project       Vertical short drama · 8c2921c3-…
+[ok  ] session       e86df10b-… · expires 2026-08-26 06:33Z
+```
+
+Auto-selection is deliberately narrow: the ACTIVE workspace with the most credits
+whose owner already holds a live session, **and only if that owner is an
+`@example.com` test account**. The local database also contains a real personal
+address; it is never auto-selected, and naming one takes an explicit `--email`.
+The minted session expires in 120 minutes rather than the application's 30-day
+default, and its id is printed for `--revoke`.
+
+```bash
+eval "$(uv run python scripts/canary_session.py --export)"
+```
+
+### Failure drill — executed 2026-08-25, free
+
+`live_canary.py video --failure-drill`, twice. No permit minted, so nothing could
+reach a provider.
+
+```
+1. Quote        44 CR ≈ USD 0.432 (provider USD 0.36, credit-pricing-v1)
+2. Reserve      44 CR RESERVED · balance 2956 · quote held through submit
+3. Poll         NEW → FAILED in 5.1s · submission NOT_SENT · 0 attempts
+   error        LIVE_CANARY_DENIED — no active live canary permit matches the
+                server-selected provider/model
+   release      REFUNDED · 44/44 CR · balance 3000
+   events       RESERVED Δ-44 → 2956  ·  REFUNDED Δ+44 → 3000
+                reason: PRE_SUBMIT_FAILURE:LIVE_CANARY_DENIED
+```
+
+Both halves of the question the drill exists to answer are now evidence rather
+than assertion: the failure arrives as a mapped `error_code` with
+`safe_to_retry=False`, and the reservation comes back in full. Workspace balance
+is 3,000 CR with **zero** entries left `RESERVED`.
+
+What remains unproven is everything past the gate — provider, poll, OSS,
+finalize, debit — which is what the two `--confirm-spend` runs are for.

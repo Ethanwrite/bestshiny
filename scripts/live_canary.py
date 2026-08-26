@@ -58,6 +58,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,11 @@ from sqlalchemy import create_engine, text  # noqa: E402
 OK, FAIL, WARN = "ok  ", "FAIL", "WARN"
 
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}
+
+# Every permit this script has ever minted counts against this. One model at a
+# time is the rule, but a rule that is only in a runbook does not hold a budget:
+# a typo in a per-model ceiling, or a model run twice, is caught here instead.
+GLOBAL_CANARY_COST_CEILING_USD = Decimal("10")
 
 
 @dataclass(frozen=True)
@@ -93,8 +99,10 @@ TARGETS = {
         name="image",
         provider="openrouter",
         model="openai/gpt-image-2",
-        max_requests=5,
-        max_cost_usd="3",
+        max_requests=1,
+        # 0.00588 USD published minimum (196 output tokens at quality=low),
+        # rounded up with a small margin for the prompt text tokens.
+        max_cost_usd="0.05",
         permit_hours=2,
         body={
             "media_type": "image",
@@ -115,8 +123,9 @@ TARGETS = {
         # Ark's published ID. `seedance-2.5` was this platform's logical name
         # leaking into the field that names an execution target.
         model="doubao-seedance-2-5-260628",
-        max_requests=5,
-        max_cost_usd="5",
+        max_requests=1,
+        # 4s at 720p is 0.8916 USD by Ark published rate; margin for rounding.
+        max_cost_usd="1.20",
         permit_hours=2,
         body={
             "media_type": "video",
@@ -230,15 +239,57 @@ def _report_events(engine, job_id: str, report: Report) -> None:  # type: ignore
     report.evidence["credit_events"] = [event["event_type"] for event in events]
 
 
+def _global_ceiling_remaining(settings: Settings, api: str, report: Report) -> Decimal | None:
+    """Refuse to mint another permit once the audit as a whole has spent enough.
+
+    Per-model ceilings bound one mistake. They do not bound a sequence of them,
+    and a sequence is exactly what a model-by-model audit is.
+    """
+
+    status, body = _call(f"{api}/internal/live-canary-permits", token=settings.platform_api_key)
+    if status != 200:
+        report.say(FAIL, "global ceiling", f"cannot read permits: HTTP {status}")
+        return None
+    committed = Decimal("0")
+    for permit in body.get("items", body if isinstance(body, list) else []):
+        if not isinstance(permit, dict):
+            continue
+        # What a permit authorises is what it can still cost, so the ceiling is
+        # measured against the authorisation, not against what has been drawn.
+        committed += Decimal(str(permit.get("max_cost_usd") or "0"))
+    remaining = GLOBAL_CANARY_COST_CEILING_USD - committed
+    report.say(
+        OK if remaining > 0 else FAIL,
+        "global ceiling",
+        f"USD {committed} of {GLOBAL_CANARY_COST_CEILING_USD} authorised, USD {remaining} left",
+    )
+    return remaining if remaining > 0 else None
+
+
 def _mint_permit(settings: Settings, target: Target, api: str, report: Report) -> dict[str, Any] | None:
     """Bound the spend before anything can spend it."""
 
+    remaining = _global_ceiling_remaining(settings, api, report)
+    if remaining is None:
+        return None
+    if Decimal(target.max_cost_usd) > remaining:
+        report.say(
+            FAIL,
+            "permit refused",
+            f"USD {target.max_cost_usd} would exceed the remaining USD {remaining}",
+        )
+        return None
     expires_at = datetime.now(UTC) + timedelta(hours=target.permit_hours)
     status, body = _call(
         f"{api}/internal/live-canary-permits",
         token=settings.platform_api_key,
         method="POST",
-        headers={"Idempotency-Key": f"canary:{target.name}:{expires_at:%Y%m%dT%H}"},
+        headers={
+            "Idempotency-Key": (
+                f"canary:{target.name}:{target.max_requests}:{target.max_cost_usd}"
+                f":{expires_at:%Y%m%dT%H}"
+            )
+        },
         body={
             "provider": target.provider,
             "model": target.model,

@@ -2740,6 +2740,19 @@ class ModelDefinition(Base, TimestampMixin):
         index=True,
         nullable=False,
     )
+    # Where this model stands in the live canary sequence. NOT_RUN is the
+    # starting point, VERIFIED_LIVE means one real generation completed and
+    # reconciled, and LIVE_BLOCKED_EXTERNAL means the attempt was refused by
+    # something outside this repository — an account setting, a balance, a
+    # permission. That distinction exists so one blocked provider cannot stall
+    # the audit of every model behind it, and so a blocked model is never
+    # mistaken later for one that was proven.
+    live_canary_status: Mapped[str] = mapped_column(
+        String(32), default="NOT_RUN", server_default="NOT_RUN", index=True, nullable=False
+    )
+    live_canary_detail: Mapped[str] = mapped_column(
+        String(500), default="", server_default="", nullable=False
+    )
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_live_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_window: Mapped[int | None] = mapped_column(Integer)

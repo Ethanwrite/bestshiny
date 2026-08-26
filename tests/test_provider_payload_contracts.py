@@ -11,6 +11,7 @@ Each test here covers one previously unguarded handover defect:
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
@@ -1952,3 +1953,49 @@ async def test_generate_audio_is_sent_explicitly_because_it_doubles_the_bill() -
         {"model": "google/veo-3.1", "prompt": "a lantern"}, account_id="", worker_id=""
     )
     assert recorded[1].json_body["generate_audio"] is False
+
+
+# --- 9. OpenRouter video: every model id on the wire is the vendor's ---------
+
+# logical_name -> provider_model_id, as the registry holds them. The pairing is
+# the point: the left column is this platform's vocabulary and must never reach
+# a provider, which is exactly how `seedance-2.5` was submitted to Ark.
+OPENROUTER_VIDEO_IDS = {
+    "veo-3.1-openrouter": "google/veo-3.1",
+    "veo-3.1-fast-openrouter": "google/veo-3.1-fast",
+    "veo-3.1-lite-openrouter": "google/veo-3.1-lite",
+    "kling-3-pro-openrouter": "kwaivgi/kling-v3.0-pro",
+    "kling-3-standard-openrouter": "kwaivgi/kling-v3.0-std",
+    "grok-imagine-video-openrouter": "x-ai/grok-imagine-video",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("logical_name", "provider_model_id"), OPENROUTER_VIDEO_IDS.items())
+async def test_openrouter_video_wire_carries_the_vendor_id_never_the_logical_name(
+    logical_name: str, provider_model_id: str
+) -> None:
+    """Record what leaves the process, per model."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(202, {"id": "video-job"})
+
+    provider = OpenRouterProvider(transport=MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {"model": provider_model_id, "prompt": "a lantern rising", "duration": 4},
+        account_id="",
+        worker_id="",
+    )
+
+    sent = recorded[0]
+    assert (sent.method, sent.path) == ("POST", "/videos")
+    assert f"https://openrouter.ai/api/v1{sent.path}" == "https://openrouter.ai/api/v1/videos"
+    assert sent.json_body is not None
+    assert sent.json_body["model"] == provider_model_id
+    assert sent.json_body["model"] != logical_name
+    # The internal name must not appear anywhere in the body, not merely in the
+    # model field — a logical name smuggled through metadata is the same defect.
+    assert logical_name not in json.dumps(sent.json_body)

@@ -4,13 +4,13 @@
   "compiled_from": [
     {
       "document": "data01.md",
-      "title": "视觉生成模型 External Evidence：生产级 Model Router Cold-Start Prior 研究报告",
+      "title": "\u89c6\u89c9\u751f\u6210\u6a21\u578b External Evidence\uff1a\u751f\u4ea7\u7ea7 Model Router Cold-Start Prior \u7814\u7a76\u62a5\u544a",
       "role": "PRIMARY",
-      "why": "Carries an explicit operational definition of grades A–D, an explicit version-lock principle, exact-variant Arena entries with sample counts and 95% CI, and a gap/conflict register. Where the two documents disagree this one is taken, because it is the stricter of the two and states the criterion it is being strict about."
+      "why": "Carries an explicit operational definition of grades A\u2013D, an explicit version-lock principle, exact-variant Arena entries with sample counts and 95% CI, and a gap/conflict register. Where the two documents disagree this one is taken, because it is the stricter of the two and states the criterion it is being strict about."
     },
     {
       "document": "data03.md",
-      "title": "External Evidence v1 — Primary-Source Verified Final Report",
+      "title": "External Evidence v1 \u2014 Primary-Source Verified Final Report",
       "role": "CROSS_CHECK",
       "why": "A shorter re-verification pass. It discards anything it could not re-check against a primary source, which makes it useful as a corroboration signal and as a record of what one reviewer could not confirm. Its grades are recorded as disagreements rather than merged."
     }
@@ -263,7 +263,7 @@
       "published_at": "2023",
       "snapshot_at": "2026-08-25",
       "grade": "A",
-      "grade_rationale": "Method is auditable. Carried from the cross-check document, where it scores GPT-4o image generation — a different model from GPT Image 2.",
+      "grade_rationale": "Method is auditable. Carried from the cross-check document, where it scores GPT-4o image generation \u2014 a different model from GPT Image 2.",
       "dynamic": false
     },
     {
@@ -1813,7 +1813,7 @@
             "reference_adherence"
           ],
           "mapping_confidence": "HIGH",
-          "mapping_rationale": "An actual target style reference exists here, which is what makes style_fidelity a legal mapping — unlike a general Aesthetics score."
+          "mapping_rationale": "An actual target style reference exists here, which is what makes style_fidelity a legal mapping \u2014 unlike a general Aesthetics score."
         },
         {
           "metric_name": "Video editing Edit Consistency (1-5)",
@@ -2165,7 +2165,7 @@
             "prompt_adherence"
           ],
           "mapping_confidence": "MEDIUM",
-          "mapping_rationale": "The closest public evidence to commercial content, but the benchmark is slides, charts, web pages, posters and scientific figures — not product packshots. Adjacent mapping only."
+          "mapping_rationale": "The closest public evidence to commercial content, but the benchmark is slides, charts, web pages, posters and scientific figures \u2014 not product packshots. Adjacent mapping only."
         },
         {
           "metric_name": "Easy",
@@ -2474,7 +2474,7 @@
   "unbacked_models": [
     {
       "logical_name": "seedream-5.0-ark",
-      "provider_model_id": "seedream-5-0",
+      "provider_model_id": "doubao-seedream-5-0-260128",
       "status": "NO_EXTERNAL_EVIDENCE",
       "note": "No public benchmark for this exact version was found in either source document. Its capability priors in the model registry are hand-authored judgement."
     },
@@ -2514,7 +2514,7 @@
       "scope": "every video model this platform runs",
       "canonical_scene": "commercial_hero",
       "status": "INSUFFICIENT_EXTERNAL_EVIDENCE",
-      "reason": "The closest evidence (BizGenEval) is static business documents — slides, charts, posters — not product hero video."
+      "reason": "The closest evidence (BizGenEval) is static business documents \u2014 slides, charts, posters \u2014 not product hero video."
     },
     {
       "scope": "every video model this platform runs",
@@ -2605,7 +2605,7 @@
     {
       "conflict_id": "C-OSC-EVAL",
       "kind": "EVALUATOR_DISAGREEMENT",
-      "description": "On OSCBench, human and GPT-5.2 scores for the same model and dimension differ materially: Veo 3.1 Fast Action .908 human versus .802 automatic; Kling 2.5 Turbo Accuracy .726 versus .652; Wan 2.2 OSC Consistency .668 human versus .710 automatic — the automatic judge is higher in that last case.",
+      "description": "On OSCBench, human and GPT-5.2 scores for the same model and dimension differ materially: Veo 3.1 Fast Action .908 human versus .802 automatic; Kling 2.5 Turbo Accuracy .726 versus .652; Wan 2.2 OSC Consistency .668 human versus .710 automatic \u2014 the automatic judge is higher in that last case.",
       "resolution": "Human and automatic scores are stored as separate metrics. Neither is treated as ground truth for the other and they are never averaged."
     },
     {

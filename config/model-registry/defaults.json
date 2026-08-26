@@ -238,7 +238,7 @@
     {
       "logical_name": "seedream-5.0-ark",
       "provider": "seedance",
-      "provider_model_id": "seedream-5-0",
+      "provider_model_id": "doubao-seedream-5-0-260128",
       "modality": "image",
       "capabilities": [
         "image_generation"

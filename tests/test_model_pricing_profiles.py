@@ -484,3 +484,122 @@ def test_the_quoted_image_price_is_the_quality_the_wire_actually_sends(
         f"OPENROUTER_IMAGE_QUALITY={configured} costs {expected_usd} USD per image, "
         f"but the pricing profile charges {seeded}"
     )
+
+
+OPENROUTER_VIDEO_USD_PER_SECOND = {
+    "google/veo-3.1": {"720p": 0.40, "1080p": 0.40},
+    "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12},
+    "google/veo-3.1-lite": {"720p": 0.05, "1080p": 0.08},
+    "kwaivgi/kling-v3.0-pro": {"720p": 0.168},
+    "kwaivgi/kling-v3.0-std": {"720p": 0.126},
+    "x-ai/grok-imagine-video": {"480p": 0.05, "720p": 0.07},
+}
+
+
+def test_migration_seeds_openrouter_video_rates_from_the_published_skus(
+    tmp_path, monkeypatch
+) -> None:
+    """Each rate is the vendor's own SKU, not a scaled guess from a neighbour."""
+
+    database_path = tmp_path / "openrouter-video-pricing.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.text(
+                "select provider_model_id, resolution, estimate_unit_price, currency, source_url "
+                "from model_pricing_profiles where provider = 'openrouter' "
+                "and billing_unit = 'second'"
+            )
+        ).mappings().all()
+    engine.dispose()
+
+    seeded: dict[str, dict[str, float]] = {}
+    for row in rows:
+        assert row["currency"] == "USD"
+        assert row["source_url"] == "https://openrouter.ai/api/v1/videos/models"
+        seeded.setdefault(row["provider_model_id"], {})[row["resolution"]] = float(
+            row["estimate_unit_price"]
+        )
+
+    assert set(seeded) == set(OPENROUTER_VIDEO_USD_PER_SECOND)
+    for model, by_resolution in OPENROUTER_VIDEO_USD_PER_SECOND.items():
+        assert set(seeded[model]) == set(by_resolution), model
+        for resolution, expected in by_resolution.items():
+            assert seeded[model][resolution] == pytest.approx(expected), (model, resolution)
+
+
+def test_seedream_submits_the_ark_id_and_is_priced_per_image(tmp_path, monkeypatch) -> None:
+    """'seedream-5-0' was the BytePlus stem, not a Volcengine Ark model ID.
+
+    Same defect as Seedance 2.5: an internal-looking string in the field that
+    names an execution target. Ark publishes lite as doubao-seedream-5-0-260128
+    and bills a flat 0.22 CNY per output image, not per token.
+    """
+
+    database_path = tmp_path / "seedream-pricing.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        row = connection.execute(
+            sa.text(
+                "select billing_unit, unit_price, estimate_unit, currency, usd_per_currency "
+                "from model_pricing_profiles where provider_model_id = 'doubao-seedream-5-0-260128'"
+            )
+        ).mappings().first()
+        legacy = connection.execute(
+            sa.text(
+                "select count(*) from model_pricing_profiles where provider_model_id = 'seedream-5-0'"
+            )
+        ).scalar()
+    engine.dispose()
+
+    assert row is not None
+    assert row["billing_unit"] == "image"
+    assert row["estimate_unit"] == "image"
+    assert row["currency"] == "CNY"
+    assert float(row["unit_price"]) == pytest.approx(0.22)
+    assert float(row["usd_per_currency"]) == pytest.approx(USD_PER_CNY)
+    assert legacy == 0
+
+
+def test_wan_is_priced_for_the_region_this_deployment_actually_calls(
+    tmp_path, monkeypatch
+) -> None:
+    """Wan 2.7 list price varies by region, and only one region is called here.
+
+    This deployment posts to dashscope.aliyuncs.com/api/v1, the mainland
+    endpoint, so Beijing rates apply: 0.6 CNY/s at 720P and 1.0 at 1080P.
+    Singapore's catalogue rates differ and are deliberately absent — a rate for a
+    region we do not call is a number waiting to be believed.
+    """
+
+    database_path = tmp_path / "wan-pricing.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    with engine.connect() as connection:
+        rows = connection.execute(
+            sa.text(
+                "select resolution, unit_price, billing_unit from model_pricing_profiles "
+                "where provider_model_id = 'wan-2.7'"
+            )
+        ).mappings().all()
+    engine.dispose()
+
+    seeded = {row["resolution"]: float(row["unit_price"]) for row in rows}
+    assert seeded == {"720p": pytest.approx(0.6), "1080p": pytest.approx(1.0)}
+    assert {row["billing_unit"] for row in rows} == {"second"}
+    # Singapore is 0.733924 / 1.100886 and must not have been seeded.
+    assert all(value not in (pytest.approx(0.733924), pytest.approx(1.100886)) for value in seeded.values())

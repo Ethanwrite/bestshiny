@@ -55,7 +55,10 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
         "deepseek-v4-flash",
         "qwen3.8-max",
         "glm-5.2",
-        "seedream-5-0",
+        # Corrected 2026-08-26: `seedream-5-0` is the BytePlus stem and is not a
+        # model ID Volcengine Ark publishes, so it named nothing on the provider
+        # this platform actually calls.
+        "doubao-seedream-5-0-260128",
         "openai/gpt-image-2",
         "google/gemini-embedding-2",
         "x-ai/grok-imagine-video",

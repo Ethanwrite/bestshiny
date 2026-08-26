@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from entitlement_core import WorkspaceCreditConflict
+from entitlement_core import InsufficientWorkspaceCredits, WorkspaceCreditConflict
 from fastapi.testclient import TestClient
 from generation_gateway.gateway import UnsafeRetry
 from platform_contracts import GenerationRequest
@@ -216,15 +216,22 @@ class _RunningPollProvider(_CancelledPollProvider):
 
 
 def _free_projects(container, *titles: str) -> tuple[str, list[str]]:  # type: ignore[no-untyped-def]
+    return _plan_projects(container, "FREE", *titles)
+
+
+def _plan_projects(container, plan_tier: str, *titles: str) -> tuple[str, list[str]]:  # type: ignore[no-untyped-def]
     with container.database.session() as session:
-        user = User(email="credit-lifecycle@example.com", display_name="Credit Lifecycle")
+        user = User(
+            email=f"credit-lifecycle-{plan_tier.lower()}@example.com",
+            display_name="Credit Lifecycle",
+        )
         session.add(user)
         session.flush()
         workspace = Workspace(
             owner_user_id=user.id,
-            name="Credit Lifecycle Workspace",
+            name=f"Credit Lifecycle {plan_tier}",
             status="ACTIVE",
-            plan_tier="FREE",
+            plan_tier=plan_tier,
         )
         session.add(workspace)
         session.flush()
@@ -1451,3 +1458,157 @@ def test_settlement_compare_and_swap_replays_stale_winner_without_double_effect(
         assert entry.settled_credits == 10
         assert entry.refunded_credits == 0
         assert settlement_events == 1
+
+
+# --- Every plan draws on the same wallet -------------------------------------
+#
+# A plan sets the grant, the discount and which models may be used. It never
+# decided whether a generation costs anything — except that it did: any tier
+# other than FREE was quoted, the quote was written onto the job, and then
+# nothing was reserved, nothing settled, and an ambiguous provider result left
+# no credit to hold for reconciliation.
+
+
+@pytest.mark.parametrize("plan_tier", ["FREE", "PRO", "ENTERPRISE"])
+def test_every_plan_reserves_and_settles_against_the_same_wallet(container, plan_tier):  # type: ignore[no-untyped-def]
+    workspace_id, (project_id,) = _plan_projects(container, plan_tier, "Billed Plan")
+
+    job = _reserve(container, project_id, idempotency_key=f"{plan_tier}-billed", credits=10)
+
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        entry = session.scalar(
+            select(WorkspaceCreditEntry).where(WorkspaceCreditEntry.generation_job_id == job.id)
+        )
+        assert workspace.credit_balance == 40
+        assert entry is not None
+        assert entry.status == "RESERVED"
+        assert entry.credits == 10
+        assert session.get(GenerationJob, job.id).workspace_credit_required is True
+
+    with container.database.session() as session:
+        settled = container.workspace_credits.settle_generation(
+            session, session.get(GenerationJob, job.id), reason="GENERATION_COMPLETED"
+        )
+        assert settled.applied is True
+
+    with container.database.session() as session:
+        entry = session.scalar(
+            select(WorkspaceCreditEntry).where(WorkspaceCreditEntry.generation_job_id == job.id)
+        )
+        assert entry.status == "SETTLED"
+        assert entry.settled_credits == 10
+        assert session.get(Workspace, workspace_id).credit_balance == 40
+
+
+def test_a_paid_workspace_out_of_credits_is_refused_before_the_provider(container):  # type: ignore[no-untyped-def]
+    """The refusal a paid tier could not previously reach."""
+
+    workspace_id, (project_id,) = _plan_projects(container, "PRO", "Exhausted")
+
+    with pytest.raises(InsufficientWorkspaceCredits, match="required=51, available=50"):
+        _reserve(container, project_id, idempotency_key="pro-too-expensive", credits=51)
+
+    with container.database.session() as session:
+        # Refused whole: no balance moved, no entry, no job.
+        assert session.get(Workspace, workspace_id).credit_balance == 50
+        assert (
+            session.scalar(
+                select(func.count(WorkspaceCreditEntry.id)).where(
+                    WorkspaceCreditEntry.workspace_id == workspace_id
+                )
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count(GenerationJob.id)).where(GenerationJob.project_id == project_id)
+            )
+            == 0
+        )
+
+
+def test_the_development_bypass_workspace_is_not_a_plan_and_is_not_charged(container):  # type: ignore[no-untyped-def]
+    """`ALL` is the authentication-disabled local bypass, not a tier.
+
+    It still receives server pricing and CostRecords. Charging it would make
+    local development spend a real balance, which is why it is excluded by the
+    same property that includes every real plan.
+    """
+
+    workspace_id, (project_id,) = _plan_projects(container, "ALL", "Local Bypass")
+
+    job = _reserve(container, project_id, idempotency_key="bypass-not-charged", credits=10)
+
+    with container.database.session() as session:
+        assert session.get(Workspace, workspace_id).credit_balance == 50
+        assert (
+            session.scalar(
+                select(func.count(WorkspaceCreditEntry.id)).where(
+                    WorkspaceCreditEntry.workspace_id == workspace_id
+                )
+            )
+            == 0
+        )
+        assert session.get(GenerationJob, job.id).workspace_credit_required is False
+
+
+def test_running_out_of_credits_is_402_and_a_plan_denial_is_403(container):  # type: ignore[no-untyped-def]
+    """Two different problems with two different fixes: top up, or upgrade.
+
+    They shared a 403 while a paid tier could not run out of credits. Now that
+    it can, a client that cannot tell them apart cannot route the user to the
+    thing that would actually help.
+    """
+
+    from entitlement_core import PlanEntitlementDenied
+    from video_platform_api.main import create_app
+
+    workspace_id, (project_id,) = _plan_projects(container, "PRO", "Status Codes")
+    with container.database.session() as session:
+        session.get(Workspace, workspace_id).credit_balance = 0
+
+    app = create_app(container)
+    with TestClient(app) as client:
+        # For real: a PRO workspace at zero, quoted by the server, refused.
+        broke = client.post(
+            "/v1/generations",
+            json={
+                "project_id": project_id,
+                "type": "video",
+                "prompt": "one visible action",
+                "idempotency_key": "pro-out-of-credits",
+            },
+        )
+        assert broke.status_code == 402, broke.text
+        assert "insufficient workspace credits" in broke.json()["detail"]
+
+        # And the entitlement denial it used to be indistinguishable from.
+        original = container.gateway.create
+
+        def not_entitled(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise PlanEntitlementDenied("this plan cannot use that model")
+
+        container.gateway.create = not_entitled  # type: ignore[method-assign]
+        try:
+            denied = client.post(
+                "/v1/generations",
+                json={
+                    "project_id": project_id,
+                    "type": "video",
+                    "prompt": "one visible action",
+                    "idempotency_key": "pro-not-entitled",
+                },
+            )
+        finally:
+            container.gateway.create = original  # type: ignore[method-assign]
+        assert denied.status_code == 403, denied.text
+
+    with container.database.session() as session:
+        assert session.get(Workspace, workspace_id).credit_balance == 0
+        assert (
+            session.scalar(
+                select(func.count(GenerationJob.id)).where(GenerationJob.project_id == project_id)
+            )
+            == 0
+        )

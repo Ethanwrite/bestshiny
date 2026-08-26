@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from agent_runtime import AgentRuntime
@@ -74,10 +75,13 @@ from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
 from skill_core import PromptCompilerService, SkillRegistry
+from sqlalchemy.engine import make_url
 from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from wan_provider import WanProvider
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_provider_media_hosts(value: str) -> dict[str, tuple[str, ...]]:
@@ -163,8 +167,34 @@ def build_container(settings: Settings | None = None) -> Container:
             raise RuntimeError(
                 "PLATFORM_API_KEY must be a high-entropy secret of at least 32 bytes in production"
             )
+        # SQLite is not a smaller PostgreSQL here. Under pysqlite a
+        # `begin_nested()` savepoint does not roll back with its enclosing
+        # transaction, and seven call sites — the registry, renditions, the
+        # gateway and provider affinity — depend on that rollback to keep a
+        # failed step from being committed. A production database that silently
+        # keeps half-applied work is not a performance problem, it is a
+        # correctness one.
+        backend = make_url(settings.database_url).get_backend_name()
+        if backend != "postgresql":
+            raise RuntimeError(
+                f"production requires a PostgreSQL DATABASE_URL, not {backend}; "
+                "SQLite savepoints do not roll back under pysqlite"
+            )
+    # Every guard above and this one read configuration only. They run before
+    # the first connection is opened, so a misconfigured deployment is refused
+    # for the reason it is actually misconfigured rather than for whichever
+    # symptom the database happens to surface first.
+    credentials = CredentialVault(
+        settings.credential_encryption_key,
+        allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
+    )
     database = Database(settings.database_url)
-    database.create_all()
+    if settings.deployment_environment == "test":
+        # A per-test throwaway database cannot replay every revision. This is
+        # the one place ORM metadata may build a schema, and it stamps what it
+        # built so the check below asks the same question everywhere.
+        database.create_all_and_stamp()
+    database.require_schema_revision()
     alchemy_webhooks = AlchemyUSDCWebhookService(
         database,
         signing_key=settings.alchemy_webhook_signing_key,
@@ -228,6 +258,7 @@ def build_container(settings: Settings | None = None) -> Container:
         max_upload_bytes=settings.max_upload_bytes,
         max_image_pixels=settings.max_image_pixels,
         ttl_seconds=settings.direct_upload_ttl_seconds,
+        verify_sha256_on_complete=settings.s3_verify_upload_sha256_on_complete,
     )
     runtime = BrowserRuntime(database, heartbeat_timeout_seconds=settings.worker_heartbeat_timeout_seconds)
     live_provider_settings = LiveProviderSettings(
@@ -243,6 +274,9 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.model_infrastructure_config,
     )
     default_sync = model_infrastructure.ensure_defaults()
+    # After the rows exist, not before: 0044's migration can only mark models
+    # that were already seeded when it ran.
+    model_infrastructure.reconcile_pricing_status()
     model_registry = ModelCapabilityRegistry(database)
     providers = ProviderRouter(
         model_registry,
@@ -262,6 +296,8 @@ def build_container(settings: Settings | None = None) -> Container:
         base_url=settings.openrouter_base_url,
         timeout_seconds=settings.provider_http_timeout_seconds,
         image_model_envelopes=settings.openrouter_image_model_keys,
+        image_quality=settings.openrouter_image_quality,
+        video_generate_audio=settings.openrouter_video_generate_audio,
         transport_settings=live_provider_settings,
     )
     wan = WanProvider(
@@ -344,6 +380,27 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     provider_capabilities.register("deepseek", deepseek, {ProviderCapability.CHAT.value})
     newly_created_models = set(default_sync.model_names_created)
+
+    def report_declared_model_id(logical_name: str, declared: str) -> None:
+        """Say out loud when the environment and the registry disagree.
+
+        The registry wins — an operator override of `provider_model_id` has to
+        survive a restart, and a test pins that. The failure this guards against
+        is not the registry winning, it is nobody noticing: a corrected ID in
+        `.env` that never reached the row, and a model that goes on submitting a
+        name the provider does not have.
+        """
+
+        stored = model_infrastructure.declared_model_id_divergence(logical_name, declared)
+        if stored is not None:
+            logger.warning(
+                "model %s: environment declares provider model id %r but the registry holds %r; "
+                "the registry is authoritative — correct it deliberately if the environment is right",
+                logical_name,
+                declared.strip(),
+                stored,
+            )
+
     workspace_models = WorkspaceModelResolver(database, model_infrastructure)
     live_canary = LiveCanaryPermitService(database)
     model_roles = ModelRoleRuntime(
@@ -372,6 +429,7 @@ def build_container(settings: Settings | None = None) -> Container:
             )
 
     doubao_default = defaults_by_name["doubao-free-reasoner"]
+    report_declared_model_id(doubao_default.logical_name, settings.doubao_model_id)
     if doubao_default.logical_name in newly_created_models and settings.doubao_model_id.strip():
         doubao_ready = bool(settings.ark_api_key.strip() and settings.ark_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -383,6 +441,7 @@ def build_container(settings: Settings | None = None) -> Container:
 
     seedance_default = defaults_by_name["seedance-2.5-official"]
     seedance_runtime = model_infrastructure.runtime_model(seedance_default.logical_name)
+    report_declared_model_id(seedance_default.logical_name, settings.seedance_model_id)
     if seedance_default.logical_name in newly_created_models and settings.seedance_model_id.strip():
         seedance_ready = bool(settings.ark_api_key.strip() and settings.ark_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -414,6 +473,7 @@ def build_container(settings: Settings | None = None) -> Container:
     runtime_video_routes.append((wan_default.provider, wan_runtime.provider_model_id, wan_available))
 
     runapi_default = defaults_by_name["runapi-prompt-refiner-edge"]
+    report_declared_model_id(runapi_default.logical_name, settings.runapi_model_id)
     if runapi_default.logical_name in newly_created_models and settings.runapi_model_id.strip():
         runapi_ready = bool(settings.runapi_api_key.strip() and settings.runapi_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -454,6 +514,7 @@ def build_container(settings: Settings | None = None) -> Container:
     # The project's image model. Registered explicitly, like the Flow image
     # model, so only a reviewed ID can reach a provider transport.
     image_default = defaults_by_name["gpt-image-2-openrouter"]
+    report_declared_model_id(image_default.logical_name, settings.openrouter_image_model_id)
     if image_default.logical_name in newly_created_models and settings.openrouter_image_model_id.strip():
         image_ready = bool(settings.openrouter_api_key.strip() and settings.openrouter_base_url.strip())
         model_infrastructure.configure_runtime_model(
@@ -538,10 +599,6 @@ def build_container(settings: Settings | None = None) -> Container:
         flow_affinity=flow_affinity,
         live_canary=live_canary,
     )
-    credentials = CredentialVault(
-        settings.credential_encryption_key,
-        allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
-    )
     production = ProductionEngine(database)
     skills = SkillRegistry(settings.skills_root)
     agents = AgentRuntime(production, gateway, media, skills)
@@ -560,19 +617,27 @@ def build_container(settings: Settings | None = None) -> Container:
     # changes what "committable" means, and a gate that is quietly stronger on
     # some projects than others is not a gate.
     semantic_style = (
-        ModelRoleSemanticStyleEmbedder(model_roles)
-        if settings.feature_semantic_style_lock
-        else None
+        ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
     prompts = PromptCompilerService(database, skills, styles)
-    credit_pricing = CreditPricingEngine(model_registry)
+    credit_pricing = CreditPricingEngine(
+        model_registry,
+        database=database,
+        # Only a route that can actually be billed has to fail closed. Mock and
+        # recorded modes keep the seeded placeholder so development and the
+        # offline suite still run, and every estimate reports which it used.
+        require_verified_pricing=settings.provider_mode == "live",
+    )
     generation_admission = GenerationAdmissionService(
         workspace_models,
         model_roles,
         credit_pricing,
     )
-    video_router = VideoModelRouter(model_registry)
+    video_router = VideoModelRouter(
+        model_registry,
+        require_live_lifecycle=settings.provider_mode == "live",
+    )
     video_adapters = VideoAdapterRegistry()
     image_prompts = ImagePromptCorrector()
     asset_registry = AssetRegistry(database)

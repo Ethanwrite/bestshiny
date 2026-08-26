@@ -6,6 +6,12 @@ from .direct_upload import (
     DirectUploadNotFinished,
     DirectUploadService,
     DirectUploadUnsupported,
+    ExpiredUploadClaim,
+)
+from .maintenance import (
+    DEFAULT_SWEEP_LIMIT,
+    ExpiredUploadSweep,
+    sweep_expired_uploads,
 )
 from .quota import (
     StorageQuotaReservation,
@@ -38,6 +44,10 @@ __all__ = [
     "DirectUploadNotFinished",
     "DirectUploadService",
     "DirectUploadUnsupported",
+    "DEFAULT_SWEEP_LIMIT",
+    "ExpiredUploadClaim",
+    "ExpiredUploadSweep",
+    "sweep_expired_uploads",
     "MediaRegistry",
     "ProviderMediaReconciliationConflict",
     "ProviderMediaReconciliationRequired",

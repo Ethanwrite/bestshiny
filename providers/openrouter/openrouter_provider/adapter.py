@@ -194,6 +194,8 @@ class OpenRouterProvider(
         base_url: str = "https://openrouter.ai/api/v1",
         timeout_seconds: float = 120,
         image_model_envelopes: str = "",
+        image_quality: str = "low",
+        video_generate_audio: bool = True,
         transport_settings: LiveProviderSettings | None = None,
         transport: ProviderTransport | None = None,
     ):
@@ -207,6 +209,14 @@ class OpenRouterProvider(
         )
         self.client = ProviderJsonClient(self.name, transport, api_key_configured=bool(api_key.strip()))
         self.configured = bool(api_key.strip()) or injected_transport
+        # Two parameters that decide the bill and that this adapter used to leave
+        # to the provider. `quality` moves a gpt-image-2 image across a 36x range
+        # (196 to 7024 output tokens), and OpenRouter defaults `generate_audio`
+        # to true, which doubles Veo 3.1. A price can only be exact for a request
+        # that states them, so they go on the wire explicitly and the pricing
+        # profile is written for the values named here.
+        self.image_quality = image_quality.strip() or "low"
+        self.video_generate_audio = video_generate_audio
         self.image_envelopes = {
             **IMAGE_MODEL_ENVELOPES,
             **parse_image_model_envelopes(image_model_envelopes),
@@ -288,6 +298,8 @@ class OpenRouterProvider(
         batch = request.get("image_count")
         if batch is not None and payload.get("n") is None:
             payload["n"] = batch
+        # Never left to the provider default: `auto` is unpriceable.
+        payload.setdefault("quality", self.image_quality)
         envelope = self.image_envelopes.get(model)
         if envelope is None:
             raise ProviderError(
@@ -331,6 +343,8 @@ class OpenRouterProvider(
                 payload[target] = request[resolved]
         payload["model"] = _required(str(payload.get("model") or ""), "model")
         payload["prompt"] = _required(str(payload.get("prompt") or ""), "prompt")
+        # OpenRouter defaults this to true and bills the audio rate for it.
+        payload.setdefault("generate_audio", self.video_generate_audio)
         data = await self.client.request("POST", "/videos", json_body=payload, submitted=True)
         job_id = data.get("id")
         if not job_id:

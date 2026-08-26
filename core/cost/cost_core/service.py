@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -12,6 +13,7 @@ from production_domain.models import (
     CostRecord,
     GenerationCandidate,
     GenerationJob,
+    ModelPricingProfile,
     ProviderBillingEvidence,
     QADecision,
     QAResult,
@@ -24,6 +26,41 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 
+class PricingUnverified(ValueError):
+    """No confirmed provider price covers this request, and money is at stake."""
+
+    def __init__(self, provider: str, model: str, detail: str):
+        super().__init__(
+            f"no verified price for {provider}:{model} — {detail}; "
+            "confirm the provider's published rate before this model takes a paid request"
+        )
+        self.provider = provider
+        self.model = model
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
+# Whether the *input* carries video, which is the axis Ark actually prices on.
+# Only a continuation feeds a clip back in; a character or scene reference is an
+# image, and a start/end frame is an image. Keying this off `reference_count`
+# billed every reference-guided shot as video input — and because the
+# video-input rates are deliberately unseeded, fail-closed then refused the
+# whole class of shots the platform generates most.
+VIDEO_INPUT_POLICIES = frozenset({"CONTINUE_V2V"})
+
+
+def _input_mode(media_type: str, generation_policy: str) -> str:
+    if media_type != "video":
+        return "default"
+    return (
+        "video_input"
+        if generation_policy.strip().upper() in VIDEO_INPUT_POLICIES
+        else "no_video_input"
+    )
+
+
 @dataclass(frozen=True)
 class CreditEstimate:
     provider_cost_usd: float
@@ -34,6 +71,14 @@ class CreditEstimate:
     credits: int
     usd_per_credit: float
     image_count: int = 1
+    # VERIFIED when the figure came from a dated provider price with a source
+    # URL; UNVERIFIED when it fell back to the seeded placeholder. A paid route
+    # refuses UNVERIFIED, so this is not decoration.
+    pricing_status: str = "UNVERIFIED"
+    pricing_source_url: str = ""
+    pricing_checked_at: str = ""
+    billing_unit: str = ""
+    settlement_formula: str = ""
 
 
 class CreditPricingEngine:
@@ -47,10 +92,68 @@ class CreditPricingEngine:
         *,
         usd_per_credit: float = 0.01,
         service_multiplier: float = 1.20,
+        database: Database | None = None,
+        require_verified_pricing: bool = False,
     ):
         self.registry = registry
         self.usd_per_credit = usd_per_credit
         self.service_multiplier = service_multiplier
+        self.database = database
+        # In live mode an unpriced model must not be quotable: a placeholder that
+        # is 40% of the real rate loses money on every call and nothing reports
+        # it. Outside live mode the fallback keeps development and the offline
+        # suite working, and the estimate says which of the two it was.
+        self.require_verified_pricing = require_verified_pricing
+
+    def _active_profile(
+        self,
+        *,
+        provider: str,
+        model: str,
+        scopes: tuple[tuple[str, str], ...],
+    ) -> ModelPricingProfile | None:
+        """The narrowest price in force right now, promotion before list.
+
+        `scopes` is the (input_mode, resolution) precedence, narrowest first. All
+        of them are answered from one read: a quote is on the request path, and
+        an unpriced model would otherwise pay a round trip per candidate to be
+        told nothing four times.
+        """
+
+        if self.database is None:
+            return None
+        now = utcnow()
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(ModelPricingProfile).where(
+                        ModelPricingProfile.provider == provider,
+                        ModelPricingProfile.provider_model_id == model,
+                        ModelPricingProfile.effective_from <= now,
+                    )
+                )
+            )
+        live = [
+            row
+            for row in rows
+            if row.effective_until is None or _aware(row.effective_until) > now
+        ]
+        for scope in scopes:
+            candidates = [row for row in live if (row.input_mode, row.resolution) == scope]
+            if not candidates:
+                continue
+            # A dated promotion is more specific than an open-ended list price,
+            # so it wins while it is in force and stops applying on its own
+            # afterwards. Later start dates win among equals: a reissued rate
+            # supersedes the one it was issued to replace.
+            candidates.sort(
+                key=lambda row: (
+                    row.effective_until is None,
+                    -_aware(row.effective_from).timestamp(),
+                )
+            )
+            return candidates[0]
+        return None
 
     def estimate(
         self,
@@ -62,23 +165,74 @@ class CreditPricingEngine:
         resolution: str = "720p",
         reference_count: int = 0,
         image_count: int = 1,
+        generation_policy: str = "TEXT_TO_VIDEO",
     ) -> CreditEstimate:
         profile = self.registry.get(model, provider)
         if profile is None or f"{media_type}_generation" not in profile.supported_operations:
             raise ValueError(f"selected {media_type} model is not registered for this provider")
         images = max(1, int(image_count))
-        if media_type == "video":
-            if images != 1:
-                raise ValueError("image_count applies to image generation only")
-            provider_cost = profile.cost.get("estimated_per_second", 0.0) * max(1.0, duration)
-        else:
-            # Every image in the batch is generated and billed, so every image
-            # is reserved before the call. Charging for one and delivering four
-            # would make the workspace balance a fiction.
-            provider_cost = profile.cost.get("estimated_per_image", 0.0) * images
-        resolution_multiplier = {"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}.get(
-            resolution.lower(), 1.0
+        if media_type == "video" and images != 1:
+            raise ValueError("image_count applies to image generation only")
+
+        input_mode = _input_mode(media_type, generation_policy)
+        # Narrowest first. A provider that prices one axis but not the other —
+        # a per-image rate with no resolution, a flat rate with no input mode —
+        # is described by dropping that axis to "", which is what the model
+        # documents "" to mean. Widening never invents a price: every candidate
+        # is a row someone recorded from a published page.
+        priced = self._active_profile(
+            provider=provider,
+            model=model,
+            scopes=(
+                (input_mode, resolution.lower()),
+                (input_mode, ""),
+                ("default", resolution.lower()),
+                ("default", ""),
+            ),
         )
+
+        if priced is not None:
+            # The provider's own published rate, in the provider's own currency,
+            # converted at a rate that carries its own source and date.
+            quantity = max(1.0, duration) if media_type == "video" else float(images)
+            provider_cost = (
+                float(priced.estimate_unit_price) * quantity * float(priced.usd_per_currency)
+            )
+            # Resolution is priced by the profile that was selected for it, so
+            # there is no multiplier left to apply. That table used to charge
+            # 1080p at 1.30x for every provider on the platform; Ark's own rates
+            # put its 1080p at 2.47x of 720p and its 480p at 0.44x.
+            resolution_multiplier = 1.0
+            pricing_status = "VERIFIED"
+            source_url = priced.source_url
+            checked_at = priced.source_checked_at.isoformat()
+            billing_unit = priced.billing_unit
+            settlement_formula = priced.settlement_formula
+        else:
+            if self.require_verified_pricing:
+                raise PricingUnverified(
+                    provider,
+                    model,
+                    f"no pricing profile for input_mode={input_mode!r} resolution={resolution!r}",
+                )
+            # Development and the offline suite still need a number. It is the
+            # seeded placeholder, and the estimate says so.
+            if media_type == "video":
+                provider_cost = profile.cost.get("estimated_per_second", 0.0) * max(1.0, duration)
+            else:
+                # Every image in the batch is generated and billed, so every
+                # image is reserved before the call. Charging for one and
+                # delivering four would make the workspace balance a fiction.
+                provider_cost = profile.cost.get("estimated_per_image", 0.0) * images
+            resolution_multiplier = {"720p": 1.0, "1080p": 1.30, "2k": 1.65, "4k": 2.4}.get(
+                resolution.lower(), 1.0
+            )
+            pricing_status = "UNVERIFIED"
+            source_url = ""
+            checked_at = ""
+            billing_unit = ""
+            settlement_formula = ""
+
         reference_multiplier = min(1.25, 1.0 + max(0, reference_count) * 0.04)
         total = provider_cost * resolution_multiplier * reference_multiplier * self.service_multiplier
         credits = max(1, math.ceil(total / self.usd_per_credit))
@@ -91,6 +245,11 @@ class CreditPricingEngine:
             credits=credits,
             usd_per_credit=self.usd_per_credit,
             image_count=images,
+            pricing_status=pricing_status,
+            pricing_source_url=source_url,
+            pricing_checked_at=checked_at,
+            billing_unit=billing_unit,
+            settlement_formula=settlement_formula,
         )
 
 

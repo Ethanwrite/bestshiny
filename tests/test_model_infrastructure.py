@@ -47,14 +47,18 @@ def test_every_generation_request_serializes_an_explicit_asset_criticality() -> 
 def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> None:
     config = load_model_infrastructure_config(CONFIG_PATH)
     provider_ids = {item.provider_model_id for item in config.models}
-    assert len(config.models) == 22
+    # 22 + the three OpenRouter Veo 3.1 variants added 2026-08-25.
+    assert len(config.models) == 25
     assert {
         "openai/gpt-5.6-sol",
         "anthropic/claude-opus-5",
         "deepseek-v4-flash",
         "qwen3.8-max",
         "glm-5.2",
-        "seedream-5-0",
+        # Corrected 2026-08-26: `seedream-5-0` is the BytePlus stem and is not a
+        # model ID Volcengine Ark publishes, so it named nothing on the provider
+        # this platform actually calls.
+        "doubao-seedream-5-0-260128",
         "openai/gpt-image-2",
         "google/gemini-embedding-2",
         "x-ai/grok-imagine-video",

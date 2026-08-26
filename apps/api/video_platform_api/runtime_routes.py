@@ -65,7 +65,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import or_, select
-from style_core import StyleLockConflict
+from style_core import SemanticStyleLayerRequired, StyleLockConflict
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -174,6 +174,10 @@ class PricingEstimateRequest(BaseModel):
     duration: float = Field(default=1, ge=1, le=60)
     resolution: str = "720p"
     reference_count: int = Field(default=0, ge=0, le=20)
+    # Priced on whether the input carries video, not on how many references
+    # there are: a provider that discounts video-input tokens is answering a
+    # different question from "is this shot reference-guided".
+    generation_policy: str = "TEXT_TO_VIDEO"
 
 
 class CreditReconcileRequest(BaseModel):
@@ -560,8 +564,11 @@ def register_runtime_routes(
                 GenerationRequest(
                     project_id=body.project_id,
                     type=body.media_type,
-                    provider=body.provider or "google_flow",
-                    model=body.model or ("veo" if body.media_type == "video" else "NARWHAL"),
+                    # Passed through exactly as sent. An empty pair is the caller
+                    # asking for automatic selection; substituting a default here
+                    # would make a named model indistinguishable from no choice.
+                    provider=body.provider,
+                    model=body.model,
                     prompt=body.prompt,
                     negative_prompt=body.negative_prompt,
                     duration=body.duration,
@@ -575,6 +582,7 @@ def register_runtime_routes(
                 requested_role=body.model_role,
                 resolution=body.resolution,
                 enforce_plan=not principal.development_bypass,
+                image_task=body.image_task,
             )
             estimate = admitted.estimate
             body = body.model_copy(
@@ -596,7 +604,13 @@ def register_runtime_routes(
             )
         except IdempotencyConflict as exc:
             raise HTTPException(409, str(exc)) from exc
-        except (PlanEntitlementDenied, InsufficientWorkspaceCredits) as exc:
+        except InsufficientWorkspaceCredits as exc:
+            # 402, not 403. Now that every plan is charged, "your plan does not
+            # allow this" and "you are allowed and out of credits" are different
+            # answers with different fixes — upgrade versus top up — and only
+            # the caller can act on the difference.
+            raise HTTPException(402, str(exc)) from exc
+        except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -749,6 +763,11 @@ def register_runtime_routes(
             "credits": value.credits,
             "usd_per_credit": value.usd_per_credit,
             "version": container.credit_pricing.version,
+            "pricing_status": value.pricing_status,
+            "pricing_source_url": value.pricing_source_url,
+            "pricing_checked_at": value.pricing_checked_at,
+            "billing_unit": value.billing_unit,
+            "settlement_formula": value.settlement_formula,
         }
 
     @user_router.post("/api/assets")
@@ -829,6 +848,11 @@ def register_runtime_routes(
                 if not persisted or not embedding:
                     raise HTTPException(409, "project style lock provenance is incomplete")
                 return {"locked": True, **_style_lock_view(persisted, embedding)}
+        except SemanticStyleLayerRequired as exc:
+            # 503 only when waiting could actually help. Media that cannot be
+            # read will not become readable, and telling the user to retry
+            # would be a lie; that is a conflict with the version they chose.
+            raise HTTPException(503 if exc.retryable else 409, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except (ValueError, StyleLockConflict) as exc:

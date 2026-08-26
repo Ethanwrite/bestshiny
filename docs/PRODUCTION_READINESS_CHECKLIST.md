@@ -99,12 +99,20 @@ a live Provider result. The authoritative evidence narrative is
 
 - [x] A matching durable `LiveCanaryPermit` is required at model and media live-call boundaries.
 - [x] Permit expiry, Provider/model match, idempotency, request ceiling and cost ceiling hard-stop offline tests exist.
+- [x] Every billable model carries a sourced price, or is refused a paid route. *(2026-08-26 — `model_pricing_profiles`; `pricing_status` derived from it at boot; live mode raises `PricingUnverified` rather than quoting a placeholder.)*
+- [x] Each canary is bounded by its own `max_requests=1` permit under a global cost ceiling, one attempt, no automatic retry.
+- [x] Credit release and error mapping proven on the failure path. *(Reserve → refuse at the live gate → `REFUNDED` in full, `submission_state=NOT_SENT`; run twice, free.)*
 - [ ] One RunAPI prompt-refinement canary passed. **NOT EXECUTED.**
-- [ ] One OpenRouter role canary passed. **NOT EXECUTED.**
+- [ ] One OpenRouter role canary passed. **BLOCKED EXTERNALLY** — the account excludes the only upstream endpoint for `openai/gpt-image-2`; one paid attempt was refused before billing.
 - [ ] One Voyage multimodal embedding canary passed. **NOT EXECUTED.**
-- [ ] One low-cost Flow affinity/project operation passed. **NOT EXECUTED.**
-- [ ] Actual Provider billing/credit evidence has been ingested and reconciled. **NOT EXECUTED.**
-- [ ] Single paid video canary passed end to end. **NOT EXECUTED.**
+- [ ] One low-cost Flow affinity/project operation passed. **NOT EXECUTED** — `google_flow` is disabled in Admin and has no published per-call rate.
+- [ ] Actual Provider billing/credit evidence has been ingested and reconciled. **NOT EXECUTED** — settlement still debits the reservation rather than actual usage.
+- [ ] Single paid video canary passed end to end. **NOT EXECUTED** — nine models are `VERIFIED_NO_SPEND` and queued for phase two.
+
+Model-by-model status lives in `model_definitions.live_canary_status`
+(`NOT_RUN` / `VERIFIED_LIVE` / `LIVE_BLOCKED_EXTERNAL` / `CONTRACT_INVALID`), so a
+blocker outside this repository does not stall the models behind it and is never
+later mistaken for a pass. See `HANDOFF.md` §1b for the current matrix.
 
 Do not declare a public beta or production release until all applicable unchecked P0 deployment, data, security and
 live-evidence items have documented proof.

@@ -10,6 +10,7 @@ from production_domain.models import (
 )
 from production_domain.models import (
     ModelDefinition,
+    ProviderControl,
 )
 from provider_sdk import AssetCriticality, ProviderTrustLevel
 from sqlalchemy import select
@@ -166,6 +167,41 @@ class ModelCapabilityRegistry:
 
     def by_provider(self, provider: str) -> list[ModelCapabilityProfile]:
         return [profile for profile in self.all() if profile.provider == provider]
+
+    def provider_enabled(self, provider: str) -> bool:
+        """Return the persisted provider kill-switch state (missing means enabled)."""
+
+        with self.database.session() as session:
+            control = session.get(ProviderControl, provider)
+            return control is None or control.enabled
+
+    def routable(self, *, require_live: bool = True) -> list[ModelCapabilityProfile]:
+        """Models eligible for automatic selection, distinct from explicit use."""
+
+        with self.database.session() as session:
+            definition_statement = select(ModelDefinition).where(
+                ModelDefinition.enabled.is_(True),
+                ModelDefinition.router_enabled.is_(True),
+            )
+            if require_live:
+                definition_statement = definition_statement.where(
+                    ModelDefinition.lifecycle_status.in_(("LIVE", "DEGRADED"))
+                )
+            definitions = list(session.scalars(definition_statement))
+            enabled_ids = {item.id for item in definitions}
+            enabled_providers = {
+                item.provider for item in definitions if self.provider_enabled(item.provider)
+            }
+            statement = (
+                select(ModelDefinition, ModelCapabilityProfileRow)
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
+                .where(ModelDefinition.id.in_(enabled_ids), ModelDefinition.provider.in_(enabled_providers))
+                .order_by(ModelDefinition.logical_name)
+            )
+            return [self._to_profile(*pair) for pair in session.execute(statement).all()]
 
     def supports(self, provider: str, model_id: str, operation: str) -> bool:
         profile = self.get(model_id, provider)

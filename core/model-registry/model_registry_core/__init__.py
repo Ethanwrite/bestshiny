@@ -17,7 +17,9 @@ from .schemas import (
     ModelInfrastructureConfig,
     ModelRole,
     ModelRoleBindingConfig,
+    RejectedModel,
     RouterDecision,
+    RoutingEvidence,
     ShotRequirements,
 )
 
@@ -34,10 +36,12 @@ __all__ = [
     "ModelInfrastructureService",
     "ModelRole",
     "ModelRoleBindingConfig",
+    "RejectedModel",
     "ResolvedModel",
     "RuntimeModelConfiguration",
     "RuntimeModelState",
     "RouterDecision",
+    "RoutingEvidence",
     "ShotRequirements",
     "VideoModelRouter",
     "load_model_infrastructure_config",

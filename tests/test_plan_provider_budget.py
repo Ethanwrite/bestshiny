@@ -316,10 +316,9 @@ def test_free_passenger_video_is_server_routed_to_seedance_role(container, monke
             "/api/passenger/generate",
             headers=headers,
             json={
+                # Auto: no provider/model named, so the platform routes.
                 "project_id": project["id"],
                 "media_type": "video",
-                "provider": "google_flow",
-                "model": "flow-veo-3.1",
                 "prompt": "A single visible action",
                 "idempotency_key": "free-role-route",
             },
@@ -386,8 +385,6 @@ def test_free_passenger_charge_job_and_cost_are_atomic_and_idempotent(container,
     )
     payload = {
         "media_type": "video",
-        "provider": "openrouter",
-        "model": "kwaivgi/kling-v3.0-pro",
         "prompt": "One visible action",
         "idempotency_key": "atomic-free-charge",
     }
@@ -468,7 +465,9 @@ def test_insufficient_free_credits_roll_back_job_cost_and_ledger(container, monk
             },
         )
 
-    assert response.status_code == 403, response.text
+    # 402, not 403: being out of credits is a top-up problem, and it shares
+    # nothing but a rough shape with a plan that does not permit the request.
+    assert response.status_code == 402, response.text
     assert "required=87, available=50" in response.json()["detail"]
     with container.database.session() as session:
         stored_project = session.get(Project, project["id"])

@@ -19,7 +19,7 @@ from production_domain.models import (
     User,
 )
 from sqlalchemy import delete, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 
 def _committed_initial_state(
@@ -273,7 +273,14 @@ def test_character_state_commit_is_versioned_and_append_only(container, project)
         with container.database.session() as session:
             session.execute(delete(CharacterStateDelta).where(CharacterStateDelta.id == ids["delta_id"]))
 
-    with pytest.raises(IntegrityError, match="fresh commit"):
+    # The head fence is the one guard that deliberately does *not* raise a
+    # constraint violation on PostgreSQL: it declares SQLSTATE 40001
+    # (serialization_failure), because a stale fence means "someone else
+    # committed first, re-read and retry", not "this data is invalid".
+    # SQLAlchemy maps that to OperationalError, while SQLite's RAISE(ABORT)
+    # can carry no SQLSTATE at all and always arrives as IntegrityError. The
+    # message is the part both engines agree on.
+    with pytest.raises((IntegrityError, OperationalError), match="fresh commit"):
         with container.database.session() as session:
             session.execute(
                 update(CharacterStateHead)

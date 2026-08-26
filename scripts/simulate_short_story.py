@@ -57,10 +57,9 @@ def main() -> int:
             provider_mode="mock",
         )
     )
+    # The container builds and stamps the schema for a test-environment
+    # database; nothing here may create tables behind alembic's back.
     database = container.database
-    from production_domain.models import Base
-
-    Base.metadata.create_all(database.engine)
 
     with database.session() as session:
         actor = User(email="sim@example.com", display_name="Simulation Owner")

@@ -32,11 +32,13 @@ from provider_sdk.transport import (
 # Wan 2.7 is three separate DashScope models, not one model with three
 # switches, so the mode decides the model ID:
 #
-# | Mode | DashScope model            | Accepts                                |
-# | ---- | -------------------------- | -------------------------------------- |
-# | t2v  | wan2.7-t2v-2026-06-12      | text, optionally images                |
-# | i2v  | wan2.7-i2v-2026-04-25      | images, optionally text and audio      |
-# | r2v  | wan2.7-r2v-2026-06-12      | image/video references plus text       |
+# | Mode | DashScope model            | Accepts                                  |
+# | ---- | -------------------------- | ---------------------------------------- |
+# | t2v  | wan2.7-t2v-2026-06-12      | text, optionally one custom audio track  |
+# | i2v  | wan2.7-i2v-2026-04-25      | a first frame or clip, a last frame, and |
+# |      |                            | driving audio — never a reference image  |
+# | r2v  | wan2.7-r2v-2026-06-12      | image/video references, optionally one   |
+# |      |                            | first frame, plus text                   |
 #
 # Wan 3.0 is deliberately absent. It is invitation-only Beta, so no runtime
 # model ID has been reviewed for it; an unmapped model is rejected here rather
@@ -107,44 +109,44 @@ def resolve_video_model(
 
 # --- The Wan 2.7 media plane -------------------------------------------------
 #
-# Wan 2.7 carries every non-text input in one ``media`` array. On the wire each
-# entry has exactly two official fields, ``type`` and ``url``.
+# Wan 2.7 carries every non-text input of I2V and R2V in one ``media`` array,
+# and each entry names its own semantic role in ``type``:
 #
-# The role — first frame, reference image, reference video — is **canonical
-# internal state only and is never serialized**. It still has to exist here: a
-# clip whose end the shot continues from, a video the shot takes motion and
-# grade reference from, and a still that fixes a character's identity are three
-# different instructions, and the role is what lets this adapter choose the
-# right model, enforce the per-role limits and order the array deterministically
-# before any of that is thrown away at the boundary.
+#     {"type": "first_frame",     "url": ...}
+#     {"type": "last_frame",      "url": ...}
+#     {"type": "first_clip",      "url": ...}
+#     {"type": "driving_audio",   "url": ...}
+#     {"type": "reference_image", "url": ..., "reference_voice": ...}
+#     {"type": "reference_video", "url": ..., "reference_voice": ...}
 #
-# Because the wire carries no role, **position is the only signal the provider
-# gets**, so ``_ROLE_ORDER`` below is part of the contract rather than a tidiness
-# preference.
+# The role **is** the wire contract. An earlier version of this adapter mapped
+# the role down to a media *category* — ``image``/``video``/``audio`` — on the
+# theory that the role was internal state and array position was the only
+# signal the provider received. That is the opposite of the published protocol:
+# the official I2V and R2V references define these exact strings as the values
+# of ``media.type``, and nothing about a request's meaning is carried by
+# position. A first frame posted as ``{"type": "image"}`` is not a first frame
+# that arrived unlabelled; it is a request DashScope rejects.
 #
-# The previous payload had the opposite defect in two directions: it flattened
-# a first frame to ``img_url`` and a reference video to ``video_url``, and it
-# never read ``reference_images``/``reference_urls`` at all — so every reference
-# still the Gateway resolved was dropped on the floor, silently, after being
-# paid for.
+# T2V has no ``media`` array at all. Its only non-text input is an optional
+# custom audio track at ``input.audio_url``.
+#
+# ``negative_prompt`` belongs to ``input`` in all three modes, beside ``prompt``.
+# It is not a ``parameters`` field.
+#
+# Sources: the Alibaba Model Studio T2V, I2V and R2V API references.
 
 
 class WanMediaRole(StrEnum):
-    """What one entry in ``input.media`` is *for*."""
+    """One entry of ``input.media`` — and the ``type`` it carries on the wire."""
 
     FIRST_FRAME = "first_frame"
     LAST_FRAME = "last_frame"
     FIRST_CLIP = "first_clip"
+    DRIVING_AUDIO = "driving_audio"
     REFERENCE_IMAGE = "reference_image"
     REFERENCE_VIDEO = "reference_video"
-    REFERENCE_VOICE = "reference_voice"
 
-
-_IMAGE_ROLES = frozenset(
-    {WanMediaRole.FIRST_FRAME, WanMediaRole.LAST_FRAME, WanMediaRole.REFERENCE_IMAGE}
-)
-_VIDEO_ROLES = frozenset({WanMediaRole.FIRST_CLIP, WanMediaRole.REFERENCE_VIDEO})
-_AUDIO_ROLES = frozenset({WanMediaRole.REFERENCE_VOICE})
 
 # Which request keys carry which role. The aliases exist because the platform's
 # own adapter layer, the Gateway's URL resolution and a hand-written request all
@@ -157,56 +159,65 @@ _SINGLE_ROLE_KEYS: tuple[tuple[WanMediaRole, tuple[str, ...]], ...] = (
     ),
     (WanMediaRole.LAST_FRAME, ("last_frame", "end_frame", "end_frame_url")),
     (WanMediaRole.FIRST_CLIP, ("first_clip", "first_clip_url", "continuation_video")),
+    # Deliberately *not* aliased to ``audio_url``: that is T2V's custom audio
+    # track, a different field of a different mode. Conflating them would turn
+    # "drive this character's performance from this take" into "play this over
+    # the top", silently.
+    (WanMediaRole.DRIVING_AUDIO, ("driving_audio", "driving_audio_url")),
     (WanMediaRole.REFERENCE_VIDEO, ("reference_video", "reference_video_url")),
-    (WanMediaRole.REFERENCE_VOICE, ("reference_voice", "reference_voice_url", "voice_reference")),
 )
 _LIST_ROLE_KEYS: tuple[tuple[WanMediaRole, tuple[str, ...]], ...] = (
     (WanMediaRole.REFERENCE_IMAGE, ("reference_images", "reference_urls")),
     (WanMediaRole.REFERENCE_VIDEO, ("reference_videos",)),
-    (WanMediaRole.REFERENCE_VOICE, ("reference_voices",)),
 )
 
-# The order entries take in ``media``. The wire carries no role, so this is how
-# the provider can tell a first frame from a reference at all: the frame leads.
+# The voice timbre of the subject in a reference material. R2V nests it *inside*
+# the reference entry rather than carrying it as its own media entry, so it has
+# no role of its own — it is a property of a reference_image or reference_video.
+_VOICE_KEYS: tuple[str, ...] = ("reference_voice", "reference_voice_url", "voice_reference")
+
+# T2V's custom audio track. Its own ``input`` field, not a media entry.
+_AUDIO_URL_KEYS: tuple[str, ...] = ("audio_url", "custom_audio", "custom_audio_url")
+
+# The order entries take in ``media``. Position carries no meaning now that the
+# role is serialized, so this is determinism rather than protocol: one request
+# shape produces one payload, which is what makes idempotency keys and recorded
+# fixtures stable.
 _ROLE_ORDER: dict[WanMediaRole, int] = {
     WanMediaRole.FIRST_FRAME: 0,
     WanMediaRole.LAST_FRAME: 1,
     WanMediaRole.FIRST_CLIP: 2,
     WanMediaRole.REFERENCE_VIDEO: 3,
     WanMediaRole.REFERENCE_IMAGE: 4,
-    WanMediaRole.REFERENCE_VOICE: 5,
+    WanMediaRole.DRIVING_AUDIO: 5,
 }
 
-# What each Wan 2.7 model accepts, per the deployment documentation:
+# What each Wan 2.7 model accepts, per the published API references:
 #
-#   t2v  text, optionally images
-#   i2v  images and a clip to continue from, optionally text
-#   r2v  a first frame *together with* reference images/videos
+#   t2v  text and an optional custom audio track — no media array whatsoever
+#   i2v  a first frame or a first clip, optionally a last frame, optionally
+#        driving audio
+#   r2v  reference images/videos, optionally alongside one first frame
 #
-# R2V taking a first frame alongside its references is the point of the mode and
-# was previously modelled wrongly here: a start frame plus a reference video was
-# rejected as inexpressible when it is exactly what R2V is for.
-#
-# ``REFERENCE_VOICE`` appears in no mode, and that is the *declaration* speaking:
-# ``supports_reference_voice`` is false for Wan 2.7. The role and its
-# serialization exist anyway, so the day the capability is declared true the
-# wire can already carry it — see ``WanMedia.media_type``. What must never
-# happen is the pair drifting apart: a profile claiming voice reference while
-# the serializer silently drops it is the same defect class as the reference
-# images this adapter used to discard. ``test_model_routing_integrity`` binds
-# the two together.
+# Two entries here were wrong before and both were wrong in the same direction —
+# they advertised a reference image on a mode that has none. T2V's HTTP API
+# takes ``prompt``, ``negative_prompt`` and ``audio_url``: there is nowhere for
+# an image to go. I2V's material combinations are enumerated by the provider
+# and ``reference_image`` is not among them. A shot routed to either of those
+# with reference stills attached would have been billed with its references
+# discarded — the exact failure this table exists to prevent.
 #
 # A role outside the selected mode's set is rejected rather than dropped. That
 # is the difference between "this shot cannot be expressed on this model" and a
 # billed generation that quietly ignored half its inputs.
 _MODE_ROLES: dict[str, frozenset[WanMediaRole]] = {
-    "t2v": frozenset({WanMediaRole.REFERENCE_IMAGE}),
+    "t2v": frozenset(),
     "i2v": frozenset(
         {
             WanMediaRole.FIRST_FRAME,
             WanMediaRole.LAST_FRAME,
             WanMediaRole.FIRST_CLIP,
-            WanMediaRole.REFERENCE_IMAGE,
+            WanMediaRole.DRIVING_AUDIO,
         }
     ),
     "r2v": frozenset(
@@ -218,15 +229,36 @@ _MODE_ROLES: dict[str, frozenset[WanMediaRole]] = {
     ),
 }
 
+# I2V does not accept an arbitrary subset of its roles: the provider publishes a
+# closed list of material combinations. Holding it here is what stops a
+# plausible-looking request — driving audio with nothing to drive, a last frame
+# with no first — from being billed before the provider refuses it.
+_I2V_COMBINATIONS: tuple[frozenset[WanMediaRole], ...] = (
+    frozenset({WanMediaRole.FIRST_FRAME}),
+    frozenset({WanMediaRole.FIRST_FRAME, WanMediaRole.DRIVING_AUDIO}),
+    frozenset({WanMediaRole.FIRST_FRAME, WanMediaRole.LAST_FRAME}),
+    frozenset({WanMediaRole.FIRST_FRAME, WanMediaRole.LAST_FRAME, WanMediaRole.DRIVING_AUDIO}),
+    frozenset({WanMediaRole.FIRST_CLIP}),
+    frozenset({WanMediaRole.FIRST_CLIP, WanMediaRole.LAST_FRAME}),
+)
+
 # The capability axes this adapter can actually serialize, keyed by the profile
 # flag that authorises each. A flag set true with no mode carrying its role is a
 # lie the integrity gate refuses.
+#
+# ``supports_reference_voice`` is documented on the profile as "a voice or audio
+# asset the model conditions *on*", which is precisely what driving audio and an
+# R2V voice reference both are — as distinct from ``supports_audio``, which is
+# audio the model produces. One flag therefore authorises both audio-in axes.
 ROLE_CAPABILITY_FLAG: dict[WanMediaRole, str] = {
     WanMediaRole.FIRST_CLIP: "supports_video_extension",
+    WanMediaRole.DRIVING_AUDIO: "supports_reference_voice",
     WanMediaRole.REFERENCE_IMAGE: "supports_reference_image",
     WanMediaRole.REFERENCE_VIDEO: "supports_v2v",
-    WanMediaRole.REFERENCE_VOICE: "supports_reference_voice",
 }
+
+# The nested ``reference_voice`` rides the same declaration as driving audio.
+VOICE_CAPABILITY_FLAG = "supports_reference_voice"
 
 _REFERENCE_ROLES = frozenset({WanMediaRole.REFERENCE_IMAGE, WanMediaRole.REFERENCE_VIDEO})
 
@@ -234,6 +266,17 @@ _REFERENCE_ROLES = frozenset({WanMediaRole.REFERENCE_IMAGE, WanMediaRole.REFEREN
 # refused before it is billed rather than after.
 MAX_FIRST_FRAME = 1
 MAX_REFERENCE_ASSETS = 5
+MIN_REFERENCE_ASSETS = 1
+
+# Published duration bounds, in seconds. Wan 2.7 takes whole seconds only.
+#
+# The floor was declared as 1 and is 2; a shot asking for a single second was
+# routed here and refused by the provider. The ceiling is not one number: R2V
+# carrying a reference *video* tops out at 10 rather than 15, so it depends on
+# the request and cannot live in a static profile field alone.
+MIN_DURATION = 2
+MAX_DURATION = 15
+MAX_DURATION_WITH_REFERENCE_VIDEO = 10
 
 # Wan expresses framing through a resolution tier, not through the "720p" label
 # the platform's shot spec uses. The previous payload posted that label straight
@@ -256,22 +299,21 @@ class WanMedia:
 
     role: WanMediaRole
     url: str
-
-    @property
-    def media_type(self) -> str:
-        if self.role in _VIDEO_ROLES:
-            return "video"
-        if self.role in _AUDIO_ROLES:
-            return "audio"
-        return "image"
+    # R2V only: the audio URL fixing the timbre of the subject in this
+    # reference material. Nested here because that is where the protocol puts
+    # it — it is not a media entry of its own.
+    reference_voice: str = ""
 
     def as_payload(self) -> dict[str, str]:
-        """The two official fields. The role stays behind, on purpose."""
+        """The role is the wire contract, not internal state."""
 
-        return {"type": self.media_type, "url": self.url}
+        payload = {"type": self.role.value, "url": self.url}
+        if self.reference_voice:
+            payload["reference_voice"] = self.reference_voice
+        return payload
 
 
-def _fetchable(url: object, role: WanMediaRole) -> str:
+def _fetchable(url: object, role: WanMediaRole | str) -> str:
     """Wan fetches every reference itself, so anything else is unusable.
 
     An asset ID or a local path reaching this point means the Gateway did not
@@ -279,10 +321,11 @@ def _fetchable(url: object, role: WanMediaRole) -> str:
     provider cannot read.
     """
 
+    label = role.value if isinstance(role, WanMediaRole) else str(role)
     candidate = str(url).strip()
     if not candidate.lower().startswith(("http://", "https://")):
         raise _invalid(
-            f"Wan {role.value} must be a URL the provider can fetch, not {candidate[:60]!r}"
+            f"Wan {label} must be a URL the provider can fetch, not {candidate[:60]!r}"
         )
     return candidate
 
@@ -297,31 +340,41 @@ def collect_media(request: dict[str, Any]) -> list[WanMedia]:
     media: list[WanMedia] = []
     seen: set[tuple[WanMediaRole, str]] = set()
 
-    def add(role: WanMediaRole, value: object) -> None:
+    def add(role: WanMediaRole, value: object, voice: object = None) -> None:
         if value in (None, ""):
             return
         url = _fetchable(value, role)
         if (role, url) in seen:
             return
         seen.add((role, url))
-        media.append(WanMedia(role, url))
+        media.append(
+            WanMedia(
+                role,
+                url,
+                _voice_for(role, voice) if voice not in (None, "") else "",
+            )
+        )
 
     explicit = request.get("media")
     if isinstance(explicit, list):
         # An operator-supplied media array is authoritative; it is still
-        # validated so a malformed role cannot reach DashScope.
+        # validated so a malformed role cannot reach DashScope. Both spellings
+        # are read: ``role`` is this platform's internal name for the field and
+        # ``type`` is the provider's, and since the fix that made them the same
+        # string a caller writing the wire form directly is not wrong.
         for item in explicit:
             if not isinstance(item, dict):
                 raise _invalid("each Wan media entry must be an object")
+            named = str(item.get("role") or item.get("type") or "")
             try:
-                role = WanMediaRole(str(item.get("role") or ""))
+                role = WanMediaRole(named)
             except ValueError as exc:
                 raise _invalid(
-                    f"unknown Wan media role {item.get('role')!r}; expected one of "
+                    f"unknown Wan media role {named!r}; expected one of "
                     + ", ".join(sorted(role.value for role in WanMediaRole))
                 ) from exc
-            add(role, item.get("url"))
-        return media
+            add(role, item.get("url"), item.get("reference_voice"))
+        return _canonical(media)
 
     for role, keys in _SINGLE_ROLE_KEYS:
         for key in keys:
@@ -332,16 +385,61 @@ def collect_media(request: dict[str, Any]) -> list[WanMedia]:
         for key in keys:
             for item in request.get(key) or []:
                 add(role, item)
-    return _canonical(media)
+    return _attach_voice(request, _canonical(media))
+
+
+def _voice_for(role: WanMediaRole, value: object) -> str:
+    """A voice reference is a property of a *reference* material, nothing else."""
+
+    if role not in _REFERENCE_ROLES:
+        raise _invalid(
+            f"Wan carries reference_voice on a reference image or video, not on {role.value}"
+        )
+    return _fetchable(value, "reference_voice")
+
+
+def _attach_voice(request: dict[str, Any], media: list[WanMedia]) -> list[WanMedia]:
+    """Bind a flat ``reference_voice`` to the reference material it describes.
+
+    The flat request key exists because the platform's own compiler resolves one
+    voice per shot. It is only unambiguous while the shot carries one reference
+    material; with several, which subject's timbre it fixes is a question this
+    adapter cannot answer, so it asks rather than guessing — a voice attached to
+    the wrong plate is a billed generation with the wrong character speaking.
+    """
+
+    voice: object = None
+    for key in _VOICE_KEYS:
+        if request.get(key):
+            voice = request[key]
+            break
+    if voice in (None, ""):
+        return media
+    targets = [index for index, item in enumerate(media) if item.role in _REFERENCE_ROLES]
+    if not targets:
+        raise _invalid(
+            "Wan reference_voice fixes the timbre of a subject in a reference image or "
+            "video; this request carries neither"
+        )
+    if len(targets) > 1:
+        raise _invalid(
+            "Wan reference_voice belongs to one reference material and this request carries "
+            f"{len(targets)}; send `media` entries with their own reference_voice instead"
+        )
+    index = targets[0]
+    resolved = _voice_for(media[index].role, voice)
+    return [
+        WanMedia(item.role, item.url, resolved) if position == index else item
+        for position, item in enumerate(media)
+    ]
 
 
 def _canonical(media: list[WanMedia]) -> list[WanMedia]:
     """Order the array, then hold it to the published bounds.
 
-    Ordering is load-bearing rather than cosmetic: the role is not serialized,
-    so where an entry sits is the only way the provider can tell a first frame
-    from a reference. Sorting is stable, so the caller's own order survives
-    within a role.
+    Ordering is no longer load-bearing for meaning — every entry names its own
+    role — but it keeps one request shape producing one payload. Sorting is
+    stable, so the caller's own order survives within a role.
     """
 
     ordered = sorted(media, key=lambda item: _ROLE_ORDER[item.role])
@@ -363,12 +461,15 @@ def resolve_mode(request: dict[str, Any], media: list[WanMedia]) -> str:
     Precedence, highest first:
 
     1. an explicit ``mode`` in the request — the caller has already decided;
-    2. any video input, because only R2V ingests video at all;
-    3. a first or last frame, which is what I2V exists for;
-    4. reference stills, which are R2V's declared purpose — the platform's own
-       ``REFERENCE_TO_VIDEO`` policy resolves here rather than to T2V, whose
-       optional-images affordance is a secondary one;
-    5. text alone.
+    2. reference stills or videos, which are R2V's declared purpose — the
+       platform's own ``REFERENCE_TO_VIDEO`` policy resolves here;
+    3. any frame, clip or driving audio, which is I2V's matrix;
+    4. text alone.
+
+    Driving audio deliberately resolves to I2V rather than to T2V's custom audio
+    track. They are different instructions — one drives a performance, the other
+    plays over the result — and a request that names the first gets the first or
+    is refused by the combination check, never quietly downgraded to the second.
     """
 
     requested = str(request.get("mode") or request.get("wan_mode") or "").strip().lower()
@@ -379,16 +480,11 @@ def resolve_mode(request: dict[str, Any], media: list[WanMedia]) -> str:
             )
         return requested
     roles = {item.role for item in media}
-    if roles & {WanMediaRole.LAST_FRAME, WanMediaRole.FIRST_CLIP}:
-        # Only I2V brackets a shot between two frames, and continuation from a
-        # clip is an I2V operation: the clip is what the new footage grows out
-        # of, exactly as a first frame is.
-        return "i2v"
     if roles & _REFERENCE_ROLES:
         # References — with or without a first frame beside them — are R2V's
         # matrix.
         return "r2v"
-    if WanMediaRole.FIRST_FRAME in roles:
+    if roles:
         return "i2v"
     return "t2v"
 
@@ -398,12 +494,89 @@ def reject_unsupported_roles(mode: str, media: list[WanMedia]) -> None:
 
     accepted = _MODE_ROLES[mode]
     unsupported = sorted({item.role.value for item in media if item.role not in accepted})
-    if unsupported:
+    if not unsupported:
+        return
+    if not accepted:
         raise _invalid(
-            f"Wan {mode} does not accept {', '.join(unsupported)}; "
-            f"it accepts {', '.join(sorted(role.value for role in accepted))}. "
-            "Split the shot or select a mode that carries every input."
+            f"Wan {mode} accepts no media at all — it takes a prompt, a negative prompt "
+            f"and an optional audio_url — but this request carries {', '.join(unsupported)}. "
+            "Select a mode that carries every input."
         )
+    raise _invalid(
+        f"Wan {mode} does not accept {', '.join(unsupported)}; "
+        f"it accepts {', '.join(sorted(role.value for role in accepted))}. "
+        "Split the shot or select a mode that carries every input."
+    )
+
+
+def reject_unsupported_combination(mode: str, media: list[WanMedia]) -> None:
+    """Hold the request to the provider's published material combinations.
+
+    Role membership alone is not the whole rule. I2V enumerates its valid sets,
+    and R2V requires at least one reference material — a request that satisfies
+    neither is refused here rather than after it is billed.
+    """
+
+    roles = {item.role for item in media}
+    if mode == "i2v":
+        if roles in _I2V_COMBINATIONS:
+            return
+        combinations = "; ".join(
+            " + ".join(sorted(role.value for role in combination))
+            for combination in _I2V_COMBINATIONS
+        )
+        carried = ", ".join(sorted(role.value for role in roles)) or "no media"
+        raise _invalid(
+            f"Wan i2v accepts only these material combinations: {combinations}. "
+            f"This request carries {carried}."
+        )
+    if mode == "r2v":
+        references = sum(1 for item in media if item.role in _REFERENCE_ROLES)
+        if references < MIN_REFERENCE_ASSETS:
+            raise _invalid(
+                "Wan r2v needs at least one reference image or reference video; a first "
+                "frame on its own is an i2v shot"
+            )
+
+
+def max_duration_for(mode: str, media: list[WanMedia]) -> int:
+    """The ceiling this *particular* request is held to.
+
+    R2V carrying a reference video tops out at 10 seconds where everything else
+    reaches 15. A single declared maximum cannot express that, which is why the
+    check is here and not only in the registry profile.
+    """
+
+    if mode == "r2v" and any(item.role is WanMediaRole.REFERENCE_VIDEO for item in media):
+        return MAX_DURATION_WITH_REFERENCE_VIDEO
+    return MAX_DURATION
+
+
+def _duration(value: object, mode: str, media: list[WanMedia]) -> int:
+    """Whole seconds inside the bound that applies to this request."""
+
+    if isinstance(value, bool):
+        raise _invalid("Wan duration is a whole number of seconds")
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise _invalid(f"Wan duration is a whole number of seconds, not {value!r}") from exc
+    if seconds != int(seconds):
+        raise _invalid(f"Wan duration is a whole number of seconds, not {value!r}")
+    ceiling = max_duration_for(mode, media)
+    whole = int(seconds)
+    if whole < MIN_DURATION or whole > ceiling:
+        reason = (
+            " (an r2v shot carrying a reference video tops out there, not at "
+            f"{MAX_DURATION})"
+            if ceiling == MAX_DURATION_WITH_REFERENCE_VIDEO
+            else ""
+        )
+        raise _invalid(
+            f"Wan {mode} takes a duration of {MIN_DURATION}-{ceiling} seconds{reason}; "
+            f"this shot asks for {whole}"
+        )
+    return whole
 
 
 class WanProvider(GenerationProvider, ChatCapability):
@@ -527,8 +700,9 @@ class WanProvider(GenerationProvider, ChatCapability):
         media = collect_media(request)
         mode = resolve_mode(request, media)
         # Before anything is billed: every supplied input must be one this mode
-        # can actually carry.
+        # can actually carry, in a combination the provider publishes.
         reject_unsupported_roles(mode, media)
+        reject_unsupported_combination(mode, media)
         model = resolve_video_model(
             str(request.get("model") or ""),
             mode,
@@ -545,8 +719,15 @@ class WanProvider(GenerationProvider, ChatCapability):
             input_value = {}
             if prompt:
                 input_value["prompt"] = prompt
+            # `input`, not `parameters`. All three modes put it beside `prompt`.
+            negative_prompt = str(request.get("negative_prompt") or "").strip()
+            if negative_prompt:
+                input_value["negative_prompt"] = negative_prompt
             if media:
                 input_value["media"] = [item.as_payload() for item in media]
+            audio_url = _t2v_audio_url(request, mode)
+            if audio_url:
+                input_value["audio_url"] = audio_url
         return {
             "model": model,
             "input": input_value,
@@ -630,6 +811,30 @@ def _resolution(value: object) -> str:
     )
 
 
+def _t2v_audio_url(request: dict[str, Any], mode: str) -> str:
+    """T2V's custom audio track, which lives at ``input.audio_url``.
+
+    It exists on T2V and nowhere else. A request that carries one while routing
+    to I2V or R2V is refused rather than stripped: those modes carry audio too,
+    but as ``driving_audio`` and ``reference_voice``, and the three are not
+    interchangeable instructions.
+    """
+
+    for key in _AUDIO_URL_KEYS:
+        if request.get(key):
+            if mode != "t2v":
+                raise _invalid(
+                    f"Wan {mode} has no audio_url; it carries audio as "
+                    + (
+                        "a driving_audio media entry"
+                        if mode == "i2v"
+                        else "reference_voice on a reference material"
+                    )
+                )
+            return _fetchable(request[key], "audio_url")
+    return ""
+
+
 def _video_parameters(request: dict[str, Any], mode: str, media: list[WanMedia]) -> dict[str, Any]:
     """Wan's ``parameters`` block, which differs by mode.
 
@@ -642,6 +847,14 @@ def _video_parameters(request: dict[str, Any], mode: str, media: list[WanMedia])
     The conditional on R2V follows the same rule I2V does: a supplied first
     frame determines the aspect, so sending a ratio next to it asks for two
     different answers to one question.
+
+    Two fields this block used to carry are gone, because neither is a
+    ``parameters`` field in any published mode. ``negative_prompt`` belongs to
+    ``input``. ``audio`` was never a field at all: it was the shot's audio
+    *design* — a dict — posted verbatim, so every Wan request went out carrying
+    ``"audio": {}``. Wan's audio inputs are ``input.audio_url``,
+    ``driving_audio`` and ``reference_voice``, all of which are URLs and none of
+    which lives here.
     """
 
     existing = request.get("parameters")
@@ -655,17 +868,21 @@ def _video_parameters(request: dict[str, Any], mode: str, media: list[WanMedia])
         raise _invalid(
             "Wan takes a resolution tier, not a pixel size; remove `size` and set `resolution`"
         )
+    if request.get("audio") not in (None, "", {}):
+        raise _invalid(
+            "Wan has no `audio` parameter; send `audio_url` on t2v, `driving_audio` on i2v, "
+            "or `reference_voice` beside an r2v reference material"
+        )
     carries_first_frame = any(item.role is WanMediaRole.FIRST_FRAME for item in media)
     ratio = str(request.get("ratio") or request.get("aspect_ratio") or "").strip()
     if ratio and (mode == "t2v" or (mode == "r2v" and not carries_first_frame)):
         parameters["ratio"] = ratio
+    if request.get("duration") is not None:
+        parameters["duration"] = _duration(request["duration"], mode, media)
     for source, target in (
-        ("duration", "duration"),
         ("seed", "seed"),
         ("prompt_extend", "prompt_extend"),
         ("watermark", "watermark"),
-        ("audio", "audio"),
-        ("negative_prompt", "negative_prompt"),
     ):
         if request.get(source) is not None:
             parameters[target] = request[source]

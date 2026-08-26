@@ -35,6 +35,8 @@ class ModelCapabilityRegistryView(Protocol):
         self, provider: str, model_id: str, media_type: str
     ) -> ModelCapabilityProfileView: ...
 
+    def provider_enabled(self, provider: str) -> bool: ...
+
 
 class GenerationTargetError(LookupError):
     """A generation target is unknown or cannot be executed by this deployment."""
@@ -127,6 +129,15 @@ class ProviderRouter:
             raise GenerationTargetError(
                 "PROVIDER_NOT_REGISTERED",
                 f"selected provider is not registered: {provider}",
+            )
+        if (
+            self._capability_registry is not None
+            and hasattr(self._capability_registry, "provider_enabled")
+            and not self._capability_registry.provider_enabled(provider)
+        ):
+            raise GenerationTargetError(
+                "PROVIDER_DISABLED",
+                f"selected provider is disabled by platform operations: {provider}",
             )
         if (
             isinstance(implementation, NotConfiguredProvider)

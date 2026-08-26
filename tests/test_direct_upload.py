@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import time
 
 import pytest
 from media_service import (
@@ -54,6 +55,7 @@ class FakeObjectStore:
         self.presigned: list[str] = []
         self.head_calls = 0
         self.prefix_reads: list[int] = []
+        self.full_hash_reads = 0
         self.enforce_checksum = True
 
     def presigned_upload(self, key, *, sha256, mime_type, expires_in=900):  # type: ignore[no-untyped-def]
@@ -83,6 +85,13 @@ class FakeObjectStore:
         self.prefix_reads.append(length)
         entry = self.objects.get(key)
         return b"" if entry is None else entry[0][:length]
+
+    def content_sha256(self, key, *, max_bytes):  # type: ignore[no-untyped-def]
+        self.full_hash_reads += 1
+        entry = self.objects.get(key)
+        if entry is None or len(entry[0]) > max_bytes:
+            return None
+        return hashlib.sha256(entry[0]).hexdigest()
 
     def open(self, key, mode="rb"):  # type: ignore[no-untyped-def]
         raise AssertionError("a direct upload must never read the whole object through the API")
@@ -192,6 +201,33 @@ def test_bytes_that_do_not_match_the_declared_digest_never_land(
     upload = uploads.pending(authorized.upload_id)
     with pytest.raises(DirectUploadNotFinished, match="not present in storage"):
         uploads.verify_object(upload)
+
+
+def test_completion_hashes_the_object_when_the_store_does_not_enforce_sha256(
+    container,
+    project,
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    payload = _png()
+    service = DirectUploadService(
+        container.database,
+        store,
+        max_upload_bytes=64 * 1024 * 1024,
+        max_image_pixels=50_000_000,
+        verify_sha256_on_complete=True,
+    )
+    authorized = _authorize(service, project.id, payload)
+    store.enforce_checksum = False
+    assert store.client_put(
+        authorized.presigned.storage_key,
+        _png(64, 64),
+        "image/png",
+        declared_sha=hashlib.sha256(payload).hexdigest(),
+    )
+
+    with pytest.raises(DirectUploadNotFinished, match="SHA-256 does not match"):
+        service.verify_object(service.pending(authorized.upload_id))
+    assert store.full_hash_reads == 1
 
 
 def store_put_mismatch(authorized, uploads):  # type: ignore[no-untyped-def]
@@ -555,9 +591,7 @@ def _quota(container, workspace_id: str) -> tuple[int, int, list[str]]:  # type:
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         reservations = list(
-            session.scalars(
-                select(StorageReservation).where(StorageReservation.workspace_id == workspace_id)
-            )
+            session.scalars(select(StorageReservation).where(StorageReservation.workspace_id == workspace_id))
         )
         assert workspace is not None
         return (
@@ -674,9 +708,7 @@ def test_completing_before_the_put_lands_leaves_the_session_usable(container, st
 
         # The transfer the client was still running when it polled.
         assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
-        completed = client.post(
-            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
-        )
+        completed = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
         assert completed.status_code == 200, completed.text
         assert completed.json()["sha256"] == digest
 
@@ -790,12 +822,8 @@ def test_only_one_completion_settles_the_hold(container, store) -> None:  # type
         ).json()
         assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
 
-        first = client.post(
-            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
-        )
-        second = client.post(
-            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
-        )
+        first = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
+        second = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
         assert first.status_code == 200, first.text
         assert second.status_code == 200, second.text
         assert second.json()["id"] == first.json()["id"]
@@ -833,9 +861,7 @@ def test_a_failed_settlement_rolls_back_the_whole_completion(container, store, m
             raise RuntimeError("fixture settlement failure")
 
         monkeypatch.setattr(WorkspaceStorageQuota, "settle_in", fail_settle)
-        failed = client.post(
-            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
-        )
+        failed = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
         assert failed.status_code == 500
     finally:
         client.__exit__(None, None, None)
@@ -861,28 +887,63 @@ def test_a_lost_authorization_insert_race_replays_instead_of_erroring(  # type: 
     `authorize` reads for an existing row and inserts in two separate
     transactions. A concurrent first authorization landing in between made the
     loser's insert violate the unique constraint, and the raw `IntegrityError`
-    surfaced as a 500. Simulated here by hiding the winner from the read.
+    surfaced as a 500.
+
+    The race is produced, not described: the winner is hidden from the loser's
+    *first* lookup only, so the insert really does collide with
+    `uq_direct_upload_idempotency` and the recovery really does have to find the
+    winner on its second lookup. An earlier version of this test wrapped
+    `authorize` in a function that flipped a flag and then called through
+    unchanged — it hid nothing, raised no IntegrityError, and passed whether or
+    not the recovery path existed at all.
     """
 
     from media_service.direct_upload import DirectUploadService
+    from production_domain.models import DirectUpload
+    from sqlalchemy import func, select
 
     payload = _png()
     winner = _authorize(uploads, project.id, payload, idempotency_key="race-1")
 
-    hidden = {"once": True}
-    original = DirectUploadService.authorize
+    lookups = {"count": 0}
+    original = DirectUploadService._existing_authorization
 
-    def blind_read(self, **kwargs):  # type: ignore[no-untyped-def]
-        if hidden["once"]:
-            hidden["once"] = False
-        return original(self, **kwargs)
+    def blind_read(session, project_id, idempotency_key):  # type: ignore[no-untyped-def]
+        lookups["count"] += 1
+        if lookups["count"] == 1:
+            # The read happened before the winner committed.
+            return None
+        return original(session, project_id, idempotency_key)
 
-    # The second call reads before the winner is visible, then collides on the
-    # insert. Deleting the row from the read's view is what a real race does.
-    monkeypatch.setattr(DirectUploadService, "authorize", blind_read)
+    monkeypatch.setattr(
+        DirectUploadService, "_existing_authorization", staticmethod(blind_read)
+    )
+    collisions: list[str] = []
+    original_replay = DirectUploadService._replay
+
+    def counting_replay(self, upload, **kwargs):  # type: ignore[no-untyped-def]
+        collisions.append(upload.id)
+        return original_replay(self, upload, **kwargs)
+
+    monkeypatch.setattr(DirectUploadService, "_replay", counting_replay)
+
     loser = _authorize(uploads, project.id, payload, idempotency_key="race-1")
+    # Two lookups: the blinded one, then the recovery that found the winner.
+    assert lookups["count"] == 2
+    # And the answer came from the replay path, not from a second insert.
+    assert collisions == [winner.upload_id]
     assert loser.upload_id == winner.upload_id
     assert loser.presigned.storage_key == winner.presigned.storage_key
+
+    with container.database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count(DirectUpload.id)).where(
+                    DirectUpload.idempotency_key == "race-1"
+                )
+            )
+            == 1
+        )
 
 
 def test_the_sweeper_reclaims_a_window_the_client_never_came_back_to(container, store) -> None:  # type: ignore[no-untyped-def]
@@ -910,9 +971,7 @@ def test_the_sweeper_reclaims_a_window_the_client_never_came_back_to(container, 
             declared_sha=hashlib.sha256(payload).hexdigest(),
         )
         with container.database.session() as session:
-            session.get(DirectUpload, issued["upload_id"]).expires_at = datetime.now(
-                UTC
-            ) - timedelta(hours=2)
+            session.get(DirectUpload, issued["upload_id"]).expires_at = datetime.now(UTC) - timedelta(hours=2)
 
         assert _quota(container, workspace_id)[0] == len(payload)
 
@@ -968,9 +1027,9 @@ def test_the_sweeper_reports_a_stale_hold_rather_than_releasing_it(container, st
             idempotency_key="orphan-hold",
         )
         with container.database.session() as session:
-            session.get(StorageReservation, reservation.id).created_at = datetime.now(
-                UTC
-            ) - timedelta(hours=6)
+            session.get(StorageReservation, reservation.id).created_at = datetime.now(UTC) - timedelta(
+                hours=6
+            )
 
         body = client.post(
             "/internal/maintenance/expired-uploads",
@@ -1015,9 +1074,7 @@ def test_completion_uses_the_lineage_the_authorization_recorded(container, store
         assert issued.status_code == 201, issued.text
         issued = issued.json()
         assert store.client_put(issued["storage_key"], payload, "image/png", declared_sha=digest)
-        adopted = client.post(
-            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
-        )
+        adopted = client.post(f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers)
         assert adopted.status_code == 200, adopted.text
     finally:
         client.__exit__(None, None, None)
@@ -1056,3 +1113,408 @@ def test_local_disk_reports_that_direct_upload_is_unavailable(container, project
 
     assert response.status_code == 501
     assert "multipart upload endpoint" in response.json()["detail"]
+
+
+# --- Reclaiming an abandoned upload -----------------------------------------
+#
+# The sweep had the right effect and the wrong shape. It read expired rows with
+# no lock, released the hold in one transaction and abandoned the row in
+# another, which left this interleaving open:
+#
+# ```text
+# sweeper  reads the upload, still PENDING
+# complete locks the upload row and begins adopting it
+# sweeper  releases the reservation and commits
+# complete calls settle_in, finds it RELEASED -> StorageReservationConflict
+# ```
+#
+# A client that had uploaded correctly got a 500. These pin the fix: one
+# transaction per upload, the completion path's lock order, and the expiry
+# predicate re-read under the lock rather than trusted from the unlocked scan.
+
+
+def _expire(container, upload_id, *, hours: int = 2):  # type: ignore[no-untyped-def]
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import DirectUpload
+
+    with container.database.session() as session:
+        session.get(DirectUpload, upload_id).expires_at = datetime.now(UTC) - timedelta(hours=hours)
+
+
+def _sweep(container):  # type: ignore[no-untyped-def]
+    from media_service import WorkspaceStorageQuota, sweep_expired_uploads
+
+    return sweep_expired_uploads(
+        database=container.database,
+        uploads=container.direct_uploads,
+        quota=WorkspaceStorageQuota(container.database),
+    )
+
+
+def test_claiming_an_expired_upload_rechecks_the_predicate_under_the_lock(container, store) -> None:  # type: ignore[no-untyped-def]
+    """The unlocked scan proposes; the locked re-read decides.
+
+    Both ways a candidate can stop being sweepable between the two: a completion
+    moved it out of `PENDING`, and a re-authorization moved its window forward.
+    Acting on the scan's answer is exactly what let the sweep reclaim a hold a
+    completion already owned.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "recheck@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "recheck-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        upload_id = issued["upload_id"]
+        _expire(container, upload_id)
+
+        # It is a candidate right now.
+        assert container.direct_uploads.expired() == [upload_id]
+
+        # A completion got there first.
+        with container.database.session() as session:
+            session.get(DirectUpload, upload_id).status = DirectUploadStatus.COMPLETED.value
+        with container.database.session() as session:
+            claim = container.direct_uploads.claim_expired(session, upload_id)
+        assert claim.claimed is False
+        with container.database.session() as session:
+            assert session.get(DirectUpload, upload_id).status == DirectUploadStatus.COMPLETED.value
+
+        # And a window that moved forward is a live session, not the sweeper's.
+        with container.database.session() as session:
+            row = session.get(DirectUpload, upload_id)
+            row.status = DirectUploadStatus.PENDING.value
+            row.expires_at = datetime.now(UTC) + timedelta(hours=1)
+        with container.database.session() as session:
+            assert container.direct_uploads.claim_expired(session, upload_id).claimed is False
+
+        # The hold is untouched throughout.
+        assert _quota(container, workspace_id)[0] == len(payload)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_the_abandon_and_the_release_commit_together_or_not_at_all(  # type: ignore[no-untyped-def]
+    container, store, monkeypatch
+) -> None:
+    """A hold that cannot be released leaves the row sweepable, not half-swept.
+
+    The old sweep abandoned in a second transaction, so a failed release still
+    produced `ABANDONED` + `RESERVED` — a row nothing would ever look at again
+    holding capacity nothing would ever give back.
+    """
+
+    from media_service import StorageReservationConflict, WorkspaceStorageQuota
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "atomic@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "atomic-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        upload_id = issued["upload_id"]
+        _expire(container, upload_id)
+
+        def refuse(self, session, reservation_id):  # type: ignore[no-untyped-def]
+            raise StorageReservationConflict("workspace storage counters changed unexpectedly")
+
+        monkeypatch.setattr(WorkspaceStorageQuota, "release_in", refuse)
+        result = _sweep(container)
+        assert result.swept == []
+        assert [item["upload_id"] for item in result.contended] == [upload_id]
+
+        with container.database.session() as session:
+            assert session.get(DirectUpload, upload_id).status == DirectUploadStatus.PENDING.value
+        assert _quota(container, workspace_id) == (len(payload), 0, ["RESERVED"])
+
+        # The next sweep, with the conflict gone, finishes the job.
+        monkeypatch.undo()
+        result = _sweep(container)
+        assert [item["upload_id"] for item in result.swept] == [upload_id]
+        assert result.swept[0]["reservation_released"] is True
+        with container.database.session() as session:
+            assert session.get(DirectUpload, upload_id).status == DirectUploadStatus.ABANDONED.value
+        assert _quota(container, workspace_id) == (0, 0, ["RELEASED"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_completed_upload_is_never_swept_even_once_its_window_closed(container, store) -> None:  # type: ignore[no-untyped-def]
+    """Expiry is about the presigned PUT, not about the asset it produced."""
+
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "done@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "done-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        assert store.client_put(
+            issued["storage_key"],
+            payload,
+            "image/png",
+            declared_sha=hashlib.sha256(payload).hexdigest(),
+        )
+        completed = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert completed.status_code == 200, completed.text
+        _expire(container, issued["upload_id"])
+
+        result = _sweep(container)
+        assert result.swept == []
+        with container.database.session() as session:
+            row = session.get(DirectUpload, issued["upload_id"])
+            assert row.status == DirectUploadStatus.COMPLETED.value
+        # Settled, not released: the bytes are real and accounted for.
+        assert _quota(container, workspace_id) == (0, len(payload), ["SETTLED"])
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_reservation_conflict_on_completion_answers_409_not_500(  # type: ignore[no-untyped-def]
+    container, store, monkeypatch
+) -> None:
+    """Settlement is fail-closed, so a conflict must stay an answer.
+
+    The expiry sweep was the reachable cause and no longer races here, but a
+    conflict raised out of `settle_in` used to leave the endpoint with no
+    handler at all: the client that had uploaded correctly saw a stack trace.
+    """
+
+    from media_service import StorageReservationConflict, WorkspaceStorageQuota
+    from production_domain.models import DirectUpload, DirectUploadStatus, MediaAsset
+    from sqlalchemy import func, select
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "conflict@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "conflict-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        assert store.client_put(
+            issued["storage_key"],
+            payload,
+            "image/png",
+            declared_sha=hashlib.sha256(payload).hexdigest(),
+        )
+
+        def conflict(self, session, reservation_id, **kwargs):  # type: ignore[no-untyped-def]
+            raise StorageReservationConflict("released reservation cannot be settled")
+
+        monkeypatch.setattr(WorkspaceStorageQuota, "settle_in", conflict)
+        response = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        assert response.status_code == 409
+        assert "cannot be settled" in response.json()["detail"]
+    finally:
+        client.__exit__(None, None, None)
+
+    # The transaction rolled back: no asset, and no half-moved upload row.
+    with container.database.session() as session:
+        assert session.scalar(select(func.count(MediaAsset.id))) == 0
+        assert (
+            session.get(DirectUpload, issued["upload_id"]).status
+            != DirectUploadStatus.COMPLETED.value
+        )
+
+
+def test_the_worker_runs_the_sweep_on_its_own_schedule(container, store) -> None:  # type: ignore[no-untyped-def]
+    """"The sweep exists" and "the sweep runs" were two different claims.
+
+    Only the first was true: `POST /internal/maintenance/expired-uploads` made
+    an abandoned upload reclaimable and nothing called it, so in production the
+    hold still sat there until an operator remembered. The worker loop is what
+    closes it, and it runs the same implementation the endpoint does.
+    """
+
+    from generation_gateway.worker import sweep_expired_uploads_once
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "worker@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "worker-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        _expire(container, issued["upload_id"])
+        assert _quota(container, workspace_id)[0] == len(payload)
+
+        assert sweep_expired_uploads_once(container) == 1
+
+        with container.database.session() as session:
+            assert (
+                session.get(DirectUpload, issued["upload_id"]).status
+                == DirectUploadStatus.ABANDONED.value
+            )
+        assert _quota(container, workspace_id) == (0, 0, ["RELEASED"])
+        # Idempotent, because the loop will call it again in five minutes.
+        assert sweep_expired_uploads_once(container) == 0
+    finally:
+        client.__exit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_the_worker_loop_sweeps_on_its_interval_and_survives_a_failure() -> None:
+    """The loop must schedule it, and maintenance must never take the loop down."""
+
+    import asyncio
+    from types import SimpleNamespace
+
+    from generation_gateway import worker as worker_module
+
+    settings = SimpleNamespace(
+        worker_poll_interval_seconds=0,
+        expired_upload_sweep_interval_seconds=3600,
+        expired_upload_sweep_limit=200,
+        storage_reservation_stale_after_seconds=86_400,
+    )
+    container = SimpleNamespace(
+        settings=settings,
+        gateway=SimpleNamespace(recover_after_restart=lambda: None),
+    )
+    calls = {"sweeps": 0, "jobs": 0}
+
+    def exploding_sweep(_container):  # type: ignore[no-untyped-def]
+        calls["sweeps"] += 1
+        raise RuntimeError("object storage is unreachable")
+
+    async def no_jobs(_container):  # type: ignore[no-untyped-def]
+        calls["jobs"] += 1
+        if calls["jobs"] >= 3:
+            raise asyncio.CancelledError
+        return False
+
+    worker_module.sweep_expired_uploads_once = exploding_sweep  # type: ignore[assignment]
+    worker_module.process_next_job = no_jobs  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await worker_module.run_loop(container)
+    finally:
+        importlib_reload = __import__("importlib").reload
+        importlib_reload(worker_module)
+
+    # Due immediately on start — a worker that restarts often would otherwise
+    # never reach its first sweep — and once only, on an hour's interval.
+    assert calls["sweeps"] == 1
+    # And the job loop kept running through the failure.
+    assert calls["jobs"] == 3
+
+
+@pytest.mark.postgres_only
+def test_the_sweep_blocks_behind_a_completion_that_already_owns_the_row(  # type: ignore[no-untyped-def]
+    container, store, monkeypatch
+) -> None:
+    """The reported interleaving, forced rather than left to scheduling.
+
+    The sweeper is released at the exact moment the completion holds the upload
+    row and is about to settle its hold — the window the old sweep drove
+    straight through, because it took the reservation without ever touching the
+    row. Now `claim_expired` asks for the same row first, so the sweeper waits,
+    and by the time it reads the row the completion has committed and the row
+    says `COMPLETED`.
+
+    Needs two transactions genuinely running at once, which is why it is
+    PostgreSQL-only: SQLite serialises them and the situation cannot be built.
+    """
+
+    import threading
+
+    from media_service import WorkspaceStorageQuota
+    from production_domain.models import DirectUpload, DirectUploadStatus
+
+    payload = _png()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    client, headers, project_id, workspace_id = _workspace_client(container, "race@example.com")
+    try:
+        issued = client.post(
+            "/v1/assets/uploads",
+            headers={**headers, "Idempotency-Key": "sweep-race-1"},
+            json=_authorize_request(project_id, payload),
+        ).json()
+        assert store.client_put(
+            issued["storage_key"],
+            payload,
+            "image/png",
+            declared_sha=hashlib.sha256(payload).hexdigest(),
+        )
+        # The window closed while the client was still finishing. Completing is
+        # still correct — the object is there — and this is what makes the row a
+        # sweep candidate and a completion candidate at the same instant.
+        _expire(container, issued["upload_id"])
+
+        completion_holds_the_row = threading.Event()
+        swept: dict[str, object] = {}
+
+        def sweeper() -> None:
+            completion_holds_the_row.wait(10)
+            swept["result"] = _sweep(container)
+
+        original_settle = WorkspaceStorageQuota.settle_in
+
+        def settle_with_a_sweeper_racing(self, session, reservation_id, **kwargs):  # type: ignore[no-untyped-def]
+            completion_holds_the_row.set()
+            # Long enough for the sweeper to read its candidates and block on
+            # the row lock this transaction is holding.
+            time.sleep(0.5)
+            return original_settle(self, session, reservation_id, **kwargs)
+
+        monkeypatch.setattr(WorkspaceStorageQuota, "settle_in", settle_with_a_sweeper_racing)
+        thread = threading.Thread(target=sweeper, daemon=True)
+        thread.start()
+        response = client.post(
+            f"/v1/assets/uploads/{issued['upload_id']}/complete", headers=headers
+        )
+        thread.join(20)
+        assert not thread.is_alive()
+    finally:
+        client.__exit__(None, None, None)
+
+    # The client uploaded correctly and is told so. This was the 500.
+    assert response.status_code == 200, response.text
+    # The sweeper found the row already owned and left it alone.
+    assert swept["result"].swept == []
+    assert [item["upload_id"] for item in swept["result"].contended] == [issued["upload_id"]]
+    with container.database.session() as session:
+        assert (
+            session.get(DirectUpload, issued["upload_id"]).status
+            == DirectUploadStatus.COMPLETED.value
+        )
+    # Settled, never released: no torn PENDING/RELEASED pair, no unaccounted bytes.
+    assert _quota(container, workspace_id) == (0, len(payload), ["SETTLED"])

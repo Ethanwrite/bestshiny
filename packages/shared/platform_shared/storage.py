@@ -82,6 +82,10 @@ class StorageProvider(Protocol):
         """The first ``length`` bytes, for header validation without a full read."""
         ...
 
+    def content_sha256(self, key: str, *, max_bytes: int) -> str | None:
+        """Hash the stored bytes, or return None when they cannot be read safely."""
+        ...
+
     def presigned_reference_url(
         self,
         key: str,
@@ -170,6 +174,20 @@ class LocalStorage:
         with self.open(key, "rb") as stream:
             return stream.read(max(0, length))
 
+    def content_sha256(self, key: str, *, max_bytes: int) -> str | None:
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with self.open(key, "rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        return None
+                    digest.update(chunk)
+        except (OSError, ValueError):
+            return None
+        return digest.hexdigest()
+
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject:
         safe_name = Path(filename).name or "asset.bin"
         suffix = Path(safe_name).suffix.lower()
@@ -215,6 +233,7 @@ class LocalStorage:
 
     def open(self, key: str, mode: str = "rb") -> BinaryIO:
         return cast(BinaryIO, self.path_for(key).open(mode))
+
 
 def _reference_signature(key: str, expires_at: int, signing_key: str) -> str:
     payload = f"{key}\n{expires_at}".encode()
@@ -289,7 +308,20 @@ class S3CompatibleStorage:
             region_name=region,
             aws_access_key_id=access_key_id or None,
             aws_secret_access_key=secret_access_key or None,
-            config=Config(s3={"addressing_style": addressing_style}),
+            config=Config(
+                s3={"addressing_style": addressing_style},
+                # botocore >= 1.36 adds a CRC32 trailer to every upload by
+                # default, which puts the body on the wire as
+                # STREAMING-UNSIGNED-PAYLOAD-TRAILER aws-chunked encoding.
+                # Alibaba OSS does not implement that encoding and answers
+                # PutObject with `NotImplemented`, so the default breaks every
+                # write. "when_required" still sends a checksum whenever the
+                # caller asks for one explicitly — which is exactly what
+                # `enforce_checksum` does on the presigned path below — so the
+                # integrity guarantee is unchanged; only the implicit trailer
+                # on plain uploads goes away.
+                request_checksum_calculation="when_required",
+            ),
         )
         # `x-amz-checksum-sha256` is what makes a client-declared digest safe to
         # content-address a key with: the store rejects bytes that do not hash to
@@ -358,9 +390,11 @@ class S3CompatibleStorage:
         fetch passes through the API process.
         """
 
+        # The object was stored with validated Content-Type metadata. Do not
+        # add S3's response-content-type override: Alibaba's S3-compatible
+        # endpoint signs it but rejects the resulting GET with HTTP 400.
+        del mime_type
         params: dict[str, str] = {"Bucket": self.bucket, "Key": key}
-        if mime_type:
-            params["ResponseContentType"] = mime_type
         try:
             url = self.client.generate_presigned_url(
                 "get_object",
@@ -435,10 +469,32 @@ class S3CompatibleStorage:
         if length <= 0:
             return b""
         try:
-            response = self.client.get_object(
-                Bucket=self.bucket, Key=key, Range=f"bytes=0-{length - 1}"
-            )
+            response = self.client.get_object(Bucket=self.bucket, Key=key, Range=f"bytes=0-{length - 1}")
         except Exception:
             return b""
         body = response.get("Body")
         return bytes(body.read()) if body is not None else b""
+
+    def content_sha256(self, key: str, *, max_bytes: int) -> str | None:
+        """Stream and hash the remote object without trusting a local cache."""
+
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+        except Exception:
+            return None
+        body = response.get("Body")
+        if body is None:
+            return None
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            while chunk := body.read(1024 * 1024):
+                size += len(chunk)
+                if size > max_bytes:
+                    return None
+                digest.update(chunk)
+        except Exception:
+            return None
+        finally:
+            body.close()
+        return digest.hexdigest()

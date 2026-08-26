@@ -13,21 +13,21 @@ client ──2. PUT bytes──► object storage
 client ──3. complete───► API        (HEAD + bounded header read, register)
 ```
 
-Two things make phase 3 trustworthy without reading the object:
+Two things make phase 3 trustworthy:
 
 - the **size** comes from the store's own `HEAD`, never from the client;
-- the **digest** is bound into the presigned PUT, so the store rejects bytes
-  that do not hash to it. That is what allows a client-declared SHA-256 to
-  content-address the key.
+- the **digest** is either enforced by the store or, for compatible stores such
+  as Alibaba OSS that accept but ignore the S3 checksum header, verified by one
+  full read before the content-addressed key is adopted.
 
-What is deliberately given up is the full decode that the multipart path
+What is deliberately given up is the full media decode that the multipart path
 performs. A truncated file passes header validation and fails at first use,
-where `RenditionResolver` already decodes and raises. Pulling every upload back
-through the API to catch it one step earlier would undo the whole point.
+where `RenditionResolver` already decodes and raises.
 """
 
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -86,6 +86,22 @@ class AuthorizedUpload:
 
 
 @dataclass(frozen=True)
+class ExpiredUploadClaim:
+    """Exclusive ownership of one expired upload, plus what it left behind."""
+
+    claimed: bool
+    upload_id: str = ""
+    project_id: str = ""
+    storage_key: str = ""
+    expires_at: datetime | None = None
+    reservation_id: str | None = None
+    # An upload that registered its asset and then failed to settle keeps its
+    # hold on purpose: the bytes are real and something must still account for
+    # them. Only a hold with nothing behind it is the sweeper's to release.
+    media_asset_id: str | None = None
+
+
+@dataclass(frozen=True)
 class CompletionClaim:
     """Who owns this completion, and what they must settle."""
 
@@ -109,12 +125,14 @@ class DirectUploadService:
         max_upload_bytes: int,
         max_image_pixels: int,
         ttl_seconds: int = 3600,
+        verify_sha256_on_complete: bool = False,
     ):
         self.database = database
         self.storage = storage
         self.max_upload_bytes = max(1, max_upload_bytes)
         self.max_image_pixels = max(1, max_image_pixels)
         self.ttl_seconds = max(60, ttl_seconds)
+        self.verify_sha256_on_complete = verify_sha256_on_complete
 
     @staticmethod
     def _storage_key(sha256: str, filename: str) -> str:
@@ -159,12 +177,7 @@ class DirectUploadService:
         storage_key = self._storage_key(digest, safe_name)
 
         with self.database.session() as session:
-            existing_upload = session.scalar(
-                select(DirectUpload).where(
-                    DirectUpload.project_id == project_id,
-                    DirectUpload.idempotency_key == idempotency_key,
-                )
-            )
+            existing_upload = self._existing_authorization(session, project_id, idempotency_key)
             duplicate = session.scalar(
                 select(MediaAsset).where(
                     MediaAsset.project_id == project_id,
@@ -174,8 +187,6 @@ class DirectUploadService:
                 )
             )
             duplicate_id = duplicate.id if duplicate else None
-            if existing_upload is not None:
-                session.expunge(existing_upload)
 
         if existing_upload is not None:
             return self._replay(
@@ -223,15 +234,9 @@ class DirectUploadService:
             # backed project is serialized earlier by the reservation's unique
             # constraint; a project with no workspace has no such guard.
             with self.database.session() as session:
-                winner = session.scalar(
-                    select(DirectUpload).where(
-                        DirectUpload.project_id == project_id,
-                        DirectUpload.idempotency_key == idempotency_key,
-                    )
-                )
+                winner = self._existing_authorization(session, project_id, idempotency_key)
                 if winner is None:
                     raise
-                session.expunge(winner)
             return self._replay(
                 winner,
                 digest=digest,
@@ -241,6 +246,28 @@ class DirectUploadService:
                 duplicate_id=duplicate_id,
             )
         return AuthorizedUpload(upload_id, presigned, expires_at, duplicate_id)
+
+    @staticmethod
+    def _existing_authorization(
+        session: Session, project_id: str, idempotency_key: str
+    ) -> DirectUpload | None:
+        """The row `uq_direct_upload_idempotency` will collide with, if it exists.
+
+        One definition, read twice: once before inserting and once after losing
+        the insert. Keeping it a single seam is also what lets a test hide the
+        winner from the *first* read only, which is the whole shape of the race —
+        a test that cannot hide it proves nothing about the recovery path.
+        """
+
+        row = session.scalar(
+            select(DirectUpload).where(
+                DirectUpload.project_id == project_id,
+                DirectUpload.idempotency_key == idempotency_key,
+            )
+        )
+        if row is not None:
+            session.expunge(row)
+        return row
 
     def _presign(self, storage_key: str, digest: str, mime_type: str, expires_in: int) -> PresignedUpload:
         presigned = self.storage.presigned_upload(
@@ -271,9 +298,7 @@ class DirectUploadService:
         if upload.sha256 != digest or upload.asset_type != asset_type or upload.storage_key != storage_key:
             raise DirectUploadConflict("Idempotency-Key was already used for a different upload")
         if upload.status != DirectUploadStatus.PENDING.value:
-            raise DirectUploadConflict(
-                f"this upload is {upload.status.lower()} and cannot be re-authorized"
-            )
+            raise DirectUploadConflict(f"this upload is {upload.status.lower()} and cannot be re-authorized")
         expires_at = _aware(upload.expires_at)
         # The row's deadline is authoritative, so a replay is presigned for the
         # time that is left rather than a fresh full TTL. Handing out a URL that
@@ -282,15 +307,12 @@ class DirectUploadService:
         expires_in = int((expires_at - utcnow()).total_seconds())
         if expires_in <= 0:
             raise DirectUploadExpired(
-                "the authorized upload window has closed; authorize again with a new "
-                "Idempotency-Key"
+                "the authorized upload window has closed; authorize again with a new Idempotency-Key"
             )
         presigned = self._presign(storage_key, digest, mime_type, expires_in)
         return AuthorizedUpload(upload.id, presigned, expires_at, duplicate_id)
 
-    def find_by_idempotency_key(
-        self, *, project_id: str, idempotency_key: str
-    ) -> DirectUpload | None:
+    def find_by_idempotency_key(self, *, project_id: str, idempotency_key: str) -> DirectUpload | None:
         """The upload this key already authorized, whatever state it is in.
 
         A caller holding a quota reservation needs this *before* it reserves:
@@ -331,6 +353,19 @@ class DirectUploadService:
             )
         if stat.size > self.max_upload_bytes:
             raise StorageLimitExceeded(self.max_upload_bytes)
+        if self.verify_sha256_on_complete:
+            actual_sha256 = self.storage.content_sha256(
+                upload.storage_key,
+                max_bytes=self.max_upload_bytes,
+            )
+            if actual_sha256 is None:
+                raise DirectUploadNotFinished(
+                    "the uploaded object could not be fully read for SHA-256 verification"
+                )
+            if not hmac.compare_digest(actual_sha256, upload.sha256):
+                raise DirectUploadNotFinished(
+                    "the uploaded object SHA-256 does not match the authorized digest"
+                )
         header = self.storage.read_prefix(upload.storage_key, MEDIA_HEADER_BYTES)
         if not header:
             raise DirectUploadNotFinished("the uploaded object could not be read back")
@@ -380,21 +415,25 @@ class DirectUploadService:
         upload.status = DirectUploadStatus.COMPLETED.value
         upload.media_asset_id = media_asset_id
 
-    def expired(self, *, limit: int = 200, now: datetime | None = None) -> list[DirectUpload]:
-        """`PENDING` uploads whose authorized window has closed.
+    def expired(self, *, limit: int = 200, now: datetime | None = None) -> list[str]:
+        """IDs of `PENDING` uploads whose authorized window has closed.
 
         These can never complete: the presigned PUT they were issued has
         expired, so no object can still arrive under that authorization. Until
         something sweeps them the row, its quota hold and any object the client
         did manage to write all persist forever — `expires_at` was written and
         indexed and nothing ever read it.
+
+        Deliberately only *candidates*. This query takes no lock, so by the time
+        the caller acts on a row a completion may already own it; `claim_expired`
+        re-reads the same predicate under the row lock and is the authority.
         """
 
         deadline = now or utcnow()
         with self.database.session() as session:
-            rows = list(
+            return list(
                 session.scalars(
-                    select(DirectUpload)
+                    select(DirectUpload.id)
                     .where(
                         DirectUpload.status == DirectUploadStatus.PENDING.value,
                         DirectUpload.expires_at < deadline,
@@ -403,13 +442,60 @@ class DirectUploadService:
                     .limit(max(1, limit))
                 )
             )
-            for row in rows:
-                session.expunge(row)
-            return rows
+
+    def claim_expired(
+        self, session: Session, upload_id: str, *, now: datetime | None = None
+    ) -> ExpiredUploadClaim:
+        """Take exclusive ownership of one expired upload and abandon it.
+
+        Deliberately the same shape and the same **lock order** as
+        `claim_completion`: the `DirectUpload` row first, and the caller takes
+        the storage reservation second, inside the same transaction.
+
+        The sweep used to do neither. It read expired rows with no lock,
+        released the hold in one transaction and abandoned the row in another,
+        which left this interleaving open:
+
+        ```text
+        sweeper  reads upload, still PENDING
+        complete locks the upload row and begins adopting it
+        sweeper  releases the reservation and commits
+        complete calls settle_in, finds it RELEASED -> StorageReservationConflict
+        ```
+
+        The completion then rolled back and answered 500 for an upload the
+        client had finished correctly. Holding the row lock first makes the two
+        paths serialise: whichever arrives second sees the state the first
+        committed, and the `PENDING`/expiry predicate is re-checked here rather
+        than trusted from the unlocked read.
+        """
+
+        upload = session.get(DirectUpload, upload_id, with_for_update=True)
+        if upload is None:
+            return ExpiredUploadClaim(False)
+        if upload.status != DirectUploadStatus.PENDING.value:
+            # A completion won the race. Its own transaction owns the hold.
+            return ExpiredUploadClaim(False)
+        if _aware(upload.expires_at) >= (now or utcnow()):
+            # Re-authorization can move the window forward while the candidate
+            # list is in flight; a live session is not the sweeper's to close.
+            return ExpiredUploadClaim(False)
+        upload.status = DirectUploadStatus.ABANDONED.value
+        claim = ExpiredUploadClaim(
+            True,
+            upload_id=upload.id,
+            project_id=upload.project_id,
+            storage_key=upload.storage_key,
+            expires_at=_aware(upload.expires_at),
+            reservation_id=upload.storage_reservation_id,
+            media_asset_id=upload.media_asset_id,
+        )
+        session.flush()
+        return claim
 
     def abandon(self, upload_id: str) -> None:
         with self.database.session() as session:
-            upload = session.get(DirectUpload, upload_id)
+            upload = session.get(DirectUpload, upload_id, with_for_update=True)
             if upload is None or upload.status != DirectUploadStatus.PENDING.value:
                 return
             upload.status = DirectUploadStatus.ABANDONED.value
@@ -422,6 +508,7 @@ def _aware(value: datetime) -> datetime:
 __all__ = [
     "AuthorizedUpload",
     "CompletionClaim",
+    "ExpiredUploadClaim",
     "DirectUploadConflict",
     "DirectUploadExpired",
     "DirectUploadNotFinished",

@@ -152,31 +152,123 @@ WAN_VIDEO_MODEL_KEYS=wan-3.0=<the model ID DashScope issues you>
 The model definition and its FALLBACK binding stay registered meanwhile — the router and the
 capability resolver read them as capability records, exactly as `VIDEO_GROK` and `VIDEO_VEO` do.
 
-### 1.10 Layer 2 is on, but lock your styles *after* going live
+### 1.13 Two open items on the model registry
 
-`FEATURE_SEMANTIC_STYLE_LOCK` is now `true` and `STYLE_SEMANTIC_EMBEDDING` resolves to
-`google/gemini-embedding-2`. **It cannot run yet**: while `PROVIDER_MODE=mock` the embedding
-call reaches no model, so a lock made today carries a single layer and records why in
-`metadata_json.semantic_layer_absent_reason`.
+**Veo envelope confirmed.** `google/veo-3.1`, `google/veo-3.1-fast` and `google/veo-3.1-lite` were added on
+2026-08-25 from operator-supplied ids: 4/6/8s, 720p/1080p, text and image input, first/last frame, and
+synced audio on all three variants. Audio was declared on the main variant first and extended to Fast and
+Lite once the operator confirmed it — under-declaration costs a capability, over-declaration costs a billed
+request that fails at the provider, so the order was deliberate.
 
-`ProjectStyleLock` is append-only and a database trigger forbids re-locking, so **a style locked
-before layer 2 can run keeps the single gate permanently.** If the two-layer gate matters for a
-project, do not lock its style until `PROVIDER_MODE=live`.
+**They are `enabled` but not `live_enabled`.** A newly seeded model does not open itself; adding a
+credential never does either (§2.5). One call opens all three, since `OPENROUTER_API_KEY` is present:
 
-Two consequences of the layer itself, now that it is enabled:
+```bash
+curl -XPOST -H "Authorization: Bearer $PLATFORM_API_KEY" \
+  "localhost:8080/internal/models/reconcile-live?apply=true"
+```
 
-- **Cost.** One `google/gemini-embedding-2` call per locked style, and one per evaluated
-  candidate. Roughly USD 0.00045 per image, so a 60-episode series at a few hundred candidates
-  is cents, not dollars — but it is a per-candidate paid call on the commit path.
-- **Meaning.** It changes what "committable" is. A candidate that layer 1 passes can now fail
-  on rendering medium, and a candidate whose semantic evidence is unavailable becomes
-  `REVIEW_REQUIRED` rather than passing. That is the intended behaviour — a missing second
-  opinion is not a passing one — but it means an outage at the embedding provider turns into a
-  review queue rather than silent approval.
+Run it without `?apply=true` first to see what it would change.
 
-`semantic_similarity_threshold` defaults to 0.80 and is uncalibrated — the model has never been
-called, so the real distribution of its similarity scores is unknown. Expect to tune it against
-the first live batch rather than trusting the default.
+**No live call has been made through the OpenRouter video route for Veo.** Kling and Grok Imagine already
+use `POST /videos` on OpenRouter, so the transport is exercised; these three model ids are not. The first
+call is also the first verification.
+
+### 1.10 Layer 2 is on, and locking now refuses rather than degrades
+
+`FEATURE_SEMANTIC_STYLE_LOCK` is `true` and `STYLE_SEMANTIC_EMBEDDING` resolves to
+`google/gemini-embedding-2`. As of 2026-08-25 this is **enforced, not advised**: if the embedding call cannot
+produce a reference, the lock is refused — `503` when the model was unreachable, `409` when the reference
+media could not be read — and nothing is written. The project stays lockable.
+
+That replaces the standing warning that used to live here. Previously a lock made while layer 2 could not run
+committed anyway with one layer, and since `ProjectStyleLock` is append-only and a database trigger forbids
+re-locking, **that single gate was permanent**. The advice was to lock only after going live; the code now
+enforces it.
+
+`scripts/preflight_live.py` reports the state of this path before you try:
+
+```bash
+.venv/bin/python scripts/preflight_live.py
+```
+
+It currently says `AT RISK` — the gate is open and `OPENROUTER_API_KEY` is set, but
+`google/gemini-embedding-2` has still never been called (§3.2, §3.5), so the first lock attempt is also the
+first live exercise of that model. A refused lock costs nothing and can be retried; locking is the one action
+in this system that cannot be undone.
+
+Two consequences of the layer itself:
+
+- **Cost.** One `google/gemini-embedding-2` call per locked style, and one per evaluated candidate. Roughly
+  USD 0.00045 per image, so a 60-episode series at a few hundred candidates is cents, not dollars — but it is
+  a per-candidate paid call on the commit path.
+- **Meaning.** It changes what "committable" is. A candidate that layer 1 passes can now fail on rendering
+  medium, and a candidate whose semantic evidence is unavailable becomes `REVIEW_REQUIRED` rather than
+  passing. That is the intended behaviour — a missing second opinion is not a passing one — but it means an
+  outage at the embedding provider turns into a review queue rather than silent approval.
+
+`semantic_similarity_threshold` defaults to 0.80 and is uncalibrated — the model has never been called, so the
+real distribution of its similarity scores is unknown. Expect to tune it against the first live batch rather
+than trusting the default.
+
+---
+
+
+### 1.11 Decided — PostgreSQL everywhere, alembic owns the schema
+
+Answered 2026-08-25: both halves. `build_container()` refuses a non-PostgreSQL `DATABASE_URL` under
+`DEPLOYMENT_ENVIRONMENT=production`, startup no longer creates tables, and local `.env` points at the
+compose PostgreSQL, which is published on `127.0.0.1:5432` for host-side alembic and pytest.
+
+What you need to know to run it:
+
+```bash
+docker compose up -d postgres
+```
+
+Then `alembic upgrade head` before starting the application — startup will refuse a database that is not
+at `REQUIRED_SCHEMA_REVISION`, and will name that command when it does. `DEPLOYMENT_ENVIRONMENT` is still
+`production` in `.env`; that is now satisfiable, but it does mean this machine enforces production rules
+(`AUTH_REQUIRED`, `PLATFORM_API_KEY` entropy, PostgreSQL). Set it to `development` if you would rather it
+did not.
+
+The test matrix is a flag:
+
+```bash
+.venv/bin/python -m pytest -q                        # SQLite — fast, algorithm-level
+POSTGRES_PASSWORD=... .venv/bin/python -m pytest -q --database=postgres
+```
+
+The PostgreSQL half reroutes the shared `container` fixture into a throwaway schema in a dedicated
+`video_platform_test` database. Test modules that build their own `Settings` with a hard-coded SQLite URL
+(about fifteen of them) are **not** rerouted and still run on SQLite in both halves.
+
+### 1.12 Decided — subscription grant against one ledger (half built)
+
+Answered 2026-08-25: every tier reserves and settles against the same wallet, and the plan sets a periodic
+credit grant plus discounts and model entitlements. A plan no longer decides *whether* a generation is
+charged.
+
+**Built** (§2.17): the charge itself. FREE, PRO and ENTERPRISE all reserve, settle, refund and hold for
+reconciliation through one service. Running out answers 402 rather than 403.
+
+**Already existed, and I was wrong to say otherwise:** a top-up path. `POST` through the DePay checkout
+credits *any* workspace in {FREE, PRO} and appends a `WorkspaceCreditLedgerEntry`; `GET
+/api/workspaces/{id}/wallet` shows balance, reserved and purchased credits. A paid workspace that runs out is
+not stuck — it tops up through the same link that upgrades a FREE one.
+
+**Not built:** the *recurring* half. There is no billing period on `Workspace`, no renewal, and no grant
+primitive — the only ways credits appear are the 50 at workspace creation and a DePay purchase. A
+subscription grant needs a period, an idempotent grant operation keyed to that period, and something that
+fires on renewal. None of the three exists, and building the operation without the period would be a lever
+attached to nothing.
+
+**Also not built:** the plan *discount*. `CreditPricingEngine` has a `service_multiplier`, and no plan tier
+feeds it. Every tier pays the same credits for the same generation today.
+
+See also §2.24: the 50-credit grant buys exactly one 4-second clip and nothing longer, and a paid tier that
+has not purchased has the same 50 — which is the more urgent half of this decision.
+
 
 ---
 
@@ -187,25 +279,37 @@ the first live batch rather than trusting the default.
 | 2.1 | Retrieval is keyed on the current shot's prompt text, so narrative dependency is invisible to it. The ledger covers obligations and retrieval can now reach across episodes, but *which* earlier beat matters is still decided by similarity alone. | `services/production-engine/production_engine/runtime.py` |
 | 2.2 | Aggregate style drift across episodes is unmonitored — each shot can pass while the series slowly walks away from episode 1. | `core/style/style_core/service.py` |
 | 2.3 | `timeline_scope_key` branch proliferation (flashback/dream) has no merge or retirement policy. | `core/character/` |
-| 2.4 | A synchronous provider's result is held in the Gateway process between the confirmed submission and the poll that consumes it, both inside one `process()` call. Process death in that window loses the artefact. It is **not** a silent success or refund — the poll then fails with `OPENROUTER_IMAGE_RESULT_NOT_RETRIEVABLE` while `submitted` stays true, so the credit moves to `RECONCILIATION_REQUIRED`. Making it durable needs a migration. | `services/generation-gateway/generation_gateway/gateway.py` |
+| 2.4 | **Fixed 2026-08-25 — a synchronous provider's result is now durable.** It was held in a Gateway attribute between the confirmed submission and the poll that consumes it, both inside one `process()` call; process death in that window lost an artefact the workspace had already been billed for. Migration `0040_provider_synchronous_result_inbox` adds `provider_synchronous_results` and its ordered `provider_synchronous_result_outputs`. The result is written in the **same transaction** that confirms the submission, so it becomes durable exactly when the workspace becomes liable, and it is deleted in the **same transaction** that marks the job terminal — reading never consumes it, because delete-on-read would only move the fatal window to "between the read and the completion commit". Each output carries a SHA-256 that is re-checked on read; a mismatch fails `submitted=True`, so a corrupt artefact reaches `RECONCILIATION_REQUIRED` rather than being published as a paid result. A stale row from an earlier attempt names a different `provider_job_id` and is discarded, never returned. A test drives the completion from a **different** `GenerationGateway` object, sharing nothing with the first but the database. | `services/generation-gateway/generation_gateway/gateway.py` |
 | 2.6 | `MediaRenditionKind.THUMBNAIL` exists in the schema and nothing generates one. The Web UI still reads originals, so a gallery of 4K plates downloads 4K plates. | `services/media-service/media_service/renditions.py` |
 | 2.7 | Derived renditions are never retired. They are content-addressed and bounded, but a provider that repeatedly changes its limits accumulates one copy per constraint set with no garbage collection. | `services/media-service/media_service/renditions.py` |
 | 2.8 | The batch-to-candidate path allocates sibling candidates in a short transaction before the media is registered. If the process dies between the two, the shot keeps empty `CREATED` candidates. They are inert — no output asset, so nothing can commit them — but nothing sweeps them either. | `services/generation-gateway/generation_gateway/gateway.py` |
 | 2.9 | Video is never adapted to a provider's reference constraints; an over-large video reference fails closed instead of being transcoded. Correct today, but it means video-reference providers need originals inside their limits. | `services/media-service/media_service/renditions.py` |
 | 2.10 | A direct upload is validated from a bounded 64 KB header, not a full decode. Magic bytes, declared format and pixel dimensions are checked; a **truncated or internally corrupt** file passes and fails later at first use, where `RenditionResolver` raises `RenditionDerivationFailed`. Deliberate — pulling every upload back through the API to catch it one step earlier would undo the reason writes bypass the API — but it is a real difference from the multipart path. | `packages/shared/platform_shared/media_validation.py` |
-| 2.11 | `POST /internal/maintenance/expired-uploads` now reclaims an upload that was authorized and walked away from, but **nothing schedules it** — it is an endpoint an operator or cron must call. The object itself is never deleted: removing bytes a user may have paid to upload is not a sweeper's decision, so an abandoned upload still leaves one orphan in the bucket. Stale `RESERVED` holds with no `PENDING` upload behind them are reported for reconciliation and deliberately not released, because a hold whose registration succeeded and whose settlement failed is a fail-closed hold that must survive. | `apps/api/video_platform_api/main.py` |
-| 2.12 | **Savepoints do not roll back under pysqlite.** Work inside `session.begin_nested()` survives a rollback of the enclosing transaction — verified directly: a plain insert rolls back, the same insert inside a savepoint does not. Seven call sites still rely on savepoints (`registry.py` ×2, `renditions.py`, `gateway.py`, `affinity.py` ×3); each of them silently loses its rollback guarantee whenever `DATABASE_URL` is SQLite, which is the **default**. The direct-upload completion path was rewritten to need no savepoint, so it is correct on both engines. The documented pysqlite workaround (`isolation_level = None` plus an explicit `BEGIN`) was tried and reverted: it makes every transaction take a write lock, and the concurrency suites either fail on `database is locked` or hang. The real fix is PostgreSQL, or per-call-site restructuring like the one done here. | `packages/database/platform_database/session.py` |
-| 2.13 | The R2V `ratio` condition is an inference, not a quoted rule. The documentation gives "R2V → resolution + conditional ratio" without naming the condition; this adapter sends `ratio` only when no first frame is supplied, on the same logic that makes I2V take no ratio at all — a supplied frame already fixes the aspect, and sending both asks one question twice. Worth confirming against a live R2V call. | `providers/wan/wan_provider/adapter.py` |
-| 2.14 | `supports_reference_voice` is now a first-class capability on **every** model profile and is `false` everywhere, including models whose provider may well accept a voice reference. Only Wan 2.7 was actually reviewed for it; the rest inherit the column default. A model that does accept one is currently under-declared rather than mis-declared — it fails closed — but the flag should be reviewed per provider rather than assumed. | `config/model-registry/defaults.json` |
-| 2.15 | **P0 — the local database cannot be migrated forward.** `data/platform.db` is stamped `0020_provider_media_upload_claim`, eighteen revisions behind head, yet it holds tables from far later revisions. `Database.create_all()` runs on every startup and creates *missing tables* from ORM metadata; it never adds columns to tables that already exist and never advances the alembic stamp. The result is a hybrid no migration can repair: `alembic upgrade head` dies immediately on `0021_unified_model_registry` with `table model_definitions already exists`, while `model_capability_profiles` still lacks `supports_image_generation` and everything added after it. Reproduced on a copy. The root cause is two schema authorities — `create_all()` and alembic — running against one database. | `packages/database/platform_database/session.py` |
+| 2.11 | **Fixed 2026-08-25 — the sweep is atomic and it runs.** Two problems behind one endpoint. It **raced**: expired rows were read with no lock, the hold was released in one transaction and the row abandoned in another — the opposite order from completion, which locks the `DirectUpload` row first and its reservation second. A sweeper could therefore release a hold out from under a completion that already owned the row, whose `settle_in` then raised `StorageReservationConflict` into a handler that did not exist: **500** for an upload the client had finished correctly. `DirectUploadService.claim_expired` now takes the row lock first, re-reads the `PENDING`/expiry predicate under it, and the caller releases through `WorkspaceStorageQuota.release_in` in the same transaction — one commit or none, so a conflicting release rolls the abandon back and the row stays sweepable. Completion answers **409** on a settlement conflict from any other cause. A `postgres_only` test forces the interleaving and fails if the `FOR UPDATE` is removed. And **nothing scheduled it**: the endpoint existed and no cron, worker or scheduler called it, so "the sweep is done" only meant "the manual endpoint is done". `media_service.maintenance.sweep_expired_uploads` is now one implementation called by both the endpoint and the worker loop, on `EXPIRED_UPLOAD_SWEEP_INTERVAL_SECONDS` (default 300, `0` disables) and `EXPIRED_UPLOAD_SWEEP_LIMIT` (default 200) — due immediately on worker start, never fatal to the job loop. Unchanged on purpose: the object is never deleted, so an abandoned upload still leaves one orphan in the bucket, and stale `RESERVED` holds with no `PENDING` upload behind them are reported for reconciliation and deliberately not released. | `services/media-service/media_service/maintenance.py` |
+| 2.12 | **Savepoints do not roll back under pysqlite.** Work inside `session.begin_nested()` survives a rollback of the enclosing transaction — verified directly. Seven call sites rely on savepoints (`registry.py` ×2, `renditions.py`, `gateway.py`, `affinity.py` ×3). **No longer reachable in production** (2026-08-25): `build_container()` refuses a non-PostgreSQL `DATABASE_URL` when `DEPLOYMENT_ENVIRONMENT=production`, and local `.env` now points at the compose PostgreSQL. It remains true of any SQLite database, which is why the test matrix runs the shared `container` fixture on PostgreSQL too (`pytest --database=postgres`). The documented pysqlite workaround (`isolation_level = None` plus an explicit `BEGIN`) was tried and reverted: it makes every transaction take a write lock, and the concurrency suites either fail on `database is locked` or hang. | `packages/database/platform_database/session.py` |
+| 2.13 | **Half-confirmed 2026-08-25.** The R2V `ratio` condition is an inference, not a quoted rule. The documentation gives "R2V → resolution + conditional ratio" without naming the condition; this adapter sends `ratio` only when no first frame is supplied, on the same logic that makes I2V take no ratio at all — a supplied frame already fixes the aspect, and sending both asks one question twice. The live R2V canary (task `57ba09a0`) confirms the half this platform actually sends: R2V **with no first frame** accepts `parameters.ratio` and completes. What stays unconfirmed is the other half — whether R2V *with* a first frame would reject a ratio or merely ignore it — which would cost another clip to establish and is only reachable by deliberately sending a combination this adapter refuses to build. Everything else in the Wan request body was re-derived from the published API references (HANDOFF §12d). | `providers/wan/wan_provider/adapter.py` |
+| 2.14 | `supports_reference_voice` is a first-class capability on **every** model profile and is `false` everywhere **except Wan 2.7**, which was corrected to `true` on 2026-08-25: R2V nests a `reference_voice` audio URL inside a reference material and I2V takes a `driving_audio` media entry, and the flag means an asset the model conditions *on* (as against `supports_audio`, audio it produces). Every other model inherits the column default and has not been reviewed. A model that does accept one is under-declared rather than mis-declared — it fails closed — but the flag should be reviewed per provider rather than assumed. Wan 2.7's own reading was wrong in exactly this way for a week. | `config/model-registry/defaults.json` |
+| 2.15 | **Resolved 2026-08-25 — the database now has one schema authority.** `Database.create_all()` no longer runs at startup. `build_container()` checks the stamped revision against `REQUIRED_SCHEMA_REVISION` and refuses to start otherwise, naming `alembic upgrade head`; alembic alone creates and alters schemas. `create_all_and_stamp()` survives for throwaway databases (a per-test tmp file, a scratch simulation) and runs only under `DEPLOYMENT_ENVIRONMENT=test`. A test asserts the constant equals the alembic head, so bumping one without the other is a gate failure rather than a runtime surprise. | `packages/database/platform_database/session.py` |
 | 2.16 | Importing `video_platform_api` builds a container as a side effect: `__init__.py` imports `main`, and `main.py` ends with `app = create_app()` at module scope. Any import — a script, a test collection, a linter plugin — therefore opens `DATABASE_URL`, runs `create_all()` and seeds defaults. It is why the live Wan test, which touches no database, could not run until it was pointed at a scratch one. | `apps/api/video_platform_api/main.py` |
 | 2.5 | Startup still never replays defaults over an administrator's changes, which is right. `POST /internal/models/reconcile-live` is now the operator path that was missing: it re-derives `live_enabled` for every model from the credentials present, reports by default and writes on `?apply=true`. It moves only enablement — never the execution ID — so it cannot overwrite an administrator's chosen model. **Nothing calls it automatically**, so adding a credential still requires that call. | `apps/api/video_platform_api/main.py` |
+| 2.17 | **Fixed 2026-08-25 — every plan draws on the same wallet.** `reserve_generation` returned an inert charge for any tier other than FREE, so PRO and ENTERPRISE generations were quoted, the quote was written onto the job, and then nothing was reserved, nothing settled, and an ambiguous provider result left no credit to hold for reconciliation. Who pays is now one property — `WorkspaceCreditBalance.billable` — used by both the service and the Gateway: every plan does; a project with no workspace and the `ALL` workspace do not. `ALL` is the authentication-disabled local development bypass, not a tier — it still receives server pricing and CostRecords, and charging it would make local development spend a real balance. Running out of credits is now reachable for a paid tier, so it answers **402** where a plan entitlement denial answers **403**: two problems with two different fixes, top up versus upgrade. | `core/entitlements/entitlement_core/credits.py` |
+| 2.18 | **Fixed 2026-08-25 — the style lock fails closed on its second layer.** With `FEATURE_SEMANTIC_STYLE_LOCK=true`, an unavailable `google/gemini-embedding-2` used to record `style_layers: 1` and a `semantic_layer_absent_reason` and commit — and because `ProjectStyleLock` is append-only with a trigger forbidding re-locking, a transient outage permanently downgraded that project to a single-layer gate that looked identical to one made deliberately with the feature off. `lock()` now raises `SemanticStyleLayerRequired` and writes nothing, so the project stays lockable and a retry produces the two-layer lock that was asked for. The route answers **503** when the model was unreachable (waiting can help) and **409** when the reference media could not be read (it cannot). With the feature off, a single-layer lock is still the intended outcome and still records `SEMANTIC_EMBEDDER_NOT_CONFIGURED`. | `core/style/style_core/service.py` |
+| 2.19 | **Fixed 2026-08-25 — a vector now carries the space it belongs to, and spaces are compared before vectors are.** `StyleEmbedding` gained `model_revision`, `normalization` and `distance_metric` (migration `0041_embedding_space`), completing the space alongside the `provider`, `model`, `algorithm_version` and `dimension` it already had — of which only `model` was ever read, and only to find a row. `EmbeddingSpaceIdentity` is compared at three points: before reusing a stored reference to lock (refuses the lock, non-retryable), and before scoring either layer of a candidate (`REVIEW_REQUIRED` with `STYLE_EMBEDDING_SPACE_CHANGED:<fields>` / `STYLE_SEMANTIC_EMBEDDING_SPACE_CHANGED:<fields>`, and no score at all rather than a low one). **Residual:** `model_revision` is only what a provider echoes back, and no model wired here publishes one — so a silent provider-side swap behind a stable model id whose output dimension is unchanged is still undetectable. Everything detectable locally is now detected. `capability_profile_version` was deliberately not stored: its only failure mode independent of the fields above is a changed declared dimension, which `dimension` already catches. | `core/style/style_core/space.py` |
+| 2.20 | **Fixed 2026-08-25 — a duplicate generate request replays instead of 409ing.** The timeline fence is evaluated under the Shot's row lock, so the loser of a race reads the Shot only after the winner has committed — and reads it `QUEUED`. The fence was then stale against a change the loser's own duplicate caused, and the request was told `shot or authoritative timeline binding changed; plan the shot again` for work already running, never reaching the `except IntegrityError` replay path that exists for this race. A stale fence is now conclusive only once the idempotency key is known to be unclaimed: if a claim exists it is a claim for this same request (`replay` still refuses a key whose request hash differs) and the idempotent answer is the competitor's job. Ordering the claim ahead of the fence would reach the same place through `IntegrityError`, but would mean writing a job row before the plan behind it has been validated. Two regression tests: the threaded one that exposed it, and a deterministic `postgres_only` one that opens the window directly. Both fail if the handler is removed. | `services/generation-gateway/generation_gateway/gateway.py` |
+| 2.21 | **Fixed 2026-08-25 — eight integrity guards raised the wrong SQLSTATE on PostgreSQL.** The asset-registry and project-style plpgsql guards raised with no ERRCODE, so PostgreSQL reported `P0001` and SQLAlchemy raised `ProgrammingError`, while the identical SQLite guards raised `IntegrityError`. `except IntegrityError` therefore caught on the development engine and not on the production one. Migration `0039_integrity_errcodes` replaces both functions with `USING ERRCODE = '23514'`; `models.py` matches for the `create_all` path; a test now fails if any plpgsql guard omits its SQLSTATE. The character-state head fence keeps `40001` deliberately — a stale fence means retry, not invalid data — and its test accepts either class with the same message. | `migrations/versions/0039_integrity_errcodes.py` |
+| 2.22 | **Fixed 2026-08-25 — `create_all()` could not build the schema on PostgreSQL at all.** `enforce_payment_ledger_append_only()` was declared through SQLAlchemy's `DDL` construct with a single `%` in `RAISE EXCEPTION '% is append-only'`; `DDL` percent-interpolates its statement, so it raised `TypeError` before the trigger could be created. Latent because `create_all` had never been run against PostgreSQL — the migration path uses `op.execute`, which does not interpolate, so production was never affected. | `packages/domain/production_domain/models.py` |
+| 2.23 | **Narrative memory compares vectors on a narrower space than the style gate does.** Retrieval filters candidates by `embedding_provider`, `embedding_model` and `embedding_dimension` before scoring (`core/memory/memory_core/engine.py`), so a model swap or dimension change cannot silently mix spaces — but normalization, distance metric and model revision are not part of that filter, and a `ShotMemory` row carries no equivalent of `EmbeddingSpaceIdentity`. Narrower than the hole §2.19 closed, and the same shape. | `core/memory/memory_core/engine.py` |
+| 2.24 | **The starter grant covers exactly one generation, at the default duration only.** Every workspace is created with 50 credits. Seedance 2.5 — the model a FREE workspace is routed to — quotes 44 credits at the 4s Passenger default, 54 at 5s and 87 at 8s; Flow Veo 3.1 at 8s quotes 192. So the grant buys one short clip and nothing else, and any request longer than the default is refused before a Job exists. Pre-existing and unchanged by §2.17 — FREE was always charged — but now reachable for every tier that has not topped up, and the paid tiers have no grant of their own beyond the same 50 (only a DePay purchase adds 3,000). Whether that is right is a pricing decision, not an engineering one. | `core/entitlements/entitlement_core/credits.py`, `core/cost/cost_core/service.py` |
+| 2.25 | **Ten of the twelve generative models this platform runs have no diagnostic external evidence.** Recorded by the External Evidence Registry (`external-evidence-v1`). Only `veo-3.1-fast-openrouter` (OSCBench, exact variant) and `gpt-image-2-openrouter` (Qwen-Image-Bench, PhyEditBench, BizGenEval) have per-dimension public backing. `wan-2.7`, `kling-3-pro`, `kling-3-std`, `veo-3.1`, `veo-3.1-lite` and `flow-veo-3.1` have a holistic Arena preference reading and nothing else. `seedance-2.5-official` has 31 metrics on file and **zero** eligible, because all of them belong to Seedance 2.0. `seedream-5.0`, both Grok video models, `flow-narwhal-image` and `veo-3.1-quality` have no public evidence at all. Every `capability_prior` in `config/model-registry/defaults.json` therefore remains hand-authored judgement; the registry's job today is to say which numbers those are. `GET /internal/models/external-evidence` reports it. | `config/external-evidence/registry-v1.json` |
+| 2.26 | **The duration ceiling is back at 15s.** `wan-3.0-official` was the only model declaring 30s, and it is disabled because this account has no Wan 3.0 API access. A shot longer than 15s now fails routing with `DURATION_UNSUPPORTED` before a Job exists — correct, and asserted by a test, but it means long-form shots have no route until either Wan 3.0 access arrives or another 30s model is registered. | `config/model-registry/defaults.json` |
+| 2.27 | **The router's duration gate cannot express a request-dependent ceiling.** `VideoModelRouter` reads one `max_duration` per profile, and Wan 2.7's depends on the request: 15 seconds normally, 10 when the shot carries a reference video into R2V. The registry records the exception (`modes.r2v.max_duration_with_reference_video`) and the adapter enforces it per request, so a 12-second reference-video shot fails closed with `INVALID_REQUEST` **before** anything is billed — but it fails at the adapter rather than being excluded at routing, where `ShotRequirements` already carries both `duration` and `requires_reference_video` and could have decided it. Expressing it generically needs a new profile field, which is a migration. | `core/model-registry/model_registry_core/router.py` |
+| 2.28 | **I2V's material-combination table is held in the adapter, not the profile's capability flags.** Wan 2.7 I2V publishes a closed list of valid media sets — a last frame needs a first frame or a first clip beside it, driving audio needs something to drive. `_I2V_COMBINATIONS` enforces it and `test_wan_adapter_bounds_match_the_registry_declaration` pins it against `modes.i2v.material_combinations`, so the two cannot drift — but the router's capability flags are per-axis booleans and cannot represent "these axes only in these combinations". A shot asking for an impossible combination is refused before billing rather than excluded from routing, the same shape as §2.27. | `providers/wan/wan_provider/adapter.py` |
 
 ## 3. Incomplete work
 
 | # | Item | Blocked by |
 | --- | --- | --- |
-| 3.1 | **Model-backed prompt compilation.** `compile_input()` is deterministic; `skill_contract()` never calls a model. Steps are in `HANDOFF.md` §8. | §1.7 decision |
+| 3.1 | **Model-backed prompt compilation.** `compile_input()` is deterministic; `skill_contract()` never calls a model. Steps are in `HANDOFF.md` §18. | §1.7 decision |
 | 3.2 | **Live provider evidence.** Wan 2.7 **T2V is verified live** — submitted, polled, `COMPLETED` with a `video/mp4` artefact on 2026-08-25. I2V and R2V remain unverified because both carry a reference and `S3_*` is still unset (§1.3). Image, chat and embedding roles have never been called. | §1.3 for I2V/R2V |
 | 3.3 | **Omni reference file** in `skills/model-prompting/references/`. Wan 3.0's 30s envelope, the Seedance 2.5 entry and a GPT Image 2 entry have landed. | §1.5 |
 | 3.4 | **A client that uses the direct-upload endpoints.** The server side is complete (`POST /v1/assets/uploads` + `/complete`); the Web UI still posts multipart to `POST /v1/assets`. Nothing is broken — the streaming path remains — but the benefit only arrives once the client performs its own PUT. | — |
@@ -213,8 +317,10 @@ the first live batch rather than trusting the default.
 
 ## 4. P2 — release blockers
 
-- Migration head `0037_direct_uploads` has offline/temporary-database evidence only.
-  Production-shaped populated upgrade and rollback are unverified across `0035`–`0037`.
+- **Partly closed 2026-08-25.** `0035`–`0039` now have a populated PostgreSQL upgrade, downgrade and
+  re-upgrade, run against the compose database at `0027` holding 13 `model_definitions` rows — the first
+  populated migration evidence this project has on PostgreSQL rather than on an empty temporary database.
+  Still missing: a *production-shaped* dataset, and a backup/restore drill. Neither is a migration test.
 - **The repository has no remote.** Everything, including commit `ea9d042`, exists only on this
   machine. A disk failure loses the entire project. This is the cheapest unaddressed risk on
   the list.

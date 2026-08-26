@@ -11,8 +11,14 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from generation_gateway.scheduler import AccountScheduler
 from pgvector.sqlalchemy import Vector
-from platform_database import Database
+from platform_database import (
+    REQUIRED_SCHEMA_REVISION,
+    Database,
+    SchemaRevisionMismatch,
+)
+from platform_shared import Settings
 from sqlalchemy.dialects import postgresql, sqlite
+from video_platform_api.container import build_container
 
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_REVISIONS = (
@@ -1466,3 +1472,92 @@ def test_model_capability_downgrade_only_drops_deterministic_backfill(
     engine.dispose()
     assert revision == "0026_model_capability_registry"
     assert physics_prior == pytest.approx(0.123)
+
+
+def test_every_postgres_trigger_declares_its_sqlstate() -> None:
+    """A guard with no ERRCODE raises P0001, which is not an IntegrityError.
+
+    Eight of these were missing, so the same invariant surfaced as
+    `IntegrityError` on SQLite and `ProgrammingError` on PostgreSQL, and any
+    `except IntegrityError` around them caught only on the development engine.
+    """
+
+    import re
+
+    source = (ROOT / "packages/domain/production_domain/models.py").read_text("utf-8")
+    silent = [
+        match.group(1)[:60]
+        for match in re.finditer(r"RAISE EXCEPTION\s+'((?:[^']|'')*)'(.*?);", source, re.S)
+        if "ERRCODE" not in match.group(2)
+    ]
+    assert not silent, "plpgsql guards with no SQLSTATE: " + "; ".join(silent)
+
+
+def test_every_revision_id_fits_the_version_column() -> None:
+    """A too-long revision id only fails on PostgreSQL, and only at stamp time.
+
+    SQLite ignores VARCHAR lengths, so an over-long id is invisible on the
+    development engine and breaks every PostgreSQL database the moment it
+    becomes head.
+    """
+
+    import re
+
+    over_long = {}
+    for path in (ROOT / "migrations" / "versions").glob("*.py"):
+        match = re.search(r'^revision: str = "([^"]+)"', path.read_text("utf-8"), re.M)
+        if match and len(match.group(1)) > Database.VERSION_NUM_LENGTH:
+            over_long[match.group(1)] = len(match.group(1))
+    assert not over_long, f"revision ids longer than the version column: {over_long}"
+
+
+def test_the_required_schema_revision_is_the_alembic_head() -> None:
+    """The application declares the schema it needs; alembic decides what head is.
+
+    Bumping one without the other is the only way this constant can lie, and it
+    would lie at deploy time on a running database rather than here.
+    """
+
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    assert REQUIRED_SCHEMA_REVISION == _script_head(config)
+
+
+def test_production_refuses_a_non_postgresql_database(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Under pysqlite a savepoint does not roll back; seven call sites rely on it."""
+
+    settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path / 'platform.db'}",
+        storage_root=tmp_path / "media",
+        deployment_environment="production",
+        auth_required=True,
+        platform_api_key="0123456789abcdef0123456789abcdef0123456789",
+    )
+    with pytest.raises(RuntimeError, match="production requires a PostgreSQL"):
+        build_container(settings)
+
+
+def test_startup_refuses_a_database_that_is_not_at_the_required_revision(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """`create_all()` no longer runs at startup, so an unmigrated database is loud.
+
+    The defect this replaces was silent: startup created whatever tables were
+    missing from ORM metadata, never added a column to a table that already
+    existed, and never advanced the stamp — leaving a hybrid schema that no
+    migration could repair.
+    """
+
+    database = Database(f"sqlite:///{tmp_path / 'unmigrated.db'}")
+    with pytest.raises(SchemaRevisionMismatch, match="no revision"):
+        database.require_schema_revision()
+
+    database.create_all()
+    with pytest.raises(SchemaRevisionMismatch, match="no revision"):
+        database.require_schema_revision()
+
+    database.stamp("0020_provider_media_upload_claim")
+    with pytest.raises(SchemaRevisionMismatch, match="0020_provider_media_upload_claim"):
+        database.require_schema_revision()
+
+    database.stamp(REQUIRED_SCHEMA_REVISION)
+    database.require_schema_revision()

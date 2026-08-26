@@ -18,6 +18,7 @@ from production_domain.models import (
     AuthSession,
     LegacyWorkspaceClaim,
     PasswordResetToken,
+    PlatformRole,
     Project,
     User,
     Workspace,
@@ -154,6 +155,7 @@ class AuthPrincipal:
     display_name: str
     session_id: str
     workspace_roles: dict[str, str]
+    platform_role: str = PlatformRole.USER.value
     development_bypass: bool = False
 
 
@@ -651,6 +653,7 @@ class AuthService:
             display_name=user.display_name,
             session_id=session_id,
             workspace_roles={item.workspace_id: item.role for item in memberships},
+            platform_role=user.platform_role,
         )
 
     def authenticate(self, token: str) -> AuthPrincipal:
@@ -731,6 +734,7 @@ class AuthService:
                 display_name="Development User",
                 session_id="development-bypass",
                 workspace_roles={},
+                platform_role=PlatformRole.USER.value,
                 development_bypass=True,
             )
         token = ""
@@ -780,6 +784,17 @@ class AuthService:
         required_rank = ROLE_RANK["ADMIN"] if admin else ROLE_RANK["EDITOR"] if write else ROLE_RANK["VIEWER"]
         if ROLE_RANK.get(role, 0) < required_rank:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "你无权访问该工作空间")
+        return role
+
+    def require_admin(self, principal: AuthPrincipal, *, super_admin: bool = False) -> str:
+        """Enforce platform RBAC independently of workspace membership."""
+
+        role = principal.platform_role
+        allowed = {PlatformRole.SUPER_ADMIN.value}
+        if not super_admin:
+            allowed.add(PlatformRole.ADMIN.value)
+        if principal.development_bypass or role not in allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "platform administrator access required")
         return role
 
     def require_project(
@@ -836,6 +851,7 @@ class AuthService:
             "id": principal.user_id,
             "email": principal.email,
             "display_name": principal.display_name,
+            "platform_role": principal.platform_role,
             "workspaces": [
                 {
                     "id": workspace_id,

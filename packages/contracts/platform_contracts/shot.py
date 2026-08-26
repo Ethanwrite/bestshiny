@@ -75,11 +75,26 @@ class CanonicalShotSpec(BaseModel):
         return self
 
 
+IMAGE_CREATIVE_TASKS = (
+    "auto",
+    "portrait",
+    "beauty_fashion",
+    "product",
+    "commercial",
+    "scene_concept",
+    "reference_character_regeneration",
+)
+
+
 class PassengerGenerationCommand(BaseModel):
     project_id: str
     media_type: Literal["image", "video"]
+    # Image requests never name a model: the caller states creative intent and the
+    # router resolves the target before anything is quoted or reserved. Video
+    # requests may name one, and then that exact model runs or the request fails.
     provider: str = ""
     model: str = ""
+    image_task: Literal[IMAGE_CREATIVE_TASKS] = "auto"  # type: ignore[valid-type]
     model_role: str | None = Field(default=None, max_length=80)
     asset_criticality: AssetCriticality = AssetCriticality.STANDARD
     prompt: str = Field(min_length=1, max_length=30_000)

@@ -19,6 +19,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -141,6 +142,22 @@ class CredentialStatus(StrEnum):
     ROTATION_REQUIRED = "ROTATION_REQUIRED"
     REVOKED = "REVOKED"
     NOT_CONFIGURED = "NOT_CONFIGURED"
+
+
+class PlatformRole(StrEnum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+    SUPER_ADMIN = "SUPER_ADMIN"
+
+
+class ModelLifecycleStatus(StrEnum):
+    DISABLED = "DISABLED"
+    CONFIGURED = "CONFIGURED"
+    TESTING = "TESTING"
+    VERIFIED = "VERIFIED"
+    LIVE = "LIVE"
+    DEGRADED = "DEGRADED"
+    BLOCKED = "BLOCKED"
 
 
 class TimelineTransitionType(StrEnum):
@@ -281,6 +298,9 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(160), default="", nullable=False)
     password_hash: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="ACTIVE", nullable=False)
+    platform_role: Mapped[str] = mapped_column(
+        String(40), default=PlatformRole.USER.value, server_default=PlatformRole.USER.value, nullable=False
+    )
 
 
 class WorkspaceMembership(Base, TimestampMixin):
@@ -696,6 +716,63 @@ class WorkspaceCreditLedgerEntry(Base):
     raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class AdminCreditAdjustment(Base):
+    """Append-only operator credit mutation, separate from payment evidence."""
+
+    __tablename__ = "admin_credit_adjustments"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_admin_credit_adjustment_idempotency"),
+        CheckConstraint("delta != 0", name="ck_admin_credit_adjustment_delta_nonzero"),
+        CheckConstraint("before_balance >= 0", name="ck_admin_credit_adjustment_before_nonnegative"),
+        CheckConstraint("after_balance >= 0", name="ck_admin_credit_adjustment_after_nonnegative"),
+        Index("ix_admin_credit_adjustments_workspace_created", "workspace_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    operator_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    before_balance: Mapped[int] = mapped_column(Integer, nullable=False)
+    after_balance: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class AdminAuditLog(Base):
+    """Append-only, redacted record of every high-impact platform mutation."""
+
+    __tablename__ = "admin_audit_logs"
+    __table_args__ = (
+        Index("ix_admin_audit_entity_created", "entity_type", "entity_id", "created_at"),
+        Index("ix_admin_audit_actor_created", "actor_user_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    actor_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    actor_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
+    before_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    after_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(500))
+    request_id: Mapped[str] = mapped_column(String(160), index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True, nullable=False
     )
@@ -1748,7 +1825,8 @@ def _install_asset_registry_integrity_ddl() -> None:
                 IF NEW.canonical_version_id IS NOT NULL AND NOT EXISTS (
                     SELECT 1 FROM asset_versions
                     WHERE id = NEW.canonical_version_id AND asset_id = NEW.id
-                ) THEN RAISE EXCEPTION 'canonical version must belong to the same asset'; END IF;
+                ) THEN RAISE EXCEPTION 'canonical version must belong to the same asset'
+                    USING ERRCODE = '23514'; END IF;
                 IF TG_OP = 'UPDATE'
                    AND NEW.canonical_version_id IS DISTINCT FROM OLD.canonical_version_id AND (
                     NEW.canonical_version_id IS NULL OR NOT EXISTS (
@@ -1758,12 +1836,14 @@ def _install_asset_registry_integrity_ddl() -> None:
                           AND from_version_id IS NOT DISTINCT FROM OLD.canonical_version_id
                           AND created_at >= OLD.updated_at
                     )
-                ) THEN RAISE EXCEPTION 'canonical change requires a fresh promotion record'; END IF;
+                ) THEN RAISE EXCEPTION 'canonical change requires a fresh promotion record'
+                    USING ERRCODE = '23514'; END IF;
             ELSIF TG_TABLE_NAME = 'asset_versions' THEN
                 IF NEW.parent_version_id IS NOT NULL AND NOT EXISTS (
                     SELECT 1 FROM asset_versions
                     WHERE id = NEW.parent_version_id AND asset_id = NEW.asset_id
-                ) THEN RAISE EXCEPTION 'parent version must belong to the same asset'; END IF;
+                ) THEN RAISE EXCEPTION 'parent version must belong to the same asset'
+                    USING ERRCODE = '23514'; END IF;
             ELSIF TG_TABLE_NAME = 'asset_canonical_promotions' THEN
                 IF NOT EXISTS (
                     SELECT 1 FROM asset_versions
@@ -1771,7 +1851,8 @@ def _install_asset_registry_integrity_ddl() -> None:
                 ) OR (NEW.from_version_id IS NOT NULL AND NOT EXISTS (
                     SELECT 1 FROM asset_versions
                     WHERE id = NEW.from_version_id AND asset_id = NEW.asset_id
-                )) THEN RAISE EXCEPTION 'promotion versions must belong to the same asset'; END IF;
+                )) THEN RAISE EXCEPTION 'promotion versions must belong to the same asset'
+                    USING ERRCODE = '23514'; END IF;
             END IF;
             RETURN NEW;
         END; $$""",
@@ -2041,6 +2122,70 @@ class GenerationIdempotency(Base, TimestampMixin):
     result_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
 
 
+class ProviderSynchronousResult(Base, TimestampMixin):
+    """A synchronous provider's finished result, held until the poll consumes it.
+
+    A synchronous image API answers with the artefact in the response body:
+    there is no remote job to re-read and no URL to fetch. The Gateway is
+    submit-then-poll, so the result has to survive the gap between the
+    confirmed submission and the poll that completes it. Holding it in the
+    worker process meant process death in that window lost an artefact the
+    workspace had already been billed for — recoverable only as
+    ``RECONCILIATION_REQUIRED``, never as a refund or a silent success.
+
+    Written in the same transaction that confirms the submission, so it exists
+    for exactly the outcomes the confirmation exists for, and deleted by the
+    completion that consumes it. ``provider_job_id`` and ``attempt_number``
+    are what make a stale row unusable: a result belongs to the submission
+    that produced it, never to a later attempt.
+    """
+
+    __tablename__ = "provider_synchronous_results"
+    __table_args__ = (
+        UniqueConstraint("generation_job_id", name="uq_provider_sync_result_job"),
+        CheckConstraint("attempt_number >= 1", name="ck_provider_sync_result_attempt"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    generation_job_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    provider_job_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    output_url: Mapped[str | None] = mapped_column(Text)
+    output_mime_type: Mapped[str | None] = mapped_column(String(120))
+    error: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ProviderSynchronousResultOutput(Base):
+    """One inline artefact of a held synchronous result, in provider order.
+
+    ``ordinal`` 0 is the job's own output asset; the rest are the extra images
+    of a batch request, which are registered as project media rather than
+    discarded because the workspace paid for them.
+    """
+
+    __tablename__ = "provider_synchronous_result_outputs"
+    __table_args__ = (
+        UniqueConstraint("result_id", "ordinal", name="uq_provider_sync_output_ordinal"),
+        CheckConstraint("ordinal >= 0", name="ck_provider_sync_output_ordinal"),
+        CheckConstraint("length(content_sha256) = 64", name="ck_provider_sync_output_digest"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    result_id: Mapped[str] = mapped_column(
+        ForeignKey("provider_synchronous_results.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
 class GenerationEvent(Base):
     __tablename__ = "generation_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -2272,6 +2417,14 @@ class StyleEmbedding(Base, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(80), nullable=False)
     model: Mapped[str] = mapped_column(String(120), nullable=False)
     algorithm_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    # The rest of this vector's space. `provider`, `model`, `algorithm_version`
+    # and `dimension` above are the other half of it. A similarity score is only
+    # meaningful inside one space, and cosine over two unrelated vectors returns
+    # a plausible number rather than an error — so the space travels with the
+    # vector and is compared before any score is taken.
+    model_revision: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    normalization: Mapped[str] = mapped_column(String(40), default="L2", nullable=False)
+    distance_metric: Mapped[str] = mapped_column(String(40), default="cosine", nullable=False)
     embedding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source_media_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     source_media_hashes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
@@ -2557,10 +2710,205 @@ class ModelDefinition(Base, TimestampMixin):
     criticality_allowed: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     live_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), default="", server_default="", nullable=False)
+    user_visible: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    router_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(40),
+        default=ModelLifecycleStatus.CONFIGURED.value,
+        server_default=ModelLifecycleStatus.CONFIGURED.value,
+        index=True,
+        nullable=False,
+    )
+    pricing_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    # Whether this model's price has been confirmed against the provider's own
+    # published rates. UNVERIFIED is the honest default: a number with no source
+    # is a guess, and a guess that is 40% of the real price loses money on every
+    # call — which is what `estimated_per_second = 0.09` did for Seedance 2.5.
+    # A billable model that is UNVERIFIED is refused a paid route rather than
+    # quoted from a placeholder.
+    pricing_status: Mapped[str] = mapped_column(
+        String(24),
+        default="UNVERIFIED",
+        server_default="UNVERIFIED",
+        index=True,
+        nullable=False,
+    )
+    # Where this model stands in the live canary sequence. NOT_RUN is the
+    # starting point, VERIFIED_LIVE means one real generation completed and
+    # reconciled, and LIVE_BLOCKED_EXTERNAL means the attempt was refused by
+    # something outside this repository — an account setting, a balance, a
+    # permission. That distinction exists so one blocked provider cannot stall
+    # the audit of every model behind it, and so a blocked model is never
+    # mistaken later for one that was proven.
+    live_canary_status: Mapped[str] = mapped_column(
+        String(32), default="NOT_RUN", server_default="NOT_RUN", index=True, nullable=False
+    )
+    live_canary_detail: Mapped[str] = mapped_column(
+        String(500), default="", server_default="", nullable=False
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_live_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_window: Mapped[int | None] = mapped_column(Integer)
     max_duration: Mapped[float | None] = mapped_column(Float)
     supported_aspect_ratios: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ModelVerification(Base):
+    """Immutable evidence for a model-specific production-protocol verification."""
+
+    __tablename__ = "model_verifications"
+    __table_args__ = (
+        UniqueConstraint("model_definition_id", "idempotency_key", name="uq_model_verification_key"),
+        Index("ix_model_verification_created", "model_definition_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    model_definition_id: Mapped[str] = mapped_column(
+        ForeignKey("model_definitions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    operator_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    protocol_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    result: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    evidence_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    billable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    latency_ms: Mapped[float | None] = mapped_column(Float)
+    detail: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
+
+
+class ProviderControl(Base, TimestampMixin):
+    """Persisted provider kill switch; credentials remain in the secret plane."""
+
+    __tablename__ = "provider_controls"
+    provider: Mapped[str] = mapped_column(String(80), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    disabled_reason: Mapped[str | None] = mapped_column(String(500))
+    changed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+
+
+def _install_admin_append_only_ddl() -> None:
+    for table in (AdminAuditLog.__table__, AdminCreditAdjustment.__table__, ModelVerification.__table__):
+        table_name = str(table.name)  # type: ignore[attr-defined]
+        for operation in ("UPDATE", "DELETE"):
+            event.listen(
+                table,
+                "after_create",
+                DDL(
+                    f"CREATE TRIGGER trg_{table_name}_append_only_{operation.lower()} "
+                    f"BEFORE {operation} ON {table_name} "
+                    f"BEGIN SELECT RAISE(ABORT, '{table_name} is append-only'); END"
+                ).execute_if(dialect="sqlite"),
+            )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                "CREATE OR REPLACE FUNCTION enforce_admin_append_only() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'admin audit table is append-only' USING ERRCODE = '23000'; "
+                "RETURN OLD; END; $$"
+            ).execute_if(dialect="postgresql"),
+        )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER trg_{table_name}_append_only BEFORE UPDATE OR DELETE ON {table_name} "
+                "FOR EACH ROW EXECUTE FUNCTION enforce_admin_append_only()"
+            ).execute_if(dialect="postgresql"),
+        )
+
+
+_install_admin_append_only_ddl()
+
+
+class ModelPricingProfile(Base, TimestampMixin):
+    """One provider's published price for one model, mode and resolution.
+
+    Replaces a single `estimated_per_second` per model plus a global resolution
+    multiplier shared by every provider. That design encoded one vendor's price
+    curve as if it were physics: it charged 1080p at 1.30x across the board when
+    Ark's own published rates put 1080p at 2.47x its 720p, and it had no 480p
+    entry at all, so 480p quoted as though it were 720p.
+
+    Price is stored in the provider's own currency at the provider's own billing
+    unit, because that is the only form in which it can be checked against the
+    published page. The USD conversion carries its own rate and source, so a
+    quote can always be traced back to two dated facts rather than one rounded
+    number.
+
+    `estimate_formula` and `settlement_formula` are separate on purpose. Ark
+    quotes per second for planning but settles on `usage.completion_tokens`; a
+    reservation taken from the estimate and a debit taken from the settlement are
+    different numbers, and pretending otherwise is how a ledger drifts.
+    """
+
+    __tablename__ = "model_pricing_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_model_id",
+            "input_mode",
+            "resolution",
+            "effective_from",
+            name="uq_model_pricing_profile_scope",
+        ),
+        CheckConstraint("unit_price >= 0", name="ck_model_pricing_unit_price_nonnegative"),
+        CheckConstraint("estimate_unit_price >= 0", name="ck_model_pricing_estimate_nonnegative"),
+        CheckConstraint("usd_per_currency > 0", name="ck_model_pricing_fx_positive"),
+        CheckConstraint(
+            "effective_until IS NULL OR effective_until > effective_from",
+            name="ck_model_pricing_effective_window",
+        ),
+        Index("ix_model_pricing_profiles_lookup", "provider", "provider_model_id", "input_mode"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "no_video_input" / "video_input" / "default" — the axis a provider actually
+    # prices on. Ark charges less per token when the input carries video.
+    input_mode: Mapped[str] = mapped_column(String(40), default="default", nullable=False)
+    # "" where the model has no resolution axis, e.g. a per-image price.
+    resolution: Mapped[str] = mapped_column(String(24), default="", nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    # How the provider *bills*: the unit the invoice is computed in.
+    billing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    # How the provider lets you *plan*. Ark bills on completion tokens, which
+    # nobody can know before the clip exists, and publishes a per-second typical
+    # price for exactly this purpose. The reservation is taken from this; the
+    # debit is settled from the one above. Equal to `unit_price` where a provider
+    # bills in the same unit it quotes in.
+    estimate_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    estimate_unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    usd_per_currency: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    fx_source: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    fx_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimate_formula: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    settlement_formula: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    # A promotion has an end. Writing a discounted rate in as the base price is
+    # how a temporary number becomes permanent by accident.
+    effective_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    notes: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
 
 
 class ModelCapabilityProfile(Base, TimestampMixin):
@@ -3795,7 +4143,8 @@ def _install_project_style_integrity_ddl() -> None:
                       AND asset.project_id = NEW.project_id
                       AND asset.asset_type = 'STYLE'
                 ) THEN
-                    RAISE EXCEPTION 'style embedding must belong to a STYLE version in the project';
+                    RAISE EXCEPTION 'style embedding must belong to a STYLE version in the project'
+                        USING ERRCODE = '23514';
                 END IF;
             ELSIF TG_TABLE_NAME = 'project_style_locks' THEN
                 IF NOT EXISTS (
@@ -3813,7 +4162,8 @@ def _install_project_style_integrity_ddl() -> None:
                       AND asset.canonical_version_id = version.id
                       AND version.status = 'READY'
                 ) THEN
-                    RAISE EXCEPTION 'project style lock requires a canonical STYLE version and embedding';
+                    RAISE EXCEPTION 'project style lock requires a canonical STYLE version and embedding'
+                        USING ERRCODE = '23514';
                 END IF;
             ELSIF TG_TABLE_NAME = 'projects' THEN
                 IF NEW.canonical_style_version_id IS DISTINCT FROM OLD.canonical_style_version_id AND (
@@ -3826,7 +4176,8 @@ def _install_project_style_integrity_ddl() -> None:
                           AND style_lock.created_at >= OLD.updated_at
                     )
                 ) THEN
-                    RAISE EXCEPTION 'project style can only be locked once through a fresh style lock';
+                    RAISE EXCEPTION 'project style can only be locked once through a fresh style lock'
+                        USING ERRCODE = '23514';
                 END IF;
             ELSIF TG_TABLE_NAME = 'candidate_style_evaluations' THEN
                 IF NOT EXISTS (
@@ -3843,7 +4194,8 @@ def _install_project_style_integrity_ddl() -> None:
                       AND style_lock.project_id = NEW.project_id
                       AND style_lock.style_version_id = NEW.style_version_id
                       AND style_lock.style_embedding_id = NEW.style_embedding_id
-                ) THEN RAISE EXCEPTION 'candidate style evaluation provenance is inconsistent'; END IF;
+                ) THEN RAISE EXCEPTION 'candidate style evaluation provenance is inconsistent'
+                    USING ERRCODE = '23514'; END IF;
             END IF;
             RETURN NEW;
         END; $$""",
@@ -3906,7 +4258,11 @@ def _install_payment_ledger_integrity_ddl() -> None:
         DDL(
             "CREATE OR REPLACE FUNCTION enforce_payment_ledger_append_only() "
             "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
-            "RAISE EXCEPTION '% is append-only', TG_TABLE_NAME USING ERRCODE = '23000'; "
+            # `%%` because SQLAlchemy's DDL construct percent-interpolates its
+            # statement; a single `%` makes this raise TypeError at create time
+            # rather than installing the trigger. The two identical guards in
+            # this module already escape it.
+            "RAISE EXCEPTION '%% is append-only', TG_TABLE_NAME USING ERRCODE = '23000'; "
             "RETURN OLD; END; $$"
         ).execute_if(dialect="postgresql"),
     )

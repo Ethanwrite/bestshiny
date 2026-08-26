@@ -434,8 +434,14 @@ async def test_inline_image_result_completes_the_job_and_stores_every_paid_image
 ) -> None:
     """The Gateway finishes a synchronous provider through its ordinary path."""
 
-    from production_domain.models import BrowserWorker, MediaAsset, ProviderAccount
-    from sqlalchemy import select
+    from production_domain.models import (
+        BrowserWorker,
+        MediaAsset,
+        ProviderAccount,
+        ProviderSynchronousResult,
+        ProviderSynchronousResultOutput,
+    )
+    from sqlalchemy import func, select
 
     container, project = image_container, image_project
     provider_name, model_id = _openrouter_image_target(container)
@@ -501,8 +507,172 @@ async def test_inline_image_result_completes_the_job_and_stores_every_paid_image
 
     events = {event.event_type for event in container.gateway.events(job.id)}
     assert {"MEDIA_DOWNLOADED", "MEDIA_BATCH_SIBLINGS_REGISTERED", "JOB_COMPLETED"} <= events
-    # Nothing was left behind that a later attempt could reuse.
-    assert container.gateway._synchronous_results == {}
+    # The held result is consumed, not left behind for a later attempt to reuse
+    # — and, unlike the process dictionary it replaced, it was durable while it
+    # existed, so a worker that died between confirmation and poll would not
+    # have lost a paid artefact.
+    with container.database.session() as session:
+        assert (
+            session.scalar(
+                select(func.count(ProviderSynchronousResult.id)).where(
+                    ProviderSynchronousResult.generation_job_id == job.id
+                )
+            )
+            == 0
+        )
+        assert session.scalar(select(func.count(ProviderSynchronousResultOutput.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_held_synchronous_result_survives_the_process_that_received_it(
+    image_container,  # type: ignore[no-untyped-def]
+    image_project,  # type: ignore[no-untyped-def]
+) -> None:
+    """The gap between a confirmed submission and its poll is crash-safe.
+
+    A synchronous provider hands over the artefact once, in the response body.
+    While it was held in a Gateway attribute, a worker dying in that window lost
+    bytes the workspace had already been billed for — recoverable only as
+    RECONCILIATION_REQUIRED, never as a refund or a silent success.
+
+    The crash is simulated the only way that actually proves the point: the poll
+    is driven by a **different** Gateway object, which shares nothing with the
+    one that took the submission except the database.
+    """
+
+    from generation_gateway import GenerationGateway
+    from production_domain.models import (
+        BrowserWorker,
+        GenerationJob,
+        ProviderAccount,
+        ProviderSynchronousResult,
+        ProviderSynchronousResultOutput,
+    )
+    from sqlalchemy import func, select
+
+    container, project = image_container, image_project
+    provider_name, model_id = _openrouter_image_target(container)
+    provider = container.providers.get(provider_name)
+    assert isinstance(provider, OpenRouterProvider)
+    provider.client.transport = MockProviderTransport({("POST", "/images"): _image_response(count=1)})
+    provider.configured = True
+    container.providers.register_model(provider_name, model_id, "image", available=True)
+
+    with container.database.session() as session:
+        account = ProviderAccount(
+            provider=provider_name,
+            account_identifier="crash@example.com",
+            tier="PRO",
+            credits=100,
+            image_capacity=2,
+            video_capacity=2,
+            supported_models=[model_id],
+        )
+        session.add(account)
+        session.flush()
+        worker = BrowserWorker(
+            id="crash-worker",
+            provider=provider_name,
+            account_id=account.id,
+            connection_id="crash-connection",
+            capabilities=["image", "poll"],
+            max_jobs=2,
+        )
+        session.add(worker)
+        account.worker_id = worker.id
+        session.flush()
+
+    job, _replayed = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="image",
+            provider=provider_name,
+            model=model_id,
+            prompt="a lantern-lit alley after rain",
+            aspect_ratio="9:16",
+            idempotency_key="inline-image-crash",
+        )
+    )
+
+    # Leave the original Gateway at the instant the submission is confirmed and
+    # the result is held, without polling — the exact window that used to be
+    # fatal. Refusing the poll claim is how that window is reached from the
+    # outside, and it is the same branch a worker takes when a competitor holds
+    # the claim.
+    original_claim = GenerationGateway._claim_for_polling
+    GenerationGateway._claim_for_polling = lambda self, job_id: None  # type: ignore[method-assign]
+    try:
+        handed_off = await container.gateway.process(job.id)
+    finally:
+        GenerationGateway._claim_for_polling = original_claim  # type: ignore[method-assign]
+    assert handed_off.status == JobStatus.SUBMITTED.value
+    assert handed_off.output_asset_id is None
+
+    # The artefact outlived the process that received it.
+    with container.database.session() as session:
+        held = session.scalar(
+            select(ProviderSynchronousResult).where(
+                ProviderSynchronousResult.generation_job_id == job.id
+            )
+        )
+        assert held is not None
+        assert held.status == "COMPLETED"
+        assert session.scalar(
+            select(func.count(ProviderSynchronousResultOutput.id)).where(
+                ProviderSynchronousResultOutput.result_id == held.id
+            )
+        ) == 1
+
+    # Reading does not consume. A poll that reads the bytes and then dies before
+    # its completion commits must find them again — otherwise the fix would only
+    # have moved the fatal window from "before the poll" to "mid-completion".
+    first_read = container.gateway._read_synchronous_result(job.id, held.provider_job_id)
+    second_read = container.gateway._read_synchronous_result(job.id, held.provider_job_id)
+    assert first_read is not None and second_read is not None
+    assert first_read.outputs[0].content == second_read.outputs[0].content
+
+    # A result from a different attempt is never handed to this poll.
+    assert container.gateway._read_synchronous_result(job.id, "some-other-provider-job") is None
+    with container.database.session() as session:
+        assert session.scalar(select(func.count(ProviderSynchronousResult.id))) == 0
+
+    # ...which leaves nothing for the successor to complete from, so put the
+    # submission back the way the crash left it.
+    with container.database.session() as session:
+        crashed_job = session.get(GenerationJob, job.id)
+        container.gateway._hold_synchronous_result(
+            session,
+            crashed_job,
+            provider_job_id=held.provider_job_id,
+            result=first_read,
+        )
+
+    # A different Gateway — nothing shared but the database — finishes the job.
+    successor = GenerationGateway(
+        container.database,
+        container.providers,
+        container.media,
+        container.gateway.scheduler,
+        continuity=container.gateway.continuity,
+        retry_policy=container.gateway.retry_policy,
+        workspace_credits=container.gateway.workspace_credits,
+        model_infrastructure=container.gateway.model_infrastructure,
+        provider_mode=container.gateway.provider_mode,
+        flow_affinity=container.gateway.flow_affinity,
+        live_canary=container.gateway.live_canary,
+    )
+    completed = await successor.process(job.id)
+
+    assert completed.status == JobStatus.COMPLETED.value
+    assert completed.output_asset_id is not None
+    output = container.media.get(completed.output_asset_id)
+    assert output is not None
+    assert output.mime_type == "image/png"
+    assert output.size_bytes > 0
+
+    with container.database.session() as session:
+        assert session.scalar(select(func.count(ProviderSynchronousResult.id))) == 0
+        assert session.scalar(select(func.count(ProviderSynchronousResultOutput.id))) == 0
 
 
 # --- 8. The HTTP entry point defaults to the role, not to a constant ---------

@@ -26,7 +26,12 @@ from memory_core import (
     MultimodalMemoryEngine,
 )
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
-from model_registry_core import RouterDecision, ShotRequirements, VideoModelRouter
+from model_registry_core import (
+    RouterDecision,
+    RoutingEvidence,
+    ShotRequirements,
+    VideoModelRouter,
+)
 from platform_contracts import (
     AuthoritativeTimelineFence,
     CanonicalShotSpec,
@@ -130,7 +135,15 @@ class VisualProductionRuntime:
             reference_asset_ids=command.reference_asset_ids,
             idempotency_key=command.idempotency_key,
             cost_estimate=command.estimated_cost,
-            metadata={"mode": "PASSENGER_SEAT", "resolution": command.resolution},
+            metadata={
+                "mode": "PASSENGER_SEAT",
+                "resolution": command.resolution,
+                # Why this model ran, so the choice stays auditable after the fact.
+                # Admission clears model_role when it obeyed a named model, so its
+                # absence is exactly what distinguishes a manual pick from a route.
+                "model_selection": "MANUAL" if command.model_role is None else "ROUTER",
+                **({"image_task": command.image_task} if command.media_type == "image" else {}),
+            },
         )
         return self.submit(
             request,
@@ -322,18 +335,21 @@ class VisualProductionRuntime:
             end_frame_asset_id,
             preferred_provider=preferred_provider,
         )
+        evidence = self.router.baseline_evidence
         if self.flags.enabled("adaptive_router", project_id=project_id):
             production, counts = self.metrics.production_adjustments()
-            self.router.production_adjustments = production
-            self.router.production_sample_counts = counts
-            self.router.benchmark_adjustments = self.benchmarks.adjustments()
+            evidence = RoutingEvidence(
+                benchmark_adjustments=dict(self.benchmarks.adjustments()),
+                production_adjustments=production,
+                production_sample_counts=counts,
+            )
         excluded = {
             profile.key
             for profile in self.router.registry.all()
             if not self.gateway.providers.is_configured(profile.provider)
             or (allowed_providers and profile.provider not in allowed_providers)
         }
-        decision = self.router.rank(requirements, excluded_models=excluded)
+        decision = self.router.rank(requirements, excluded_models=excluded, evidence=evidence)
         selected = decision.candidates[0]
         adapter_context = generation_context.model_dump(mode="json")
         adapter_context.update(

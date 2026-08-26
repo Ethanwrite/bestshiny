@@ -33,6 +33,25 @@ class WorkspaceCreditBalance:
     balance: int | None
     starter_grant: int = 50
 
+    @property
+    def billable(self) -> bool:
+        """Whether this generation is charged against a wallet.
+
+        Every *plan* is — FREE, PRO and ENTERPRISE alike. A plan sets the
+        grant, the discount and which models may be used; it does not decide
+        whether a generation costs anything. That it once did is what let a paid
+        workspace be quoted and then never charged.
+
+        Two things are not plans and are therefore not charged: a project with
+        no workspace, which predates the commercial model, and the `ALL`
+        workspace, which is the authentication-disabled local development
+        bypass. `ALL` still receives server pricing and CostRecords; it has no
+        wallet to draw on, and giving it one would make local development spend
+        a real balance.
+        """
+
+        return self.workspace_id is not None and self.plan_tier != "ALL"
+
 
 @dataclass(frozen=True)
 class WorkspaceCreditCharge:
@@ -63,7 +82,7 @@ ReconcileAction = Literal["SETTLE_RESERVED", "REFUND_RESERVED"]
 
 
 class WorkspaceCreditService:
-    """Transactional Free-plan reservation, settlement, refund and reconciliation.
+    """Transactional reservation, settlement, refund and reconciliation, for every plan.
 
     ``Workspace.credit_balance`` is available credit, so reserving decreases it
     immediately. A reservation remains held while generation is running. Only a
@@ -110,7 +129,7 @@ class WorkspaceCreditService:
         if not key:
             raise ValueError("generation credit idempotency key is required")
         balance = self.balance_in_session(session, job.project_id)
-        if balance.workspace_id is None or balance.plan_tier != "FREE":
+        if not balance.billable:
             return WorkspaceCreditCharge(False, False, None, 0, balance.balance, None)
 
         existing = session.scalar(
@@ -135,7 +154,9 @@ class WorkspaceCreditService:
             .where(
                 Workspace.id == balance.workspace_id,
                 Workspace.status == "ACTIVE",
-                Workspace.plan_tier == "FREE",
+                # The plan is deliberately not a condition. It was, and that is
+                # what let a paid workspace be quoted and then never charged.
+                Workspace.plan_tier == balance.plan_tier,
                 Workspace.credit_balance >= credits,
             )
             .values(credit_balance=Workspace.credit_balance - credits)

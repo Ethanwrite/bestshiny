@@ -1,7 +1,13 @@
 # AI Director Platform — Documentation Index
 
-Snapshot: 2026-08-22
+Snapshot: 2026-08-26 · branch `claude/production-readiness-postgres` · commit `64ee277`
 Release verdict: **NOT PRODUCTION-READY**
+
+Current work is the all-models pricing audit: every billable model now prices from
+a published provider rate with a source URL and a date, or is refused a paid route.
+Migration head `0049_live_canary_status`. Nine of twelve billable models are
+`VERIFIED_NO_SPEND`; none has yet completed a live canary. Read `HANDOFF.md` §1b
+first, and the "Model pricing" section of `CURRENT_ARCHITECTURE.md` for the shape.
 
 The Phase II offline algorithm core is frozen at commit `0a74d31`, tag
 `v0.2.0-algorithm-core-offline`. Phase III was implemented at `99f9c60` with the offline

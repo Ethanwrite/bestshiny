@@ -1,5 +1,5 @@
 {
-  "version": "phase2-model-infrastructure-v4",
+  "version": "phase2-model-infrastructure-v6",
   "models": [
     {
       "logical_name": "gpt-5.6-sol-openrouter",
@@ -238,7 +238,7 @@
     {
       "logical_name": "seedream-5.0-ark",
       "provider": "seedance",
-      "provider_model_id": "seedream-5-0",
+      "provider_model_id": "doubao-seedream-5-0-260128",
       "modality": "image",
       "capabilities": [
         "image_generation"
@@ -498,7 +498,7 @@
         "supports_audio": true,
         "supports_text_rendering": true,
         "max_reference_images": 4,
-        "min_duration": 1,
+        "min_duration": 3,
         "max_duration": 15,
         "supported_aspect_ratios": [
           "9:16",
@@ -506,8 +506,7 @@
           "1:1"
         ],
         "supported_resolutions": [
-          "720p",
-          "1080p"
+          "720p"
         ],
         "physics_prior": 0.9,
         "identity_prior": 0.88,
@@ -580,7 +579,7 @@
         "supports_audio": true,
         "supports_text_rendering": true,
         "max_reference_images": 4,
-        "min_duration": 1,
+        "min_duration": 3,
         "max_duration": 15,
         "supported_aspect_ratios": [
           "9:16",
@@ -588,8 +587,7 @@
           "1:1"
         ],
         "supported_resolutions": [
-          "720p",
-          "1080p"
+          "720p"
         ],
         "physics_prior": 0.92,
         "identity_prior": 0.9,
@@ -1098,7 +1096,7 @@
         "EDGE",
         "TEMPORARY"
       ],
-      "enabled": true,
+      "enabled": false,
       "live_enabled": false,
       "max_duration": 30,
       "supported_aspect_ratios": [
@@ -1108,7 +1106,8 @@
       ],
       "metadata_json": {
         "transport": "dashscope",
-        "credential_required": true
+        "credential_required": true,
+        "disabled_reason": "This account has no Wan 3.0 API access (invitation-only Beta). External evidence for it is kept in the External Evidence Registry so that enabling it later is a config change."
       },
       "capability_profile": {
         "profile_version": "wan-3.0-manual-v1",
@@ -1193,7 +1192,7 @@
         "credential_required": true
       },
       "capability_profile": {
-        "profile_version": "wan-2.7-manual-v3",
+        "profile_version": "wan-2.7-manual-v4",
         "confidence_level": "initial",
         "supported_operations": [
           "video_generation"
@@ -1209,10 +1208,10 @@
         "supports_multi_reference": true,
         "supports_character_reference": true,
         "supports_audio": true,
-        "supports_reference_voice": false,
+        "supports_reference_voice": true,
         "supports_camera_instruction": true,
         "max_reference_images": 5,
-        "min_duration": 1,
+        "min_duration": 2,
         "max_duration": 15,
         "supported_aspect_ratios": [
           "9:16",
@@ -1232,17 +1231,23 @@
         "text_render_prior": 0.5,
         "provider_metadata": {
           "adapter": "wan",
-          "evidence": "published_mode_matrix_no_live_capability_verification",
+          "evidence": "official_t2v_i2v_r2v_api_references_no_live_capability_verification",
           "modes": {
             "t2v": {
               "model": "wan2.7-t2v-2026-06-12",
-              "accepts": [
-                "reference_image"
+              "accepts": [],
+              "input_fields": [
+                "prompt",
+                "negative_prompt",
+                "audio_url"
               ],
               "framing": [
                 "resolution",
                 "ratio"
-              ]
+              ],
+              "min_duration": 2,
+              "max_duration": 15,
+              "note": "the published HTTP API has no media array and no reference image; audio is one optional custom track at input.audio_url"
             },
             "i2v": {
               "model": "wan2.7-i2v-2026-04-25",
@@ -1250,11 +1255,39 @@
                 "first_frame",
                 "last_frame",
                 "first_clip",
-                "reference_image"
+                "driving_audio"
               ],
               "framing": [
                 "resolution"
-              ]
+              ],
+              "min_duration": 2,
+              "max_duration": 15,
+              "material_combinations": [
+                [
+                  "first_frame"
+                ],
+                [
+                  "first_frame",
+                  "driving_audio"
+                ],
+                [
+                  "first_frame",
+                  "last_frame"
+                ],
+                [
+                  "first_frame",
+                  "last_frame",
+                  "driving_audio"
+                ],
+                [
+                  "first_clip"
+                ],
+                [
+                  "first_clip",
+                  "last_frame"
+                ]
+              ],
+              "note": "the provider publishes a closed combination list; reference_image is not among the accepted types at all"
             },
             "r2v": {
               "model": "wan2.7-r2v-2026-06-12",
@@ -1268,7 +1301,12 @@
                 "ratio_when_no_first_frame"
               ],
               "max_first_frame": 1,
-              "max_reference_assets": 5
+              "min_reference_assets": 1,
+              "max_reference_assets": 5,
+              "min_duration": 2,
+              "max_duration": 15,
+              "max_duration_with_reference_video": 10,
+              "note": "reference_voice is an optional audio URL nested inside a reference_image or reference_video entry, never a media entry of its own"
             }
           },
           "wire_contract": {
@@ -1276,12 +1314,19 @@
               "type",
               "url"
             ],
-            "media_types": [
-              "image",
-              "video",
-              "audio"
+            "media_entry_optional_fields": [
+              "reference_voice"
             ],
-            "note": "role is canonical internal state and is never serialized; array position is the only role signal the provider receives"
+            "media_types": [
+              "first_frame",
+              "last_frame",
+              "first_clip",
+              "driving_audio",
+              "reference_image",
+              "reference_video"
+            ],
+            "negative_prompt_location": "input",
+            "note": "media.type carries the semantic role verbatim; it is not a media category and it is not inferred from array position. An earlier profile declared the opposite and the adapter posted 'image'/'video'/'audio', which the API rejects."
           },
           "capability_axes": {
             "continuation": {
@@ -1291,11 +1336,15 @@
               "reason": "continuing from a clip is an I2V operation: the clip is what the new footage grows out of, exactly as a first frame is"
             },
             "voice": {
-              "role": "reference_voice",
-              "mode": null,
+              "field": "reference_voice",
+              "nested_in": [
+                "reference_image",
+                "reference_video"
+              ],
+              "mode": "r2v",
               "flag": "supports_reference_voice",
-              "supported": false,
-              "reason": "supports_audio is native audio out; Wan 2.7 declares no voice or audio asset carried in as a reference. The role and its wire form ('type': 'audio') exist so the serializer is ready if that changes, and no mode accepts it while the flag is false"
+              "supported": true,
+              "reason": "R2V takes an audio URL fixing the timbre of the subject in a reference material. It is a field on the reference entry, not a media type. The same flag authorises i2v driving_audio: both are audio the model conditions on, as opposed to supports_audio, which is audio it produces."
             },
             "reference": {
               "roles": [
@@ -1313,9 +1362,23 @@
             "edit": {
               "supported": false,
               "reason": "Wan 2.7 publishes t2v, i2v and r2v only; this adapter exposes no edit operation and generate_image raises CAPABILITY_NOT_SUPPORTED"
+            },
+            "driving_audio": {
+              "role": "driving_audio",
+              "mode": "i2v",
+              "flag": "supports_reference_voice",
+              "supported": true,
+              "reason": "audio that drives the performance, carried as its own media entry alongside a first frame or first clip"
+            },
+            "custom_audio": {
+              "field": "audio_url",
+              "mode": "t2v",
+              "flag": "supports_reference_voice",
+              "supported": true,
+              "reason": "a custom audio track on the text-only mode; an input field, not a media entry"
             }
           },
-          "reference_bounds_evidence": "alibaba_cloud_deployment_documentation",
+          "reference_bounds_evidence": "official_r2v_api_reference",
           "cost": {
             "normalized": 0.42,
             "estimated_per_second": 0.07
@@ -1323,9 +1386,256 @@
           "latency": {
             "normalized": 0.58,
             "expected_seconds": 170
-          }
+          },
+          "duration_bounds_evidence": "official_t2v_i2v_r2v_api_references"
         },
         "source": "MANUAL_PRIOR"
+      }
+    },
+    {
+      "logical_name": "veo-3.1-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "google/veo-3.1",
+      "modality": "video",
+      "capabilities": [
+        "video_generation"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "PREMIUM",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "max_duration": 8,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true,
+        "backend": "Google Vertex, via OpenRouter"
+      },
+      "capability_profile": {
+        "profile_version": "veo-3.1-openrouter-manual-v1",
+        "supported_operations": [
+          "video_generation"
+        ],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": false,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 1,
+        "min_duration": 4,
+        "max_duration": 8,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.9,
+        "identity_prior": 0.88,
+        "camera_prior": 0.9,
+        "render_prior": 0.92,
+        "action_prior": 0.9,
+        "dialogue_prior": 0.82,
+        "text_render_prior": 0.7,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {
+            "normalized": 0.95,
+            "estimated_per_second": 0.4
+          },
+          "latency": {
+            "normalized": 0.7,
+            "expected_seconds": 200
+          },
+          "failure_priors": {}
+        },
+        "source": "MANUAL_PRIOR",
+        "supports_start_end": true,
+        "supports_character_reference": false,
+        "supports_video_extension": false,
+        "supports_reference_voice": false,
+        "supports_text_rendering": false
+      }
+    },
+    {
+      "logical_name": "veo-3.1-fast-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "google/veo-3.1-fast",
+      "modality": "video",
+      "capabilities": [
+        "video_generation"
+      ],
+      "quality_tier": "STANDARD",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "max_duration": 8,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true,
+        "backend": "Google Vertex, via OpenRouter"
+      },
+      "capability_profile": {
+        "profile_version": "veo-3.1-fast-openrouter-manual-v1",
+        "supported_operations": [
+          "video_generation"
+        ],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": false,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 1,
+        "min_duration": 4,
+        "max_duration": 8,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.9,
+        "identity_prior": 0.88,
+        "camera_prior": 0.9,
+        "render_prior": 0.88,
+        "action_prior": 0.88,
+        "dialogue_prior": 0.78,
+        "text_render_prior": 0.7,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {
+            "normalized": 0.35,
+            "estimated_per_second": 0.1
+          },
+          "latency": {
+            "normalized": 0.45,
+            "expected_seconds": 110
+          },
+          "failure_priors": {}
+        },
+        "source": "MANUAL_PRIOR",
+        "supports_start_end": true,
+        "supports_character_reference": false,
+        "supports_video_extension": false,
+        "supports_reference_voice": false,
+        "supports_text_rendering": false
+      }
+    },
+    {
+      "logical_name": "veo-3.1-lite-openrouter",
+      "provider": "openrouter",
+      "provider_model_id": "google/veo-3.1-lite",
+      "modality": "video",
+      "capabilities": [
+        "video_generation"
+      ],
+      "quality_tier": "DRAFT",
+      "cost_class": "ECONOMY",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "max_duration": 8,
+      "supported_aspect_ratios": [
+        "9:16",
+        "16:9",
+        "1:1"
+      ],
+      "metadata_json": {
+        "transport": "openrouter",
+        "credential_required": true,
+        "backend": "Google Vertex, via OpenRouter"
+      },
+      "capability_profile": {
+        "profile_version": "veo-3.1-lite-openrouter-manual-v1",
+        "supported_operations": [
+          "video_generation"
+        ],
+        "supports_t2v": true,
+        "supports_i2v": true,
+        "supports_reference_image": true,
+        "supports_multi_reference": false,
+        "supports_start_frame": true,
+        "supports_end_frame": true,
+        "supports_camera_instruction": true,
+        "supports_audio": true,
+        "max_reference_images": 1,
+        "min_duration": 4,
+        "max_duration": 8,
+        "supported_aspect_ratios": [
+          "9:16",
+          "16:9",
+          "1:1"
+        ],
+        "supported_resolutions": [
+          "720p",
+          "1080p"
+        ],
+        "physics_prior": 0.82,
+        "identity_prior": 0.8,
+        "camera_prior": 0.82,
+        "render_prior": 0.8,
+        "action_prior": 0.8,
+        "dialogue_prior": 0.7,
+        "text_render_prior": 0.7,
+        "provider_metadata": {
+          "adapter": "veo",
+          "cost": {
+            "normalized": 0.15,
+            "estimated_per_second": 0.05
+          },
+          "latency": {
+            "normalized": 0.3,
+            "expected_seconds": 70
+          },
+          "failure_priors": {}
+        },
+        "source": "MANUAL_PRIOR",
+        "supports_start_end": true,
+        "supports_character_reference": false,
+        "supports_video_extension": false,
+        "supports_reference_voice": false,
+        "supports_text_rendering": false
       }
     }
   ],

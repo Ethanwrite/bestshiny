@@ -150,17 +150,43 @@ def test_wan_adapter_bounds_match_the_registry_declaration(models) -> None:  # t
     shots that carry one is a failure nobody sees until a generation is billed.
     """
 
-    from wan_provider.adapter import _MODE_ROLES, MAX_FIRST_FRAME, MAX_REFERENCE_ASSETS
+    from wan_provider.adapter import (
+        _I2V_COMBINATIONS,
+        _MODE_ROLES,
+        MAX_DURATION,
+        MAX_DURATION_WITH_REFERENCE_VIDEO,
+        MAX_FIRST_FRAME,
+        MAX_REFERENCE_ASSETS,
+        MIN_DURATION,
+        MIN_REFERENCE_ASSETS,
+    )
 
     profile = models["wan-2.7-official"]["capability_profile"]
-    r2v = profile["provider_metadata"]["modes"]["r2v"]
+    modes = profile["provider_metadata"]["modes"]
+    r2v = modes["r2v"]
     assert profile["max_reference_images"] == MAX_REFERENCE_ASSETS
     assert r2v["max_reference_assets"] == MAX_REFERENCE_ASSETS
+    assert r2v["min_reference_assets"] == MIN_REFERENCE_ASSETS
     assert r2v["max_first_frame"] == MAX_FIRST_FRAME
-    for mode, declared in profile["provider_metadata"]["modes"].items():
+    for mode, declared in modes.items():
         assert {role.value for role in _MODE_ROLES[mode]} == set(declared["accepts"]), (
             f"Wan {mode} accepts different roles in the adapter and the registry"
         )
+
+    # The duration floor was declared as 1 and enforced nowhere; Wan 2.7's is 2.
+    # The ceiling is request-dependent, so the profile's single `max_duration`
+    # cannot be the whole rule and the mode table has to carry the exception.
+    assert profile["min_duration"] == MIN_DURATION
+    assert profile["max_duration"] == MAX_DURATION
+    for mode, declared in modes.items():
+        assert declared["min_duration"] == MIN_DURATION, f"Wan {mode} floor disagrees"
+        assert declared["max_duration"] == MAX_DURATION, f"Wan {mode} ceiling disagrees"
+    assert r2v["max_duration_with_reference_video"] == MAX_DURATION_WITH_REFERENCE_VIDEO
+
+    # I2V does not accept an arbitrary subset of its roles.
+    assert {frozenset(entry) for entry in modes["i2v"]["material_combinations"]} == {
+        frozenset(role.value for role in combination) for combination in _I2V_COMBINATIONS
+    }
 
 
 def test_wan_declared_capabilities_are_ones_the_wire_can_actually_carry(models) -> None:  # type: ignore[no-untyped-def]
@@ -168,27 +194,58 @@ def test_wan_declared_capabilities_are_ones_the_wire_can_actually_carry(models) 
 
     Both directions fail here. A profile that claims a capability no mode
     accepts advertises an input the adapter would refuse; a mode that accepts a
-    role the profile does not claim sends an input nobody authorised. Voice is
-    the live case: `supports_audio` means native audio *out*, so a voice
-    reference carried *in* needed its own flag rather than riding on that one.
+    role the profile does not claim sends an input nobody authorised.
+
+    Audio is the live case, and it moved: `supports_audio` is native audio
+    *out*, while `supports_reference_voice` is documented on the profile as an
+    audio asset the model conditions *on*. Wan 2.7 has two of those — I2V's
+    `driving_audio` media entry and R2V's nested `reference_voice` — so the flag
+    that was declared false is true, and one flag authorises both.
     """
 
-    from wan_provider.adapter import _MODE_ROLES, ROLE_CAPABILITY_FLAG, WanMedia, WanMediaRole
+    from wan_provider.adapter import (
+        _MODE_ROLES,
+        ROLE_CAPABILITY_FLAG,
+        VOICE_CAPABILITY_FLAG,
+        WanMedia,
+        WanMediaRole,
+    )
 
     profile = models["wan-2.7-official"]["capability_profile"]
+    wire = profile["provider_metadata"]["wire_contract"]
     accepted = {role for roles in _MODE_ROLES.values() for role in roles}
     for role, flag in ROLE_CAPABILITY_FLAG.items():
         assert profile.get(flag, False) is (role in accepted), (
             f"{flag} and the modes accepting {role.value} disagree"
         )
 
-    # Wan 2.7 declares no voice reference, so nothing may route one.
-    assert profile["supports_reference_voice"] is False
-    assert WanMediaRole.REFERENCE_VOICE not in accepted
+    assert profile[VOICE_CAPABILITY_FLAG] is True
+    assert WanMediaRole.DRIVING_AUDIO in _MODE_ROLES["i2v"]
 
-    # The serializer is nonetheless ready for the day the flag flips: a voice
-    # reference has a wire form, and it is still just type + url.
-    voiced = WanMedia(WanMediaRole.REFERENCE_VOICE, "https://media.invalid/voice.wav").as_payload()
-    assert voiced == {"type": "audio", "url": "https://media.invalid/voice.wav"}
-    assert set(voiced) == set(profile["provider_metadata"]["wire_contract"]["media_fields"])
-    assert voiced["type"] in profile["provider_metadata"]["wire_contract"]["media_types"]
+    # `media.type` is the role verbatim. The registry used to declare the
+    # opposite — "role is never serialized; position is the only signal" — and
+    # the adapter posted image/video/audio to match it. Both were wrong, so the
+    # declaration is pinned to the enum rather than hand-listed.
+    assert set(wire["media_types"]) == {role.value for role in WanMediaRole}
+    assert wire["negative_prompt_location"] == "input"
+    assert not {"image", "video", "audio"} & set(wire["media_types"])
+
+    for role in WanMediaRole:
+        entry = WanMedia(role, "https://media.invalid/asset.bin").as_payload()
+        assert entry == {"type": role.value, "url": "https://media.invalid/asset.bin"}
+        assert set(entry) == set(wire["media_fields"])
+
+    # A voice reference is a field *on* a reference material, never an entry.
+    voiced = WanMedia(
+        WanMediaRole.REFERENCE_IMAGE,
+        "https://media.invalid/face.png",
+        "https://media.invalid/voice.mp3",
+    ).as_payload()
+    assert voiced == {
+        "type": "reference_image",
+        "url": "https://media.invalid/face.png",
+        "reference_voice": "https://media.invalid/voice.mp3",
+    }
+    assert set(voiced) - set(wire["media_fields"]) == set(
+        wire["media_entry_optional_fields"]
+    )

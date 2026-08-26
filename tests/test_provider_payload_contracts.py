@@ -10,6 +10,8 @@ Each test here covers one previously unguarded handover defect:
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
 
 import pytest
@@ -623,6 +625,10 @@ async def test_openrouter_video_never_forwards_internal_platform_fields() -> Non
         "resolution",
         "image_url",
         "reference_images",
+        # Stated rather than inherited: OpenRouter defaults this to true and
+        # bills the audio rate for it, which is double the silent rate on
+        # Veo 3.1. It is a cost-affecting field, so it belongs on the wire.
+        "generate_audio",
     }
 
 
@@ -657,6 +663,16 @@ async def test_openrouter_video_consumes_gateway_resolved_reference_urls() -> No
 
 @pytest.mark.asyncio
 async def test_seedance_video_consumes_gateway_resolved_reference_urls() -> None:
+    """The Gateway's resolved URLs reach Ark — in one mode at a time.
+
+    This used to assert that a start frame and a reference image were flattened
+    into a single role-less image list. Ark treats first/last-frame and
+    omni-reference as mutually exclusive modes, so that request was never one it
+    could honour; the assertion was pinning the defect. Each mode is checked on
+    its own here, and the combination is refused before submission by
+    `test_seedance_refuses_to_ask_for_two_mutually_exclusive_modes`.
+    """
+
     from seedance_provider import SeedanceProvider
 
     transport = MockProviderTransport(
@@ -664,19 +680,34 @@ async def test_seedance_video_consumes_gateway_resolved_reference_urls() -> None
     )
     provider = SeedanceProvider(transport=transport, seedance_model_id="doubao-seedance-2-5-260628")
     await provider.generate_video(
-        {
-            "prompt": "one action",
-            "start_frame_url": "https://media.invalid/start.png",
-            "reference_urls": ["https://media.invalid/reference.png"],
-        },
+        {"prompt": "one action", "start_frame_url": "https://media.invalid/start.png"},
         account_id="",
         worker_id="",
     )
+    frame_body = transport.requests[0].json_body
+    assert frame_body is not None
+    assert [item for item in frame_body["content"] if item["type"] == "image_url"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://media.invalid/start.png"},
+            "role": "first_frame",
+        }
+    ]
 
-    body = transport.requests[0].json_body
-    assert body is not None
-    image_urls = [item["image_url"]["url"] for item in body["content"] if item["type"] == "image_url"]
-    assert image_urls == ["https://media.invalid/start.png", "https://media.invalid/reference.png"]
+    await provider.generate_video(
+        {"prompt": "one action", "reference_urls": ["https://media.invalid/reference.png"]},
+        account_id="",
+        worker_id="",
+    )
+    reference_body = transport.requests[1].json_body
+    assert reference_body is not None
+    assert [item for item in reference_body["content"] if item["type"] == "image_url"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://media.invalid/reference.png"},
+            "role": "reference_image",
+        }
+    ]
 
 
 # --- 3b. Wan 2.7 runtime model keys -----------------------------------------
@@ -758,9 +789,12 @@ async def test_wan_selects_the_mode_model_from_the_request_shape() -> None:
 # list the Gateway resolves and pays to resolve — never reached DashScope. A
 # shot generated on four character plates rendered as if it had none.
 #
-# They also pin the wire contract, which is narrower than the internal one: an
-# entry carries `type` and `url` only. The role decides the model, the limits
-# and the ordering, and is then dropped.
+# They also pin the wire contract, and the second defect lived here: these
+# tests used to *assert* `{"type": "image"}`, so a full green suite proved only
+# that the adapter and the tests agreed with each other. Wan 2.7 defines
+# `media.type` as the semantic role — `first_frame`, `last_frame`, `first_clip`,
+# `driving_audio`, `reference_image`, `reference_video` — and infers nothing
+# from array position. Every assertion below now names the published value.
 
 
 def _wan(**kwargs):  # type: ignore[no-untyped-def]
@@ -795,14 +829,22 @@ async def test_wan_carries_reference_images_instead_of_dropping_them() -> None:
     assert body is not None
     assert body["model"] == "wan2.7-r2v-2026-06-12"
     assert body["input"]["media"] == [
-        {"type": "image", "url": "https://media.invalid/face.png"},
-        {"type": "image", "url": "https://media.invalid/wardrobe.png"},
+        {"type": "reference_image", "url": "https://media.invalid/face.png"},
+        {"type": "reference_image", "url": "https://media.invalid/wardrobe.png"},
     ]
 
 
 @pytest.mark.asyncio
-async def test_wan_media_entries_carry_only_the_official_fields() -> None:
-    """The role is canonical internal state and never reaches the provider."""
+async def test_wan_media_entries_carry_the_role_as_their_wire_type() -> None:
+    """`media.type` is the published role, not a media category.
+
+    The regression this pins: the adapter used to map the role down to
+    `image`/`video`/`audio` on the theory that position was the only signal the
+    provider received. It is the reverse — the role is the contract, and a
+    first frame labelled `image` is a request DashScope refuses.
+    """
+
+    from wan_provider.adapter import WanMediaRole
 
     provider, transport = _wan()
     await provider.generate_video(
@@ -818,13 +860,22 @@ async def test_wan_media_entries_carry_only_the_official_fields() -> None:
     body = transport.requests[0].json_body
     assert body is not None
     assert all(set(item) == {"type", "url"} for item in body["input"]["media"])
+    roles = {role.value for role in WanMediaRole}
+    assert [item["type"] for item in body["input"]["media"]] == [
+        "first_frame",
+        "reference_image",
+    ]
+    assert all(item["type"] in roles for item in body["input"]["media"])
+    # And no entry carries a media *category*, which is what used to travel.
+    assert not {"image", "video", "audio"} & {item["type"] for item in body["input"]["media"]}
 
 
 @pytest.mark.asyncio
 async def test_wan_r2v_takes_a_first_frame_alongside_its_references() -> None:
     """The published R2V matrix: first_frame + reference_image/reference_video.
 
-    Position is the only role signal the provider gets, so the frame leads.
+    Order is deterministic so one request shape yields one payload, but it no
+    longer carries meaning: each entry names its own role.
     """
 
     provider, transport = _wan()
@@ -843,9 +894,9 @@ async def test_wan_r2v_takes_a_first_frame_alongside_its_references() -> None:
     assert body is not None
     assert body["model"] == "wan2.7-r2v-2026-06-12"
     assert body["input"]["media"] == [
-        {"type": "image", "url": "https://media.invalid/start.png"},
-        {"type": "video", "url": "https://media.invalid/style.mp4"},
-        {"type": "image", "url": "https://media.invalid/face.png"},
+        {"type": "first_frame", "url": "https://media.invalid/start.png"},
+        {"type": "reference_video", "url": "https://media.invalid/style.mp4"},
+        {"type": "reference_image", "url": "https://media.invalid/face.png"},
     ]
 
 
@@ -918,7 +969,7 @@ async def test_wan_continuation_from_a_clip_is_an_i2v_shot() -> None:
     assert body is not None
     assert body["model"] == "wan2.7-i2v-2026-04-25"
     assert body["input"]["media"] == [
-        {"type": "video", "url": "https://media.invalid/previous.mp4"}
+        {"type": "first_clip", "url": "https://media.invalid/previous.mp4"}
     ]
 
 
@@ -965,14 +1016,40 @@ async def test_wan_continuation_and_a_reference_video_are_not_the_same_request()
 
 
 @pytest.mark.asyncio
-async def test_wan_refuses_a_voice_reference_it_does_not_declare() -> None:
-    """`supports_reference_voice` is false, so no mode may carry one.
+async def test_wan_nests_a_voice_reference_inside_the_material_it_describes() -> None:
+    """R2V carries `reference_voice` *on* a reference entry, not as one.
 
-    The serializer can express it — a voice reference is `type: audio` and
-    still only type + url — but the capability declaration is the gate, and a
-    request carrying one fails before it is billed rather than arriving with
-    the voice quietly missing.
+    It is an audio URL fixing the timbre of the subject in that plate. Sending
+    it as its own `media` entry — which is what a standalone role would
+    serialize to — is not a thing the protocol has.
     """
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "reference_urls": ["https://media.invalid/face.png"],
+            "reference_voice": "https://media.invalid/voice.mp3",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-r2v-2026-06-12"
+    assert body["input"]["media"] == [
+        {
+            "type": "reference_image",
+            "url": "https://media.invalid/face.png",
+            "reference_voice": "https://media.invalid/voice.mp3",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wan_refuses_a_voice_reference_with_no_material_to_attach_it_to() -> None:
+    """A timbre belongs to a subject, and the subject is a reference plate."""
 
     provider, transport = _wan()
     with pytest.raises(ProviderError) as error:
@@ -988,6 +1065,132 @@ async def test_wan_refuses_a_voice_reference_it_does_not_declare() -> None:
     assert error.value.code == "INVALID_REQUEST"
     assert "reference_voice" in str(error.value)
     assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_refuses_an_ambiguous_voice_reference_rather_than_guessing() -> None:
+    """Two plates, one voice: which subject speaks is not this adapter's call."""
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "reference_urls": [
+                    "https://media.invalid/face.png",
+                    "https://media.invalid/second.png",
+                ],
+                "reference_voice": "https://media.invalid/voice.wav",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "one reference material" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_carries_driving_audio_as_its_own_i2v_media_entry() -> None:
+    """I2V audio is `type: driving_audio`, beside the frame it drives."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "start_frame_url": "https://media.invalid/start.png",
+            "driving_audio": "https://media.invalid/take.mp3",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-i2v-2026-04-25"
+    assert body["input"]["media"] == [
+        {"type": "first_frame", "url": "https://media.invalid/start.png"},
+        {"type": "driving_audio", "url": "https://media.invalid/take.mp3"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wan_t2v_audio_is_an_input_field_and_never_a_parameter() -> None:
+    """T2V's custom track is `input.audio_url`. There is no `parameters.audio`.
+
+    The defect: the compiler passed the shot's audio *design* — a dict — and the
+    adapter posted it as `parameters.audio`, so every Wan request that has ever
+    left this platform carried `"audio": {}`, a field no mode publishes.
+    """
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "audio_url": "https://media.invalid/track.mp3",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["model"] == "wan2.7-t2v-2026-06-12"
+    assert body["input"]["audio_url"] == "https://media.invalid/track.mp3"
+    assert "media" not in body["input"]
+    assert "audio" not in body["parameters"]
+
+    # And the dict that used to travel is now refused rather than posted.
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {"model": "wan-2.7", "prompt": "one action", "audio": {"dialogue": "none"}},
+            account_id="",
+            worker_id="",
+        )
+    assert "no `audio` parameter" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_keeps_the_three_audio_planes_apart() -> None:
+    """A T2V track, driving audio and a voice reference are not interchangeable."""
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "start_frame_url": "https://media.invalid/start.png",
+                "audio_url": "https://media.invalid/track.mp3",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "driving_audio" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_negative_prompt_travels_in_input_not_parameters() -> None:
+    """All three modes put it beside `prompt`, inside `input`."""
+
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "negative_prompt": "identity drift, extra limbs",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["input"]["negative_prompt"] == "identity drift, extra limbs"
+    assert "negative_prompt" not in body["parameters"]
 
 
 @pytest.mark.asyncio
@@ -1097,13 +1300,14 @@ async def test_wan_sends_ratio_only_where_nothing_else_fixes_the_aspect() -> Non
 
 @pytest.mark.asyncio
 async def test_wan_honours_an_explicit_mode_over_the_inferred_one() -> None:
+    """An explicit mode outranks inference — for media that mode can carry."""
+
     provider, transport = _wan()
     await provider.generate_video(
         {
             "model": "wan-2.7",
             "mode": "t2v",
             "prompt": "one action",
-            "reference_urls": ["https://media.invalid/face.png"],
         },
         account_id="",
         worker_id="",
@@ -1111,6 +1315,186 @@ async def test_wan_honours_an_explicit_mode_over_the_inferred_one() -> None:
     body = transport.requests[0].json_body
     assert body is not None
     assert body["model"] == "wan2.7-t2v-2026-06-12"
+
+
+@pytest.mark.asyncio
+async def test_wan_t2v_carries_no_media_even_when_asked_explicitly() -> None:
+    """T2V's HTTP API has prompt, negative prompt and audio_url. Nothing else.
+
+    This test used to assert the opposite: `mode=t2v` plus reference stills was
+    accepted and posted, so the references were paid for and discarded by the
+    provider. Neither the adapter's mode table nor the registry profile may
+    advertise an input the published API has no field for.
+    """
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "mode": "t2v",
+                "prompt": "one action",
+                "reference_urls": ["https://media.invalid/face.png"],
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "accepts no media at all" in str(error.value)
+    assert "reference_image" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_i2v_refuses_a_reference_image_it_cannot_express() -> None:
+    """I2V's published combinations do not include a reference image."""
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "mode": "i2v",
+                "prompt": "one action",
+                "start_frame_url": "https://media.invalid/start.png",
+                "reference_urls": ["https://media.invalid/face.png"],
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert error.value.code == "INVALID_REQUEST"
+    assert "reference_image" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_holds_i2v_to_its_published_material_combinations() -> None:
+    """Role membership is not the whole rule; the provider enumerates the sets."""
+
+    # A last frame with no first frame and no clip is not a combination.
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "end_frame_url": "https://media.invalid/end.png",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "material combinations" in str(error.value)
+    assert not transport.requests
+
+    # Driving audio drives *something*; on its own there is nothing to drive.
+    provider, transport = _wan()
+    with pytest.raises(ProviderError):
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "driving_audio": "https://media.invalid/take.mp3",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert not transport.requests
+
+    # Continuation plus a last frame is published, and is accepted.
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "first_clip": "https://media.invalid/previous.mp4",
+            "end_frame_url": "https://media.invalid/end.png",
+        },
+        account_id="",
+        worker_id="",
+    )
+    assert transport.requests[0].json_body["model"] == "wan2.7-i2v-2026-04-25"
+
+
+@pytest.mark.asyncio
+async def test_wan_r2v_needs_a_reference_material_not_only_a_first_frame() -> None:
+    """A first frame alone is an i2v shot, and r2v says so instead of failing late."""
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "mode": "r2v",
+                "prompt": "one action",
+                "start_frame_url": "https://media.invalid/start.png",
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "at least one reference image or reference video" in str(error.value)
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_wan_holds_duration_to_the_bound_that_applies_to_this_request() -> None:
+    """2 seconds is the floor, and an r2v shot with a reference video caps at 10.
+
+    The registry declared a floor of 1 and one flat ceiling of 15. Both were
+    wrong in the direction that costs a generation: a 1-second shot and a
+    12-second reference-video shot were both routed here and both refused by
+    the provider.
+    """
+
+    from wan_provider.adapter import max_duration_for
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {"model": "wan-2.7", "prompt": "one action", "duration": 1},
+            account_id="",
+            worker_id="",
+        )
+    assert "2-15 seconds" in str(error.value)
+    assert not transport.requests
+
+    provider, transport = _wan()
+    with pytest.raises(ProviderError) as error:
+        await provider.generate_video(
+            {
+                "model": "wan-2.7",
+                "prompt": "one action",
+                "reference_video": "https://media.invalid/style.mp4",
+                "duration": 12,
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "2-10 seconds" in str(error.value)
+    assert not transport.requests
+
+    # The same 12 seconds without a reference video is inside the bound.
+    provider, transport = _wan()
+    await provider.generate_video(
+        {
+            "model": "wan-2.7",
+            "prompt": "one action",
+            "reference_urls": ["https://media.invalid/face.png"],
+            "duration": 12,
+        },
+        account_id="",
+        worker_id="",
+    )
+    assert transport.requests[0].json_body["parameters"]["duration"] == 12
+
+    from wan_provider.adapter import WanMedia, WanMediaRole
+
+    assert max_duration_for("t2v", []) == 15
+    assert (
+        max_duration_for(
+            "r2v", [WanMedia(WanMediaRole.REFERENCE_VIDEO, "https://media.invalid/a.mp4")]
+        )
+        == 10
+    )
 
 
 @pytest.mark.asyncio
@@ -1143,8 +1527,8 @@ async def test_wan_video_consumes_gateway_resolved_reference_urls() -> None:
     assert body is not None
     assert body["model"] == "wan-i2v"
     assert body["input"]["media"] == [
-        {"type": "image", "url": "https://media.invalid/start.png"},
-        {"type": "image", "url": "https://media.invalid/end.png"},
+        {"type": "first_frame", "url": "https://media.invalid/start.png"},
+        {"type": "last_frame", "url": "https://media.invalid/end.png"},
     ]
 
 
@@ -1283,3 +1667,335 @@ async def test_in_progress_openrouter_video_is_reported_as_running() -> None:
     )
     assert job.status == "RUNNING"
     assert job.progress == pytest.approx(0.4)
+
+
+# --- 6. OpenRouter image: the exact request that leaves this process ---------
+
+
+@pytest.mark.asyncio
+async def test_gpt_image_2_wire_request_is_post_v1_images_with_the_canonical_model() -> None:
+    """Record the outbound request instead of describing it.
+
+    The Unified Image API is `POST /api/v1/images`, the model is the plain image
+    model `openai/gpt-image-2`, and the images come back as base64 in `data[]`.
+    Three neighbouring shapes would each look plausible and each be wrong:
+    `/chat/completions` or `/responses` (the multimodal reasoning path),
+    `/images/generations` (the OpenAI-native path), and the reasoning model
+    `openai/gpt-5.4-image-2` in place of the image model. This pins all of them
+    at the wire, including the URL the transport actually composes.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        # `b64_json` per entry, not a chat completion.
+        return ProviderHttpResponse(
+            200,
+            {
+                "id": "img-1",
+                "created": 1,
+                "data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}],
+            },
+        )
+
+    transport = MockProviderTransport(handler=handler)
+    provider = OpenRouterProvider(transport=transport)
+    submission = await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "A red apple on a white studio background"},
+        account_id="",
+        worker_id="",
+    )
+
+    assert len(recorded) == 1
+    sent = recorded[0]
+    assert sent.method == "POST"
+    assert sent.path == "/images"
+    assert sent.path not in {"/chat/completions", "/responses", "/images/generations"}
+    # The path is joined to the configured origin exactly as the live transport
+    # joins it, so this asserts the full canonical URL, not just the suffix.
+    assert f"https://openrouter.ai/api/v1{sent.path}" == "https://openrouter.ai/api/v1/images"
+
+    assert sent.json_body == {
+        "model": "openai/gpt-image-2",
+        "prompt": "A red apple on a white studio background",
+        # Cost-affecting, so never left to the provider's `auto`: it selects
+        # across 196 to 7024 output tokens without saying which it chose.
+        "quality": "low",
+    }
+    assert sent.json_body["model"] != "openai/gpt-5.4-image-2"
+    assert "messages" not in sent.json_body
+    assert "input" not in sent.json_body
+
+    # Parsed from data[].b64_json, never choices[0].message.
+    assert submission.result is not None
+    assert submission.result.outputs[0].content == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.asyncio
+async def test_gpt_image_2_capability_discovery_uses_the_images_model_index() -> None:
+    """Descriptor discovery is `GET /api/v1/images/models`, not the text index."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"data": [{"id": "openai/gpt-image-2"}]})
+
+    transport = MockProviderTransport(handler=handler)
+    provider = OpenRouterProvider(transport=transport)
+    described = await provider.list_image_models()
+
+    assert [(item.method, item.path) for item in recorded] == [("GET", "/images/models")]
+    assert recorded[0].path != "/models"
+    assert [entry["id"] for entry in described["data"]] == ["openai/gpt-image-2"]
+
+
+# --- 7. Seedance 2.5 on Volcengine Ark: the request that leaves this process --
+
+
+def _seedance(transport: MockProviderTransport) -> Any:
+    from seedance_provider import SeedanceProvider
+
+    return SeedanceProvider(transport=transport, seedance_model_id="doubao-seedance-2-5-260628")
+
+
+@pytest.mark.asyncio
+async def test_seedance_wire_request_names_the_ark_model_not_the_logical_name() -> None:
+    """The registry used to submit `seedance-2.5`, which names nothing anywhere.
+
+    That string is this platform's internal logical name. Ark publishes the model
+    as `doubao-seedance-2-5-260628` and answered the live submission with "model
+    or endpoint does not exist". BytePlus publishes a similarly-shaped
+    `dreamina-seedance-2-5-260628` on a different host; writing that here would
+    be the same class of mistake in the other direction.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-1"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {"prompt": "a paper lantern rising", "duration": 4, "resolution": "720p", "aspect_ratio": "9:16"},
+        account_id="",
+        worker_id="",
+    )
+
+    sent = recorded[0]
+    assert (sent.method, sent.path) == ("POST", "/contents/generations/tasks")
+    assert f"https://ark.cn-beijing.volces.com/api/v3{sent.path}" == (
+        "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks"
+    )
+    assert sent.json_body is not None
+    assert sent.json_body["model"] == "doubao-seedance-2-5-260628"
+    assert sent.json_body["model"] not in {"seedance-2.5", "dreamina-seedance-2-5-260628"}
+    assert sent.json_body["duration"] == 4
+    assert sent.json_body["resolution"] == "720p"
+    assert sent.json_body["ratio"] == "9:16"
+    assert sent.json_body["content"] == [{"type": "text", "text": "a paper lantern rising"}]
+
+
+@pytest.mark.asyncio
+async def test_seedance_reference_images_carry_the_role_ark_requires() -> None:
+    """`role` is a sibling of `image_url`, and an omni-reference needs it.
+
+    Role-less images left the model to infer what each picture was for. Ark
+    distinguishes `first_frame`, `last_frame` and `reference_image` explicitly.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-2"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {
+            "prompt": "she turns to the window",
+            "reference_urls": ["https://example.test/a.png", "https://example.test/b.png"],
+        },
+        account_id="",
+        worker_id="",
+    )
+
+    content = recorded[0].json_body["content"]  # type: ignore[index]
+    assert content[0] == {"type": "text", "text": "she turns to the window"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://example.test/a.png"},
+        "role": "reference_image",
+    }
+    assert all(part.get("role") == "reference_image" for part in content[1:])
+
+
+@pytest.mark.asyncio
+async def test_seedance_first_and_last_frame_take_their_own_roles_and_adaptive_ratio() -> None:
+    """A supplied frame fixes the geometry, and Ark then accepts only `adaptive`."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"id": "cgt-3"})
+
+    provider = _seedance(MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {
+            "prompt": "the lantern drifts up",
+            "start_frame_url": "https://example.test/first.png",
+            "end_frame_url": "https://example.test/last.png",
+            "aspect_ratio": "9:16",
+        },
+        account_id="",
+        worker_id="",
+    )
+
+    body = recorded[0].json_body
+    assert body is not None
+    roles = [part.get("role") for part in body["content"] if part["type"] == "image_url"]
+    assert roles == ["first_frame", "last_frame"]
+    assert body["ratio"] == "adaptive"
+
+
+@pytest.mark.asyncio
+async def test_seedance_refuses_to_ask_for_two_mutually_exclusive_modes() -> None:
+    """Frames and omni-reference are separate modes; sending both is a request Ark cannot honour."""
+
+    provider = _seedance(MockProviderTransport({}))
+    with pytest.raises(ProviderError) as first:
+        await provider.generate_video(
+            {
+                "prompt": "x",
+                "start_frame_url": "https://example.test/first.png",
+                "reference_urls": ["https://example.test/ref.png"],
+            },
+            account_id="",
+            worker_id="",
+        )
+    assert "not both" in str(first.value)
+
+    with pytest.raises(ProviderError) as second:
+        await provider.generate_video(
+            {"prompt": "x", "end_frame_url": "https://example.test/last.png"},
+            account_id="",
+            worker_id="",
+        )
+    assert "requires a first_frame" in str(second.value)
+
+
+# --- 8. Cost-affecting parameters are stated, not inherited ------------------
+
+
+@pytest.mark.asyncio
+async def test_image_quality_is_sent_explicitly_rather_than_left_to_auto() -> None:
+    """`auto` is unpriceable: it picks across a 36x range without saying so.
+
+    196 output tokens at `low` against 7024 at `high`, same request. Leaving the
+    parameter off meant the reservation had to be a ceiling; naming it makes the
+    quote exact.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(
+            200, {"data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}]}
+        )
+
+    provider = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), image_quality="low"
+    )
+    await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "a red apple"}, account_id="", worker_id=""
+    )
+    assert recorded[0].json_body["quality"] == "low"
+
+    # A caller who states one keeps it: this is a default, not an override.
+    await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "a red apple", "quality": "high"},
+        account_id="",
+        worker_id="",
+    )
+    assert recorded[1].json_body["quality"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_generate_audio_is_sent_explicitly_because_it_doubles_the_bill() -> None:
+    """OpenRouter defaults it to true and charges the audio rate for it.
+
+    On google/veo-3.1 that is 0.40 USD/s against 0.20 — a factor of two decided
+    by a field nobody sent.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(202, {"id": "video-1"})
+
+    provider = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), video_generate_audio=True
+    )
+    await provider.generate_video(
+        {"model": "google/veo-3.1", "prompt": "a lantern"}, account_id="", worker_id=""
+    )
+    assert recorded[0].json_body["generate_audio"] is True
+
+    silent = OpenRouterProvider(
+        transport=MockProviderTransport(handler=handler), video_generate_audio=False
+    )
+    await silent.generate_video(
+        {"model": "google/veo-3.1", "prompt": "a lantern"}, account_id="", worker_id=""
+    )
+    assert recorded[1].json_body["generate_audio"] is False
+
+
+# --- 9. OpenRouter video: every model id on the wire is the vendor's ---------
+
+# logical_name -> provider_model_id, as the registry holds them. The pairing is
+# the point: the left column is this platform's vocabulary and must never reach
+# a provider, which is exactly how `seedance-2.5` was submitted to Ark.
+OPENROUTER_VIDEO_IDS = {
+    "veo-3.1-openrouter": "google/veo-3.1",
+    "veo-3.1-fast-openrouter": "google/veo-3.1-fast",
+    "veo-3.1-lite-openrouter": "google/veo-3.1-lite",
+    "kling-3-pro-openrouter": "kwaivgi/kling-v3.0-pro",
+    "kling-3-standard-openrouter": "kwaivgi/kling-v3.0-std",
+    "grok-imagine-video-openrouter": "x-ai/grok-imagine-video",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("logical_name", "provider_model_id"), OPENROUTER_VIDEO_IDS.items())
+async def test_openrouter_video_wire_carries_the_vendor_id_never_the_logical_name(
+    logical_name: str, provider_model_id: str
+) -> None:
+    """Record what leaves the process, per model."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(202, {"id": "video-job"})
+
+    provider = OpenRouterProvider(transport=MockProviderTransport(handler=handler))
+    await provider.generate_video(
+        {"model": provider_model_id, "prompt": "a lantern rising", "duration": 4},
+        account_id="",
+        worker_id="",
+    )
+
+    sent = recorded[0]
+    assert (sent.method, sent.path) == ("POST", "/videos")
+    assert f"https://openrouter.ai/api/v1{sent.path}" == "https://openrouter.ai/api/v1/videos"
+    assert sent.json_body is not None
+    assert sent.json_body["model"] == provider_model_id
+    assert sent.json_body["model"] != logical_name
+    # The internal name must not appear anywhere in the body, not merely in the
+    # model field — a logical name smuggled through metadata is the same defect.
+    assert logical_name not in json.dumps(sent.json_body)

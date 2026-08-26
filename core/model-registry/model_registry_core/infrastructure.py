@@ -13,6 +13,7 @@ from production_domain.models import (
 )
 from production_domain.models import (
     ModelDefinition,
+    ModelPricingProfile,
     ModelRoleBinding,
 )
 from provider_sdk import AssetCriticality, ProviderTrustLevel, provider_can_handle
@@ -71,6 +72,8 @@ class RuntimeModelState:
     modality: str
     enabled: bool
     live_enabled: bool
+    lifecycle_status: str
+    router_enabled: bool
     supported_operations: tuple[str, ...]
     capability_profile_version: str
 
@@ -290,6 +293,69 @@ class ModelInfrastructureService:
                 live_enabled=definition.live_enabled,
             )
 
+    def reconcile_pricing_status(self) -> int:
+        """Make `pricing_status` agree with whether a published price exists.
+
+        The column is a report, not a switch — the engine gates on the pricing
+        profile itself. A report that can be set by hand is a report that drifts,
+        and this one drifts in the direction that costs money: 0044's migration
+        marked the rows that existed when it ran, so a database migrated before
+        its models were seeded — every fresh deployment — would show UNVERIFIED
+        for the one model whose rates were actually read off the vendor page,
+        while a model whose profiles were later withdrawn would go on claiming
+        VERIFIED. Derive it at boot instead, from the same table the quote uses.
+
+        Returns the number of rows whose status was wrong.
+        """
+
+        with self.database.session() as session:
+            # Provider and model id together: two providers can serve the same
+            # published model name at different prices, and one of them having a
+            # profile says nothing about the other.
+            priced = {
+                (row.provider, row.provider_model_id)
+                for row in session.execute(
+                    select(ModelPricingProfile.provider, ModelPricingProfile.provider_model_id)
+                )
+            }
+            corrected = 0
+            for definition in session.scalars(select(ModelDefinition)).all():
+                key = (definition.provider, definition.provider_model_id)
+                expected = "VERIFIED" if key in priced else "UNVERIFIED"
+                if definition.pricing_status != expected:
+                    definition.pricing_status = expected
+                    corrected += 1
+        return corrected
+
+    def declared_model_id_divergence(self, logical_name: str, declared: str) -> str | None:
+        """Report, without changing anything, that the stored ID is not the declared one.
+
+        Deliberately read-only. An operator who edits `provider_model_id` directly
+        is making a deployment decision, and a restart must not undo it — that is
+        a pinned invariant, not an accident. So the environment cannot win here.
+
+        What it may do is stop being silent. Seedance 2.5 sat with `.env` naming
+        `doubao-seedance-2-5-260628` and the row still holding the seeded
+        placeholder `seedance-2.5`; nothing compared them, and the first anyone
+        heard of it was Ark answering "model or endpoint does not exist" after a
+        reservation had already been taken. Returning the stored ID lets the
+        caller say so at boot.
+        """
+
+        normalized_name = logical_name.strip()
+        normalized_declared = declared.strip()
+        if not normalized_name or not normalized_declared:
+            return None
+        with self.database.session() as session:
+            stored = session.scalar(
+                select(ModelDefinition.provider_model_id).where(
+                    ModelDefinition.logical_name == normalized_name
+                )
+            )
+        if stored is None or stored == normalized_declared:
+            return None
+        return str(stored)
+
     def runtime_model(self, logical_name: str) -> RuntimeModelState:
         normalized_name = logical_name.strip()
         if not normalized_name:
@@ -480,6 +546,8 @@ class ModelInfrastructureService:
             modality=definition.modality,
             enabled=definition.enabled,
             live_enabled=definition.live_enabled,
+            lifecycle_status=definition.lifecycle_status,
+            router_enabled=definition.router_enabled,
             supported_operations=tuple(profile.supported_operations),
             capability_profile_version=profile.profile_version,
         )

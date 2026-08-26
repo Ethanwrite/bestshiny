@@ -174,6 +174,10 @@ class PricingEstimateRequest(BaseModel):
     duration: float = Field(default=1, ge=1, le=60)
     resolution: str = "720p"
     reference_count: int = Field(default=0, ge=0, le=20)
+    # Priced on whether the input carries video, not on how many references
+    # there are: a provider that discounts video-input tokens is answering a
+    # different question from "is this shot reference-guided".
+    generation_policy: str = "TEXT_TO_VIDEO"
 
 
 class CreditReconcileRequest(BaseModel):
@@ -759,6 +763,11 @@ def register_runtime_routes(
             "credits": value.credits,
             "usd_per_credit": value.usd_per_credit,
             "version": container.credit_pricing.version,
+            "pricing_status": value.pricing_status,
+            "pricing_source_url": value.pricing_source_url,
+            "pricing_checked_at": value.pricing_checked_at,
+            "billing_unit": value.billing_unit,
+            "settlement_formula": value.settlement_formula,
         }
 
     @user_router.post("/api/assets")

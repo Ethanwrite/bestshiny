@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cost_core import CreditEstimate, CreditPricingEngine
+from cost_core import CreditEstimate, CreditPricingEngine, PricingUnverified
 from model_registry_core import ModelRole
 from platform_contracts import GenerationRequest
 from provider_sdk import AssetCriticality
@@ -141,7 +141,16 @@ class GenerationAdmissionService:
                 resolution=resolution,
                 reference_count=len(admitted.reference_asset_ids),
                 image_count=admitted.image_count,
+                generation_policy=admitted.generation_policy,
             )
+        except PricingUnverified:
+            # Never a compatibility case. The fallback below exists for requests
+            # that predate pricing entirely, and it prices them at zero; routing
+            # an unverified price into it would turn "we do not know what this
+            # costs" into "this is free", which is the one answer that is
+            # certainly wrong. It subclasses ValueError so callers keep their
+            # 400, so it has to be caught ahead of the clause below.
+            raise
         except ValueError:
             if context.workspace_id is not None and enforce_plan:
                 raise
@@ -254,6 +263,7 @@ class GenerationAdmissionService:
             duration=admitted.duration or 1,
             resolution=resolution,
             reference_count=len(admitted.reference_asset_ids),
+            generation_policy=admitted.generation_policy,
         )
         admitted.cost_estimate = estimate.estimated_total_usd
         admitted.metadata = {

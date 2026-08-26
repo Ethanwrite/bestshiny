@@ -13,6 +13,7 @@ from production_domain.models import (
 )
 from production_domain.models import (
     ModelDefinition,
+    ModelPricingProfile,
     ModelRoleBinding,
 )
 from provider_sdk import AssetCriticality, ProviderTrustLevel, provider_can_handle
@@ -291,6 +292,40 @@ class ModelInfrastructureService:
                 enabled=definition.enabled,
                 live_enabled=definition.live_enabled,
             )
+
+    def reconcile_pricing_status(self) -> int:
+        """Make `pricing_status` agree with whether a published price exists.
+
+        The column is a report, not a switch — the engine gates on the pricing
+        profile itself. A report that can be set by hand is a report that drifts,
+        and this one drifts in the direction that costs money: 0044's migration
+        marked the rows that existed when it ran, so a database migrated before
+        its models were seeded — every fresh deployment — would show UNVERIFIED
+        for the one model whose rates were actually read off the vendor page,
+        while a model whose profiles were later withdrawn would go on claiming
+        VERIFIED. Derive it at boot instead, from the same table the quote uses.
+
+        Returns the number of rows whose status was wrong.
+        """
+
+        with self.database.session() as session:
+            # Provider and model id together: two providers can serve the same
+            # published model name at different prices, and one of them having a
+            # profile says nothing about the other.
+            priced = {
+                (row.provider, row.provider_model_id)
+                for row in session.execute(
+                    select(ModelPricingProfile.provider, ModelPricingProfile.provider_model_id)
+                )
+            }
+            corrected = 0
+            for definition in session.scalars(select(ModelDefinition)).all():
+                key = (definition.provider, definition.provider_model_id)
+                expected = "VERIFIED" if key in priced else "UNVERIFIED"
+                if definition.pricing_status != expected:
+                    definition.pricing_status = expected
+                    corrected += 1
+        return corrected
 
     def declared_model_id_divergence(self, logical_name: str, declared: str) -> str | None:
         """Report, without changing anything, that the stored ID is not the declared one.

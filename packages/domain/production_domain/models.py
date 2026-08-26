@@ -2727,6 +2727,19 @@ class ModelDefinition(Base, TimestampMixin):
     pricing_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, server_default="{}", nullable=False
     )
+    # Whether this model's price has been confirmed against the provider's own
+    # published rates. UNVERIFIED is the honest default: a number with no source
+    # is a guess, and a guess that is 40% of the real price loses money on every
+    # call — which is what `estimated_per_second = 0.09` did for Seedance 2.5.
+    # A billable model that is UNVERIFIED is refused a paid route rather than
+    # quoted from a placeholder.
+    pricing_status: Mapped[str] = mapped_column(
+        String(24),
+        default="UNVERIFIED",
+        server_default="UNVERIFIED",
+        index=True,
+        nullable=False,
+    )
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_live_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_window: Mapped[int | None] = mapped_column(Integer)
@@ -2808,6 +2821,81 @@ def _install_admin_append_only_ddl() -> None:
 
 
 _install_admin_append_only_ddl()
+
+
+class ModelPricingProfile(Base, TimestampMixin):
+    """One provider's published price for one model, mode and resolution.
+
+    Replaces a single `estimated_per_second` per model plus a global resolution
+    multiplier shared by every provider. That design encoded one vendor's price
+    curve as if it were physics: it charged 1080p at 1.30x across the board when
+    Ark's own published rates put 1080p at 2.47x its 720p, and it had no 480p
+    entry at all, so 480p quoted as though it were 720p.
+
+    Price is stored in the provider's own currency at the provider's own billing
+    unit, because that is the only form in which it can be checked against the
+    published page. The USD conversion carries its own rate and source, so a
+    quote can always be traced back to two dated facts rather than one rounded
+    number.
+
+    `estimate_formula` and `settlement_formula` are separate on purpose. Ark
+    quotes per second for planning but settles on `usage.completion_tokens`; a
+    reservation taken from the estimate and a debit taken from the settlement are
+    different numbers, and pretending otherwise is how a ledger drifts.
+    """
+
+    __tablename__ = "model_pricing_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_model_id",
+            "input_mode",
+            "resolution",
+            "effective_from",
+            name="uq_model_pricing_profile_scope",
+        ),
+        CheckConstraint("unit_price >= 0", name="ck_model_pricing_unit_price_nonnegative"),
+        CheckConstraint("estimate_unit_price >= 0", name="ck_model_pricing_estimate_nonnegative"),
+        CheckConstraint("usd_per_currency > 0", name="ck_model_pricing_fx_positive"),
+        CheckConstraint(
+            "effective_until IS NULL OR effective_until > effective_from",
+            name="ck_model_pricing_effective_window",
+        ),
+        Index("ix_model_pricing_profiles_lookup", "provider", "provider_model_id", "input_mode"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "no_video_input" / "video_input" / "default" — the axis a provider actually
+    # prices on. Ark charges less per token when the input carries video.
+    input_mode: Mapped[str] = mapped_column(String(40), default="default", nullable=False)
+    # "" where the model has no resolution axis, e.g. a per-image price.
+    resolution: Mapped[str] = mapped_column(String(24), default="", nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    # How the provider *bills*: the unit the invoice is computed in.
+    billing_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    # How the provider lets you *plan*. Ark bills on completion tokens, which
+    # nobody can know before the clip exists, and publishes a per-second typical
+    # price for exactly this purpose. The reservation is taken from this; the
+    # debit is settled from the one above. Equal to `unit_price` where a provider
+    # bills in the same unit it quotes in.
+    estimate_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    estimate_unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    usd_per_currency: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    fx_source: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    fx_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimate_formula: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    settlement_formula: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    # A promotion has an end. Writing a discounted rate in as the base price is
+    # how a temporary number becomes permanent by accident.
+    effective_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    notes: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
 
 
 class ModelCapabilityProfile(Base, TimestampMixin):

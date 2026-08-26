@@ -274,6 +274,9 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.model_infrastructure_config,
     )
     default_sync = model_infrastructure.ensure_defaults()
+    # After the rows exist, not before: 0044's migration can only mark models
+    # that were already seeded when it ran.
+    model_infrastructure.reconcile_pricing_status()
     model_registry = ModelCapabilityRegistry(database)
     providers = ProviderRouter(
         model_registry,
@@ -616,7 +619,14 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
     prompts = PromptCompilerService(database, skills, styles)
-    credit_pricing = CreditPricingEngine(model_registry)
+    credit_pricing = CreditPricingEngine(
+        model_registry,
+        database=database,
+        # Only a route that can actually be billed has to fail closed. Mock and
+        # recorded modes keep the seeded placeholder so development and the
+        # offline suite still run, and every estimate reports which it used.
+        require_verified_pricing=settings.provider_mode == "live",
+    )
     generation_admission = GenerationAdmissionService(
         workspace_models,
         model_roles,

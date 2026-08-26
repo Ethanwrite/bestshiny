@@ -97,26 +97,7 @@ re-filters on fields that are absent.
 
 ## 4. Open — needs a decision, not touched
 
-### QA-009 — S2 — `NOT_CONFIGURED` is displayed as red `DOWN`
-Two sources of truth disagree for `google_flow`:
-
-```
-google_flow  is_configured=True   probe.ok=False  detail='NOT_CONFIGURED'
-openrouter   is_configured=True   probe.ok=True   detail='LIVE'
-```
-
-`admin_routes.list_providers` treats "configured but probe failed" as `DOWN`, so a
-provider whose own detail reads `NOT_CONFIGURED` is badged red on both Providers and
-System Health. That is the one colour rule the brief singles out: not-configured is
-not a failure and must not be red.
-
-Two candidate fixes, and picking between them is a semantics call for whoever owns
-the provider gateway:
-1. `is_configured()` is over-reporting for `google_flow` — fix the gateway, or
-2. the status mapping should surface the probe's own `NOT_CONFIGURED` detail as a
-   grey state rather than `DOWN`.
-
-Left alone deliberately: both live in admin/provider semantics.
+### QA-009 — resolved 2026-08-25 — see §11.
 
 ### QA-010 — S3 — Danger density on Admin → Providers
 Nine solid-red `Disable` buttons render at once, one per provider card, including on
@@ -135,15 +116,7 @@ Productions shows `Reconcile` to any workspace OWNER/ADMIN. The endpoint authori
 project writers, so this is not a privilege leak, but it is an operator-shaped verb
 in a user-facing panel.
 
-### QA-013 — S2 — Browser → OSS direct upload blocked by CORS
-`scripts/verify_object_storage.py` reports:
-```
-[FAIL] browser CORS · http://localhost:3000   HTTP 403
-[FAIL] browser CORS · http://127.0.0.1:18081  HTTP 403
-```
-The bucket does not allow the web origin, so Admin → *Verified direct upload* cannot
-complete from a browser. The UI already explains this precisely when it happens.
-Fix is a bucket CORS rule (origin, `PUT`, presigned headers) — infrastructure, not code.
+### QA-013 — fix written, one command from resolved — see §11.
 
 ### QA-014 — S4 — OSS does not enforce `x-amz-checksum-sha256`
 `[WARN] checksum enforcement — store accepted mismatched bytes`. Already documented
@@ -310,3 +283,156 @@ video | seedance   | seedance-2.5       | quoted=44 | selection=MANUAL | task=-
 The manual video job matched the 44 CR the UI had quoted before submit. Both jobs
 then stopped at `LIVE_CANARY_DENIED` with `submission_state=NOT_SENT` and were
 refunded; balance is back to 3,000 CR. No provider money was spent.
+
+---
+
+## 11. QA-009 and QA-013 closed, and the canary that follows them
+
+### QA-009 — resolved — the probe's own verdict now wins
+
+The two sources of truth were never really in disagreement; the mapping was
+throwing half the answer away. Every adapter already reports a missing transport
+identically —
+
+```python
+ProviderHealth(False, "NOT_CONFIGURED", {"status": "NOT_CONFIGURED", ...})
+```
+
+— so `ok=False` covers two different facts: *this provider is broken* and *this
+provider was never wired up*. `"HEALTHY" if health.ok else "DOWN"` collapsed both
+into red.
+
+Fixed by reading the structured verdict instead of the boolean, in one helper used
+at all three sites that map a probe (`dashboard` counts, `GET /admin/providers`,
+`POST /admin/providers/{p}/probe`):
+
+```python
+def _probe_status(health: ProviderHealth) -> str:
+    if health.ok:
+        return "HEALTHY"
+    reported = str(health.metadata.get("status") or health.detail or "").strip().upper()
+    return "NOT_CONFIGURED" if reported == "NOT_CONFIGURED" else "DOWN"
+```
+
+This is the QA log's option 2, and it is the right one rather than a coin flip:
+`is_configured()` is a synchronous registry check — *is a real adapter wired in* —
+and cannot become a transport probe. `google_flow`'s own `capability_configured`
+depends on a browser worker being connected right now, which is a probe-time fact
+by construction.
+
+`detail` also stopped repeating the badge: a probe whose detail is the bare token
+`NOT_CONFIGURED` renders as "No generation transport is configured".
+
+No frontend change was needed — `admin.css` already styles `NOT_CONFIGURED` grey
+(`#86868f` on `#17171a`). Two regression tests pin both halves: the unconfigured
+probe must be grey, and a genuinely failed probe must stay red.
+
+**The running containers are built images with no source mount, so the console
+still shows the old badge until `docker compose up -d --build api worker`.**
+
+### QA-013 — the rule is written; applying it needs one operator command
+
+The bucket has no CORS configuration at all — confirmed, not inferred:
+
+```
+get_bucket_cors → NoSuchCORSConfiguration: The CORS Configuration does not exist.
+```
+
+`scripts/configure_object_storage_cors.py` derives the rule from what the platform
+actually sends rather than from a wildcard: origins from `WEB_ORIGINS`, and the
+request headers `S3CompatibleStorage.presigned_upload` binds into the signature.
+It prints the plan by default, refuses to clobber an existing configuration without
+`--force`, and is a no-op when the rule is already in place.
+
+```
+AllowedOrigins  http://localhost:3000, http://127.0.0.1:18081
+AllowedMethods  PUT, GET, HEAD
+AllowedHeaders  content-type, content-md5, x-amz-checksum-sha256
+ExposeHeaders   ETag, x-amz-checksum-sha256, x-oss-request-id
+MaxAgeSeconds   3000
+```
+
+`--apply` was refused by the local permission classifier, not by OSS. Run:
+
+```bash
+uv run python scripts/configure_object_storage_cors.py --apply
+uv run python scripts/verify_object_storage.py
+```
+
+Note this blocks **browser** uploads only. Server-side and presigned transfers
+already pass (`[ok] client transfer`), so the canary below is not waiting on it.
+
+### The closed-loop canary — `scripts/live_canary.py`
+
+QA-018 and QA-020 established that everything up to the live gate works: the
+browser produced `image | openrouter | openai/gpt-image-2 | quoted=15 CR` and
+`video | seedance | seedance-2.5 | quoted=44 CR`, both stopped at
+`LIVE_CANARY_DENIED` with `submission_state=NOT_SENT`, and both were refunded.
+What has never run is the other side of that gate.
+
+`scripts/live_canary.py` runs it, one smallest-approved request at a time, and
+checks each stage against the thing it claims rather than against the stage before
+it — the quote against `POST /api/pricing/estimate`, the reservation against
+`workspace_credit_entries`, the transfer against a `HEAD` on the real bucket, the
+debit against the append-only `workspace_credit_events` trail. A run that ends
+`COMPLETED` with no settled entry fails here even though the picture came back.
+
+It submits through `POST /api/passenger/generate`, the endpoint the Create canvas
+uses, so what gets proven is the path a paying user takes. The image target names
+no model, because image targets are router-owned (QA-018); the permit is minted for
+the model the router is expected to pick and then checked against the one it did.
+
+| Command | Spends |
+| --- | --- |
+| `live_canary.py image` | nothing — prints the plan and its cost |
+| `live_canary.py image --confirm-spend` | one 1:1 image inside a 5-request / USD 3 / 2h permit |
+| `live_canary.py video --confirm-spend` | one 4s 720p clip inside a 5-request / USD 5 / 2h permit |
+| `live_canary.py video --failure-drill` | nothing — reserves, then lets the gate refuse it |
+
+The drill is how credit release and error mapping get proven without paying: no
+permit is minted, so the request is priced and reserved and then refused at the
+live gate with `submission_state=NOT_SENT`, and the reservation has to come back.
+
+Operator inputs, exported into the shell and never committed:
+
+```
+CANARY_ACCESS_TOKEN   bearer token for a workspace user holding credits
+CANARY_PROJECT_ID     a project that user may write to
+```
+
+The script deliberately does not create either. Account operations belong to the
+operator running it.
+
+### QA-021 — S1 — Admin dashboard stranded a PostgreSQL backend on every load
+
+Found by running the PostgreSQL half of the gate, not by reading the code. The
+suite stopped dead for 13 minutes on:
+
+```
+pid 19679  active               DROP SCHEMA "t_91ee…" CASCADE      wait: Lock/relation
+pid 19680  idle in transaction  SELECT generation_jobs.status, …   age: 771s
+```
+
+`GET /api/admin/dashboard` defines `job_window()` inside its
+`with container.database.session() as session:` block but *called* it twice from
+the response literal below that block. `Database.session()` ends in
+`db.close()`, and a query issued on a closed `Session` does not fail — SQLAlchemy
+quietly begins a **new** transaction on a **new** pooled connection, which
+nothing then commits or closes.
+
+So every dashboard load leaked one PostgreSQL backend, parked `idle in
+transaction`, holding the `ACCESS SHARE` locks its `SELECT` took. Enough loads
+exhaust the pool; one is enough to block DDL, which is how the test suite's own
+`DROP SCHEMA … CASCADE` came to wait forever.
+
+SQLite hid it completely — the same code passes there and always has. This is the
+fourth defect the PostgreSQL half has caught that SQLite could not see.
+
+Fixed by computing both panels inside the session block. An AST sweep of every
+non-test module found no second instance of the shape (a closure defined inside a
+session block and called outside it). A regression test asserts the invariant on
+either engine:
+
+```python
+assert container.database.engine.pool.checkedout() == 0
+```

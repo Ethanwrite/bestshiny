@@ -10,6 +10,7 @@ Each test here covers one previously unguarded handover defect:
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -1636,3 +1637,82 @@ async def test_in_progress_openrouter_video_is_reported_as_running() -> None:
     )
     assert job.status == "RUNNING"
     assert job.progress == pytest.approx(0.4)
+
+
+# --- 6. OpenRouter image: the exact request that leaves this process ---------
+
+
+@pytest.mark.asyncio
+async def test_gpt_image_2_wire_request_is_post_v1_images_with_the_canonical_model() -> None:
+    """Record the outbound request instead of describing it.
+
+    The Unified Image API is `POST /api/v1/images`, the model is the plain image
+    model `openai/gpt-image-2`, and the images come back as base64 in `data[]`.
+    Three neighbouring shapes would each look plausible and each be wrong:
+    `/chat/completions` or `/responses` (the multimodal reasoning path),
+    `/images/generations` (the OpenAI-native path), and the reasoning model
+    `openai/gpt-5.4-image-2` in place of the image model. This pins all of them
+    at the wire, including the URL the transport actually composes.
+    """
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        # `b64_json` per entry, not a chat completion.
+        return ProviderHttpResponse(
+            200,
+            {
+                "id": "img-1",
+                "created": 1,
+                "data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}],
+            },
+        )
+
+    transport = MockProviderTransport(handler=handler)
+    provider = OpenRouterProvider(transport=transport)
+    submission = await provider.generate_image(
+        {"model": "openai/gpt-image-2", "prompt": "A red apple on a white studio background"},
+        account_id="",
+        worker_id="",
+    )
+
+    assert len(recorded) == 1
+    sent = recorded[0]
+    assert sent.method == "POST"
+    assert sent.path == "/images"
+    assert sent.path not in {"/chat/completions", "/responses", "/images/generations"}
+    # The path is joined to the configured origin exactly as the live transport
+    # joins it, so this asserts the full canonical URL, not just the suffix.
+    assert f"https://openrouter.ai/api/v1{sent.path}" == "https://openrouter.ai/api/v1/images"
+
+    assert sent.json_body == {
+        "model": "openai/gpt-image-2",
+        "prompt": "A red apple on a white studio background",
+    }
+    assert sent.json_body["model"] != "openai/gpt-5.4-image-2"
+    assert "messages" not in sent.json_body
+    assert "input" not in sent.json_body
+
+    # Parsed from data[].b64_json, never choices[0].message.
+    assert submission.result is not None
+    assert submission.result.outputs[0].content == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.asyncio
+async def test_gpt_image_2_capability_discovery_uses_the_images_model_index() -> None:
+    """Descriptor discovery is `GET /api/v1/images/models`, not the text index."""
+
+    recorded: list[ProviderHttpRequest] = []
+
+    def handler(request: ProviderHttpRequest) -> ProviderHttpResponse:
+        recorded.append(request)
+        return ProviderHttpResponse(200, {"data": [{"id": "openai/gpt-image-2"}]})
+
+    transport = MockProviderTransport(handler=handler)
+    provider = OpenRouterProvider(transport=transport)
+    described = await provider.list_image_models()
+
+    assert [(item.method, item.path) for item in recorded] == [("GET", "/images/models")]
+    assert recorded[0].path != "/models"
+    assert [entry["id"] for entry in described["data"]] == ["openai/gpt-image-2"]

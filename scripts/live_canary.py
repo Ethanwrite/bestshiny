@@ -148,6 +148,122 @@ TARGETS = {
 }
 
 
+def _video_target(
+    name: str,
+    *,
+    provider: str,
+    model: str,
+    duration: int,
+    resolution: str,
+    max_cost_usd: str,
+    prompt: str = "a paper lantern drifting upward over a wet street at night",
+) -> Target:
+    """One video model at the smallest request its own capability profile allows.
+
+    Duration and resolution are not stylistic here. They are the two axes every
+    one of these providers prices on, so the smallest admissible pair is the
+    cheapest possible proof that the wire format, the auth and the poll parsing
+    are right. Anything larger is a bigger bill for identical evidence.
+    """
+
+    return Target(
+        name=name,
+        provider=provider,
+        model=model,
+        max_requests=1,
+        max_cost_usd=max_cost_usd,
+        permit_hours=2,
+        body={
+            "media_type": "video",
+            "provider": provider,
+            "model": model,
+            "prompt": prompt,
+            "aspect_ratio": "16:9",
+            "resolution": resolution,
+            "duration": duration,
+        },
+        quote={
+            "media_type": "video",
+            "duration": duration,
+            "resolution": resolution,
+            "reference_count": 0,
+        },
+    )
+
+
+# Phase two, cheapest first. Each ceiling is the published minimum for that
+# request plus a margin for rounding — never a round number chosen for comfort,
+# because the ceiling is what the global budget is charged for while the permit
+# is live. Durations are each model's own `min_duration`; resolutions are the
+# cheapest entry in its own `supported_resolutions`.
+TARGETS.update(
+    {
+        # 1s at 480p, xAI's own floor, at OpenRouter's published 0.05 USD/s.
+        "grok-imagine-video": _video_target(
+            "grok-imagine-video",
+            provider="openrouter",
+            model="x-ai/grok-imagine-video",
+            duration=1,
+            resolution="480p",
+            max_cost_usd="0.15",
+        ),
+        # Veo durations are the discrete set 4/6/8 — 4 is the floor, not 1.
+        "veo-3.1-lite": _video_target(
+            "veo-3.1-lite",
+            provider="openrouter",
+            model="google/veo-3.1-lite",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="0.40",
+        ),
+        "kling-3-standard": _video_target(
+            "kling-3-standard",
+            provider="openrouter",
+            model="kwaivgi/kling-v3.0-std",
+            duration=3,
+            resolution="720p",
+            max_cost_usd="0.70",
+        ),
+        "veo-3.1-fast": _video_target(
+            "veo-3.1-fast",
+            provider="openrouter",
+            model="google/veo-3.1-fast",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="0.70",
+        ),
+        "kling-3-pro": _video_target(
+            "kling-3-pro",
+            provider="openrouter",
+            model="kwaivgi/kling-v3.0-pro",
+            duration=3,
+            resolution="720p",
+            max_cost_usd="0.90",
+        ),
+        # Already VERIFIED_LIVE on three clips; kept so the target set is the
+        # whole registry and a re-verification after a contract change is one
+        # command rather than a hand-built request.
+        "wan-2.7": _video_target(
+            "wan-2.7",
+            provider="wan",
+            model="wan-2.7",
+            duration=2,
+            resolution="720p",
+            max_cost_usd="0.40",
+        ),
+        "seedance-2.5": TARGETS["video"],
+        "veo-3.1": _video_target(
+            "veo-3.1",
+            provider="openrouter",
+            model="google/veo-3.1",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="2.00",
+        ),
+    }
+)
+
+
 @dataclass
 class Report:
     failures: int = 0

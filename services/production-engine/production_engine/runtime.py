@@ -135,7 +135,15 @@ class VisualProductionRuntime:
             reference_asset_ids=command.reference_asset_ids,
             idempotency_key=command.idempotency_key,
             cost_estimate=command.estimated_cost,
-            metadata={"mode": "PASSENGER_SEAT", "resolution": command.resolution},
+            metadata={
+                "mode": "PASSENGER_SEAT",
+                "resolution": command.resolution,
+                # Why this model ran, so the choice stays auditable after the fact.
+                # Admission clears model_role when it obeyed a named model, so its
+                # absence is exactly what distinguishes a manual pick from a route.
+                "model_selection": "MANUAL" if command.model_role is None else "ROUTER",
+                **({"image_task": command.image_task} if command.media_type == "image" else {}),
+            },
         )
         return self.submit(
             request,

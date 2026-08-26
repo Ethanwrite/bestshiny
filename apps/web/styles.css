@@ -269,6 +269,7 @@ input[type="file"]::file-selector-button {
   word-break: break-word;
 }
 .output-box.empty-state { color: var(--fg-meta); }
+.output-box.is-error { color: var(--danger); box-shadow: inset 0 0 0 1px rgba(242, 96, 122, .28); }
 .output-box pre { margin: 8px 0 0; font-family: var(--mono); font-size: 10px; color: var(--fg-label); white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto; }
 
 .kv-list { display: grid; gap: 1px; background: var(--line-faint); border-radius: var(--radius-s); overflow: hidden; }
@@ -739,7 +740,11 @@ input[type="file"]::file-selector-button {
 .depay-checkout .btn-row { width: 100%; }
 
 .toast {
-  position: fixed; left: 50%; bottom: 84px; z-index: 200;
+  /* `popover` puts this in the top layer so it can be seen over an open
+     <dialog>; the UA popover styles (inset:0, margin:auto, border) have to be
+     unset for our own placement to survive. */
+  position: fixed; inset: auto; left: 50%; bottom: 84px; z-index: 200;
+  margin: 0; border: 0;
   transform: translate(-50%, 12px);
   max-width: min(560px, calc(100vw - 40px));
   padding: 11px 18px; border-radius: 22px;

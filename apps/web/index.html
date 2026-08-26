@@ -358,10 +358,25 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <h2 id="inspectorTitle">Generation settings</h2>
             </div>
             <div class="inspector-body">
-              <section class="group">
+              <section class="group" id="imageTaskGroup">
+                <h3 class="group-title">Creative task</h3>
+                <label class="field"><span class="field-label">What are you making?</span>
+                  <select id="passengerImageTask">
+                    <option value="auto">Auto — detect from the prompt</option>
+                    <option value="portrait">Character</option>
+                    <option value="product">Product</option>
+                    <option value="commercial">Commercial</option>
+                    <option value="scene_concept">Scene</option>
+                    <option value="beauty_fashion">Beauty &amp; fashion</option>
+                    <option value="reference_character_regeneration">Character from reference</option>
+                  </select>
+                </label>
+                <p class="field-note">The task decides how your prompt is treated and which route the platform picks. You are told the model and the price the moment you submit.</p>
+              </section>
+              <section class="group" id="videoModelGroup" hidden>
                 <h3 class="group-title">Model</h3>
-                <label class="field"><span class="field-label">Generation model</span><select id="passengerModel"><option value="">Reading models…</option></select></label>
-                <p id="modelHint" class="field-note">The model you pick is never silently swapped.</p>
+                <label class="field"><span class="field-label">Generation model</span><select id="passengerModel"><option value="">Auto — Recommended</option></select></label>
+                <p id="modelHint" class="field-note">Auto lets the platform choose. Name a model and that exact model runs, or the request is refused.</p>
               </section>
               <section class="group">
                 <h3 class="group-title">Output</h3>
@@ -710,7 +725,8 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <small class="field-note">Every click mints a fresh PaymentIntent and order_ref against the same fixed offer.</small>
         </div>
         <div id="depayCheckout" class="depay-checkout" hidden>
-          <img id="depayQrCode" alt="DePay payment QR code" width="200" height="200" />
+          <img id="depayQrCode" alt="DePay payment QR code" width="200" height="200"
+               src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" />
           <strong id="depayCheckoutSummary" class="mono"></strong>
           <div class="btn-row">
             <button id="openDePayBtn" class="btn btn-secondary btn-grow" type="button">Open DePay</button>
@@ -723,7 +739,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
       </div>
     </dialog>
 
-    <div id="toast" class="toast" role="status"></div>
+    <div id="toast" class="toast" role="status" popover="manual"></div>
 
     <script type="module" src="/router.js"></script>
     <script type="module" src="/public.js"></script>

@@ -560,8 +560,11 @@ def register_runtime_routes(
                 GenerationRequest(
                     project_id=body.project_id,
                     type=body.media_type,
-                    provider=body.provider or "google_flow",
-                    model=body.model or ("veo" if body.media_type == "video" else "NARWHAL"),
+                    # Passed through exactly as sent. An empty pair is the caller
+                    # asking for automatic selection; substituting a default here
+                    # would make a named model indistinguishable from no choice.
+                    provider=body.provider,
+                    model=body.model,
                     prompt=body.prompt,
                     negative_prompt=body.negative_prompt,
                     duration=body.duration,
@@ -575,6 +578,7 @@ def register_runtime_routes(
                 requested_role=body.model_role,
                 resolution=body.resolution,
                 enforce_plan=not principal.development_bypass,
+                image_task=body.image_task,
             )
             estimate = admitted.estimate
             body = body.model_copy(

@@ -169,11 +169,26 @@ async function request(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
+let toastTimer = null;
 function toast(message) {
   if (!message) return;
-  $("toast").textContent = message;
-  $("toast").classList.add("show");
-  setTimeout(() => $("toast").classList.remove("show"), 2800);
+  const node = $("toast");
+  node.textContent = message;
+  // A modal <dialog> lives in the top layer, where no z-index can reach it, so
+  // a toast raised during a dialog flow would be invisible exactly when it
+  // matters most — reporting that the dialog's action failed. Showing it as a
+  // popover puts it in the top layer too.
+  if (typeof node.showPopover === "function" && !node.matches(":popover-open")) {
+    try { node.showPopover(); } catch (_error) { /* raced with another toast */ }
+  }
+  node.classList.add("show");
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    node.classList.remove("show");
+    if (typeof node.hidePopover === "function" && node.matches(":popover-open")) {
+      try { node.hidePopover(); } catch (_error) { /* already dismissed */ }
+    }
+  }, 2800);
 }
 
 /* ============================================================
@@ -371,6 +386,9 @@ function setPassengerMedia(media) {
     button.classList.toggle("active", button.dataset.media === media);
   });
   const video = media === "video";
+  // Image work is routed from creative intent; only video exposes a model.
+  $("imageTaskGroup").hidden = video;
+  $("videoModelGroup").hidden = !video;
   $("passengerDurationField").classList.toggle("hidden", !video);
   $("barDurationFact").hidden = !video;
   $("imagePromptActions").classList.toggle("hidden", video);
@@ -390,8 +408,10 @@ function setPassengerMedia(media) {
 }
 
 async function loadPassengerModels() {
-  const providers = await request("/v1/providers");
-  const configuredProviders = providers.filter((provider) => provider.configured !== false);
+  // /v1/providers is already filtered server-side to configured providers whose
+  // models are enabled and user-visible; it deliberately no longer reports
+  // `configured`/`healthy`, so the client must not re-filter on absent fields.
+  const configuredProviders = await request("/v1/providers");
   state.modelProfiles = configuredProviders.flatMap((provider) => (provider.models || [])
     .filter((model) => model.status !== "disabled"
       && model.modality === "video"
@@ -412,12 +432,14 @@ function renderPassengerModels() {
   if (freeVideo) {
     state.passengerModels = state.passengerModels.filter((model) => model.provider === "seedance");
   }
-  $("passengerModel").innerHTML = state.passengerModels.length
-    ? state.passengerModels.map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(model.model_id)}</option>`).join("")
-    : '<option value="">No models configured</option>';
+  const auto = '<option value="">Auto — Recommended</option>';
+  $("passengerModel").innerHTML = auto + state.passengerModels
+    .filter((model) => model.media === "video")
+    .map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(model.model_id)}</option>`)
+    .join("");
   $("modelHint").textContent = freeVideo
     ? "Free plan video runs on Seedance. Upgrade to reach every route."
-    : "The model you pick is never silently swapped.";
+    : "Auto lets the platform choose. Name a model and that exact model runs, or the request is refused.";
   updatePassengerCost();
 }
 
@@ -425,6 +447,8 @@ function selectedPassengerModel() {
   const [provider, model] = $("passengerModel").value.split("|");
   return state.passengerModels.find((item) => item.provider === provider && item.model_id === model);
 }
+
+const isAutoModel = () => !$("passengerModel").value;
 
 function passengerEstimatedCost() {
   const profile = selectedPassengerModel();
@@ -438,7 +462,7 @@ function passengerEstimatedCost() {
 }
 
 function updatePassengerCost() {
-  const profile = selectedPassengerModel();
+  const profile = state.passengerMedia === "image" ? null : selectedPassengerModel();
   $("barAspect").textContent = $("passengerAspect").value;
   $("barResolution").textContent = $("passengerResolution").value;
   $("barDuration").textContent = `${$("passengerDuration").value || 4}s`;
@@ -451,7 +475,16 @@ function updatePassengerCost() {
       : `$${Number(profile.cost.estimated_per_second || 0).toFixed(3)} / s`)
     : "provider settled";
 
-  if (!profile) { $("passengerCost").textContent = "Pick a model"; return; }
+  if (!profile) {
+    // Nothing is quoted until the router has resolved a target, so the figure the
+    // user sees can never belong to a model other than the one that runs.
+    const routed = state.passengerMedia === "image" || isAutoModel();
+    $("passengerCost").textContent = routed ? "Quoted on submit" : "Pick a model";
+    $("barModel").textContent = state.passengerMedia === "image"
+      ? `Routed · ${$("passengerImageTask").selectedOptions[0]?.text.replace(/ —.*$/, "") || "Auto"}`
+      : (isAutoModel() ? "Auto" : "None");
+    return;
+  }
   const estimate = passengerEstimatedCost();
   $("passengerCost").textContent = estimate > 0
     ? `${Math.max(1, Math.ceil(estimate / .01))} CR · $${estimate.toFixed(2)}`
@@ -637,8 +670,12 @@ async function renderPassengerJob(job) {
 async function generatePassenger() {
   if (!state.project) return toast("Create a project first");
   const prompt = $("passengerPrompt").value.trim();
-  const selection = selectedPassengerModel();
-  if (!prompt || !selection) return toast("Write a prompt and pick a model");
+  const isImage = state.passengerMedia === "image";
+  const selection = isImage ? null : selectedPassengerModel();
+  const auto = isImage || isAutoModel();
+  const imageTask = $("passengerImageTask").value;
+  if (!prompt) return toast("Write a prompt first");
+  if (!isImage && !auto && !selection) return toast("Pick a model, or choose Auto");
   const projectId = state.project.id;
   const mediaType = state.passengerMedia;
   const aspectRatio = $("passengerAspect").value;
@@ -651,8 +688,11 @@ async function generatePassenger() {
     && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
   const file = $("passengerReference").files[0];
   const fingerprint = JSON.stringify({
-    projectId, mediaType, provider: selection.provider, model: selection.model_id,
-    modelRole: freeVideo ? "VIDEO_SEEDANCE" : null,
+    projectId, mediaType,
+    provider: auto ? "" : selection.provider,
+    model: auto ? "" : selection.model_id,
+    imageTask: isImage ? imageTask : null,
+    modelRole: !isImage && auto && freeVideo ? "VIDEO_SEEDANCE" : null,
     prompt, negativePrompt, criticality, aspectRatio, resolution, duration, estimatedCost,
     file: file ? [file.name, file.size, file.lastModified] : null,
   });
@@ -661,17 +701,22 @@ async function generatePassenger() {
   const button = $("passengerGenerateBtn");
   button.disabled = true;
   button.textContent = "Submitting…";
-  ["passengerPrompt", "passengerModel", "passengerAspect", "passengerResolution",
-    "passengerDuration", "passengerReference"].forEach((id) => { $(id).disabled = true; });
+  ["passengerPrompt", "passengerModel", "passengerImageTask", "passengerAspect",
+    "passengerResolution", "passengerDuration", "passengerReference"]
+    .forEach((id) => { const node = $(id); if (node) node.disabled = true; });
   let succeeded = false;
   try {
     const reference = await uploadPassengerReference({ projectId, file });
     const payload = {
       project_id: projectId,
       media_type: mediaType,
-      provider: selection.provider,
-      model: selection.model_id,
-      ...(freeVideo ? { model_role: "VIDEO_SEEDANCE" } : {}),
+      // Images never carry a model: the creative task is the whole request and
+      // the router resolves the target. Video sends a named model alone, since
+      // pairing it with a role would ask the server to route and obey at once.
+      provider: auto ? "" : selection.provider,
+      model: auto ? "" : selection.model_id,
+      ...(isImage ? { image_task: imageTask } : {}),
+      ...(!isImage && auto && freeVideo ? { model_role: "VIDEO_SEEDANCE" } : {}),
       prompt,
       ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
       asset_criticality: criticality,
@@ -687,14 +732,15 @@ async function generatePassenger() {
     await renderPassengerJob(job);
     await loadCredits();
     succeeded = true;
-    toast(freeVideo
-      ? "Submitted. Free plan video runs on Seedance."
-      : "Submitted. Your model choice is not substituted.");
+    toast(auto
+      ? `Submitted. Routed to ${simpleLabel(job.provider)} · ${job.model} — ${job.estimated_credits} CR.`
+      : "Submitted. Your chosen model is the one that runs and the one you are billed for.");
   } finally {
     finishSubmission("passenger", idempotencyKey, succeeded);
     button.disabled = false;
-    ["passengerPrompt", "passengerModel", "passengerAspect", "passengerResolution",
-      "passengerDuration", "passengerReference"].forEach((id) => { $(id).disabled = false; });
+    ["passengerPrompt", "passengerModel", "passengerImageTask", "passengerAspect",
+      "passengerResolution", "passengerDuration", "passengerReference"]
+      .forEach((id) => { const node = $(id); if (node) node.disabled = false; });
     button.textContent = state.passengerMedia === "video" ? "Generate video" : "Generate image";
   }
 }
@@ -705,6 +751,10 @@ async function refreshPassengerJob() {
   const job = await request(`/v1/generations/${current.id}`);
   state.passengerJobs[state.passengerMedia] = job;
   await renderPassengerJob(job);
+  // A job that fails before submission has its reservation refunded server-side.
+  // Without this the pill keeps showing the reserved balance and the credits look
+  // lost, which is exactly the moment a user is most likely to distrust the meter.
+  await loadCredits();
 }
 
 async function confirmPassengerAsset() {
@@ -904,7 +954,7 @@ async function uploadManualAssetVersion() {
       body: JSON.stringify({
         primary_media_asset_id: media.id,
         parent_version_id: existing?.canonical_version_id || null,
-        label: `User upload v${Date.now()}`,
+        label: `User upload · ${new Date().toLocaleString()}`,
         source: "USER_UPLOAD",
         status: "READY",
       }),
@@ -923,6 +973,12 @@ async function uploadManualAssetVersion() {
     $("manualAssetFile").value = "";
     $("manualAssetStatus").textContent = `Saved ${simpleLabel(assetType)} "${assetName}" as v${version.version}${promoted ? " and set it as canonical." : ". The canonical reference did not change."}`;
     toast("New version saved. Earlier versions stay traceable.");
+  } catch (error) {
+    // The dialog is modal; leaving its own status line on the default helper
+    // text after a failure reads as "nothing happened".
+    $("manualAssetStatus").className = "output-box is-error";
+    $("manualAssetStatus").textContent = error.message;
+    throw error;
   } finally {
     button.disabled = false;
     button.textContent = "Save as new version";
@@ -1972,6 +2028,7 @@ on("undoImagePromptBtn", "click", undoPassengerPrompt);
 on("passengerGenerateBtn", "click", guard(generatePassenger));
 on("passengerRefreshBtn", "click", guard(refreshPassengerJob));
 on("passengerModel", "change", updatePassengerCost);
+on("passengerImageTask", "change", updatePassengerCost);
 on("passengerAspect", "change", updatePassengerCost);
 on("passengerDuration", "input", updatePassengerCost);
 on("passengerResolution", "change", updatePassengerCost);

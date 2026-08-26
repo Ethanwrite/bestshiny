@@ -316,10 +316,9 @@ def test_free_passenger_video_is_server_routed_to_seedance_role(container, monke
             "/api/passenger/generate",
             headers=headers,
             json={
+                # Auto: no provider/model named, so the platform routes.
                 "project_id": project["id"],
                 "media_type": "video",
-                "provider": "google_flow",
-                "model": "flow-veo-3.1",
                 "prompt": "A single visible action",
                 "idempotency_key": "free-role-route",
             },
@@ -386,8 +385,6 @@ def test_free_passenger_charge_job_and_cost_are_atomic_and_idempotent(container,
     )
     payload = {
         "media_type": "video",
-        "provider": "openrouter",
-        "model": "kwaivgi/kling-v3.0-pro",
         "prompt": "One visible action",
         "idempotency_key": "atomic-free-charge",
     }

@@ -1,6 +1,12 @@
 import { currentUser, isAdminRoute, navigate, onRoute } from "./router.js";
 
-const API = location.port === "18081" ? "http://127.0.0.1:18080" : "";
+// Same convention as app.js: the served origin proxies /api/ to the API and
+// strips that prefix, so the base must carry it for `${API}/api${path}` to
+// arrive as /api/admin/... rather than /admin/...
+const API = window.AI_DIRECTOR_API
+  || (location.hostname === "127.0.0.1" && location.port === "18081"
+    ? "http://127.0.0.1:18080"
+    : "/api");
 const $ = (id) => document.getElementById(id);
 const esc = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
 const fmt = (value) => {

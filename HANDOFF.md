@@ -10,12 +10,13 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q                      761 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      933 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  763 passed, 7 skipped   (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  935 passed, 7 skipped   (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 139 source files
-.venv/bin/python -m alembic heads                  0049_live_canary_status (single head)
+.venv/bin/python -m mypy                           Success: 157 source files
+.venv/bin/python -m alembic heads                  0050_router_evidence (single head)
+git diff --check                                   clean
 ```
 
 **Both halves must be green.** The PostgreSQL half needs `docker compose up -d postgres`. The SQLite
@@ -272,6 +273,61 @@ move to the next. Do not batch.
 Then: the two `google_flow` models (Flow is browser-driven with no published
 per-call rate — likely to stay unpriceable), and the resolution/duration schema
 gaps listed above.
+
+## 1c. 2026-08-26 — four layers of routing evidence, and a flag that is off
+
+Full account in [`docs/ROUTER_EVIDENCE.md`](docs/ROUTER_EVIDENCE.md). The short version.
+
+**Nothing about routing changed.** `feature_router_lcb` is `False` and `VideoModelRouter` is
+untouched — same version string, same `rank` signature, same four scoring profiles, asserted by
+`tests/test_router_lcb_runtime_gate.py`. With the flag off the router receives byte-for-byte the
+evidence it received before. `model_metrics` and the adaptive router are also untouched.
+
+**What was added.** `core/router-evidence/router_evidence_core` (18 modules), migration
+`0050_router_evidence` with three new tables, three research/ingest/analysis scripts, and 172 tests
+across 12 files.
+
+The four layers — `official_prior`, `benchmark_prior`, `community_prior`,
+`production_posterior` — are physically separate: three frozen files under `config/router-evidence/`
+with one loader each and deliberately no accessor that returns two layers, plus a database table.
+Everything is keyed by `provider · model_id · exact_version · task_type · scenario ·
+metric_scale_id`, and production additionally by duration bucket, resolution and reference mode.
+
+**Production observations got wider.** `router_observations` is written alongside `model_metrics`,
+one row per evaluated generation, by `VisualProductionRuntime.evaluate_job`. It records the
+conditions and every observed outcome; `None` means not observed and never zero, and a check
+constraint refuses a failed generation carrying a quality score — because otherwise a provider
+outage reads as a quality problem and teaches the router to avoid a good model permanently.
+
+**The posterior is offline and hierarchical.** Beta, five levels, no level above the exact version —
+which is what makes cross-version inheritance impossible rather than merely discouraged. Cost and
+latency deliberately have no posterior.
+
+**The Grok research pass** (2026-08-26, eleven models × three layers) returned 255 candidate records
+and 154 survived ingest: 64 official, 38 benchmark, 52 community. 98 were refused — unquoted
+numbers, unregistered scales, values outside their own scale, unattributed sample sizes, versions
+the source never named. 37 conflicts marked and none resolved; 47 records bound to unconfirmed
+versions, kept and permanently ineligible. Two models have insufficient evidence
+(`kling-v3.0-std`, `seedream-5.0`).
+
+**No external evidence reaches the production posterior.** All 112 eligible external priors are
+refused with `NO_CALIBRATION_BRIDGE` — there is no published artefact relating any benchmark scale
+to any production outcome scale, and `calibration.BRIDGES` is empty on purpose. That is the
+isolation rule working, not a gap.
+
+**Two things to know before continuing.**
+
+- The re-run that fixed a schema defect in the research prompt **exhausted the account's Grok Build
+  balance**. 16 of the 33 model×layer files are the first pass (repaired at ingest), 11 are the
+  corrected pass, and 6 pairs have no usable research and are recorded as gaps. Topping up and
+  running `scripts/research_router_evidence.py --overwrite` closes them.
+- `router_observations` is **empty**. Until it has 20 rows `scripts/router_posterior_run.py` exits 2
+  with "no replay", and the LCB flag must stay off — its precondition is a replay on file that
+  passed.
+
+**Exploration is closed and has no switch.** It ships as an offline simulator with six constraints
+and no feature flag; `tests/test_router_exploration_offline.py` asserts that nothing under
+`services/`, `apps/`, `agents/` or `providers/` imports it or names its exports.
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 
@@ -1352,6 +1408,10 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 | Path | Purpose |
 | --- | --- |
 | `core/narrative-ledger/` | The series ledger service |
+| `core/router-evidence/` | Four-layer routing evidence, the offline posterior, replay, LCB, exploration |
+| `docs/ROUTER_EVIDENCE.md` | What each layer may say, why external priors do not reach the posterior, how to enable the LCB |
+| `scripts/router_posterior_run.py` | Compute the posterior, replay history, report; exit 3 means the replay did not pass |
+| `tests/test_router_exploration_offline.py` | Asserts no service or app can reach the exploration policy |
 | `skills/model-prompting/references/gpt-image.md` | How to phrase a still for the project's image model |
 | `services/media-service/media_service/renditions.py` | Original vs derived encodings; the rule that the original is never touched |
 | `core/style/style_core/semantic.py` | The layer-2 boundary; owns no model choice |

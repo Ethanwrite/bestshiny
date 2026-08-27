@@ -172,6 +172,25 @@ class TimelineTransitionType(StrEnum):
     EXPLICIT_RESET = "EXPLICIT_RESET"
 
 
+class ShotDependencyType(StrEnum):
+    """Why a later shot explicitly requires earlier narrative material.
+
+    Similarity retrieval decides what a shot *resembles*; these rows record what
+    a shot *requires*. A payoff shares no vocabulary with its setup, so the
+    requirement is structural, never left to cosine ranking.
+    """
+
+    FORESHADOWING = "FORESHADOWING"
+    FACT_REVELATION = "FACT_REVELATION"
+    OBLIGATION_FULFILLMENT = "OBLIGATION_FULFILLMENT"
+    STATE_INHERITANCE = "STATE_INHERITANCE"
+
+
+class ShotDependencyOrigin(StrEnum):
+    SCRIPT_COMPILER = "SCRIPT_COMPILER"
+    MANUAL = "MANUAL"
+
+
 class CharacterStateProposalKind(StrEnum):
     INITIALIZE = "INITIALIZE"
     NARRATIVE = "NARRATIVE"
@@ -1082,6 +1101,86 @@ class NarrativeObligation(Base, TimestampMixin):
     )
     settled_reason: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ShotDependency(Base, TimestampMixin):
+    """One explicit narrative dependency of a shot on earlier material.
+
+    ``target_shot_id`` is the shot that depends; the referent is an earlier
+    shot, an established narrative fact, or an obligation — at least one is
+    required, and the type-specific constraints below hold each dependency kind
+    to the referent that makes it checkable. Rows are written by script
+    compilation or by manual editing, and retrieval must force them into
+    generation context rather than hoping similarity surfaces them.
+
+    ``source_shot_id`` carries no ON DELETE action on purpose: deleting a shot
+    that a *surviving* shot explicitly depends on must fail loudly, while a
+    delete that removes both ends in one statement passes because the row
+    cascades away with its target.
+    """
+
+    __tablename__ = "shot_dependencies"
+    __table_args__ = (
+        UniqueConstraint("target_shot_id", "dependency_key", name="uq_shot_dependency_key"),
+        CheckConstraint(
+            "dependency_type IN ('FORESHADOWING', 'FACT_REVELATION', "
+            "'OBLIGATION_FULFILLMENT', 'STATE_INHERITANCE')",
+            name="ck_shot_dependency_type",
+        ),
+        CheckConstraint(
+            "origin IN ('SCRIPT_COMPILER', 'MANUAL')",
+            name="ck_shot_dependency_origin",
+        ),
+        CheckConstraint(
+            "source_shot_id IS NOT NULL OR fact_key IS NOT NULL OR obligation_key IS NOT NULL",
+            name="ck_shot_dependency_referent",
+        ),
+        CheckConstraint(
+            "dependency_type != 'FACT_REVELATION' OR fact_key IS NOT NULL",
+            name="ck_shot_dependency_fact_referent",
+        ),
+        CheckConstraint(
+            "dependency_type != 'OBLIGATION_FULFILLMENT' OR obligation_key IS NOT NULL",
+            name="ck_shot_dependency_obligation_referent",
+        ),
+        CheckConstraint(
+            "dependency_type != 'STATE_INHERITANCE' OR source_shot_id IS NOT NULL",
+            name="ck_shot_dependency_state_referent",
+        ),
+        Index("ix_shot_dependency_target", "project_id", "target_shot_id"),
+        Index("ix_shot_dependency_source_shot", "source_shot_id"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    target_shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    source_shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), nullable=True)
+    dependency_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    fact_key: Mapped[str | None] = mapped_column(String(160))
+    obligation_key: Mapped[str | None] = mapped_column(String(160))
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(40), default=ShotDependencyOrigin.MANUAL.value, nullable=False
+    )
+    dependency_key: Mapped[str] = mapped_column(String(420), nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    @staticmethod
+    def natural_key(
+        dependency_type: str,
+        *,
+        source_shot_id: str | None = None,
+        fact_key: str | None = None,
+        obligation_key: str | None = None,
+    ) -> str:
+        """The idempotency key: one row per (type, referent) on a target shot."""
+
+        return "|".join(
+            [dependency_type, source_shot_id or "", fact_key or "", obligation_key or ""]
+        )
 
 
 class CharacterStateVersion(Base, TimestampMixin):

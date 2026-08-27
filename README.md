@@ -13,6 +13,12 @@ The current 2026-08-23 development checkpoint (commit `ea9d042`, no remote) adds
 `0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the
 series narrative ledger, and adds the first working image-generation path — `openai/gpt-image-2` through the
 OpenRouter Image API, bound as the `IMAGE_GENERATION` role. No video Provider was added and none was called.
+On 2026-08-27 explicit plot dependencies became rows (`shot_dependencies`, migration `0052`): retrieval is
+two-stage (declared dependencies and open obligations are forced into context with recorded provenance;
+similarity only supplements), the Narrative Ledger's `series_context()` feeds the Prompt Compiler, an
+unresolvable dependency moves the shot to `USER_REVIEW_REQUIRED` instead of degrading, and a Frame Anchor
+Planner decides inherit-vs-reconstruct between every two adjacent shots — see
+[`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) and [`HANDOFF.md`](HANDOFF.md).
 The `406 passed` figure above is historical evidence from the previously tagged checkpoint. The current
 working-tree gate measures **`612 passed, 2 skipped, 61 warnings`** — the two skipped are opt-in live image
 tests — with Ruff check, Mypy (133 source files), the Web production build and npm audit all green. This is
@@ -81,7 +87,7 @@ uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0034_narrative_ledger`。`0030` 增加 Alchemy Delivery、Base USDC 付款事实与追加式购买积分 Ledger；`0031` 增加通用链上 PaymentIntent；`0032` 增加 DePay checkout session 与不可改写的签名回调收据；`0033` 把 DePay checkout 绑定到独立 PaymentIntent，并将 FREE→PRO 与 3,000 Credits 入账收口到同一事务。PostgreSQL 实机证据仍只到 `0032`，上线前必须在临时 PostgreSQL 验证 `0033`；历史 Compose 证据仍只背书到 `0027`。
+当前迁移代码链为单 head `0052_shot_dependencies`（`0034` 之后的链见 `migrations/versions/`；`0052` 增加显式镜头依赖表）。`0030` 增加 Alchemy Delivery、Base USDC 付款事实与追加式购买积分 Ledger；`0031` 增加通用链上 PaymentIntent；`0032` 增加 DePay checkout session 与不可改写的签名回调收据；`0033` 把 DePay checkout 绑定到独立 PaymentIntent，并将 FREE→PRO 与 3,000 Credits 入账收口到同一事务。PostgreSQL 实机证据仍只到 `0032`，上线前必须在临时 PostgreSQL 验证 `0033`；历史 Compose 证据仍只背书到 `0027`。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 

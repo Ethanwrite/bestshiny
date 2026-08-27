@@ -107,6 +107,7 @@ from production_domain.models import (
     QAResult,
     Scene,
     Shot,
+    ShotDependency,
     TimelineState,
     User,
     WorkerStatus,
@@ -272,6 +273,15 @@ class PromptRefine(BaseModel):
 class ContinuityEvaluate(BaseModel):
     project_id: str
     risk: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShotDependencyDeclare(BaseModel):
+    project_id: str
+    dependency_type: str = Field(min_length=1, max_length=40)
+    source_shot_id: str | None = None
+    fact_key: str | None = Field(default=None, max_length=160)
+    obligation_key: str | None = Field(default=None, max_length=160)
+    summary: str = Field(default="", max_length=2000)
 
 
 class ProviderProjectBind(BaseModel):
@@ -1342,6 +1352,111 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         except TypeError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+    def _shot_dependency_view(row) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+        return {
+            "id": row.id,
+            "project_id": row.project_id,
+            "target_shot_id": row.target_shot_id,
+            "source_shot_id": row.source_shot_id,
+            "dependency_type": row.dependency_type,
+            "fact_key": row.fact_key,
+            "obligation_key": row.obligation_key,
+            "summary": row.summary,
+            "origin": row.origin,
+            "created_at": row.created_at,
+        }
+
+    def _require_shot_project(shot_id: str, project_id: str, principal: AuthPrincipal) -> None:
+        auth.require_project(principal, project_id, write=True)
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            if episode.project_id != project_id:
+                raise HTTPException(409, "shot does not belong to project")
+
+    @app.post("/v1/shots/{shot_id}/dependencies")
+    def declare_shot_dependency(
+        shot_id: str,
+        body: ShotDependencyDeclare,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Manual editing surface for explicit plot dependencies."""
+
+        _require_shot_project(shot_id, body.project_id, principal)
+        try:
+            row = container.shot_dependencies.declare(
+                body.project_id,
+                target_shot_id=shot_id,
+                dependency_type=body.dependency_type,
+                source_shot_id=body.source_shot_id,
+                fact_key=body.fact_key,
+                obligation_key=body.obligation_key,
+                summary=body.summary,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return _shot_dependency_view(row)
+
+    @app.get("/v1/shots/{shot_id}/dependencies")
+    def list_shot_dependencies(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id)
+        return [_shot_dependency_view(row) for row in container.shot_dependencies.list_for(shot_id)]
+
+    @app.delete("/v1/shots/{shot_id}/dependencies/{dependency_id}")
+    def remove_shot_dependency(
+        shot_id: str,
+        dependency_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+            project_id = episode.project_id
+            row = session.get(ShotDependency, dependency_id)
+            if row is None or row.target_shot_id != shot_id:
+                raise HTTPException(404, "shot dependency not found")
+        try:
+            container.shot_dependencies.remove(project_id, dependency_id=dependency_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"removed": dependency_id}
+
+    @app.post("/v1/episodes/{episode_id}/plan-frame-anchors")
+    def plan_frame_anchors(
+        episode_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Re-run the automatic per-pair frame strategy for an episode."""
+
+        with container.database.session() as session:
+            episode = session.get(Episode, episode_id)
+            if not episode:
+                raise HTTPException(404, "episode not found")
+            auth.require_project(principal, episode.project_id, write=True)
+        try:
+            result = container.orchestrator.plan_frame_anchors(episode_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"episode_id": episode_id, "stage": result.stage, **result.detail}
 
     @app.get("/v1/shots/{shot_id}/decisions")
     def shot_decisions(

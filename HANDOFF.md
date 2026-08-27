@@ -1,6 +1,8 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-27 · Branch `main` · commit `cb8762b` · **NOT PRODUCTION-READY** · everything below is merged
+Date: 2026-08-27 · Branch `main` · commit `03cef85` · **NOT PRODUCTION-READY** · everything below is
+merged **except §1d** (explicit shot dependencies + frame anchor planner), which is an uncommitted
+working-tree change on `main`
 
 Four PRs landed on `main`, in this order:
 [#1](https://github.com/Ethanwrite/bestshiny/pull/1) production readiness on PostgreSQL and the
@@ -17,12 +19,12 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q                      1045 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1066 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  1047 passed, 7 skipped  (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1068 passed, 7 skipped  (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 157 source files
-.venv/bin/python -m alembic heads                  0051_token_pricing (single head)
+.venv/bin/python -m mypy                           Success: 159 source files
+.venv/bin/python -m alembic heads                  0052_shot_dependencies (single head)
 git diff --check                                   clean
 ```
 
@@ -423,6 +425,112 @@ was correct; `_record_router_observation` promised never to fail the user's requ
 reproducible; the LCB reported the **largest** backing count across dimensions, weighting a
 25-observation bound as if it had another dimension's 300; and the quote check could be satisfied
 by a sample size, because scaling 0.87 by a hundred matched "we ran 87 prompts".
+
+## 1d. 2026-08-27 — what a shot requires is no longer a similarity bet
+
+Migration head moves to **`0052_shot_dependencies`**; `REQUIRED_SCHEMA_REVISION` matches it.
+Uncommitted working-tree change, offline only, no provider touched. The compose PostgreSQL was
+upgraded to `0052` and the migration was exercised down and back up on it. The running `api` and
+`worker` containers still hold the pre-`0052` image and were deliberately not rebuilt or restarted
+(shared local infrastructure; see §1b2's built-image hazard) — run `docker compose build api worker`
+before their next restart, or their startup `alembic upgrade head` will not recognise the database's
+stamp.
+
+**The defect this closes is OPEN_ISSUES §2.1**, and it was structural: which earlier beat reached a
+shot's context was decided by cosine similarity over the current prompt text. A payoff shares no
+vocabulary with its setup, so the one thing retrieval most needed to surface was the thing it was
+least able to see. The ledger already carried obligations; nothing carried *this shot pays off that
+one*.
+
+**Explicit dependencies are rows now.** `shot_dependencies`: FORESHADOWING, FACT_REVELATION,
+OBLIGATION_FULFILLMENT, STATE_INHERITANCE — each check-constrained to the referent that makes it
+checkable (a fact key must name an established `narrative_facts` row, an obligation key a
+`narrative_obligations` row, state inheritance an earlier shot). A dependency may only point
+backward in narrative order. Written in two ways, matching what each writer can actually know: the
+narrative compiler emits STATE_INHERITANCE for every continuous pair (origin `SCRIPT_COMPILER`),
+and the semantic kinds come through manual editing (`POST`/`GET`/`DELETE
+/v1/shots/{shot_id}/dependencies`, origin `MANUAL`) — a rules compiler that "detected" foreshadowing
+would be inventing story facts. Declarations are idempotent on the natural key.
+`source_shot_id` carries **no** ON DELETE action, and the compiler refuses to recompile an episode
+whose shots other episodes explicitly depend on: an explicit dependency is a contract, and both
+ends of it fail loudly rather than silently.
+
+**Retrieval is two-stage.** Stage one force-resolves every declared dependency
+(`ShotDependencyService.resolve_for_generation`) and the ledger's open obligations into the
+generation context. Stage two is the similarity search that already existed, unchanged, now
+explicitly the *supplement*. `ContextAssembler` v2 stamps every section with why it is present —
+`CANONICAL`, `TEMPORAL_STATE`, `SHOT_REQUIREMENT`, `EXPLICIT_DEPENDENCY`, `OPEN_OBLIGATION`,
+`SIMILARITY`, `WORLD_RULES` — and that provenance is persisted onto the generation request as
+`context_provenance`. Under budget pressure similarity is shed first; a forced segment can be
+truncated but never dropped, and a budget that cannot hold one raises. The regression that pins the
+whole point: four unrelated memories at score 0.99 against one declared dependency in a 900-character
+budget — the dependency is in the assembled text, the similarity hits are in `omitted`.
+
+**Missing dependencies refuse; they never degrade.** An unresolvable referent — a fact established
+only in a later episode, an obligation already settled by a different shot, a deleted source — makes
+`resolve_for_generation` raise with one reason code per failure
+(`DEPENDENCY_FACT_FROM_FUTURE:…`, `DEPENDENCY_OBLIGATION_ALREADY_SETTLED:…`).
+`CandidatePipeline.create_candidate` catches it on both the runtime and legacy paths, moves the shot
+to `USER_REVIEW_REQUIRED`, writes a `SHOT_DEPENDENCY_RESOLUTION` decision record, and re-raises (a
+`ValueError`, so the generate route answers 409). No job, no candidate, no charge, and — asserted by
+test — no silent fall-through to similarity-only context.
+
+**The ledger reaches the Prompt Compiler.** `PromptCompilerService` now takes the
+`NarrativeLedgerService` and `ShotDependencyService`; `series_context(project, episode,
+holder_keys=bound characters)` renders through `continuity_facts()` into
+`PromptCompilerInput.continuity_context.facts` alongside the resolved dependency contexts, each
+entry tagged `SERIES_FACT` / `OPEN_OBLIGATION` / `EXPLICIT_DEPENDENCY`. The compiler contract is
+unchanged — facts remain the only door into `continuity_assertions`, so knowledge gating still
+holds. The runtime resolves dependencies once and hands the contexts to the compiler, so the check
+runs once per generation, not twice.
+
+**The frame strategy between adjacent shots is now a planner, not an implication.**
+`FrameAnchorPlanner` (`continuity_core.frame_anchor`) makes exactly one decision per adjacent pair,
+deriving the risk vector from structured rows only — the pair's `TimelineTransition` type, camera
+axis/angle/scale deltas between the source's output state and the target's input state, characters
+entering frame, the declared STATE_INHERITANCE edge, a failed predecessor — and feeding the
+**existing** `ContinuityDecisionEngine`. Its mode flows through the **existing**
+`GenerationPolicyEngine`. Strategies: `INHERIT_LAST_FRAME` (HARD_CONTINUITY → the previous end
+frame is wired as start frame when it exists), `HYBRID_CONTEXT` (HYBRID, end frame as soft context,
+start frame cleared), `RECONSTRUCT_FIRST_FRAME` (RE_ANCHOR — scene cuts, time jumps, flashbacks,
+dreams, montage, explicit resets, episode-first shots, failed predecessors). A reconstruction names
+**which characters** anchor the rebuilt first frame — the union of the target's input and output
+state characters (the compiler only writes the actor into the output state, and the actor is in
+frame), resolved to locked `CharacterIdentityVersion` master assets — plus the canonical SCENE
+asset for the location when one exists. Written three ways: `Shot.continuity_mode`,
+`TimelineTransition.metadata_json["frame_anchor_plan"]`, and a `FRAME_ANCHOR_PLAN` decision record.
+Committed shots are never re-planned. `AgentOrchestrator.compile_episode` runs the planner right
+after script compilation; `POST /v1/episodes/{id}/plan-frame-anchors` re-runs it alone; the old
+caller-supplied-risk route stays as the manual override.
+
+**One downgrade the first run of the suite forced, and it is right.** The planner's first cut
+marked every episode-opening shot `RE_ANCHOR`, and three `test_director_api` flows — compile a
+one-line script, generate — went from 202 to 409: `RE_ANCHOR` compiles to `REANCHOR_FULL`, which
+demands character *and* scene references, and those projects own no canon at all. A mode a project
+can never satisfy is not fail-closed, it is bricked. When the canon the mode would demand does not
+exist, the plan keeps the strategy (`RECONSTRUCT_FIRST_FRAME` — nothing is inherited, which is the
+decision that matters) and downgrades the mode to `NONE`, naming what is missing
+(`NO_CANONICAL_CHARACTER_REFERENCE`, `NO_CANONICAL_SCENE_REFERENCE`); create the canon and re-plan,
+and the same shot upgrades to a real canonical re-anchor. A test pins both directions.
+
+**A latent PostgreSQL defect this surfaced, in code that predates it.** Recompiling an episode
+whose shots have `timeline_transitions` rows failed on PostgreSQL with a foreign-key violation on
+`timeline_transitions_source_shot_id_fkey` — and only there. The compiler relied on the target FK's
+`ON DELETE CASCADE` to clear a deleted shot's transitions, but PostgreSQL runs RI triggers in
+creation order, the source FK's NO ACTION check was created first, and it fires before the cascade
+removes the very row it is checking. SQLite never enforced the constraint, and no PostgreSQL test
+had ever recompiled an episode that *had* transitions (the existing recompile test starts from a
+one-shot script), so the first dependency-guard test to do so found it. The compiler now deletes
+the episode's transition rows explicitly before its shots, exactly as it already did for
+dependency rows.
+
+**Tests:** 21 new across `tests/test_shot_dependencies.py`,
+`tests/test_dependency_context_pipeline.py` and `tests/test_frame_anchor_planner.py` — declaration
+validation and idempotency, payload resolution, every refusal reason, the review transition with
+its no-job/no-candidate assertion, the forced-context regression, compiler assertions carrying
+ledger and dependency facts, and the planner's per-pair decisions including transition overrides,
+committed-shot immunity and end-frame wiring. All run on both engine halves; the recompile guard
+test is the one that found the transition-cascade defect above.
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 

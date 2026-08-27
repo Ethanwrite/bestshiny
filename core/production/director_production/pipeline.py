@@ -21,6 +21,7 @@ from generation_policy_core import (
     GenerationPolicyEngine,
 )
 from narrative_core import AuthoritativeTimelineStateEngine
+from narrative_ledger_core import ShotDependencyUnresolved
 from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
     AuthoritativeTimelineFence,
@@ -114,6 +115,33 @@ class CandidatePipeline:
     def _embedding(value: str) -> list[float]:
         digest = hashlib.sha256(value.encode("utf-8")).digest()
         return [round(byte / 255, 6) for byte in digest[:16]]
+
+    def _record_dependency_review(
+        self, shot_id: str, project_id: str, reason_codes: tuple[str, ...]
+    ) -> None:
+        """An unresolved explicit dependency moves the shot to review.
+
+        The refusal is recorded and visible; nothing may quietly continue with
+        similarity-only context in place of material the shot is owed.
+        """
+
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is not None and shot.status != ShotStatus.COMMITTED.value:
+                shot.status = ShotStatus.USER_REVIEW_REQUIRED.value
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=shot_id,
+                    decision_type="SHOT_DEPENDENCY_RESOLUTION",
+                    input_features={"reason_codes": list(reason_codes)},
+                    selected_action="REVIEW_REQUIRED",
+                    reason_codes=list(reason_codes),
+                    model_version="shot-dependency-gate-v1",
+                    policy_version="dependency-gate-v1",
+                )
+            )
+            session.flush()
 
     @staticmethod
     def _dot_state_path(path: str) -> str:
@@ -569,15 +597,19 @@ class CandidatePipeline:
                 plan_context = self.generation_admission.workspace_models.context_for_project(project_id)
                 if plan_context.plan_tier.value == "FREE":
                     allowed_providers = ["seedance"]
-            prepared = self.visual_runtime.prepare_autopilot(
-                shot_id,
-                idempotency_key=idempotency_key,
-                candidate_id=candidate_id,
-                character_bindings=character_bindings,
-                reference_asset_ids=effective_reference_asset_ids,
-                estimated_cost=0.0,
-                allowed_providers=allowed_providers,
-            )
+            try:
+                prepared = self.visual_runtime.prepare_autopilot(
+                    shot_id,
+                    idempotency_key=idempotency_key,
+                    candidate_id=candidate_id,
+                    character_bindings=character_bindings,
+                    reference_asset_ids=effective_reference_asset_ids,
+                    estimated_cost=0.0,
+                    allowed_providers=allowed_providers,
+                )
+            except ShotDependencyUnresolved as exc:
+                self._record_dependency_review(shot_id, project_id, exc.reason_codes)
+                raise
             admitted = (
                 self.generation_admission.admit_autopilot(
                     prepared.request,
@@ -681,12 +713,16 @@ class CandidatePipeline:
             quality_profile=shot_type,
             available_inputs=policy_assets.available_inputs() if policy_assets else None,
         )
-        compilation = self.prompts.compile_shot(
-            shot_id,
-            provider=plan.provider,
-            model=model,
-            character_bindings=character_bindings,
-        )
+        try:
+            compilation = self.prompts.compile_shot(
+                shot_id,
+                provider=plan.provider,
+                model=model,
+                character_bindings=character_bindings,
+            )
+        except ShotDependencyUnresolved as exc:
+            self._record_dependency_review(shot_id, project_id, exc.reason_codes)
+            raise
         generation_plan = {
             "policy": plan.policy,
             "required_inputs": plan.required_inputs,

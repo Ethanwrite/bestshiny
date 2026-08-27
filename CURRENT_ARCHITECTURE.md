@@ -1,12 +1,12 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-26
+Snapshot date: 2026-08-27
 Repository: `ai-director-platform`
-Branch: `claude/production-readiness-postgres` (working tree clean; pushed to `origin`)
-Commit: `64ee277` — open on [PR #1](https://github.com/Ethanwrite/bestshiny/pull/1)
+Branch: `main` at `03cef85`, plus the uncommitted explicit-dependencies / frame-anchor-planner
+working-tree change described in [`HANDOFF.md`](HANDOFF.md) §1d
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0049_live_canary_status`
+Migration head: `0052_shot_dependencies`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
@@ -375,8 +375,96 @@ earlier work unable to see any of it — the reason the 60-episode case did not 
 episode is ranked up through an `episode_match` component rather than left to compete on cosine similarity
 alone. `prepare_autopilot` retrieves with `SERIES` scope against the shot's own episode.
 
-Known gap: retrieval is still keyed on the current shot's prompt text, so *which* earlier beat matters is
-decided by similarity. Obligations are covered by the ledger; episodic callbacks are not.
+Which earlier beat matters is **no longer decided by similarity**. Retrieval is two-stage
+(2026-08-27): stage one force-resolves the shot's explicit dependencies and the ledger's open
+obligations into context; stage two supplements with similarity under whatever budget remains. The
+residual gap is narrower: an *un-declared* callback is still a similarity bet, which is what the
+manual dependency-editing surface exists to close per case.
+
+## Explicit shot dependencies and two-stage retrieval
+
+Similarity retrieval decides what a shot *resembles*; `shot_dependencies` (migration
+`0052_shot_dependencies`) records what a shot *requires*. Four dependency types, each held by check
+constraints to the referent that makes it checkable:
+
+| Type | Referent | Meaning |
+| --- | --- | --- |
+| `FORESHADOWING` | earlier shot (and/or key) | a planted setup this shot pays off |
+| `FACT_REVELATION` | `fact_key` in `narrative_facts` | the shot reveals or turns on an established fact |
+| `OBLIGATION_FULFILLMENT` | `obligation_key` in `narrative_obligations` | the shot settles an open promise |
+| `STATE_INHERITANCE` | earlier shot | the shot continues the source shot's physical state |
+
+Rows are written at **script compilation** — the narrative compiler emits `STATE_INHERITANCE` for
+every continuous pair, origin `SCRIPT_COMPILER` — or by **manual editing**
+(`POST`/`GET`/`DELETE /v1/shots/{shot_id}/dependencies`, origin `MANUAL`), since foreshadowing,
+revelation and obligation dependencies carry story meaning a rules compiler cannot derive. A
+dependency may only point backward in narrative order; declaring against a missing fact or
+obligation is refused at write time. Idempotent on `(target_shot_id, natural key)`.
+`source_shot_id` deliberately carries no ON DELETE action, and the compiler refuses to recompile an
+episode whose shots other episodes explicitly depend on — an explicit dependency is a contract, and
+breaking it must be deliberate.
+
+`ShotDependencyService.resolve_for_generation` is stage one of retrieval: every declared dependency
+resolves to real material (the source shot's prompt/state/artefacts, the fact's summary, the
+obligation's promise and status) or the whole resolution refuses with one reason code per failure
+(`DEPENDENCY_FACT_FROM_FUTURE`, `DEPENDENCY_OBLIGATION_ALREADY_SETTLED`, …).
+`CandidatePipeline.create_candidate` maps that refusal to the shot entering
+`USER_REVIEW_REQUIRED` with a `SHOT_DEPENDENCY_RESOLUTION` decision record and no job, candidate or
+charge — **never** a silent fallback to similarity-only context.
+
+`ContextAssembler` v2 assembles in immutable priority order — canonical truth, temporal state, shot
+requirement, forced dependency segments, similarity, world rules — and stamps every section with a
+`source_reason` (`CANONICAL`, `TEMPORAL_STATE`, `SHOT_REQUIREMENT`, `EXPLICIT_DEPENDENCY`,
+`OPEN_OBLIGATION`, `SIMILARITY`, `WORLD_RULES`), persisted onto the generation request as
+`context_provenance`. Forced segments may be truncated under budget pressure but never dropped: a
+budget that cannot hold one raises, and the shot goes to review. A regression test pins the rule
+that a declared dependency enters the context even when unrelated material outscores it on
+similarity — the similarity stage is shed first.
+
+The Prompt Compiler consumes the same material: `series_context()` /
+`continuity_facts()` from the Narrative Ledger and the resolved dependency contexts are rendered
+into `PromptCompilerInput.continuity_context.facts` (tagged `EXPLICIT_DEPENDENCY`,
+`OPEN_OBLIGATION`, `SERIES_FACT`), and therefore into `continuity_assertions` — the compiler
+contract admits nothing into assertions that was not supplied there, so an undisclosed fact still
+cannot reach a prompt by accident.
+
+## Shot Transition / Frame Anchor Planner
+
+Between every two adjacent shots there is exactly one frame-strategy decision, and it is now made
+by a dedicated layer rather than implied by whoever set `Shot.continuity_mode`.
+`FrameAnchorPlanner` (`core/continuity/continuity_core/frame_anchor.py`) derives a
+`ContinuityRiskVector` from structured rows only — the pair's `TimelineTransition`, the
+authoritative timeline states (camera axis/angle/scale deltas, characters entering frame), the
+declared `STATE_INHERITANCE` dependency, and whether the previous shot failed — and feeds the
+**existing** `ContinuityDecisionEngine`. Nothing downstream changed: the chosen mode still flows
+through `GenerationPolicyEngine` and `CapabilityResolver` exactly as before.
+
+| Strategy | Continuity mode | When |
+| --- | --- | --- |
+| `INHERIT_LAST_FRAME` | `HARD_CONTINUITY` | continuous same-scene action chain with a usable predecessor |
+| `HYBRID_CONTEXT` | `HYBRID` | moderate camera/blocking change; previous end frame is soft context only |
+| `RECONSTRUCT_FIRST_FRAME` | `RE_ANCHOR` | scene cut, location change, time jump, flashback, dream, montage, explicit reset, first shot of an episode, failed predecessor |
+| `RECONSTRUCT_FIRST_FRAME` | `NONE` (downgraded) | same triggers, in a project that lacks the canon the mode would demand — `NO_CANONICAL_CHARACTER_REFERENCE` / `NO_CANONICAL_SCENE_REFERENCE` |
+
+The downgrade exists because `RE_ANCHOR` compiles to `REANCHOR_FULL`, which requires character *and*
+scene references, and `HYBRID` requires character references on both of its branches. A project that
+owns none of that canon cannot ever satisfy the mode; planning it anyway would make every generation
+fail with a policy error. Nothing is inherited either way — that is the decision that matters — and
+the plan says exactly which canon is missing, so adding it and re-planning upgrades the shot to a
+real canonical re-anchor. Fail-closed applies to inheritance and to canon that exists, not to canon
+a project has not created yet.
+
+A reconstruction decision also answers *which characters and scene anchor the rebuilt first frame*:
+the union of the target shot's input and output state characters (the compiler only adds an actor
+to the output state, and the actor is in frame), resolved to their locked
+`CharacterIdentityVersion` master assets, plus the canonical SCENE asset matching the shot's
+location when one exists. The plan is written three ways — `Shot.continuity_mode` (and the start
+frame wired or cleared), `TimelineTransition.metadata_json["frame_anchor_plan"]`, and a
+`FRAME_ANCHOR_PLAN` decision record. Committed shots are never re-planned.
+`AgentOrchestrator.compile_episode` runs the planner immediately after script compilation, so a
+compiled episode arrives with a frame strategy for every pair; `POST
+/v1/episodes/{id}/plan-frame-anchors` re-runs it without recompiling, and the caller-supplied-risk
+route (`POST /v1/shots/{id}/continuity`) survives as the manual override.
 
 ## External Evidence Registry
 

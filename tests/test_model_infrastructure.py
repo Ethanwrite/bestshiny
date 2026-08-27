@@ -69,8 +69,8 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
         "flow-veo-3.1",
         "NARWHAL",
         "doubao-seedance-2-5-260628",
-        "veo-3.1-quality",
-        "grok-video",
+        "veo-3.1-generate-preview",
+        "grok-imagine-video",
         "wan-2.7",
     } <= provider_ids
     assert all(not item.live_enabled for item in config.models)

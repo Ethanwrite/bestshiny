@@ -2394,7 +2394,7 @@
     },
     {
       "logical_name": "wan-3.0-official",
-      "provider_model_id": "wan-3.0",
+      "provider_model_id": "wan3.0-video",
       "evidence_id": "E-WAN30-AA",
       "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
       "rationale": "Arena entry is Wan 3.0.",
@@ -2402,7 +2402,7 @@
     },
     {
       "logical_name": "wan-3.0-official",
-      "provider_model_id": "wan-3.0",
+      "provider_model_id": "wan3.0-video",
       "evidence_id": "E-WAN21-WB",
       "version_match": "VERSION_MISMATCH",
       "rationale": "Wan 2.1 Wan-Bench is not inheritable by 3.0."
@@ -2486,7 +2486,7 @@
     },
     {
       "logical_name": "grok-video-official",
-      "provider_model_id": "grok-video",
+      "provider_model_id": "grok-imagine-video",
       "status": "NO_EXTERNAL_EVIDENCE",
       "note": "Not present in either source document. Also served by a provider with no transport."
     },
@@ -2498,9 +2498,9 @@
     },
     {
       "logical_name": "veo-3.1-quality-official",
-      "provider_model_id": "veo-3.1-quality",
+      "provider_model_id": "veo-3.1-generate-preview",
       "status": "NO_EXTERNAL_EVIDENCE",
-      "note": "The served variant behind `veo-3.1-quality` is not established, so no Arena variant can be bound to it without guessing. Also served by a provider with no transport."
+      "note": "The served variant behind `veo-3.1-generate-preview` is not established, so no Arena variant can be bound to it without guessing. Also served by a provider with no transport."
     }
   ],
   "gaps": [

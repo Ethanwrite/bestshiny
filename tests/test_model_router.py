@@ -14,7 +14,7 @@ from provider_sdk import AssetCriticality, ProviderTrustLevel
 
 def test_registry_loads_persisted_manual_profiles(container):
     registry = container.model_registry
-    grok = registry.get("grok-video", "grok")
+    grok = registry.get("grok-imagine-video", "grok")
     assert grok is not None
     assert grok.failure_priors["end_frame_direct_gaze"] == 0.8
     assert grok.adapter == "grok"
@@ -66,7 +66,7 @@ def test_router_uses_dynamic_commercial_and_action_weights(container):
             cost_priority=0,
         )
     )
-    assert commercial.candidates[0].model in {"veo-3.1-quality", "flow-veo-3.1"}
+    assert commercial.candidates[0].model in {"veo-3.1-generate-preview", "flow-veo-3.1"}
     assert action.candidates[0].model in {
         "kwaivgi/kling-v3.0-std",
         "kwaivgi/kling-v3.0-pro",

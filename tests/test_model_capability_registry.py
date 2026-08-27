@@ -80,14 +80,14 @@ def test_manual_prior_and_admin_profile_survive_default_sync(container) -> None:
 
     assert result.models_created == 0
     assert result.profiles_created == 0
-    assert container.model_registry.get("grok-video", "grok").physics_prior == 0.31
+    assert container.model_registry.get("grok-imagine-video", "grok").physics_prior == 0.31
 
 
 def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:
     """Versions may coexist, but neither may borrow the other's priors."""
 
     wan27 = container.model_registry.get("wan-2.7", "wan")
-    wan30 = container.model_registry.get("wan-3.0", "wan")
+    wan30 = container.model_registry.get("wan3.0-video", "wan")
     assert wan27 is not None and wan30 is not None
     assert wan27.logical_name == "wan-2.7-official"
     assert wan30.logical_name == "wan-3.0-official"

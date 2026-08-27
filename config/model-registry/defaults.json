@@ -732,7 +732,8 @@
         "account_affinity_required": true,
         "legacy_execution_aliases": [
           "veo"
-        ]
+        ],
+        "provider_model_id_source": "Google publishes no third-party REST API for Flow, no per-call or per-credit price, and no terms authorising programmatic access. Flow is sold as credits inside Google AI subscriptions. The aisandbox-pa host in FLOW_API_BASE appears only in unofficial write-ups. Checked 2026-08-26."
       },
       "capability_profile": {
         "profile_version": "flow-veo-3.1-manual-v1",
@@ -814,7 +815,8 @@
       ],
       "metadata_json": {
         "transport": "internal_flow_gateway",
-        "account_affinity_required": true
+        "account_affinity_required": true,
+        "provider_model_id_source": "NARWHAL is NOT a Google-published identifier. It appears on no page of support.google.com/flow, labs.google, blog.google or deepmind.google. Flow's published model names are Veo 3.1 Lite/Fast/Quality, Gemini Omni Flash and Nano Banana. Left as-is because there is no real id to correct it to; the model is unverifiable, not mis-typed. Checked 2026-08-26."
       },
       "capability_profile": {
         "profile_version": "flow-narwhal-manual-v1",
@@ -923,7 +925,7 @@
     {
       "logical_name": "veo-3.1-quality-official",
       "provider": "veo_official",
-      "provider_model_id": "veo-3.1-quality",
+      "provider_model_id": "veo-3.1-generate-preview",
       "modality": "video",
       "capabilities": [
         "video_generation"
@@ -949,7 +951,8 @@
       "metadata_json": {
         "transport": "official_api",
         "credential_required": true,
-        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT"
+        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT",
+        "provider_model_id_source": "Google's Gemini API publishes veo-3.1-generate-preview (Vertex: veo-3.1-generate-001). veo-3.1-quality is a Google Flow UI label, not an API model id. Read 2026-08-26."
       },
       "capability_profile": {
         "profile_version": "veo-3.1-manual-v1",
@@ -1004,7 +1007,7 @@
     {
       "logical_name": "grok-video-official",
       "provider": "grok",
-      "provider_model_id": "grok-video",
+      "provider_model_id": "grok-imagine-video",
       "modality": "video",
       "capabilities": [
         "video_generation"
@@ -1030,7 +1033,8 @@
       "metadata_json": {
         "transport": "official_api",
         "credential_required": true,
-        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT"
+        "routing": "CAPABILITY_RECORD_ONLY_NO_TRANSPORT",
+        "provider_model_id_source": "xAI publishes grok-imagine-video and grok-imagine-video-1.5; grok-video appears as no id or alias on docs.x.ai. Read 2026-08-26."
       },
       "capability_profile": {
         "profile_version": "grok-video-manual-v1",
@@ -1080,7 +1084,7 @@
     {
       "logical_name": "wan-3.0-official",
       "provider": "wan",
-      "provider_model_id": "wan-3.0",
+      "provider_model_id": "wan3.0-video",
       "modality": "video",
       "capabilities": [
         "video_generation"
@@ -1107,7 +1111,8 @@
       "metadata_json": {
         "transport": "dashscope",
         "credential_required": true,
-        "disabled_reason": "This account has no Wan 3.0 API access (invitation-only Beta). External evidence for it is kept in the External Evidence Registry so that enabling it later is a config change."
+        "disabled_reason": "This account has no Wan 3.0 API access (invitation-only Beta). External evidence for it is kept in the External Evidence Registry so that enabling it later is a config change.",
+        "provider_model_id_source": "DashScope publishes wan3.0-video and wan3.0-video-prime; there is no model id wan-3.0. Read 2026-08-26."
       },
       "capability_profile": {
         "profile_version": "wan-3.0-manual-v1",

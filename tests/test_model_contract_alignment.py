@@ -18,74 +18,97 @@ This asserts the alignment on a container built from the shipped defaults, so a
 model added without a price, or priced under a string the registry does not
 hold, fails here rather than at a provider's invoice.
 
-`model_pricing_profiles` is populated by migrations, and a per-test database is
-built from ORM metadata instead — so the rows are seeded here from the same
-table `0051` writes, via the loader the audit script uses. Without that every
-assertion below would pass vacuously on an empty price table.
+The fixture runs the migration chain rather than building the schema from ORM
+metadata, because the prices live in migrations 0044-0051. On a metadata-built
+database the price table is empty and every assertion below passes vacuously —
+which is how the Wan defect survived this long.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from cost_core import CreditPricingEngine, PricingUnverified
 from model_registry_core import ModelCapabilityRegistry
-from platform_database import Database
 from platform_shared import Settings
-from production_domain.models import ModelDefinition, ModelPricingProfile, new_id
+from production_domain.models import ModelDefinition, ModelPricingProfile
 from sqlalchemy import select
 from video_platform_api.container import build_container
 
-from scripts.seed_token_pricing import CHECKED_AT, RATES, USD_PER_CNY, formula_for
-
-EXPECTED_MODEL_COUNT = 25
+EXPECTED_MODEL_COUNT = 24
 
 # The five that carry no price, and why. Each is a deliberate refusal, not a gap
 # waiting to be filled with a guess.
 UNPRICEABLE = {
     "flow-veo-3.1-internal": "Google publishes no third-party Flow API and no per-call price",
     "flow-narwhal-image-internal": "NARWHAL is not a Google-published identifier",
-    "grok-video-official": "xAI rate not confirmed for this account; provider has no transport",
-    "veo-3.1-quality-official": "Google rate not confirmed for this account; no transport",
-    "wan-3.0-official": "Wan 3.0 is invitation-only Beta; no access, no confirmed rate",
+    "wan-3.0-official": (
+        "the DashScope route: this account has no Wan 3.0 access there, so no rate is "
+        "confirmed for it. Kept as a distinct record because it is a different provider "
+        "and a different model id from the OpenRouter route, not a duplicate of it."
+    ),
 }
 
-# Priced by migrations 0045-0048, which this fixture does not replay: a per-test
-# database is built from ORM metadata, and only 0051's table is importable as a
-# single object. They are listed so the assertion below stays exact — a new model
-# arriving unpriced still fails, rather than hiding in a subset check. The full
-# twenty-five-way alignment is verified against a real migrated PostgreSQL
-# database, where every migration in the chain has actually run.
-PRICED_BY_EARLIER_MIGRATIONS = {
-    "gpt-image-2-openrouter",
-    "seedream-5.0-ark",
-    "seedance-2.5-official",
-    "grok-imagine-video-openrouter",
-    "kling-3-pro-openrouter",
-    "kling-3-standard-openrouter",
-    "veo-3.1-openrouter",
-    "veo-3.1-fast-openrouter",
-    "veo-3.1-lite-openrouter",
-}
+# Retired: each held a (provider, provider_model_id, modality) that an OpenRouter
+# record already owned, behind a provider whose every method raised
+# PROVIDER_NOT_CONFIGURED. `model_definitions` is UNIQUE on that triple, so they
+# could never have been repointed at OpenRouter — they were second names for
+# models already in the registry.
+RETIRED_LOGICAL_NAMES = {"grok-video-official", "veo-3.1-quality-official"}
 
 # Strings that were once in the registry and are not model IDs at any provider.
 RETIRED_IDS = {"grok-video", "veo-3.1-quality", "wan-3.0", "seedance-2.5", "seedream-5-0"}
 
 
-@pytest.fixture
-def aligned(tmp_path, database_url):  # type: ignore[no-untyped-def]
-    root = tmp_path
+@pytest.fixture(scope="module")
+def aligned(tmp_path_factory):  # type: ignore[no-untyped-def]
+    """A fresh deployment: an empty database taken through the whole chain.
+
+    Not `create_all_and_stamp()`. The prices live in migrations 0044-0051, and a
+    database built from ORM metadata has none of them — every assertion below
+    would pass vacuously on an empty price table, which is exactly how the Wan
+    defect survived. Running the real chain is also the only way this test means
+    what its name says: that a fresh install is internally consistent.
+
+    `deployment_environment` is "development" so the container does not stamp
+    over the schema the migrations just built.
+    """
+
+    import os
+
+    from alembic import command
+    from alembic.config import Config
+
+    root = tmp_path_factory.mktemp("aligned")
+    url = f"sqlite:///{root / 'platform.db'}"
+
+    # `migrations/env.py` builds its own `Settings()` and takes `database_url`
+    # from it, so setting `sqlalchemy.url` on the Config alone is ignored. The
+    # environment is what Settings reads.
+    repo = Path(__file__).resolve().parents[1]
+    config = Config(str(repo / "alembic.ini"))
+    config.set_main_option("script_location", str(repo / "migrations"))
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = url
+    try:
+        command.upgrade(config, "head")
+    finally:
+        if previous is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous
+
     settings = Settings(
         _env_file=None,
-        database_url=database_url,
+        database_url=url,
         storage_root=root / "media",
         public_base_url="http://testserver",
         auth_required=False,
         platform_api_key="test-platform-key",
-        deployment_environment="test",
+        deployment_environment="development",
         # Declared the way a real deployment declares them, so the registry rows
-        # end up holding the IDs a deployment actually sends.
+        # hold the IDs a deployment actually sends.
         ark_api_key="test-ark-key",
         doubao_model_id="doubao-seed-2-0-lite-260428",
         wan_api_key="test-wan-key",
@@ -96,32 +119,6 @@ def aligned(tmp_path, database_url):  # type: ignore[no-untyped-def]
         deepseek_api_key="test-deepseek-key",
         deepseek_model_id="deepseek-v4-flash",
     )
-    database = Database(settings.database_url)
-    database.create_all_and_stamp()
-    now = CHECKED_AT
-    with database.session() as session:
-        for provider, model, direction, price, currency, unit, resolution, source, note in RATES:
-            session.add(
-                ModelPricingProfile(
-                    id=new_id(),
-                    provider=provider,
-                    provider_model_id=model,
-                    input_mode=direction,
-                    resolution=resolution,
-                    currency=currency,
-                    billing_unit=unit,
-                    unit_price=Decimal(price),
-                    estimate_unit=unit,
-                    estimate_unit_price=Decimal(price),
-                    usd_per_currency=Decimal("1") if currency == "USD" else USD_PER_CNY,
-                    estimate_formula=formula_for(unit, direction, "estimate_unit_price"),
-                    settlement_formula=formula_for(unit, direction, "unit_price"),
-                    effective_from=now,
-                    source_url=source,
-                    source_checked_at=now,
-                    notes=note,
-                )
-            )
     built = build_container(settings)
     try:
         yield built
@@ -176,6 +173,22 @@ def test_the_registry_holds_every_model_this_audit_covered(aligned) -> None:  # 
     assert len(_definitions(aligned)) == EXPECTED_MODEL_COUNT
 
 
+def test_no_model_is_a_second_name_for_one_already_in_the_registry(aligned) -> None:  # type: ignore[no-untyped-def]
+    """`model_definitions` is UNIQUE on (provider, provider_model_id, modality).
+
+    Two records used to violate the spirit of that while satisfying the letter,
+    by naming a fictional provider: `grok-video-official` and
+    `veo-3.1-quality-official` described the same two models OpenRouter already
+    served, behind stubs where every call raised PROVIDER_NOT_CONFIGURED.
+    """
+
+    definitions = _definitions(aligned)
+    triples = [(d.provider, d.provider_model_id, d.modality) for d in definitions]
+    assert len(triples) == len(set(triples))
+    names = {d.logical_name for d in definitions}
+    assert not (names & RETIRED_LOGICAL_NAMES)
+
+
 def test_no_model_sends_a_string_its_provider_does_not_publish(aligned) -> None:  # type: ignore[no-untyped-def]
     """A logical name must never reach a provider as an API model ID — §20."""
 
@@ -213,8 +226,7 @@ def test_pricing_status_agrees_with_what_the_till_does(aligned) -> None:  # type
 def test_exactly_the_unpriceable_models_are_refused(aligned) -> None:  # type: ignore[no-untyped-def]
     """Neither more nor fewer: a shrinking list means someone guessed a price.
 
-    `PRICED_BY_EARLIER_MIGRATIONS` is on the right-hand side because this fixture
-    seeds 0051's rows only. Those models are priced in any real deployment.
+    The chain has run, so this is the real set: three refusals, each deliberate.
     """
 
     unverified = {
@@ -222,7 +234,7 @@ def test_exactly_the_unpriceable_models_are_refused(aligned) -> None:  # type: i
         for definition in _definitions(aligned)
         if definition.pricing_status == "UNVERIFIED"
     }
-    assert unverified == set(UNPRICEABLE) | PRICED_BY_EARLIER_MIGRATIONS
+    assert unverified == set(UNPRICEABLE)
 
 
 def test_every_priced_model_is_priced_under_the_string_it_actually_sends(aligned) -> None:  # type: ignore[no-untyped-def]

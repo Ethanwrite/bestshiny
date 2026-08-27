@@ -251,6 +251,18 @@ TARGETS.update(
             resolution="720p",
             max_cost_usd="0.40",
         ),
+        # 2s at 480p, the floor of OpenRouter's own published duration set
+        # (2-30) at its cheapest resolution. USD 0.10 at list; the endpoint
+        # currently carries a 15% discount, so the charge should come in at
+        # 0.085 and the ceiling covers the list figure either way.
+        "wan-3.0": _video_target(
+            "wan-3.0",
+            provider="openrouter",
+            model="alibaba/wan-3.0",
+            duration=2,
+            resolution="480p",
+            max_cost_usd="0.20",
+        ),
         "seedance-2.5": TARGETS["video"],
         "veo-3.1": _video_target(
             "veo-3.1",
@@ -435,7 +447,14 @@ def _mint_permit(settings: Settings, target: Target, api: str, report: Report) -
             f"USD {target.max_cost_usd} would exceed the remaining USD {remaining}",
         )
         return None
-    expires_at = datetime.now(UTC) + timedelta(hours=target.permit_hours)
+    # Snapped to the hour, because the Idempotency-Key below is bucketed by hour
+    # while the permit facts carry the exact expiry. With a to-the-microsecond
+    # timestamp the two disagree: the key says "same request", the facts say
+    # "different request", and a second run inside the same hour is refused 409
+    # instead of replaying the permit it already minted. Snapping up keeps the
+    # authorised window at least as long as asked for.
+    requested = datetime.now(UTC) + timedelta(hours=target.permit_hours)
+    expires_at = requested.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     status, body = _call(
         f"{api}/internal/live-canary-permits",
         token=settings.platform_api_key,

@@ -84,6 +84,9 @@ ARK_PRICING = "https://www.volcengine.com/docs/82379/1544106"
 DASHSCOPE_PRICING = "https://help.aliyun.com/zh/model-studio/model-pricing"
 DEEPSEEK_PRICING = "https://api-docs.deepseek.com/quick_start/pricing/"
 RUNAPI_PRICING = "https://runapi.ai/models/gpt/5.6-luna"
+# The machine-readable SKU descriptor 0047 also cites, so every OpenRouter
+# video rate in the table names the same first-party source.
+OPENROUTER_VIDEO_SKUS = "https://openrouter.ai/api/v1/videos/models"
 
 _SOL_TIER = (
     "Rate for prompts of 272,000 tokens or fewer. Above that OpenRouter charges "
@@ -271,6 +274,89 @@ RATES: list[Rate] = [
     ),
     *_chat("runapi", "gpt-5.6-luna", RUNAPI_PRICING, inp="0.20", out="1.20", cached="0.02", note=_RUNAPI),
 ]
+
+# ---------------------------------------------------------------------------
+# OpenRouter video SKUs, read from its own `GET /api/v1/videos/models` on
+# 2026-08-27. These are per-second output rates, not token rates.
+#
+# `alibaba/wan-3.0` is the route this account can actually reach: the DashScope
+# Wan 3.0 record stays separate and unpriced because the account has no access
+# there. OpenRouter's endpoint currently carries `"discount": 0.15`, which makes
+# the charged figures 0.0425 / 0.085 / 0.17. The **list** price is seeded, for
+# the same reason 0048 dated Ark's promotion rather than editing its base rate:
+# a discount is a thing that lapses, and quoting the higher of the two can never
+# under-charge. The discount is recorded, not applied.
+_WAN30 = (
+    "OpenRouter list SKU, upstream Alibaba Cloud Int. The endpoint currently carries a "
+    "15% discount, making the charged rate 0.0425 / 0.085 / 0.17 per second at "
+    "480p / 720p / 1080p. The list price is seeded deliberately: a discount lapses "
+    "without anyone acting, and quoting the higher figure cannot under-charge. "
+    "Supports t2v, i2v and reference-guided video; 2-30s; first_frame only; audio and "
+    "seed supported. canonical_slug alibaba/wan-3.0-20260824."
+)
+_VEO_SKU = (
+    "OpenRouter publishes four SKUs for this model: duration_seconds_with_audio 0.40, "
+    "with_audio_4k 0.60, without_audio 0.20, without_audio_4k 0.40. The with-audio rates "
+    "are seeded because OPENROUTER_VIDEO_GENERATE_AUDIO is true and that is what this "
+    "platform sends — a parameter that decides the bill is stated, never inherited. The "
+    "silent rates are recorded here rather than seeded: the profile keys on input mode "
+    "and resolution, and audio is a third axis it cannot express. Turning audio off "
+    "halves the bill and would need a repriced profile."
+)
+_GROK_IMAGE = (
+    "OpenRouter SKU cents_per_image_input 0.2, i.e. USD 0.002 per input image, charged in "
+    "addition to the per-second output rate when a first frame or reference is supplied."
+)
+
+for _resolution, _price in (("480p", "0.05"), ("720p", "0.10"), ("1080p", "0.20")):
+    for _mode in ("no_video_input", "video_input"):
+        RATES.append(
+            (
+                "openrouter",
+                "alibaba/wan-3.0",
+                _mode,
+                _price,
+                "USD",
+                "second",
+                _resolution,
+                OPENROUTER_VIDEO_SKUS,
+                _WAN30,
+            )
+        )
+
+# Veo 3.1 at 4K. 720p and 1080p are already priced by 0047 at the same 0.40
+# with-audio rate — OpenRouter's axes are audio and 4K, not 720p versus 1080p.
+for _mode in ("no_video_input", "video_input"):
+    RATES.append(
+        (
+            "openrouter",
+            "google/veo-3.1",
+            _mode,
+            "0.60",
+            "USD",
+            "second",
+            "4k",
+            OPENROUTER_VIDEO_SKUS,
+            _VEO_SKU,
+        )
+    )
+
+# Grok Imagine Video's input-image SKU. The per-second output rates are already
+# seeded by 0047 at 0.05 / 0.07, which this confirms against the SKU table.
+RATES.append(
+    (
+        "openrouter",
+        "x-ai/grok-imagine-video",
+        "image_input",
+        "0.002",
+        "USD",
+        "image",
+        "",
+        OPENROUTER_VIDEO_SKUS,
+        _GROK_IMAGE,
+    )
+)
+
 
 # Wan's two mode snapshots, at the family key's Beijing per-second rate.
 for _snapshot in ("wan2.7-t2v-2026-06-12", "wan2.7-i2v-2026-04-25"):

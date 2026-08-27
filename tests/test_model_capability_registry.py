@@ -66,9 +66,19 @@ def test_runtime_capability_observation_can_only_narrow_registry(container) -> N
 
 
 def test_manual_prior_and_admin_profile_survive_default_sync(container) -> None:
+    """An operator's edit outlives a restart — startup seeds, it does not restate.
+
+    Uses the canonical OpenRouter route: `grok-video-official` is retired. It was
+    a second record for this same model on a provider that could not be called,
+    and its own priors stay with its retired evidence rather than being merged
+    onto this one.
+    """
+
     with container.database.session() as session:
         definition = session.scalar(
-            select(ModelDefinition).where(ModelDefinition.logical_name == "grok-video-official")
+            select(ModelDefinition).where(
+                ModelDefinition.logical_name == "grok-imagine-video-openrouter"
+            )
         )
         assert definition is not None
         profile = session.get(ModelCapabilityProfileRow, definition.id)
@@ -80,7 +90,8 @@ def test_manual_prior_and_admin_profile_survive_default_sync(container) -> None:
 
     assert result.models_created == 0
     assert result.profiles_created == 0
-    assert container.model_registry.get("grok-imagine-video", "grok").physics_prior == 0.31
+    registry = container.model_registry
+    assert registry.get("x-ai/grok-imagine-video", "openrouter").physics_prior == 0.31
 
 
 def test_each_wan_version_carries_its_own_reviewed_profile(container) -> None:

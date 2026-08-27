@@ -2488,7 +2488,14 @@
       "logical_name": "grok-video-official",
       "provider_model_id": "grok-imagine-video",
       "status": "NO_EXTERNAL_EVIDENCE",
-      "note": "Not present in either source document. Also served by a provider with no transport."
+      "note": "Not present in either source document. Also served by a provider with no transport.",
+      "lifecycle": "RETIRED",
+      "retired_on": "2026-08-27",
+      "superseded_by": {
+        "logical_name": "grok-imagine-video-openrouter",
+        "provider_model_id": "x-ai/grok-imagine-video"
+      },
+      "retirement_reason": "Retired from model_definitions as a duplicate: it held a (provider, provider_model_id, modality) that the OpenRouter record above already owned, behind a provider whose every call raised PROVIDER_NOT_CONFIGURED. Execution retargets to the canonical OpenRouter route; this verdict keeps the source, provider and version identity it was recorded under, because that is what makes it evidence rather than a label."
     },
     {
       "logical_name": "flow-narwhal-image-internal",
@@ -2500,7 +2507,20 @@
       "logical_name": "veo-3.1-quality-official",
       "provider_model_id": "veo-3.1-generate-preview",
       "status": "NO_EXTERNAL_EVIDENCE",
-      "note": "The served variant behind `veo-3.1-generate-preview` is not established, so no Arena variant can be bound to it without guessing. Also served by a provider with no transport."
+      "note": "The served variant behind `veo-3.1-generate-preview` is not established, so no Arena variant can be bound to it without guessing. Also served by a provider with no transport.",
+      "lifecycle": "RETIRED",
+      "retired_on": "2026-08-27",
+      "superseded_by": {
+        "logical_name": "veo-3.1-openrouter",
+        "provider_model_id": "google/veo-3.1"
+      },
+      "retirement_reason": "Retired from model_definitions as a duplicate: it held a (provider, provider_model_id, modality) that the OpenRouter record above already owned, behind a provider whose every call raised PROVIDER_NOT_CONFIGURED. Execution retargets to the canonical OpenRouter route; this verdict keeps the source, provider and version identity it was recorded under, because that is what makes it evidence rather than a label."
+    },
+    {
+      "logical_name": "wan-3.0-openrouter",
+      "provider_model_id": "alibaba/wan-3.0",
+      "status": "NO_EXTERNAL_EVIDENCE",
+      "note": "Listed on OpenRouter 2026-08-24 (canonical_slug alibaba/wan-3.0-20260824). No public benchmark for this version appears in either source document. Wan-Bench measured 2.1 and OSCBench measured 2.2; neither may be re-derived onto 3.0. Capability priors are hand-authored judgement."
     }
   ],
   "gaps": [

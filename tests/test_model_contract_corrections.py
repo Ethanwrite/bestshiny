@@ -36,9 +36,15 @@ import pytest
 DEFAULTS = Path(__file__).resolve().parents[1] / "config" / "model-registry" / "defaults.json"
 
 # What each provider publishes, read from that provider's own documentation.
+#
+# `grok-video-official` and `veo-3.1-quality-official` were corrected here first
+# and have since been retired outright: correcting their IDs revealed that each
+# named a model an OpenRouter record already owned, on a provider whose every
+# call raised PROVIDER_NOT_CONFIGURED. Their verdicts survive in the External
+# Evidence Registry marked RETIRED, with the identity they were recorded under —
+# see `test_external_evidence_registry.py`. Their absence from the registry is
+# asserted in `test_model_contract_alignment.py`.
 PUBLISHED_IDS = {
-    "grok-video-official": "grok-imagine-video",
-    "veo-3.1-quality-official": "veo-3.1-generate-preview",
     "wan-3.0-official": "wan3.0-video",
 }
 

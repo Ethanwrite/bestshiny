@@ -380,12 +380,23 @@ def test_migration_prices_gpt_image_2_for_the_quality_it_sends(tmp_path, monkeyp
 # OpenRouter's live SKU table, read 2026-08-26. Audio-on rates, because nothing
 # in this platform sends `generate_audio` and OpenRouter defaults it to true.
 OPENROUTER_VIDEO_USD_PER_SECOND = {
-    "google/veo-3.1": {"720p": 0.40, "1080p": 0.40},
+    # 4K is a separate SKU on the audio axis, not a scaling of 1080p: OpenRouter
+    # publishes with_audio 0.40 and with_audio_4k 0.60. The silent rates (0.20 /
+    # 0.40) are recorded in the profile notes rather than seeded, because the
+    # profile keys on input mode and resolution and audio is a third axis.
+    "google/veo-3.1": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
     "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12},
     "google/veo-3.1-lite": {"720p": 0.05, "1080p": 0.08},
     "kwaivgi/kling-v3.0-pro": {"720p": 0.168},
     "kwaivgi/kling-v3.0-std": {"720p": 0.126},
     "x-ai/grok-imagine-video": {"480p": 0.05, "720p": 0.07},
+    # The route Wan 3.0 actually reaches: this account has no DashScope 3.0
+    # access. These are OpenRouter's LIST SKUs. Its Alibaba endpoint currently
+    # carries a 15% discount, making the charged rate 0.0425 / 0.085 / 0.17 —
+    # recorded in the profile notes, deliberately not applied, because a
+    # discount lapses without anyone acting and quoting the higher figure
+    # cannot under-charge.
+    "alibaba/wan-3.0": {"480p": 0.05, "720p": 0.10, "1080p": 0.20},
 }
 
 
@@ -394,8 +405,8 @@ def test_one_resolution_multiplier_could_never_have_fitted_these_models() -> Non
 
     The engine used to scale every model's 720p price by 1.30 to reach 1080p.
     Three Veo models from the same vendor, priced by the same reseller on the
-    same day, disagree with that number and with each other — which is why the
-    multiplier is gone rather than retuned.
+    same day, disagree with that number and with each other — and Wan 3.0 from a
+    different vendor doubles. That is why the multiplier is gone, not retuned.
     """
 
     ratios = {
@@ -403,11 +414,14 @@ def test_one_resolution_multiplier_could_never_have_fitted_these_models() -> Non
         for model, rates in OPENROUTER_VIDEO_USD_PER_SECOND.items()
         if "1080p" in rates and "720p" in rates
     }
+    assert ratios["alibaba/wan-3.0"] == pytest.approx(2.0)
     assert ratios["google/veo-3.1"] == pytest.approx(1.0)
     assert ratios["google/veo-3.1-fast"] == pytest.approx(1.2)
     assert ratios["google/veo-3.1-lite"] == pytest.approx(1.6)
-    # No single constant satisfies all three, and 1.30 satisfies none of them.
-    assert len(set(round(value, 3) for value in ratios.values())) == 3
+    # No single constant satisfies them, and 1.30 satisfies none. Wan 3.0 makes
+    # a fourth distinct ratio across two vendors, which is the point: the old
+    # multiplier was not mistuned, it was unfixable.
+    assert len(set(round(value, 3) for value in ratios.values())) == 4
     assert all(value != pytest.approx(1.30) for value in ratios.values())
 
 
@@ -486,14 +500,6 @@ def test_the_quoted_image_price_is_the_quality_the_wire_actually_sends(
     )
 
 
-OPENROUTER_VIDEO_USD_PER_SECOND = {
-    "google/veo-3.1": {"720p": 0.40, "1080p": 0.40},
-    "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12},
-    "google/veo-3.1-lite": {"720p": 0.05, "1080p": 0.08},
-    "kwaivgi/kling-v3.0-pro": {"720p": 0.168},
-    "kwaivgi/kling-v3.0-std": {"720p": 0.126},
-    "x-ai/grok-imagine-video": {"480p": 0.05, "720p": 0.07},
-}
 
 
 def test_migration_seeds_openrouter_video_rates_from_the_published_skus(

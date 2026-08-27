@@ -119,6 +119,15 @@ class Binding(BaseModel):
     note: str | None = None
 
 
+class SupersededBy(BaseModel):
+    """The canonical route that took over execution for a retired model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    logical_name: str = Field(min_length=1)
+    provider_model_id: str = Field(min_length=1)
+
+
 class UnbackedModel(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -126,6 +135,15 @@ class UnbackedModel(BaseModel):
     provider_model_id: str = Field(min_length=1)
     status: Literal["NO_EXTERNAL_EVIDENCE"]
     note: str = Field(min_length=1)
+    # Execution and provenance are different facts. A model can stop being
+    # executable without its verdict changing: what was looked for, in which
+    # source, against which version, stays exactly as it was recorded. Retiring
+    # the row instead would quietly rewrite history to match the current routing
+    # table, which is the opposite of what an evidence registry is for.
+    lifecycle: Literal["ACTIVE", "RETIRED"] = "ACTIVE"
+    retired_on: str = ""
+    retirement_reason: str = ""
+    superseded_by: SupersededBy | None = None
 
 
 class Gap(BaseModel):

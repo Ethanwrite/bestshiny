@@ -14,9 +14,15 @@ from provider_sdk import AssetCriticality, ProviderTrustLevel
 
 def test_registry_loads_persisted_manual_profiles(container):
     registry = container.model_registry
-    grok = registry.get("grok-imagine-video", "grok")
+    # The canonical route. `grok-video-official` carried a separate, higher
+    # `end_frame_direct_gaze` prior of 0.8, and it is retired — its evidence
+    # keeps its own identity in the External Evidence Registry rather than being
+    # merged onto this model, which has its own hand-authored 0.62. Copying the
+    # retired model's number here to keep the assertion unchanged would be
+    # exactly the re-derivation the registry forbids.
+    grok = registry.get("x-ai/grok-imagine-video", "openrouter")
     assert grok is not None
-    assert grok.failure_priors["end_frame_direct_gaze"] == 0.8
+    assert grok.failure_priors["end_frame_direct_gaze"] == 0.62
     assert grok.adapter == "grok"
     wan = registry.get("wan-2.7", "wan")
     assert wan is not None
@@ -47,8 +53,19 @@ def test_router_penalizes_grok_for_rear_view_ending(container):
             latency_priority=0.7,
         )
     )
-    neutral_grok = next(candidate for candidate in neutral.candidates if candidate.provider == "grok")
-    rear_grok = next(candidate for candidate in rear.candidates if candidate.provider == "grok")
+    # Selected by model, not by provider: OpenRouter now serves every video
+    # model this router ranks, so `provider == "grok"` no longer identifies one.
+    # The behaviour under test is unchanged — a rear-view ending must cost this
+    # model score, and say why.
+    def _grok(ranking):
+        return next(
+            candidate
+            for candidate in ranking.candidates
+            if candidate.model == "x-ai/grok-imagine-video"
+        )
+
+    neutral_grok = _grok(neutral)
+    rear_grok = _grok(rear)
     assert rear_grok.score < neutral_grok.score
     assert any("direct-gaze" in item for item in rear_grok.penalties)
 

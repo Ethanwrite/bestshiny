@@ -10,9 +10,9 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q                      933 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      946 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  935 passed, 7 skipped   (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  948 passed, 7 skipped   (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
 .venv/bin/python -m mypy                           Success: 157 source files
 .venv/bin/python -m alembic heads                  0050_router_evidence (single head)
@@ -328,6 +328,26 @@ isolation rule working, not a gap.
 **Exploration is closed and has no switch.** It ships as an offline simulator with six constraints
 and no feature flag; `tests/test_router_exploration_offline.py` asserts that nothing under
 `services/`, `apps/`, `agents/` or `providers/` imports it or names its exports.
+
+**A review pass before merge found fifteen defects**, all fixed in the same branch with thirteen
+regression tests. One mattered more than the rest: `_execute_retry` built its metadata from
+`{**metadata, ...}` and so carried `routing_context.exact_version` onto a retry that re-routed to a
+*different* model — writing an observation keyed `newProvider:newModel@oldVersion`, a pair that
+never ran and that nothing downstream could detect, because the key is internally consistent. That
+is the cross-version contamination this whole package exists to prevent, and it was inside it.
+`_retargeted_routing_context` now re-resolves the version from the registry, and declines to write
+at all when the registry cannot name it.
+
+The others worth knowing: a generation quoted at **zero** credits was recorded as having no
+observed cost (`if quoted_credits` where the line above correctly reads `is not None`); the
+nearest-rank percentile was off by one whenever `fraction * n` was an integer, because
+`round(x + 0.5)` breaks halves to even — p90 of ten samples returned the maximum and p90 of twenty
+was correct; `_record_router_observation` promised never to fail the user's request and caught only
+`ValueError`, so a PostgreSQL serialization failure would have failed a request already billed;
+`latest_posterior_run_id` tiebroke on a uuid4, so which snapshot the router read was not
+reproducible; the LCB reported the **largest** backing count across dimensions, weighting a
+25-observation bound as if it had another dimension's 300; and the quote check could be satisfied
+by a sample size, because scaling 0.87 by a hundred matched "we ran 87 prompts".
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 

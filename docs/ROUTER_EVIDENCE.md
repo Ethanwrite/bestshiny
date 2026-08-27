@@ -458,3 +458,45 @@ The re-run to pick up that fix exhausted the account's Grok Build balance partwa
 the 33 model×layer files are the original pass (repaired at ingest) and 11 are the corrected pass;
 6 model×layer pairs have no usable research at all and are recorded as gaps. Topping the balance up
 and re-running `scripts/research_router_evidence.py --overwrite` is the way to close them.
+
+---
+
+## 13. Defects found reviewing this work, and fixed
+
+A review pass before merge found fifteen. One of them was the failure this package exists to
+prevent, sitting inside the package, and it is worth stating plainly rather than burying in a
+changelog.
+
+**A retry inherited the previous attempt's version.** `_execute_retry` builds its metadata from
+`{**metadata, ...}`, which carried `routing_context` through unchanged — `exact_version` included.
+`RetryPlan` exists precisely to re-route to a *different* model, and when it did, the observation
+was written with the new provider and model against the old version: a key like
+`openrouter:google/veo-3.1@wan-2.7-manual-v4`, describing a pair that never ran. Nothing downstream
+could catch it, because the key is internally consistent and `audit_contamination` checks a row's
+key against its level, not against history. `_retargeted_routing_context` now re-resolves the
+version from the registry when the target changes, and returns nothing when the registry cannot
+name the new target — no observation beats a mislabelled one.
+
+The rest, briefly, with what each would have cost:
+
+| Defect | Consequence |
+|---|---|
+| `cost_credits` used truthiness, not `is not None` | a generation quoted at **zero** credits recorded as cost-not-observed; replay averages over the non-free attempts and can fail a policy on a regression that never happened |
+| `round(x + 0.5)` used as `ceil` in `_percentile` | off by one whenever `fraction * n` is an integer — p90 of ten samples returned the maximum, p90 of twenty was correct; the error depended on parity alone |
+| recorder caught only `ValueError` | its own docstring promises never to fail the user's request; a PostgreSQL serialization failure under concurrent evaluation would have failed one already billed |
+| `latest_posterior_run_id` tiebroke on `id` (a uuid4) | which posterior snapshot the router read was not reproducible across processes |
+| LCB reported `max` backing count across dimensions | a `character_consistency` bound backed by 25 observations weighted as if it had another dimension's 300 |
+| freshness checked per routed request | the offline artefact back in the hot path, which is the one thing the split is for; now behind a 60s TTL |
+| quote check scaled 0-1 values unconditionally | `0.87` matched "we ran 87 prompts" — a sentence about sample size validating a claimed score. A scaled match now needs the quoted number to read as a percentage (`%` or a fractional part) |
+| prior strength counted value-less records | four records stating a result in words plus one number charged the full ceiling, as if five sources agreed |
+| replay collapsed versions with `setdefault` | a model that changed snapshot mid-history was replayed on the superseded one; now the latest, and the notes say which models this applied to |
+| over-long `observation_id` swapped for a uuid | a row stored under an identifier the caller never chose and cannot look up |
+| `coverage_counts` counted in Python | an operator page load read the whole observation table to build a dozen entries |
+| `resolution` unconstrained | a pipe in it would raise out of the entire posterior computation, not one cell |
+| exploration simulator spent instance state | a second `simulate()` refused everything for want of a budget the first one consumed |
+| ingest script's `exit_code` was dead | a pass that rejected every record exited 0 |
+
+Thirteen regression tests, one per defect that can be pinned. Two of them are worth reading on
+their own: `test_a_retry_that_re_routes_does_not_inherit_the_version` and
+`test_the_percentile_is_nearest_rank_at_every_sample_count`, which checks every count from 1 to 59
+rather than the two that happened to be convenient.

@@ -291,7 +291,7 @@ schema 上。自建 `Settings`、硬编码 SQLite URL 的测试模块（约十�
 
 离线基线的历史冻结结果是 **348 passed, 39 warnings**。Phase III tag 历史完整套件为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
 
-2026-08-26 当前未发布工作树实测为 **SQLite 933 passed / 9 skipped**、**PostgreSQL 935 passed / 7 skipped**；Ruff check、Mypy（157 source files）、Alembic 单 head（`0050_router_evidence`）与 `git diff --check` 全绿。
+2026-08-27 当前工作树实测为 **SQLite 946 passed / 9 skipped**、**PostgreSQL 948 passed / 7 skipped**；Ruff check、Mypy（157 source files）、Alembic 单 head（`0050_router_evidence`）与 `git diff --check` 全绿。
 
 2026-08-22 当前未发布工作树实测为 **468 passed, 61 warnings in 139.29s**；Ruff check、Mypy（132 source files）、Web 生产构建、npm audit 与 Alembic 单 head 全绿。PostgreSQL 17 fresh `0032`/`alembic check` 是前一迁移的证据，当前 `0033` 仍需 PostgreSQL 验证；历史 Compose smoke 只运行到 `0027`。
 

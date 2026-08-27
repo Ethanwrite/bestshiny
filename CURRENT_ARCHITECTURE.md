@@ -397,6 +397,14 @@ automatic 0.939 measure three different things. Human and automatic judge scores
 dimension are stored separately. Aggregates are stored at `mapping_confidence: LOW` and can never stand in
 for a capability. A source that published words instead of numbers stores a null value.
 
+**A retired model keeps its verdict.** `lifecycle` (`ACTIVE`/`RETIRED`), `retired_on`,
+`retirement_reason` and `superseded_by` were added on 2026-08-27 when `grok-video-official` and
+`veo-3.1-quality-official` stopped being executable. Execution and provenance are different facts: a
+model can stop being routable without its verdict changing, and what was looked for, in which source,
+against which version stays exactly as recorded. Deleting the rows to match the current routing table
+would quietly rewrite history — the opposite of what an evidence registry is for. `superseded_by`
+names the canonical route that took over.
+
 This registry is **not** superseded and **not** merged into the four-layer system added on
 2026-08-26 (see *Router evidence* below). They are separate frozen artefacts with separate loaders:
 `registry-v1.json` is the 2026-08-25 research bound to `capability_prior`, and
@@ -585,6 +593,32 @@ evidence-frame ranking. The memory boundary rejects attempts to use an embedding
 claiming authoritative use is excluded from retrieval. Direct video-URL embedding on the unverified runtime path also
 fails closed; callers must first extract bounded timestamped frames.
 
+### Model identity, and the duplicates that could never have worked
+
+The registry holds **24 canonical models, 21 enabled** (11 video, 3 image, 7 text-multimodal, and one
+each of text, embedding and multimodal-embedding). Every `provider_model_id` now carries a
+`provider_model_id_source` naming the vendor page it was read from and the date.
+
+Four IDs were wrong because nobody had checked them against the provider's own documentation.
+`seedance-2.5` was a *logical name* posted to Ark, which answered "the model or endpoint does not
+exist"; `grok-video` is published as `grok-imagine-video`; `veo-3.1-quality` is a Google **Flow UI
+label**, not an API id, and the API publishes `veo-3.1-generate-preview`; `wan-3.0` is published as
+`wan3.0-video`. `NARWHAL` is left exactly as it is and recorded as *unverifiable* — it appears on no
+Google-published page, and substituting a plausible replacement would be the same error pointed the
+other way.
+
+`grok-video-official` and `veo-3.1-quality-official` are **retired**. Each held a
+`(provider, provider_model_id, modality)` triple that an OpenRouter record already owned, behind a
+provider whose every call raised `PROVIDER_NOT_CONFIGURED` — and `model_definitions` is UNIQUE on
+that triple, so they could never have been repointed at a working transport. They were not
+under-configured; they were unreachable by construction. Execution retargets to the canonical
+OpenRouter routes.
+
+`wan-3.0-openrouter` (`alibaba/wan-3.0`) is added, verified against OpenRouter's own
+`GET /api/v1/videos/models` and `/api/v1/models/alibaba~wan-3.0/endpoints`. It is enabled and
+declares 30s, which restores a long-form route: `wan-3.0-official` on DashScope stays a separate
+record and stays disabled, because this account has no Wan 3.0 access there.
+
 ## Provider status and Flow affinity
 
 No provider below was called live during Phase III.
@@ -662,6 +696,27 @@ and whose settlement failed must survive.
 submission boundary; it is never a reason to proxy. `LOCAL_REFERENCE_SIGNING_KEY` enables a
 signed, expiring, unauthenticated route for local development, which *does* proxy and is
 documented as a development affordance rather than a deployment shape.
+
+### Fetching the result back
+
+The outbound half above is presigned. The inbound half — collecting a finished artefact from the
+provider — is an SSRF boundary, and `PROVIDER_MEDIA_ALLOWED_HOSTS` is the fence: a provider with no
+entry cannot deliver, and the transfer fails closed.
+
+Failing closed is right for a host nobody has confirmed and wrong for a provider the platform
+actually routes to, and until 2026-08-27 only `google_flow` was listed. Every OpenRouter, Ark and
+DashScope generation therefore reached `COMPLETED` **at the provider — billed —** and then died at
+the fetch with `provider media host is not allowlisted`. The failure was at the one point where the
+money is already gone.
+
+`openrouter=openrouter.ai,*.openrouter.ai` is now listed, read from the host OpenRouter's own
+`/v1/videos/{id}` returns for a finished clip on a real completed job. **Ark and DashScope stay
+unlisted deliberately** until a canary shows what theirs are: a guessed host is either a hole in the
+fence or another silent failure, and both are worse than a refusal that says why.
+
+The refusal now names the host — `{provider} returned {host!r}` — bounded to 120 characters because
+a hostname from a provider response is untrusted input. Without it an operator had to re-run a
+billed call to learn a string the provider had already sent.
 
 ### Original and derivative
 
@@ -962,6 +1017,29 @@ refusing to quote what is not priced" below. Known spend is **no longer USD 0**:
 Wan 2.7 T2V, I2V and R2V have each completed a real generation, and one
 `openai/gpt-image-2` attempt was refused by the provider's router before billing.
 
+### What a permit is worth is what it can still cost
+
+`GLOBAL_CANARY_COST_CEILING_USD` is the only thing between a model-by-model live audit and an
+unbounded bill, and until 2026-08-27 it was measuring nothing. The listing endpoint answers
+`{"limit": n, "permits": [...]}`; the script read `body.get("items", ...)`, which did not raise — it
+fell through to the default and returned an empty list. Every permit ever minted totalled USD 0 of
+USD 10, so the ceiling authorised everything while printing a reassuring figure above each canary.
+
+Fixing the key alone would have swapped one wrong answer for another. The rule it was reaching for
+charged every permit its full authorisation for ever, including exhausted permits that had billed
+nothing — three refused attempts held USD 8.05 of the USD 10 with USD 0 actually spent, which would
+have refused the whole remaining audit on money nobody had spent. The rule is now:
+
+```text
+ACTIVE               max(authorisation, actual + held)    nothing stops it drawing more
+EXHAUSTED/EXPIRED    actual + held                        it can never draw again
+```
+
+`held` keeps an unreconciled `UNCERTAIN` usage counted, because UNCERTAIN is not evidence of zero.
+`POST /internal/live-canary-usages/{usage_id}/reconcile` is how an operator closes one with a
+finding, audited. A listing that fills its page fails closed rather than totalling part of the
+history.
+
 ## Model pricing, and refusing to quote what is not priced
 
 *Added 2026-08-26. Supersedes the single `estimated_per_second` per model and the
@@ -1090,6 +1168,16 @@ model earns its status by completing its own chain — official evidence, contra
 pricing, fresh-deploy seed, recorder proof, tests, no-spend quote — and is then
 committed and pushed on its own. Batch the research; never batch the verdict.
 
+### `pricing_status` has to describe the row the till will read
+
+`reconcile_pricing_status()` runs **last** in container startup, after the block that rewrites
+`provider_model_id` for every model an operator has declared. Deriving it before those writes
+describes a row that no longer exists, and it went wrong in both directions at once: Wan's row moved
+to the ID `WAN2_7_T2V_MODEL_ID` names while its price stayed keyed on the family key, so it reported
+VERIFIED and then raised `PricingUnverified` at the till — on a fresh install the one model with real
+verified generations behind it could not be quoted. Doubao moved off `CONFIGURE_DOUBAO_MODEL_ID` onto
+a priced ID and reported UNVERIFIED. The report and the till must read the same row.
+
 ## Data architecture and migrations
 
 **One schema authority.** Alembic creates and alters every database. `Database.create_all()` no longer runs at
@@ -1127,6 +1215,15 @@ winner has committed, and reads it `QUEUED` — a fence stale against a change i
 create path therefore treats a stale fence as conclusive only once the key is known to be unclaimed; a claim
 that exists is a claim for the same request (a differing request hash is still an `IdempotencyConflict`), and
 the idempotent answer is the competitor's job rather than a 409.
+
+**`0051_token_pricing` prices what was billing blind.** Twelve of the registry's models bill per
+token and none carried a rate, so every text, embedding and refinement call was quoted from nothing.
+Every figure was read from the provider's own documentation on 2026-08-26 and the migration records
+where. Two details are structural rather than incidental: per-token rates do not survive the column —
+DeepSeek's cache-hit rate is 0.007 USD/1M and `numeric(18,8)` rounds it to zero, so rates are stored
+per-million — and the OpenRouter video SKUs are recorded at **list price** with the endpoint's
+current 15% discount noted but *not* applied, because a discount is a fact about today's promotion
+and a price is a fact about the SKU. Five models are deliberately left unpriced rather than guessed.
 
 **Evidence tables enforce what analysis cannot repair.** `router_observations` carries a check
 constraint refusing a row that failed generation and still holds a quality score or a rating — nothing
@@ -1206,6 +1303,11 @@ references are fingerprinted; prompt bodies, vectors, raw Provider responses and
 `POST/GET /internal/live-canary-permits` creates explicitly confirmed, idempotent permits and lists permit/usage
 state. These are development/operator APIs, not a redesigned analytics dashboard.
 
+`POST /internal/live-canary-usages/{usage_id}/reconcile` closes an `UNCERTAIN` canary usage with an
+operator's finding and audits it. It exists because `UNCERTAIN` is not evidence of zero: an
+unreconciled usage stays counted against the global ceiling until a human says what actually
+happened, so the only way to release that hold is to record a finding rather than let it lapse.
+
 `GET /internal/models/router-evidence` returns the four evidence layers **as four keys rather than one
 merged list**, because merging them is what the structure exists to prevent: per-layer version, record
 and eligibility counts, source-type distribution, per-model-per-version coverage, marked conflicts,
@@ -1257,6 +1359,12 @@ blockers include:
    fetchable-URL providers can actually reach; the retry/admission payload recompilation, the reference-mode
    split, the fail-closed Flow key mapping and the OpenRouter/Ark payload allowlists are implemented and
    covered by Mock payload contract tests, but no live canary has exercised them.
+
+Item 7 above changed materially on 2026-08-27. `PROVIDER_MEDIA_ALLOWED_HOSTS` listed only
+`google_flow`, so **every** OpenRouter, Ark and DashScope generation completed at the provider, was
+billed, and then failed at the fetch. OpenRouter is now listed from an observed response host; Ark
+and DashScope remain unlisted until a canary reveals theirs, and that is the remaining half of the
+item rather than an oversight. The four wrong model IDs behind it are corrected and sourced.
 
 Router evidence is deliberately *not* on that list, because it blocks nothing: with
 `feature_router_lcb` false and no exploration call site, the routing behaviour of this release is

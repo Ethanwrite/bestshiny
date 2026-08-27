@@ -1,6 +1,13 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-26 · Branch `claude/production-readiness-postgres` · commit `64ee277` · **NOT PRODUCTION-READY** · pushed to `origin`, open on [PR #1](https://github.com/Ethanwrite/bestshiny/pull/1)
+Date: 2026-08-27 · Branch `main` · commit `cb8762b` · **NOT PRODUCTION-READY** · everything below is merged
+
+Four PRs landed on `main`, in this order:
+[#1](https://github.com/Ethanwrite/bestshiny/pull/1) production readiness on PostgreSQL and the
+pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evidence
+· [#5](https://github.com/Ethanwrite/bestshiny/pull/5) its architecture documentation
+· [#3](https://github.com/Ethanwrite/bestshiny/pull/3) model contract and pricing alignment.
+There is no open PR and no unmerged work.
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted
@@ -10,14 +17,19 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 ## 1. Gate state (all green, offline only)
 
 ```
-.venv/bin/python -m pytest -q                      946 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1045 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  948 passed, 7 skipped   (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1047 passed, 7 skipped  (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
 .venv/bin/python -m mypy                           Success: 157 source files
-.venv/bin/python -m alembic heads                  0050_router_evidence (single head)
+.venv/bin/python -m alembic heads                  0051_token_pricing (single head)
 git diff --check                                   clean
 ```
+
+**Run the PostgreSQL half detached.** It takes 11 minutes and the tool timeout is 10, so a
+foreground run is SIGKILLed at exit 137 partway through — which reads exactly like a crash and is
+not one. `nohup … & disown`, then poll. pytest peaks at ~600 MB RSS, there are no jetsam entries and
+the Postgres container never dies; it is a harness limit, not resource pressure.
 
 **Both halves must be green.** The PostgreSQL half needs `docker compose up -d postgres`. The SQLite
 half skips tests marked `postgres_only` — behaviour that only exists where transactions genuinely run
@@ -273,6 +285,69 @@ move to the next. Do not batch.
 Then: the two `google_flow` models (Flow is browser-driven with no published
 per-call rate — likely to stay unpriceable), and the resolution/duration schema
 gaps listed above.
+
+## 1b2. 2026-08-27 — the model contract, and a fence that failed after the money was spent
+
+[PR #3](https://github.com/Ethanwrite/bestshiny/pull/3), merged as `cb8762b`. Four facts describe
+every model — the ID posted to the provider, a pricing row, `pricing_status`, and what `estimate()`
+does when money is at stake. They were computed in different places, nothing forced them to agree,
+and they did not.
+
+**The one that cost real money.** `PROVIDER_MEDIA_ALLOWED_HOSTS` is the SSRF fence on collecting a
+finished artefact, and it listed **only `google_flow`**. Every OpenRouter, Ark and DashScope
+generation therefore reached `COMPLETED` at the provider — billed — and then died at the fetch with
+`provider media host is not allowlisted`. The failure landed at the one point where the money is
+already gone. `openrouter.ai` is now listed, read from the host OpenRouter's own `/v1/videos/{id}`
+returns on a real completed job. **Ark and DashScope stay unlisted on purpose** until a canary shows
+what theirs are — a guessed host is either a hole in the fence or another silent failure. The
+refusal now names the host it saw, bounded to 120 characters because that string is untrusted input.
+
+**Four model IDs were never checked against the provider's own documentation.** `seedance-2.5` was a
+*logical name* posted to Ark, which answered "the model or endpoint does not exist" — that is the
+defect that started the audit. `grok-video` is published as `grok-imagine-video`; `veo-3.1-quality`
+is a Google **Flow UI label** and the API publishes `veo-3.1-generate-preview`; `wan-3.0` is
+published as `wan3.0-video`. Every `provider_model_id` now carries a `provider_model_id_source`
+naming the page and the date. `NARWHAL` is left alone and recorded as *unverifiable* rather than
+corrected: it appears on no Google-published page, and inventing a plausible replacement is the same
+error pointed the other way.
+
+**`pricing_status` lied in both directions at once.** `reconcile_pricing_status()` ran before the
+block that rewrites `provider_model_id`, so it described a row that no longer existed. Wan reported
+VERIFIED and then raised `PricingUnverified` at the till — on a fresh install the one model with real
+verified generations behind it could not be quoted. Doubao reported UNVERIFIED for a model that was
+priced. It now runs last.
+
+**Two models were unreachable by construction.** `grok-video-official` and `veo-3.1-quality-official`
+each held a `(provider, provider_model_id, modality)` triple an OpenRouter record already owned,
+behind a provider whose every call raised `PROVIDER_NOT_CONFIGURED` — and `model_definitions` is
+UNIQUE on that triple, so they could never have been repointed. Retired, with execution retargeted
+to the OpenRouter routes. `wan-3.0-openrouter` (`alibaba/wan-3.0`) is added and enabled, verified
+against OpenRouter's `GET /api/v1/videos/models`. Registry: **24 canonical models, 21 enabled**.
+
+**The global canary ceiling was counting nothing.** `GLOBAL_CANARY_COST_CEILING_USD` is the only
+thing between a model-by-model live audit and an unbounded bill. The listing endpoint answers
+`{"limit": n, "permits": [...]}` and the script read `body.get("items", ...)` — no error, just the
+default empty list. Every permit ever minted totalled USD 0 of USD 10. Fixing the key alone would
+have swapped one wrong answer for another: the rule it reached for charged every permit its full
+authorisation for ever, so three refused attempts held USD 8.05 with USD 0 spent and would have
+refused the rest of the audit on money nobody had spent. A permit is now worth what it can still
+cost — `max(authorisation, actual + held)` while ACTIVE, `actual + held` once it cannot draw again.
+
+**Evidence keeps its verdict when a model stops being executable.** The External Evidence Registry
+gained `lifecycle`, `retired_on`, `retirement_reason` and `superseded_by`. Execution and provenance
+are different facts; deleting a retired model's rows to match the routing table would rewrite
+history to match today's configuration, which is the opposite of what an evidence registry is for.
+
+**`0051_token_pricing`** prices the twelve per-token models that were quoting from nothing, read
+from each provider's own documentation on 2026-08-26. Rates are stored per-million because
+`numeric(18,8)` rounds DeepSeek's 0.007 USD/1M to zero, and the OpenRouter video SKUs are recorded at
+list price with the current 15% discount noted but not applied. Five models are left unpriced rather
+than guessed. `REQUIRED_SCHEMA_REVISION` moves to `0051_token_pricing`.
+
+**One local hazard this surfaced.** The `api` container runs a *built image*, not mounted source, and
+nothing rebuilds it. It had drifted five migrations behind and could not resolve the database's
+stamp — which looks like a merge problem and is not. `docker compose build api` after any migration
+lands.
 
 ## 1c. 2026-08-26 — four layers of routing evidence, and a flag that is off
 

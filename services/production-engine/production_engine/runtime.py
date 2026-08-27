@@ -21,6 +21,9 @@ from evaluation_core import (
 from generation_gateway import GenerationGateway, TimelineGenerationPlanStale
 from memory_core import (
     ContextAssembler,
+    ContextSegmentSource,
+    DependencySegment,
+    DependencySegmentOmitted,
     EpisodeScope,
     GenerationContext,
     MemoryQuery,
@@ -32,6 +35,12 @@ from model_registry_core import (
     RoutingEvidence,
     ShotRequirements,
     VideoModelRouter,
+)
+from narrative_ledger_core import (
+    DependencyContext,
+    NarrativeLedgerService,
+    ShotDependencyService,
+    ShotDependencyUnresolved,
 )
 from platform_contracts import (
     AuthoritativeTimelineFence,
@@ -124,6 +133,8 @@ class VisualProductionRuntime:
         generation_admission: GenerationAdmissionService | None = None,
         styles: ProjectStyleService | None = None,
         router_observations: RouterObservationService | None = None,
+        dependencies: ShotDependencyService | None = None,
+        narrative_ledger: NarrativeLedgerService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -141,6 +152,8 @@ class VisualProductionRuntime:
         self.generation_admission = generation_admission
         self.styles = styles
         self.router_observations = router_observations
+        self.dependencies = dependencies
+        self.narrative_ledger = narrative_ledger
         # The posterior snapshot is an offline artefact, so the routing path
         # must not query for it per request — that would put the offline side
         # back in the hot path, which is the one thing the split is for. The
@@ -309,6 +322,7 @@ class VisualProductionRuntime:
                 raise LookupError("shot not found")
             project_id = shot.scene.episode.project_id
             episode_id = shot.scene.episode_id
+            episode_number = shot.scene.episode.episode_number
             scene_id = shot.scene_id
             state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             temporal_state = dict(state.state_json) if state else {}
@@ -316,6 +330,35 @@ class VisualProductionRuntime:
             end_frame_asset_id = shot.end_frame_asset_id
             preferred_provider = shot.preferred_provider or shot.provider
             timeline_fence = self._timeline_fence(session, shot, project_id)
+
+        # Retrieval stage one — forced. Explicit dependencies and open
+        # obligations enter the context because they are *owed*, not because
+        # they are similar; similarity (stage two, below) only supplements
+        # them. A dependency that cannot be resolved refuses generation — the
+        # shot goes to review rather than silently degrading to
+        # similarity-only context.
+        dependency_contexts = self._resolve_dependencies(shot_id)
+        dependency_segments = [
+            DependencySegment(
+                key=item.dependency_id,
+                source_reason=ContextSegmentSource.EXPLICIT_DEPENDENCY,
+                text=item.summary,
+                dependency_type=item.dependency_type,
+                source_shot_id=item.source_shot_id,
+                fact_key=item.fact_key,
+                obligation_key=item.obligation_key,
+                payload=item.payload,
+            )
+            for item in dependency_contexts
+        ]
+        holder_keys = [
+            str(binding["character_id"])
+            for binding in (character_bindings or [])
+            if binding.get("character_id")
+        ]
+        dependency_segments.extend(
+            self._obligation_segments(project_id, episode=episode_number, holder_keys=holder_keys)
+        )
 
         canonical_assets, canonical_media_ids = self._canonical_assets(project_id)
         style_control = self.styles.generation_control(project_id) if self.styles else None
@@ -342,14 +385,20 @@ class VisualProductionRuntime:
             if self.flags.enabled("voyage_memory", project_id=project_id)
             else []
         )
-        generation_context = self.context.assemble(
-            canonical_assets=canonical_assets,
-            temporal_state=temporal_state,
-            shot_requirement={"action": shot.user_prompt or shot.prompt, "shot_id": shot_id},
-            memories=memories,
-            world_rules=self._world_rules(canonical_assets),
-            previous_final_frame_asset_id=start_frame_asset_id,
-        )
+        try:
+            generation_context = self.context.assemble(
+                canonical_assets=canonical_assets,
+                temporal_state=temporal_state,
+                shot_requirement={"action": shot.user_prompt or shot.prompt, "shot_id": shot_id},
+                memories=memories,
+                world_rules=self._world_rules(canonical_assets),
+                previous_final_frame_asset_id=start_frame_asset_id,
+                dependency_segments=dependency_segments,
+            )
+        except DependencySegmentOmitted as exc:
+            # A budget that cannot hold a forced segment is a review
+            # condition, never permission to assemble similarity-only context.
+            raise ShotDependencyUnresolved(shot_id, [f"DEPENDENCY_CONTEXT_BUDGET:{exc}"]) from exc
         extra_references = list(dict.fromkeys(reference_asset_ids or []))
         style_references = list(style_control.reference_media_ids) if style_control else []
         generation_context.reference_images = list(
@@ -366,6 +415,7 @@ class VisualProductionRuntime:
             shot_id,
             character_bindings=character_bindings,
             canonical_assets=canonical_assets,
+            dependency_contexts=dependency_contexts,
         )
         requirements = self._requirements(
             compiled.spec,
@@ -427,6 +477,9 @@ class VisualProductionRuntime:
                 "router": decision.model_dump(mode="json"),
                 "style_lock": style_control.prompt_view() if style_control else None,
                 "style_control": style_control.provider_view() if style_control else None,
+                # Why each context segment is present — EXPLICIT_DEPENDENCY and
+                # OPEN_OBLIGATION are forced; SIMILARITY merely supplements.
+                "context_provenance": generation_context.segment_provenance,
                 # Recorded at decision time rather than re-derived at evaluation
                 # time. The shot spec can be edited between the two, and an
                 # observation filed under the scene the shot *became* would be
@@ -891,6 +944,42 @@ class VisualProductionRuntime:
                     if stale and not stale.generation_job_id:
                         session.delete(stale)
             raise
+
+    def _resolve_dependencies(self, shot_id: str) -> list[DependencyContext]:
+        """Force-resolve every explicit dependency, or let the refusal escape.
+
+        Not flag-gated on purpose: explicit dependencies are structural
+        requirements of the story, not an advisory retrieval feature, and a
+        deployment without the service wired simply has none declared.
+        """
+
+        if self.dependencies is None:
+            return []
+        return self.dependencies.resolve_for_generation(shot_id)
+
+    def _obligation_segments(
+        self, project_id: str, *, episode: int, holder_keys: list[str]
+    ) -> list[DependencySegment]:
+        """Open obligations for the episode, as forced context segments.
+
+        An obligation is owed, not similar — episode 60's payoff shares no
+        vocabulary with episode 7's promise — so it can never be left to the
+        similarity stage.
+        """
+
+        if self.narrative_ledger is None:
+            return []
+        series = self.narrative_ledger.series_context(
+            project_id, episode=episode, holder_keys=holder_keys
+        )
+        return [
+            DependencySegment(
+                key=f"obligation-{index}",
+                source_reason=ContextSegmentSource.OPEN_OBLIGATION,
+                text=promise,
+            )
+            for index, promise in enumerate(series.open_obligations, 1)
+        ]
 
     def _canonical_assets(self, project_id: str) -> tuple[list[dict[str, Any]], list[str]]:
         result: list[dict[str, Any]] = []

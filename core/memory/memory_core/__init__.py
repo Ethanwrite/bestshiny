@@ -1,4 +1,4 @@
-from .context import ContextAssembler
+from .context import ContextAssembler, DependencySegmentOmitted
 from .embedding import (
     EmbeddingProvider,
     EmbeddingVector,
@@ -10,8 +10,11 @@ from .embedding import (
 from .engine import MultimodalMemoryEngine, cosine_similarity
 from .schemas import (
     ADVISORY_EVIDENCE_PURPOSES,
+    FORCED_SEGMENT_SOURCES,
     AuthorityLevel,
     ContextBudget,
+    ContextSegmentSource,
+    DependencySegment,
     EmbeddingProvenance,
     EpisodeScope,
     EvidencePurpose,
@@ -28,11 +31,15 @@ __all__ = [
     "AuthorityLevel",
     "ContextAssembler",
     "ContextBudget",
+    "ContextSegmentSource",
+    "DependencySegment",
+    "DependencySegmentOmitted",
     "EmbeddingProvider",
     "EmbeddingProvenance",
     "EmbeddingVector",
     "EpisodeScope",
     "EvidencePurpose",
+    "FORCED_SEGMENT_SOURCES",
     "GenerationContext",
     "LocalTestEmbeddingProvider",
     "MemoryEmbeddingUnavailable",

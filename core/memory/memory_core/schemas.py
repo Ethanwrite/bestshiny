@@ -172,10 +172,68 @@ class ContextBudget(BaseModel):
     max_videos: int = Field(default=2, ge=0, le=10)
 
 
+class ContextSegmentSource(StrEnum):
+    """Why one assembled context segment is present.
+
+    ``EXPLICIT_DEPENDENCY`` and ``OPEN_OBLIGATION`` are forced (stage one of
+    retrieval) and may not be dropped by the budget; ``SIMILARITY`` is the
+    supplementary stage-two material and is the first thing the budget sheds.
+    """
+
+    CANONICAL = "CANONICAL"
+    TEMPORAL_STATE = "TEMPORAL_STATE"
+    SHOT_REQUIREMENT = "SHOT_REQUIREMENT"
+    EXPLICIT_DEPENDENCY = "EXPLICIT_DEPENDENCY"
+    OPEN_OBLIGATION = "OPEN_OBLIGATION"
+    SIMILARITY = "SIMILARITY"
+    WORLD_RULES = "WORLD_RULES"
+
+
+FORCED_SEGMENT_SOURCES = frozenset(
+    {ContextSegmentSource.EXPLICIT_DEPENDENCY, ContextSegmentSource.OPEN_OBLIGATION}
+)
+
+
+class DependencySegment(BaseModel):
+    """One forced context segment carrying explicit narrative material."""
+
+    key: str = Field(min_length=1, max_length=200)
+    source_reason: ContextSegmentSource
+    text: str
+    dependency_type: str | None = None
+    source_shot_id: str | None = None
+    fact_key: str | None = None
+    obligation_key: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def forced_reasons_only(self) -> DependencySegment:
+        if self.source_reason not in FORCED_SEGMENT_SOURCES:
+            raise ValueError(
+                "dependency segments carry EXPLICIT_DEPENDENCY or OPEN_OBLIGATION provenance"
+            )
+        return self
+
+    def render(self) -> dict[str, Any]:
+        rendered: dict[str, Any] = {"summary": self.text}
+        if self.dependency_type:
+            rendered["dependency_type"] = self.dependency_type
+        if self.source_shot_id:
+            rendered["source_shot_id"] = self.source_shot_id
+        if self.fact_key:
+            rendered["fact_key"] = self.fact_key
+        if self.obligation_key:
+            rendered["obligation_key"] = self.obligation_key
+        if self.payload:
+            rendered["payload"] = self.payload
+        return rendered
+
+
 class GenerationContext(BaseModel):
     canonical_assets: list[dict[str, Any]] = Field(default_factory=list)
     temporal_state: dict[str, Any] = Field(default_factory=dict)
     shot_requirement: dict[str, Any] = Field(default_factory=dict)
+    dependency_segments: list[DependencySegment] = Field(default_factory=list)
     episodic_memories: list[RetrievedMemory] = Field(default_factory=list)
     world_rules: list[str] = Field(default_factory=list)
     canonical_asset_ids: list[str] = Field(default_factory=list)
@@ -184,6 +242,9 @@ class GenerationContext(BaseModel):
     previous_final_frame_asset_id: str | None = None
     assembled_text: str = ""
     omitted: list[str] = Field(default_factory=list)
+    #: One entry per assembled section: {"label": ..., "source_reason": ...}.
+    #: The provenance of every context segment stays auditable after the fact.
+    segment_provenance: list[dict[str, str]] = Field(default_factory=list)
     budget_used: dict[str, int] = Field(default_factory=dict)
 
 

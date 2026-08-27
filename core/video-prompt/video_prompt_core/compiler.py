@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -59,6 +60,61 @@ class ProjectStyleSource(Protocol):
     def generation_control(self, project_id: str) -> LockedStyle | None: ...
 
 
+class SeriesContextResult(Protocol):
+    @property
+    def open_obligations(self) -> list[str]: ...
+
+    def continuity_facts(self) -> list[dict[str, Any]]: ...
+
+
+class SeriesLedgerSource(Protocol):
+    """The narrative ledger: established facts per holder and open obligations.
+
+    `series_context()` is O(1) in episode count and its `continuity_facts()`
+    render directly into `PromptCompilerInput.continuity_context.facts` — the
+    only door into `continuity_assertions`, so an undisclosed fact cannot reach
+    a prompt by accident.
+    """
+
+    def series_context(
+        self, project_id: str, *, episode: int, holder_keys: list[str] | None = None
+    ) -> SeriesContextResult: ...
+
+
+class ResolvedDependency(Protocol):
+    @property
+    def dependency_id(self) -> str: ...
+
+    @property
+    def dependency_type(self) -> str: ...
+
+    @property
+    def summary(self) -> str: ...
+
+    @property
+    def source_shot_id(self) -> str | None: ...
+
+    @property
+    def fact_key(self) -> str | None: ...
+
+    @property
+    def obligation_key(self) -> str | None: ...
+
+    @property
+    def payload(self) -> dict[str, Any]: ...
+
+
+class ShotDependencySource(Protocol):
+    """Explicit shot dependencies, resolved or refused — never guessed.
+
+    `resolve_for_generation` raises when a declared dependency cannot be
+    resolved; the compiler lets that propagate so the caller moves the shot to
+    review instead of compiling a prompt that silently omits owed material.
+    """
+
+    def resolve_for_generation(self, shot_id: str) -> Sequence[ResolvedDependency]: ...
+
+
 @dataclass(frozen=True)
 class PromptCompilerResult:
     spec: CanonicalShotSpec
@@ -83,10 +139,14 @@ class PromptCompilerService:
         database: Database,
         skills: PromptSkillRegistry,
         styles: ProjectStyleSource | None = None,
+        ledger: SeriesLedgerSource | None = None,
+        dependencies: ShotDependencySource | None = None,
     ):
         self.database = database
         self.skills = skills
         self.styles = styles
+        self.ledger = ledger
+        self.dependencies = dependencies
 
     @staticmethod
     def _single_action(value: str) -> str:
@@ -287,6 +347,7 @@ class PromptCompilerService:
         camera: dict[str, Any] | None = None,
         lighting: dict[str, Any] | None = None,
         resolution: str = "720p",
+        dependency_contexts: Sequence[ResolvedDependency] | None = None,
     ) -> PromptCompilerResult:
         character_bindings = character_bindings or []
         canonical_assets = canonical_assets or []
@@ -301,12 +362,52 @@ class PromptCompilerService:
             project = shot.scene.episode.project
             project_id = project.id
             scene_id = shot.scene_id
+            episode_number = shot.scene.episode.episode_number
             shot_type = shot.shot_type
             raw_action = shot.user_prompt or shot.prompt
             duration = shot.duration
             aspect_ratio = project.default_aspect_ratio
             generation_policy = shot.generation_policy
             continuity_policy = shot.continuity_policy
+
+        # Stage one of context: explicit material the shot *requires*. The
+        # resolver raises when a declared dependency cannot be resolved, and
+        # that error must propagate — compiling a prompt that silently omits
+        # owed material is exactly the degradation this stage exists to forbid.
+        if dependency_contexts is None and self.dependencies is not None:
+            dependency_contexts = list(self.dependencies.resolve_for_generation(shot_id))
+        dependency_facts: list[dict[str, Any]] = [
+            {
+                "name": "explicit_dependency",
+                "dependency_type": item.dependency_type,
+                "value": item.summary,
+                **({"source_shot_id": item.source_shot_id} if item.source_shot_id else {}),
+                **({"fact_key": item.fact_key} if item.fact_key else {}),
+                **({"obligation_key": item.obligation_key} if item.obligation_key else {}),
+                **({"payload": item.payload} if item.payload else {}),
+                "source_reason": "EXPLICIT_DEPENDENCY",
+            }
+            for item in (dependency_contexts or [])
+        ]
+        series_facts: list[dict[str, Any]] = []
+        if self.ledger is not None:
+            holder_keys = [
+                str(binding["character_id"])
+                for binding in character_bindings
+                if binding.get("character_id")
+            ]
+            series = self.ledger.series_context(
+                project_id, episode=episode_number, holder_keys=holder_keys
+            )
+            series_facts = [
+                {
+                    **fact,
+                    "source_reason": (
+                        "OPEN_OBLIGATION" if fact.get("name") == "open_obligation" else "SERIES_FACT"
+                    ),
+                }
+                for fact in series.continuity_facts()
+            ]
 
         start_state, end_state, state_constraint_lines = self._inject_character_state_targets(
             start_state,
@@ -501,6 +602,8 @@ class PromptCompilerService:
         continuity_facts: list[str | dict[str, Any]] = [
             {"name": "approved_start_state", "value": start_state},
             {"name": "approved_end_state", "value": end_state},
+            *dependency_facts,
+            *series_facts,
             *state_constraint_lines,
         ]
         compiler_input = PromptCompilerInput(

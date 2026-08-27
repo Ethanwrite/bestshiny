@@ -16,6 +16,9 @@ from production_domain.models import (
     Prop,
     Scene,
     Shot,
+    ShotDependency,
+    ShotDependencyOrigin,
+    ShotDependencyType,
     ShotStatus,
     TimelineState,
     TimelineTransition,
@@ -384,6 +387,47 @@ class NarrativeCompiler:
                 scene.world_state_id = None
             session.flush()
             if old_scene_ids:
+                old_shot_ids = list(
+                    session.scalars(select(Shot.id).where(Shot.scene_id.in_(old_scene_ids)))
+                )
+                if old_shot_ids:
+                    # An explicit dependency is a contract. Recompiling this
+                    # episode deletes its shots, and a shot elsewhere that
+                    # declared one of them as its source would be left owing
+                    # material that no longer exists — refused loudly here
+                    # rather than discovered as an unresolvable dependency at
+                    # generation time.
+                    external_dependent = session.scalar(
+                        select(ShotDependency.id)
+                        .where(
+                            ShotDependency.source_shot_id.in_(old_shot_ids),
+                            ShotDependency.target_shot_id.not_in(old_shot_ids),
+                        )
+                        .limit(1)
+                    )
+                    if external_dependent is not None:
+                        raise RuntimeError(
+                            "cannot recompile: shots outside this episode declare explicit "
+                            "dependencies on its shots; remove those dependencies first"
+                        )
+                    session.execute(
+                        delete(ShotDependency).where(
+                            ShotDependency.target_shot_id.in_(old_shot_ids)
+                        )
+                    )
+                    # Transitions are derived rows and must go before their
+                    # shots. Relying on the target FK's cascade is not enough
+                    # on PostgreSQL: the source FK's NO ACTION check trigger
+                    # was created first, so it fires before the cascade removes
+                    # the row and refuses the whole delete — a latent defect
+                    # this was the first PostgreSQL recompile-with-transitions
+                    # to reach.
+                    session.execute(
+                        delete(TimelineTransition).where(
+                            TimelineTransition.target_shot_id.in_(old_shot_ids)
+                            | TimelineTransition.source_shot_id.in_(old_shot_ids)
+                        )
+                    )
                 session.execute(delete(Shot).where(Shot.scene_id.in_(old_scene_ids)))
             session.execute(delete(TimelineState).where(TimelineState.episode_id == episode.id))
             if old_scene_ids:
@@ -564,6 +608,30 @@ class NarrativeCompiler:
                             if previous_shot.scene_id == shot.scene_id
                             else TimelineTransitionType.SCENE_CUT
                         )
+                        if transition_type is TimelineTransitionType.CONTINUOUS:
+                            # Structural, not semantic: a continuous shot
+                            # explicitly inherits the previous shot's committed
+                            # state. Foreshadowing, revelation and obligation
+                            # dependencies carry story meaning a rules compiler
+                            # cannot derive; they are declared through manual
+                            # editing instead.
+                            session.add(
+                                ShotDependency(
+                                    project_id=episode.project_id,
+                                    target_shot_id=shot.id,
+                                    source_shot_id=previous_shot.id,
+                                    dependency_type=ShotDependencyType.STATE_INHERITANCE.value,
+                                    summary=(
+                                        "inherits in-scene state from the previous shot: "
+                                        + (previous_shot.user_prompt or previous_shot.prompt)
+                                    ),
+                                    origin=ShotDependencyOrigin.SCRIPT_COMPILER.value,
+                                    dependency_key=ShotDependency.natural_key(
+                                        ShotDependencyType.STATE_INHERITANCE.value,
+                                        source_shot_id=previous_shot.id,
+                                    ),
+                                )
+                            )
                         session.add(
                             TimelineTransition(
                                 project_id=episode.project_id,

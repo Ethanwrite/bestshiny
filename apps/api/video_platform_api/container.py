@@ -7,7 +7,7 @@ from agent_runtime import AgentRuntime
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
 from character_core import CharacterIdentityService, PersistentCharacterStateService
-from continuity_core import ContinuityDecisionEngine
+from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine
 from deepseek_provider import DeepSeekProvider
 from director_production import AgentOrchestrator, CandidatePipeline
@@ -47,6 +47,7 @@ from model_registry_core import (
     VideoModelRouter,
 )
 from narrative_core import NarrativeCompiler
+from narrative_ledger_core import NarrativeLedgerService, ShotDependencyService
 from omni_provider import OmniProvider
 from openrouter_provider import OpenRouterProvider
 from payment_core import AlchemyUSDCWebhookService, DePayPaymentService, WalletPaymentService
@@ -116,9 +117,12 @@ class Container:
     skills: SkillRegistry
     agents: AgentRuntime
     narrative: NarrativeCompiler
+    narrative_ledger: NarrativeLedgerService
+    shot_dependencies: ShotDependencyService
     characters: CharacterIdentityService
     character_states: PersistentCharacterStateService
     continuity_decision: ContinuityDecisionEngine
+    frame_anchors: FrameAnchorPlanner
     capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
     qa: QAPipeline
@@ -615,9 +619,12 @@ def build_container(settings: Settings | None = None) -> Container:
     skills = SkillRegistry(settings.skills_root)
     agents = AgentRuntime(production, gateway, media, skills)
     narrative = NarrativeCompiler(database)
+    narrative_ledger = NarrativeLedgerService(database)
+    shot_dependencies = ShotDependencyService(database)
     characters = CharacterIdentityService(database)
     character_states = PersistentCharacterStateService(database)
     continuity_decision = ContinuityDecisionEngine(database)
+    frame_anchors = FrameAnchorPlanner(database, continuity_decision)
     capabilities = model_registry
     capability_resolver = CapabilityResolver(database, model_registry)
     qa = QAPipeline(database)
@@ -632,7 +639,13 @@ def build_container(settings: Settings | None = None) -> Container:
         ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
-    prompts = PromptCompilerService(database, skills, styles)
+    prompts = PromptCompilerService(
+        database,
+        skills,
+        styles,
+        ledger=narrative_ledger,
+        dependencies=shot_dependencies,
+    )
     credit_pricing = CreditPricingEngine(
         model_registry,
         database=database,
@@ -708,6 +721,8 @@ def build_container(settings: Settings | None = None) -> Container:
         generation_admission,
         styles,
         router_observations,
+        dependencies=shot_dependencies,
+        narrative_ledger=narrative_ledger,
     )
     candidates = CandidatePipeline(
         database,
@@ -722,7 +737,14 @@ def build_container(settings: Settings | None = None) -> Container:
         character_states=character_states,
         styles=styles,
     )
-    orchestrator = AgentOrchestrator(narrative, characters, continuity_decision, prompts, candidates)
+    orchestrator = AgentOrchestrator(
+        narrative,
+        characters,
+        continuity_decision,
+        prompts,
+        candidates,
+        frame_anchors=frame_anchors,
+    )
     return Container(
         settings=settings,
         database=database,
@@ -743,9 +765,12 @@ def build_container(settings: Settings | None = None) -> Container:
         skills=skills,
         agents=agents,
         narrative=narrative,
+        narrative_ledger=narrative_ledger,
+        shot_dependencies=shot_dependencies,
         characters=characters,
         character_states=character_states,
         continuity_decision=continuity_decision,
+        frame_anchors=frame_anchors,
         capabilities=capabilities,
         capability_resolver=capability_resolver,
         qa=qa,

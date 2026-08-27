@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from character_core import CharacterIdentityService
-from continuity_core import ContinuityDecisionEngine, ContinuityRiskVector
+from continuity_core import ContinuityDecisionEngine, ContinuityRiskVector, FrameAnchorPlanner
 from generation_policy_core import AvailableGenerationAssets
 from narrative_core import NarrativeCompiler
 from production_domain.models import ContinuityMode, Episode, Scene, Shot
@@ -31,6 +31,7 @@ class AgentOrchestrator:
         "camera",
         "lighting",
         "prompt_compiler",
+        "frame_anchor_planner",
         "continuity_decision",
         "generation_policy",
         "provider_router",
@@ -44,19 +45,44 @@ class AgentOrchestrator:
         continuity: ContinuityDecisionEngine,
         prompts: PromptCompilerService,
         candidates: CandidatePipeline,
+        frame_anchors: FrameAnchorPlanner | None = None,
     ):
         self.narrative = narrative
         self.characters = characters
         self.continuity = continuity
         self.prompts = prompts
         self.candidates = candidates
+        self.frame_anchors = frame_anchors
 
     def compile_episode(self, episode_id: str) -> OrchestrationResult:
         result = self.narrative.compile_episode(episode_id)
+        # Script compilation ends with a frame strategy for every adjacent
+        # shot pair — the planner reads the transitions and dependencies the
+        # compiler just wrote, so the two stay one operation for the caller.
+        anchor_plans = (
+            self.frame_anchors.plan_episode(episode_id) if self.frame_anchors is not None else []
+        )
         return OrchestrationResult(
             "SHOT_PLANNING_COMPLETE",
             episode_id,
-            {"scene_ids": result.scene_ids, "shot_ids": result.shot_ids, "entities": result.entities},
+            {
+                "scene_ids": result.scene_ids,
+                "shot_ids": result.shot_ids,
+                "entities": result.entities,
+                "frame_anchor_plans": [plan.as_json() for plan in anchor_plans],
+            },
+        )
+
+    def plan_frame_anchors(self, episode_id: str) -> OrchestrationResult:
+        """Re-run the per-pair frame strategy without recompiling the script."""
+
+        if self.frame_anchors is None:
+            raise LookupError("frame anchor planner is not configured")
+        plans = self.frame_anchors.plan_episode(episode_id)
+        return OrchestrationResult(
+            "FRAME_ANCHORS_PLANNED",
+            episode_id,
+            {"frame_anchor_plans": [plan.as_json() for plan in plans]},
         )
 
     def plan_continuity(

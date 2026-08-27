@@ -1,6 +1,6 @@
 # Open Issues — everything left unresolved
 
-Snapshot: 2026-08-25 · live gate OPEN · Wan T2V verified · companion to [`../HANDOFF.md`](../HANDOFF.md)
+Snapshot: 2026-08-26 · live gate OPEN · Wan T2V/I2V/R2V verified · router evidence landed, LCB off · companion to [`../HANDOFF.md`](../HANDOFF.md)
 
 Every item this session raised and did **not** finish, in one place. Section 1 needs you.
 Sections 2–4 are engineering work and need no decision from you.
@@ -105,6 +105,52 @@ Omni Flash is **Google Gemini Omni Flash**, not a ByteDance model. `providers/om
 unconfigured stub. Tell the agent whether it arrives via a Gemini API key or through your own
 Google Flow reverse proxy, and it can be registered. This is also what blocks the Omni entry in
 `skills/model-prompting/references/`.
+
+### 1.14 The Grok Build balance is exhausted, and six research pairs are unfinished
+
+The 2026-08-26 router-evidence research ran the Grok CLI over eleven models × three layers. A
+second pass, to pick up a fix to the research schema, ran the account out of balance partway
+through:
+
+```
+API error (status 402 Payment Required): Grok Build usage balance exhausted
+```
+
+What survived: 16 of the 33 model×layer files are the first pass (repaired at ingest), 11 are the
+corrected pass, and **6 pairs have no usable research at all** — they are recorded as gaps in the
+layer files rather than left silently empty:
+
+```
+benchmark_prior   kling-3-standard-openrouter
+community_prior   gpt-image-2-openrouter, kling-3-pro-openrouter,
+                  veo-3.1-quality-official, wan-2.7-official
+official_prior    veo-3.1-quality-official
+```
+
+Nothing is broken by this — the layers are complete and consistent, the gaps are recorded, and the
+coverage report names them. Closing them needs a balance and one command:
+
+```bash
+.venv/bin/python scripts/research_router_evidence.py --overwrite
+```
+
+Only you can top the balance up. Cost of the first two passes was roughly USD 10 of Grok credit.
+
+### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
+
+`FEATURE_ROUTER_LCB` is `false` and must stay false until a replay passes. A replay needs
+production observations, and `router_observations` is empty because the recorder only started
+existing on 2026-08-26. It fills on its own as the platform is used — one row per evaluated
+generation — but nothing an agent can do makes that happen faster.
+
+```bash
+.venv/bin/python scripts/router_posterior_run.py   # exit 2 today: fewer than 20 observations
+```
+
+When it exits 0, the flag becomes a decision you can make. When it exits 3, the replay ran and the
+posterior policy was **not** better than what is already running, and the flag should stay off —
+`failure_reasons()` in the report says which of regret, failure rate, cost or interval calibration
+failed. See [`ROUTER_EVIDENCE.md`](ROUTER_EVIDENCE.md) §7–8.
 
 ### 1.6 Rotate the keys pasted into chat
 
@@ -305,6 +351,11 @@ has not purchased has the same 50 — which is the more urgent half of this deci
 | 2.27 | **The router's duration gate cannot express a request-dependent ceiling.** `VideoModelRouter` reads one `max_duration` per profile, and Wan 2.7's depends on the request: 15 seconds normally, 10 when the shot carries a reference video into R2V. The registry records the exception (`modes.r2v.max_duration_with_reference_video`) and the adapter enforces it per request, so a 12-second reference-video shot fails closed with `INVALID_REQUEST` **before** anything is billed — but it fails at the adapter rather than being excluded at routing, where `ShotRequirements` already carries both `duration` and `requires_reference_video` and could have decided it. Expressing it generically needs a new profile field, which is a migration. | `core/model-registry/model_registry_core/router.py` |
 | 2.28 | **I2V's material-combination table is held in the adapter, not the profile's capability flags.** Wan 2.7 I2V publishes a closed list of valid media sets — a last frame needs a first frame or a first clip beside it, driving audio needs something to drive. `_I2V_COMBINATIONS` enforces it and `test_wan_adapter_bounds_match_the_registry_declaration` pins it against `modes.i2v.material_combinations`, so the two cannot drift — but the router's capability flags are per-axis booleans and cannot represent "these axes only in these combinations". A shot asking for an impossible combination is refused before billing rather than excluded from routing, the same shape as §2.27. | `providers/wan/wan_provider/adapter.py` |
 
+| 2.29 | **No calibration bridge exists between any external scale and any production outcome, so no external evidence reaches the production posterior.** All 112 eligible external priors from the 2026-08-26 research are refused with `NO_CALIBRATION_BRIDGE`. This is the isolation rule working rather than a defect — a VBench 0.939 and a production acceptance rate are not two readings of one quantity — but it does mean the three external layers are, today, purely a reporting surface. Building a bridge means measuring the same models on both scales over overlapping material and publishing the mapping; `calibration.BRIDGES` is the one place an entry would go, and it carries an anchor count so a two-point line cannot masquerade as a calibration. | `core/router-evidence/router_evidence_core/calibration.py` |
+| 2.30 | **`qc_prompt_alignment` is recorded, given a posterior, and cannot affect routing.** The router publishes fifteen capability dimensions and prompt adherence is not one of them, and the evaluator publishes fourteen named checks and prompt adherence is not one of those either. Both gaps are real; neither is filled by mapping the outcome onto `visual_quality` or the check onto `scene`, which would move a score for a reason nobody could reconstruct. Closing it means adding a dimension to `ModelCapabilityProfile.capability_prior` and a check to `CHECK_NAMES`, in that order. | `core/router-evidence/router_evidence_core/observations.py` |
+| 2.31 | **`exact_version` is the registry profile version, which pins our configuration and not always the provider's weights.** For `doubao-seedance-2-5-260628` the model id carries a dated snapshot and the pair really does identify the weights; for `google/veo-3.1` the id is an alias the provider may repoint, and all the profile version pins is our side. `model_is_alias` exists for that case and quarantines the observation rather than attributing it, but **nothing currently sets it** — no provider here publishes a resolved snapshot in its response for the adapter to compare against. A silent repoint behind a stable alias would therefore pool outcomes from two different models. Detectable only if a provider starts reporting what actually ran. | `core/router-evidence/router_evidence_core/observations.py` |
+| 2.32 | **Replay compares policies on context buckets, which is the direct method and carries its assumptions.** Only the arm that actually ran has an outcome for a given shot, so within a bucket — task, scene, duration bucket, resolution, reference mode — every model with observations gets an empirical mean and a policy scores the arm it picked. A model that was only ever chosen for the easy shots inside a bucket will look better than it is. The bucket definition is the mitigation and `unscored_contexts` is the honesty check; a doubly-robust estimator would need logged propensities, which the router does not produce because it is deterministic. | `core/router-evidence/router_evidence_core/replay.py` |
+
 ## 3. Incomplete work
 
 | # | Item | Blocked by |
@@ -313,6 +364,7 @@ has not purchased has the same 50 — which is the more urgent half of this deci
 | 3.2 | **Live provider evidence.** Wan 2.7 **T2V is verified live** — submitted, polled, `COMPLETED` with a `video/mp4` artefact on 2026-08-25. I2V and R2V remain unverified because both carry a reference and `S3_*` is still unset (§1.3). Image, chat and embedding roles have never been called. | §1.3 for I2V/R2V |
 | 3.3 | **Omni reference file** in `skills/model-prompting/references/`. Wan 3.0's 30s envelope, the Seedance 2.5 entry and a GPT Image 2 entry have landed. | §1.5 |
 | 3.4 | **A client that uses the direct-upload endpoints.** The server side is complete (`POST /v1/assets/uploads` + `/complete`); the Web UI still posts multipart to `POST /v1/assets`. Nothing is broken — the streaming path remains — but the benefit only arrives once the client performs its own PUT. | — |
+| 3.6 | **The router-evidence loop has no production data yet.** Everything is built and green — contract, table, recorder, posterior, replay, LCB, exploration simulator — and `router_observations` has zero rows because the recorder landed on 2026-08-26. Until it has 20, `scripts/router_posterior_run.py` exits 2, no replay exists, and the LCB flag has no evidence it could be enabled on. Not blocked on anything an agent can do. | §1.15 |
 | 3.5 | **No live evidence for the semantic style layer.** `google/gemini-embedding-2` has never been called; the tests use a deterministic stub. Its real vector geometry — and therefore the right value for `semantic_similarity_threshold`, currently 0.80 — is uncalibrated. | §1.1 gate |
 
 ## 4. P2 — release blockers

@@ -3063,6 +3063,221 @@ class ModelMetric(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class RouterObservation(Base, TimestampMixin):
+    """One generation attempt, wide enough to compute a posterior from.
+
+    Written alongside ``model_metrics``, which is unchanged and still drives
+    the adaptive router. This table exists because ``model_metrics`` records a
+    metric name and a value and cannot say which snapshot ran, what was asked
+    of it, or under what conditions — and every one of those changes what an
+    outcome means.
+
+    Append-only in practice, and one row per generation job: the unique
+    constraint makes a duplicated webhook or a retried worker collapse onto the
+    row that is already there instead of counting the same attempt twice.
+    """
+
+    __tablename__ = "router_observations"
+    __table_args__ = (
+        UniqueConstraint("generation_job_id", name="uq_router_observation_job"),
+        Index(
+            "ix_router_observations_key",
+            "provider",
+            "model_id",
+            "exact_version",
+            "task_type",
+            "scenario",
+        ),
+        Index("ix_router_observations_occurred_at", "occurred_at"),
+        CheckConstraint("latency_ms IS NULL OR latency_ms >= 0", name="ck_router_obs_latency_nonneg"),
+        CheckConstraint(
+            "user_rating IS NULL OR (user_rating >= 1 AND user_rating <= 5)",
+            name="ck_router_obs_rating_range",
+        ),
+        CheckConstraint(
+            "qc_identity_score IS NULL OR (qc_identity_score >= 0 AND qc_identity_score <= 1)",
+            name="ck_router_obs_qc_identity_range",
+        ),
+        CheckConstraint(
+            "qc_motion_score IS NULL OR (qc_motion_score >= 0 AND qc_motion_score <= 1)",
+            name="ck_router_obs_qc_motion_range",
+        ),
+        CheckConstraint(
+            "qc_prompt_alignment IS NULL OR (qc_prompt_alignment >= 0 AND qc_prompt_alignment <= 1)",
+            name="ck_router_obs_qc_prompt_range",
+        ),
+        CheckConstraint(
+            "qc_temporal_consistency IS NULL OR "
+            "(qc_temporal_consistency >= 0 AND qc_temporal_consistency <= 1)",
+            name="ck_router_obs_qc_temporal_range",
+        ),
+        CheckConstraint(
+            "generation_success = true OR (qc_identity_score IS NULL AND qc_motion_score IS NULL "
+            "AND qc_prompt_alignment IS NULL AND qc_temporal_consistency IS NULL "
+            "AND user_rating IS NULL AND accepted_output IS NULL)",
+            name="ck_router_obs_failed_has_no_quality",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    # Indexed by the explicit ``ix_router_observations_occurred_at`` above; a
+    # second ``index=True`` here would emit the same CREATE INDEX twice.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    #: The snapshot, never the alias. An observation that could not name one is
+    #: refused by the service rather than defaulted, because attributing it to
+    #: whatever the alias resolves to today is the contamination this whole
+    #: table exists to avoid.
+    exact_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    model_is_alias: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    task_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    scenario: Mapped[str] = mapped_column(String(40), nullable=False)
+    asset_criticality: Mapped[str] = mapped_column(String(40), nullable=False)
+    prompt_complexity: Mapped[str] = mapped_column(String(24), nullable=False)
+    reference_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    resolution: Mapped[str] = mapped_column(String(32), default="n/a", nullable=False)
+    aspect_ratio: Mapped[str] = mapped_column(String(32), default="n/a", nullable=False)
+
+    generation_success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    provider_failure: Mapped[str | None] = mapped_column(String(120))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    cost_credits: Mapped[float | None] = mapped_column(Float)
+    cost_usd: Mapped[float | None] = mapped_column(Numeric(18, 6))
+
+    user_rating: Mapped[int | None] = mapped_column(Integer)
+    user_preference_ab: Mapped[str | None] = mapped_column(String(8))
+    user_preference_opponent: Mapped[str | None] = mapped_column(String(200))
+    regenerated: Mapped[bool | None] = mapped_column(Boolean)
+    switched_model: Mapped[bool | None] = mapped_column(Boolean)
+    downloaded: Mapped[bool | None] = mapped_column(Boolean)
+    accepted_output: Mapped[bool | None] = mapped_column(Boolean)
+    used_in_next_shot: Mapped[bool | None] = mapped_column(Boolean)
+
+    qc_identity_score: Mapped[float | None] = mapped_column(Float)
+    qc_motion_score: Mapped[float | None] = mapped_column(Float)
+    qc_prompt_alignment: Mapped[float | None] = mapped_column(Float)
+    qc_temporal_consistency: Mapped[float | None] = mapped_column(Float)
+
+    router_version: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    router_decision_id: Mapped[str | None] = mapped_column(String(64))
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), index=True)
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id"), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class RouterPosterior(Base, TimestampMixin):
+    """One saved offline posterior cell.
+
+    A snapshot of a computation, not a live value. Rows are written by an
+    offline run, carry the run that produced them, and are read by operators
+    and by the replay harness. The routing path does not query this table.
+    """
+
+    __tablename__ = "router_posteriors"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "provider",
+            "model_id",
+            "exact_version",
+            "task_type",
+            "scenario",
+            "metric_scale_id",
+            "outcome_name",
+            "level",
+            "condition_token",
+            name="uq_router_posterior_cell",
+        ),
+        Index("ix_router_posteriors_lookup", "provider", "model_id", "exact_version", "outcome_name"),
+        # Quantiles only. The mean is deliberately *not* required to sit
+        # between them: for a heavily skewed Beta — the shape a cell with a
+        # long run of identical outcomes takes — the mean can lie outside its
+        # own central interval, and a constraint saying otherwise rejects
+        # correct arithmetic.
+        CheckConstraint(
+            "posterior_lower_quantile <= posterior_upper_quantile",
+            name="ck_router_posterior_ordered",
+        ),
+        CheckConstraint("observation_count >= 0", name="ck_router_posterior_count_nonneg"),
+        CheckConstraint("effective_sample_size >= 0", name="ck_router_posterior_ess_nonneg"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    engine_version: Mapped[str] = mapped_column(String(60), nullable=False)
+
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    exact_version: Mapped[str] = mapped_column(String(120), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(8), nullable=False)
+    scenario: Mapped[str] = mapped_column(String(40), nullable=False)
+    metric_scale_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    outcome_name: Mapped[str] = mapped_column(String(48), nullable=False)
+    level: Mapped[str] = mapped_column(String(48), nullable=False)
+    #: ``duration|resolution|reference_mode`` for a condition-level row, ``-``
+    #: otherwise. Part of the unique constraint, so a NULL would let the same
+    #: cell be written twice on PostgreSQL.
+    condition_token: Mapped[str] = mapped_column(String(120), default="-", nullable=False)
+
+    posterior_mean: Mapped[float] = mapped_column(Float, nullable=False)
+    posterior_lower_quantile: Mapped[float] = mapped_column(Float, nullable=False)
+    posterior_upper_quantile: Mapped[float] = mapped_column(Float, nullable=False)
+    lower_quantile_level: Mapped[float] = mapped_column(Float, nullable=False)
+    upper_quantile_level: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_sample_size: Mapped[float] = mapped_column(Float, nullable=False)
+    observation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    alpha: Mapped[float] = mapped_column(Float, nullable=False)
+    beta: Mapped[float] = mapped_column(Float, nullable=False)
+    prior_alpha: Mapped[float] = mapped_column(Float, nullable=False)
+    prior_beta: Mapped[float] = mapped_column(Float, nullable=False)
+    prior_sources: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    prior_version: Mapped[str] = mapped_column(String(80), default="none", nullable=False)
+    parent_level: Mapped[str | None] = mapped_column(String(48))
+    parent_mean: Mapped[float | None] = mapped_column(Float)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RouterReplayRun(Base, TimestampMixin):
+    """The result of one historical replay, kept because a gate depends on it.
+
+    The conservative LCB flag may only be turned on after a replay passes. A
+    claim that one did is worth nothing unless the run itself is on file with
+    its numbers, so this is where it goes.
+    """
+
+    __tablename__ = "router_replay_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "outcome_name", name="uq_router_replay_run_outcome"),
+        CheckConstraint("fit_observations >= 0", name="ck_router_replay_fit_nonneg"),
+        CheckConstraint("eval_observations >= 0", name="ck_router_replay_eval_nonneg"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    harness_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    outcome_name: Mapped[str] = mapped_column(String(48), nullable=False)
+    posterior_run_id: Mapped[str | None] = mapped_column(String(64))
+
+    fit_observations: Mapped[int] = mapped_column(Integer, nullable=False)
+    eval_observations: Mapped[int] = mapped_column(Integer, nullable=False)
+    contexts: Mapped[int] = mapped_column(Integer, nullable=False)
+    unscored_contexts: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    baseline_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    posterior_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    coverage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The gate itself. A row with ``passed=false`` is as important as one with
+    #: true: it is the evidence that the flag must stay off.
+    passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notes_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+
+
 class ModelBenchmarkResult(Base, TimestampMixin):
     __tablename__ = "model_benchmark_results"
     __table_args__ = (Index("ix_benchmark_model_case", "provider", "model_id", "case_key", "suite_version"),)

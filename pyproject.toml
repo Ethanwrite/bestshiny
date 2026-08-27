@@ -83,6 +83,7 @@ packages = [
   "core/entitlements/entitlement_core",
   "core/payments/payment_core",
   "core/external-evidence/external_evidence_core",
+  "core/router-evidence/router_evidence_core",
 ]
 
 [tool.pytest.ini_options]
@@ -110,6 +111,7 @@ pythonpath = [
   "core/entitlements",
   "core/payments",
   "core/external-evidence",
+  "core/router-evidence",
 ]
 
 [tool.ruff]
@@ -149,4 +151,5 @@ files = [
   "core/entitlements",
   "core/payments",
   "core/external-evidence",
+  "core/router-evidence",
 ]

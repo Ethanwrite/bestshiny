@@ -157,6 +157,13 @@ class Settings(BaseSettings):
     # have exact-version public evidence, plus the per-dimension priors for
     # `veo-3.1-fast`, which is the only video model that has any.
     feature_external_prior: bool = False
+    # Whether the offline production posterior may lower a routing score
+    # through a conservative lower confidence bound. Off by default, and the
+    # default is the point: with it off the router receives exactly the
+    # evidence it received before this existed, so publishing the machinery
+    # changes no decision. Turning it on additionally requires a replay on
+    # file that passed — see `docs/ROUTER_EVIDENCE.md`.
+    feature_router_lcb: bool = False
     feature_voyage_memory: bool = False
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False

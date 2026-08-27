@@ -32,6 +32,7 @@ launch.
 - Direct Upload：写入同样绕开 API。`POST /v1/assets/uploads` 校验租户与配额后签发 presigned PUT（并把 SHA-256 绑进请求，由对象存储强制校验），客户端自行上传；`POST /v1/assets/uploads/{id}/complete` 通过 `HEAD` 取权威大小、读取 64KB 头部做格式与像素校验后落库。完整解码交给首次使用时的 `RenditionResolver`。未配置对象存储时该接口返回 `501`，仍可使用原有的 `POST /v1/assets` 分片上传。
 - Style Lock 双层校验：第一层为本地确定性 64 维描述子（色彩/明度/饱和度/边缘/明显漂移）；第二层为 `google/gemini-embedding-2`（复用现有 OpenRouter 凭据），负责材质、笔触、摄影语言与整体视觉语义。两层各自记录结论，取**更差**的一个，评估时第二层不可用判为 `REVIEW_REQUIRED` 而非放行。**向量带着自己的空间**：`EmbeddingSpaceIdentity`（provider / model / model_revision / input_schema_version / dimension / normalization / distance_metric）随每条 `StyleEmbedding` 落库，比较任何相似度之前先比空间——因为失败模式是「不失败」：跨空间做余弦不会报错，只会返回一个看着挺合理的数。不匹配时落锁被拒、候选判 `REVIEW_REQUIRED` 且**不给分**（不是给低分），reason code 里点名是哪几个字段变了。**落锁则 fail-closed**：`FEATURE_SEMANTIC_STYLE_LOCK=true` 时，若第二层的参考产不出来，落锁直接被拒绝且不写任何东西——模型不可达返回 `503`（等待有意义），参考素材读不出返回 `409`（等待没意义）；锁是 append-only 且触发器禁止重锁，所以一次降级就是永久降级。开关关闭时单层锁仍是预期结果，并记录 `SEMANTIC_EMBEDDER_NOT_CONFIGURED`。
 - External Evidence Registry：`config/external-evidence/registry-v1.json`（`external-evidence-v1`，冻结于 2026-08-25）。版本化、来源可追、场景可映射：每条证据保留原始量表与样本量，引用 source_id，并在绑定到本平台模型时声明 `version_match`。只有 A/B 级来源 + `EXACT`/`EXACT_VERSION_UNSPECIFIED_REVISION` + mapping_confidence 非 LOW 才允许影响路由分；一条记录的等级取它引用的**最弱**来源。近似版本的证据（Wan 2.1 之于 2.7、Seedance 2.0 之于 2.5、Veo 3.1 Fast 之于 3.1、GPT-4o 之于 GPT Image 2）**故意保留并标为 mismatch**——删掉只会让人半年后从同一个公开来源重新推导一遍，然后悄悄挂错模型。不做跨来源归一/平均/总榜。目前 12 个生成模型里只有 `veo-3.1-fast`（OSCBench 精确 variant）与 `gpt-image-2` 有逐维证据，其余只有 holistic Arena 偏好；`FEATURE_EXTERNAL_PRIOR` 默认 **false**，通过 `GET /internal/models/external-evidence` 只读查询。
+- Router Evidence 四层证据 + 离线后验：`official_prior` / `benchmark_prior` / `community_prior` 三层落在 `config/router-evidence/` 三个独立文件（各自一个 loader，**没有**任何一次返回两层记录的入口），`production_posterior` 落在 `router_observations` 表——外部证据与生产观测物理隔离。一切以 `provider · model_id · exact_version · task_type · scenario · metric_scale_id` 为键，生产再多一层时长档/分辨率/参考模式；键不相等就不许相遇。生产观测比 `model_metrics` 宽得多（后者原样保留、仍然驱动 `adaptive_router`）：条件、交付结果、用户后续动作、自动质检分各自成列，`None` 表示**未观测**而非 0，数据库约束拒绝「生成失败却带质量分」的行——否则一次 provider 故障会被读成质量问题，让路由永久躲开一个好模型。后验是分层 Beta：固定 Jeffreys 全局先验 → exact version → task → scenario → 条件，逐层以 4–6 个伪观测收缩；**exact version 之上没有任何层**，这是「不会跨版本继承分数」的机械保证而不是纪律要求。成本与延迟**没有**后验（无界量，Beta 无意义），按各自单位分开报。外部证据要进生产后验必须过 calibration bridge，而 `calibration.BRIDGES` 是空的：2026-08-26 那轮 112 条合格外部先验**全部**以 `NO_CALIBRATION_BRIDGE` 被拒——这是隔离规则在生效，不是缺口。`GET /internal/models/router-evidence` 只读查询。详见 [`docs/ROUTER_EVIDENCE.md`](docs/ROUTER_EVIDENCE.md)。
 - Model Registry/Router：逻辑模型、provider model ID、信任等级与套餐角色绑定持久化到数据库；持久的 `ModelCapabilityProfile` 是 UI、Policy、Router、Cost 与 Adapter 的单一能力/质量先验事实源，旧 `config/video-models/*.json` 多头配置已移除，Wan 对齐 2.7。路由先执行硬门禁再评分：`modality == video` 与 `video_generation ∈ supported_operations` 排在最前（registry 一张表容纳全部模态，不判模态就会把 embedding/chat 模型排进视频候选），其后是能力、时长、分辨率与 `AssetCriticality`。被拒绝的模型不会从列表里消失，而是进入 `RouterDecision.rejected` 并带上 `reason_codes`，事后可审计。真实观测以每次调用传入的不可变 `RoutingEvidence` 参与评分，不写在共享 router 实例上；低样本真实观测不会覆盖人工先验；`EDGE` 永远不能处理 canonical/hero/important 资产。
 - Model live kill switch：Gateway 在排队前与付费调用边界都核对持久模型身份和 `enabled/live_enabled`，最终检查与 Job CAS 同事务；重启不会覆盖管理员禁用状态，请求 metadata 也无法解锁。
 - Asset Registry：逻辑资产与不可变版本覆盖人物、场景、商品、道具等素材；只有显式提升才会改变 canonical 版本，数据库触发器防止跨资产链接、未记录切换和历史改写。
@@ -178,6 +179,7 @@ Provider 可取的 HTTPS URL 任一环节失败时返回非零。
 | `auto_evaluation` | `FEATURE_AUTO_EVALUATION` | 生成完成后触发结构化评估 |
 | `auto_retry` | `FEATURE_AUTO_RETRY` | 根据评估结果执行最多 `MAX_AUTO_RETRIES` 次修复；不会绕过未知付费请求保护 |
 | `adaptive_router` | `FEATURE_ADAPTIVE_ROUTER` | 把已有生产指标与 benchmark 调整加入模型评分 |
+| `router_lcb` | `FEATURE_ROUTER_LCB` | 用离线后验的**下分位**（而非均值）参与评分。与 `adaptive_router` 是两件事：那个混入生产均值，这个代入区间下沿。**打开的前提是有一次通过的 replay 在案**（`scripts/router_posterior_run.py` 退出码 0）；证据不足时逐级回退到既有路由，`VideoModelRouter` 本身一行未改 |
 
 运行时查询与修改：`GET /internal/feature-flags`、`PUT /internal/feature-flags/{name}`。这些接口与业务 API 使用相同的 Bearer API Key 防护。
 
@@ -231,6 +233,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/internal/evaluate/video`、`/internal/generations/{job_id}/evaluate` | 评估规格或已生成任务 |
 | `POST` | `/internal/retry/plan` | 返回有界重试/换模型计划 |
 | `POST` | `/internal/models/metrics` | 写入追加式生产指标 |
+| `GET` | `/internal/models/router-evidence` | 四层证据并排只读：各层版本/条数/合格数、来源分布、逐模型逐版本覆盖、冲突、无法确认的版本、LCB 当前是否真的在影响路由 |
 | `GET/POST` | `/internal/benchmarks`、`/internal/benchmarks/results` | 读取 benchmark 清单/写入结果 |
 | `GET` | `/internal/shots/{shot_id}/traces` | 查询镜头生产 trace |
 | `POST` | `/internal/workers/credentials` | 管理员发行绑定 worker/account/provider 的专用凭证（明文只返回一次） |
@@ -287,6 +290,8 @@ schema 上。自建 `Settings`、硬编码 SQLite URL 的测试模块（约十�
 ### Phase III tag gates and current working-tree gates
 
 离线基线的历史冻结结果是 **348 passed, 39 warnings**。Phase III tag 历史完整套件为 **406 passed, 57 warnings in 71.58s**；Mypy（121 source files）、Ruff lint、Ruff format（226 files already formatted）、Node syntax 与 `git diff --check` 通过。57 个 warning 主要来自已知的 Alembic/SQLite/Starlette 弃用警告与 SQLAlchemy FK cycle warning。
+
+2026-08-27 当前工作树实测为 **SQLite 946 passed / 9 skipped**、**PostgreSQL 948 passed / 7 skipped**；Ruff check、Mypy（157 source files）、Alembic 单 head（`0050_router_evidence`）与 `git diff --check` 全绿。
 
 2026-08-22 当前未发布工作树实测为 **468 passed, 61 warnings in 139.29s**；Ruff check、Mypy（132 source files）、Web 生产构建、npm audit 与 Alembic 单 head 全绿。PostgreSQL 17 fresh `0032`/`alembic check` 是前一迁移的证据，当前 `0033` 仍需 PostgreSQL 验证；历史 Compose smoke 只运行到 `0027`。
 

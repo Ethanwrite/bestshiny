@@ -386,6 +386,44 @@ Today ten of the twelve generative models here have no diagnostic external evide
 data asset and `GET /internal/models/external-evidence` is how it is read. Its immediate use is to say which
 `capability_prior` values are backed by public evidence and which are hand-authored judgement.
 
+## Router evidence: four layers and an offline posterior
+
+Added 2026-08-26 and documented in full in [`docs/ROUTER_EVIDENCE.md`](docs/ROUTER_EVIDENCE.md).
+`core/router-evidence/router_evidence_core` holds four kinds of evidence and never lets them meet:
+`official_prior`, `benchmark_prior` and `community_prior` are frozen files under
+`config/router-evidence/` (one per layer, one loader each, no accessor that returns two layers), and
+`production_posterior` is computed from the `router_observations` table. Every number is addressed by
+`provider · model_id · exact_version · task_type · scenario · metric_scale_id`, plus a condition
+bucket of duration/resolution/reference mode for production, and two numbers may only combine when
+those match.
+
+`router_observations` is a second, wider production record written alongside `model_metrics`, which
+is unchanged and still feeds the adaptive router. It carries the generation conditions and every
+observed outcome — delivery, what the human did next, and the automated quality checks — with `None`
+meaning *not observed* rather than zero, and a database constraint refusing a failed generation that
+carries a quality score. `VisualProductionRuntime.evaluate_job` writes one row per evaluated
+generation, using a `routing_context` stamped onto the request at decision time so the outcome is
+filed against the cell that actually ran.
+
+The posterior is Beta, hierarchical and offline: a fixed Jeffreys global prior, then exact version,
+task, scenario and condition, each level shrinking the next by 4–6 pseudo-observations plus the
+global floor. There is no level above the exact version, which is the mechanical guarantee that one
+version's data cannot move another's. Cost and latency have no posterior — they are unbounded, and
+are summarised in their own units.
+
+External evidence reaches the production posterior only through a calibration bridge, and
+`calibration.BRIDGES` is empty: as of 2026-08-26 all 112 eligible external priors are refused with
+`NO_CALIBRATION_BRIDGE`, so the three external layers are a reporting surface, read at
+`GET /internal/models/router-evidence`.
+
+`feature_router_lcb` is **false**. With it off the router receives exactly the evidence it received
+before this existed; `VideoModelRouter` itself is untouched, because the conservative lower bound is
+delivered through the per-request `RoutingEvidence` the router already accepted. Turning it on
+additionally requires a replay on file that passed — regret, failure rate, cost, predictive interval
+coverage and unscored-context share all checked — which `scripts/router_posterior_run.py` produces.
+Exploration is built as an offline simulator with six constraints and has no feature flag and no call
+site; a test asserts that nothing under `services/`, `apps/`, `agents/` or `providers/` imports it.
+
 ## Model capability and role runtime
 
 `ModelDefinition`, `ModelRoleBinding` and the one-to-one persistent `ModelCapabilityProfile` now form the

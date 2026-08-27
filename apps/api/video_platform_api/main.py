@@ -1779,6 +1779,115 @@ def create_app(container: Container | None = None) -> FastAPI:
         return _asset_view(adopted, reused=reused)
 
     @app.get(
+        "/internal/models/router-evidence",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def router_evidence():
+        """The four layers, side by side and still separate.
+
+        Reports what each external layer holds, what production has observed,
+        and — most usefully — where they disagree and what is missing. The
+        layers are returned as four keys rather than one merged list, because
+        merging them is the thing the whole structure exists to prevent.
+
+        ``lcb`` answers the question an operator actually asks: is the
+        conservative lower bound affecting routing right now, and if not, what
+        is stopping it.
+        """
+
+        from router_evidence_core import (
+            EvidenceLayer,
+            EvidenceLayerStore,
+            attach_community_effective_sizes,
+            build_coverage,
+            build_layer_priors,
+            find_conflicts,
+            prior_summary,
+        )
+        from router_evidence_core.calibration import BRIDGES
+
+        store = EvidenceLayerStore()
+        snapshots = store.snapshots()
+        priors_by_layer = {
+            snapshot.layer: build_layer_priors(snapshot) for snapshot in snapshots
+        }
+        coverage = build_coverage(snapshots)
+        attach_community_effective_sizes(
+            coverage, priors_by_layer.get(EvidenceLayer.COMMUNITY, [])
+        )
+        conflicts = find_conflicts(snapshots, priors_by_layer)
+        observation_counts = container.router_observations.coverage_counts()
+        for token, count in observation_counts.items():
+            entry = coverage.models.get(token)
+            if entry is not None:
+                entry.production_observations = count
+        latest_run = container.router_observations.latest_posterior_run_id()
+        return {
+            "layers": {
+                snapshot.layer.value: {
+                    "version": snapshot.version,
+                    "frozen_at": snapshot.frozen_at,
+                    "records": len(snapshot.records),
+                    "prior_eligible_records": len(snapshot.eligible()),
+                    "gaps": [item.model_dump() for item in snapshot.gaps],
+                    "prior_summary": prior_summary(priors_by_layer[snapshot.layer]),
+                }
+                for snapshot in snapshots
+            },
+            "source_distribution": store.source_distribution(),
+            "production": {
+                "observations_by_version": observation_counts,
+                "latest_posterior_run_id": latest_run,
+            },
+            "calibration_bridges": len(BRIDGES),
+            "coverage": {
+                token: {
+                    "official_records": entry.official_records,
+                    "benchmark_records": entry.benchmark_records,
+                    "community_records": entry.community_records,
+                    "official_eligible": entry.official_eligible,
+                    "benchmark_eligible": entry.benchmark_eligible,
+                    "community_effective_sample_size": entry.community_effective_sample_size,
+                    "production_observations": entry.production_observations,
+                    "scenarios_with_evidence": sorted(entry.scenarios_with_evidence),
+                    "scenarios_with_eligible_evidence": sorted(entry.scenarios_with_eligible_evidence),
+                    "scales": sorted(entry.scales),
+                    "exclusion_reasons": entry.exclusion_reasons,
+                    "insufficient": entry.insufficient,
+                }
+                for token, entry in sorted(coverage.models.items())
+            },
+            "insufficient_models": coverage.insufficient_models,
+            "unconfirmed_versions": coverage.unconfirmed_versions,
+            "conflicts": [
+                {
+                    "conflict_id": item.conflict_id,
+                    "kind": item.kind,
+                    "key": item.key.token,
+                    "description": item.description,
+                    "record_ids": list(item.record_ids),
+                    "layers": list(item.layers),
+                }
+                for item in conflicts
+            ],
+            "lcb": {
+                "settings_default": container.settings.feature_router_lcb,
+                "flag_enabled": container.feature_flags.enabled("router_lcb"),
+                "posterior_snapshot_available": latest_run is not None,
+                "affecting_routing": bool(
+                    container.feature_flags.enabled("router_lcb") and latest_run is not None
+                ),
+            },
+            "exploration": {
+                "online": False,
+                "note": (
+                    "the exploration policy exists as an offline simulator only; no service "
+                    "imports it and no flag turns it on"
+                ),
+            },
+        }
+
+    @app.get(
         "/internal/models/external-evidence",
         dependencies=[Depends(verify_api_key)],
     )

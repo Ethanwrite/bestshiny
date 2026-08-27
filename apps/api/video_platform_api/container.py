@@ -70,6 +70,7 @@ from provider_sdk import (
     ProviderTrustLevel,
 )
 from qa_core import QAPipeline
+from router_evidence_core.service import RouterObservationService
 from runapi_provider import RunAPIEdgeProvider
 from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
@@ -146,6 +147,9 @@ class Container:
     evaluator: GenerationEvaluator
     retry_engine: RetryEngine
     model_metrics: ModelMetricsService
+    #: Wide production observations for the offline posterior. Distinct from
+    #: `model_metrics`, which is unchanged and still feeds the adaptive router.
+    router_observations: RouterObservationService
     benchmarks: ModelBenchmarkSuite
     visual_runtime: VisualProductionRuntime
     credit_pricing: CreditPricingEngine
@@ -647,6 +651,7 @@ def build_container(settings: Settings | None = None) -> Container:
             voyage_memory=settings.feature_voyage_memory,
             auto_evaluation=settings.feature_auto_evaluation,
             adaptive_router=settings.feature_adaptive_router,
+            router_lcb=settings.feature_router_lcb,
             auto_retry=settings.feature_auto_retry,
         ),
     )
@@ -676,6 +681,7 @@ def build_container(settings: Settings | None = None) -> Container:
     evaluator = GenerationEvaluator(database)
     retry_engine = RetryEngine(settings.max_auto_retries)
     model_metrics = ModelMetricsService(database)
+    router_observations = RouterObservationService(database)
     benchmarks = ModelBenchmarkSuite(database)
     visual_runtime = VisualProductionRuntime(
         database,
@@ -693,6 +699,7 @@ def build_container(settings: Settings | None = None) -> Container:
         feature_flags,
         generation_admission,
         styles,
+        router_observations,
     )
     candidates = CandidatePipeline(
         database,
@@ -759,6 +766,7 @@ def build_container(settings: Settings | None = None) -> Container:
         evaluator=evaluator,
         retry_engine=retry_engine,
         model_metrics=model_metrics,
+        router_observations=router_observations,
         benchmarks=benchmarks,
         visual_runtime=visual_runtime,
         credit_pricing=credit_pricing,

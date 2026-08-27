@@ -51,7 +51,25 @@ from production_domain.models import (
     Project,
     Shot,
     TimelineState,
+    new_id,
+    utcnow,
 )
+from router_evidence_core import (
+    CandidateModel,
+    ConditionBucket,
+    ConservativeLcbBuilder,
+    LcbSettings,
+    PosteriorLookup,
+    ProductionObservation,
+    ReferenceMode,
+    Scenario,
+    TaskType,
+    merge_with_baseline,
+    router_reference_mode,
+    router_scenario,
+    router_task_type,
+)
+from router_evidence_core.service import RouterObservationService, UnattributableObservation
 from runtime_control_core import FeatureFlagService
 from skill_core import PromptCompilerService
 from sqlalchemy import func, select
@@ -96,6 +114,7 @@ class VisualProductionRuntime:
         flags: FeatureFlagService,
         generation_admission: GenerationAdmissionService | None = None,
         styles: ProjectStyleService | None = None,
+        router_observations: RouterObservationService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -112,6 +131,12 @@ class VisualProductionRuntime:
         self.flags = flags
         self.generation_admission = generation_admission
         self.styles = styles
+        self.router_observations = router_observations
+        # A posterior snapshot is loaded at most once per run id and held for
+        # the life of the process. Reading `router_posteriors` inside a request
+        # would put an offline artefact back in the hot path, which is the one
+        # thing the offline/online split is for.
+        self._lcb_snapshot: tuple[str, PosteriorLookup] | None = None
 
     def submit_passenger(
         self,
@@ -343,6 +368,7 @@ class VisualProductionRuntime:
                 production_adjustments=production,
                 production_sample_counts=counts,
             )
+        evidence = self._apply_conservative_lcb(evidence, requirements, project_id=project_id)
         excluded = {
             profile.key
             for profile in self.router.registry.all()
@@ -388,6 +414,21 @@ class VisualProductionRuntime:
                 "router": decision.model_dump(mode="json"),
                 "style_lock": style_control.prompt_view() if style_control else None,
                 "style_control": style_control.provider_view() if style_control else None,
+                # Recorded at decision time rather than re-derived at evaluation
+                # time. The shot spec can be edited between the two, and an
+                # observation filed under the scene the shot *became* would be
+                # attributed to a cell that never ran.
+                "routing_context": {
+                    "task_type": router_task_type(requirements).value,
+                    "scenario": router_scenario(requirements).value,
+                    "reference_mode": router_reference_mode(requirements).value,
+                    "duration_seconds": requirements.duration,
+                    "resolution": requirements.resolution,
+                    "aspect_ratio": requirements.aspect_ratio,
+                    "asset_criticality": requirements.asset_criticality.value,
+                    "router_version": decision.router_version,
+                    "exact_version": selected.version,
+                },
             },
         )
         if self._current_timeline_fence(shot_id) != timeline_fence:
@@ -556,7 +597,100 @@ class VisualProductionRuntime:
             if trace:
                 trace.evaluation_json = result.model_dump(mode="json")
                 trace.retry_json = plan.model_dump(mode="json") if plan else {}
+        self._record_router_observation(job_id, metadata, result)
         return result, plan, retry_job
+
+    def _record_router_observation(
+        self,
+        job_id: str,
+        metadata: dict[str, Any],
+        result: EvaluationResult,
+    ) -> None:
+        """Write the wide production observation for one evaluated generation.
+
+        Deliberately best-effort and deliberately silent about failure. This is
+        evidence collection for an offline analysis, not part of delivering the
+        user's shot, and an exception here must never turn a successful
+        generation into a failed request. What it must not do instead is write
+        something wrong, so every path that cannot name the version, the task or
+        the scene declines to write at all.
+        """
+
+        if self.router_observations is None:
+            return
+        context = metadata.get("routing_context")
+        if not isinstance(context, dict) or not context.get("exact_version"):
+            # A job planned before this field existed, or by a path that does
+            # not route. Skipped rather than guessed: re-deriving the scene from
+            # the current shot spec would attribute the outcome to a cell that
+            # may never have run.
+            return
+        with self.database.session() as session:
+            job = session.get(GenerationJob, job_id)
+            if job is None:  # pragma: no cover - evaluate_job already loaded it
+                return
+            provider = job.provider
+            model_id = job.model
+            project_id = job.project_id
+            shot_id = job.shot_id
+            job_status = job.status
+            actual_cost = job.actual_cost
+            quoted_credits = job.quoted_credits
+            error_code = job.error_code
+            submitted_at = job.submitted_at
+            completed_at = job.completed_at
+            created_at = job.created_at
+            # The job carries no workspace; the project does.
+            project = session.get(Project, project_id) if project_id else None
+            workspace_id = project.workspace_id if project else None
+
+        latency_ms: int | None = None
+        started = submitted_at or created_at
+        if started and completed_at:
+            latency_ms = max(0, int((completed_at - started).total_seconds() * 1000))
+        succeeded = job_status == JobStatus.COMPLETED.value
+        scores = result.scores if succeeded else {}
+        try:
+            observation = ProductionObservation(
+                observation_id=new_id(),
+                occurred_at=completed_at or utcnow(),
+                provider=provider,
+                model_id=model_id,
+                exact_version=str(context["exact_version"]),
+                task_type=TaskType(str(context.get("task_type", "T2V"))),
+                scenario=Scenario(str(context.get("scenario", "generic"))),
+                asset_criticality=str(context.get("asset_criticality", "STANDARD")),
+                reference_mode=ReferenceMode(str(context.get("reference_mode", "NONE"))),
+                duration_seconds=context.get("duration_seconds"),
+                resolution=str(context.get("resolution") or "n/a"),
+                aspect_ratio=str(context.get("aspect_ratio") or "n/a"),
+                generation_success=succeeded,
+                provider_failure=None if succeeded else (error_code or "UNKNOWN_FAILURE"),
+                latency_ms=latency_ms,
+                cost_credits=float(quoted_credits) if quoted_credits else None,
+                cost_usd=float(actual_cost) if actual_cost is not None else None,
+                accepted_output=(
+                    result.decision == EvaluationDecision.ACCEPT if succeeded else None
+                ),
+                # `qc_prompt_alignment` has no source here on purpose: the
+                # evaluator publishes fourteen named checks and none of them is
+                # prompt adherence. Mapping `scene` or `blocking` onto it would
+                # be inventing a measurement.
+                qc_identity_score=scores.get("identity"),
+                qc_motion_score=scores.get("motion"),
+                qc_temporal_consistency=scores.get("continuity"),
+                router_version=str(context.get("router_version") or ""),
+                project_id=project_id,
+                workspace_id=workspace_id,
+                generation_job_id=job_id,
+                shot_id=shot_id,
+                metadata={"evaluator_version": result.evaluator_version},
+            )
+            self.router_observations.record(observation)
+        except (ValueError, LookupError, UnattributableObservation):
+            # Includes the contract's own refusals — an alias binding, a failed
+            # generation carrying a score. Not writing is the correct outcome.
+            return
 
     def _execute_retry(
         self,
@@ -759,6 +893,72 @@ class VisualProductionRuntime:
             if asset.get("type") == "STYLE"
             for rule in asset.get("canonical_metadata", {}).get("world_rules", [])
         ]
+
+    def _conservative_lcb_lookup(self) -> PosteriorLookup | None:
+        """The saved posterior the LCB reads, or ``None`` if there is none.
+
+        Returns ``None`` rather than an empty lookup when no offline run has
+        ever been saved, so the caller can tell "nothing computed yet" from
+        "computed, and it had nothing to say about these models".
+        """
+
+        if self.router_observations is None:
+            return None
+        run_id = self.router_observations.latest_posterior_run_id()
+        if run_id is None:
+            return None
+        if self._lcb_snapshot is None or self._lcb_snapshot[0] != run_id:
+            self._lcb_snapshot = (run_id, self.router_observations.lookup_for(run_id))
+        return self._lcb_snapshot[1]
+
+    def _apply_conservative_lcb(
+        self,
+        evidence: RoutingEvidence,
+        requirements: ShotRequirements,
+        *,
+        project_id: str,
+    ) -> RoutingEvidence:
+        """Overlay lower-bound evidence, or return the caller's evidence unchanged.
+
+        Every early return here is a fallback to the routing behaviour that
+        already exists: flag off, no snapshot saved, no sufficient cell for
+        these models. That is the design — the conservative thing to do with
+        thin evidence is to keep using the priors that were reviewed by hand.
+        """
+
+        if not self.flags.enabled("router_lcb", project_id=project_id):
+            return evidence
+        lookup = self._conservative_lcb_lookup()
+        if lookup is None:
+            return evidence
+        candidates = [
+            CandidateModel(
+                provider=profile.provider, model_id=profile.model_id, exact_version=profile.version
+            )
+            for profile in self.router.registry.all()
+            if profile.modality == "video"
+        ]
+        builder = ConservativeLcbBuilder(lookup, LcbSettings(enabled=True))
+        adjustments = builder.build(
+            candidates,
+            task_type=router_task_type(requirements),
+            scenario=router_scenario(requirements),
+            conditions=ConditionBucket(
+                duration_bucket=ConditionBucket.bucket_duration(requirements.duration),
+                resolution=requirements.resolution,
+                reference_mode=router_reference_mode(requirements),
+            ),
+        )
+        if adjustments.is_noop:
+            return evidence
+        return RoutingEvidence(
+            benchmark_adjustments=dict(evidence.benchmark_adjustments),
+            production_adjustments=merge_with_baseline(evidence.production_adjustments, adjustments),
+            production_sample_counts={
+                **dict(evidence.production_sample_counts),
+                **adjustments.sample_counts,
+            },
+        )
 
     @staticmethod
     def _requirements(

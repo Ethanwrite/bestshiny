@@ -1,0 +1,4043 @@
+{
+  "compiled_from": [
+    {
+      "at": "2026-08-26T17:37:20.714489+00:00",
+      "source": "data/router-evidence/raw/benchmark_prior"
+    }
+  ],
+  "conflicts": [],
+  "frozen_at": "2026-08-26",
+  "gaps": [
+    {
+      "reason": "no structured output (model output was not valid JSON: trailing characters at line 1 column 42879)",
+      "scenario": "all",
+      "scope": "kling-3-pro-openrouter",
+      "searched_at": "2026-08-26"
+    },
+    {
+      "reason": "research call failed: Error: Internal error: \"reqwest error stream: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)\"\n",
+      "scenario": "all",
+      "scope": "kling-3-standard-openrouter",
+      "searched_at": "2026-08-26"
+    },
+    {
+      "reason": "6 candidate record(s) were all refused: SCHEMA_INVALID",
+      "scenario": "all",
+      "scope": "seedance-2.5-official",
+      "searched_at": "2026-08-26"
+    },
+    {
+      "reason": "11 candidate record(s) were all refused: SCHEMA_INVALID",
+      "scenario": "all",
+      "scope": "seedream-5.0-ark",
+      "searched_at": "2026-08-26"
+    },
+    {
+      "reason": "No records yet — checking the workspace for schema conventions (scale ids, source_type, binding fields) before converting the notes so I do not invent labels.",
+      "scenario": "all",
+      "scope": "veo-3.1-quality-official",
+      "searched_at": "2026-08-26"
+    }
+  ],
+  "layer": "benchmark_prior",
+  "layer_version": "benchmark-prior-v1",
+  "notes": "gpt-image-2-openrouter: Converted only quoted, protocol-stated third-party scores for GPT Image 2 / gpt-image-2 / openai/gpt-image-2 from the notes (LM Arena T2I overall, text rendering, portraits, photorealistic, and the older 3D subcategory; Artificial Analysis T2I and editing arenas; ImageBench V1.2 and RealBench V1; Qwen-Image-Bench arXiv 2605.28091v2; Lumenfall photorealism). Quality tags (medium/high) are treated as generation settings of gpt-image-2, not different snapshots; no source named gpt-image-2-2026-04-21, so every binding uses EXACT_VERSION_UNSPECIFIED_REVISION. Excluded, as the notes dropped them or they lack a quoted model score: GPT-ImgEval (GPT-4o, different model); arXiv 2604.25370 Twitter scrape OCR/face rates; Datapoint (no copyable Elo; live board did not render); OpenRouter image gallery; Design Arena tweet Elo 1406 (board not opened); vendor/news blogs; PiazBench (rehosts AA); Arena image-edit (login wall) and second-hand April figures 1512/1513/1464; AA $211.0/1k imgs and Lumenfall 3.9¢ (no allowed scale); Qwen “above 84”/“exceeding 90” bounds and unattributed field-wide bests (20.9–43.3); Lumenfall Text Rendering Elo 1253 (search snippet, page not re-opened); GenEval/CompBench/HPS/PickScore/ImageReward/VBench (none found). Video axes (motion, camera motion, dialogue/lip-sync, first/last frame) have no still-image benchmark_prior here. Overall arena/bench Elos are mapped to generic unless the source is a named category cut. Model-card Elo 1370.53 is not used; the ranked AA table integer 1,371 is.; grok-imagine-video-openrouter: Converted only the ten independent sources in the notes (AA T2V, AA I2V, LMArena I2V, FilmBench, What-If World, H2R-Bench, Vidguru, Contra HCB Product Videos, Contra Ad Videos expansion, Design Arena). source_type is benchmark_prior on every record to match the benchmark_prior layer; publisher/URL/evaluation_method keep the arena vs paper vs lab distinction from the notes. Packed FilmBench T2V+R2V into one record (same paper and table name) and LMArena 720p+480p into one record (notes: resolution configs of the same id) to stay within 12 records while keeping both 1.5 VERSION_MISMATCH arena rows. Dropped: claims with no verbatim quote (What-If per-primitive APEO 70.7/54.5/49.1/51.7/52.5/36.9); unidentified What-If Table 2 columns 69.2, 49.2, 70.5, 67.2, 69.7, 45.1; H2R M1–M5 0–1 columns; V2V-Bench 0–1 suite; Vidguru 30/40; Contra overall win rate and ideation % (no Grok number); Design Arena 34.5s; AA pricing; FilmBench Spearman (evaluator, not a Grok score); vendor blogs and other omitted classes. sample_size_stated_by_source / human_eval_size_stated_by_source / confidence_interval_stated_by_source are true only where the notes say the source stated them. Vidguru n=8 is the eight described rounds, flag false because they do not state a larger n. H2R human_eval_size 660 is the stated human-check size, not the 240-case Grok n.; grok-video-official: Converted only quoted numbers from pages the notes opened: Arena.ai I2V/T2V (read 2026-08-26, page header Aug 14, 2026), FilmBench arXiv:2607.24241v1, What-If World arXiv:2605.27589v1, Physics-IQ arXiv:2606.18943v1, Human Creativity Benchmark arXiv:2606.30561v1, and H2R-Bench arXiv:2608.13049v1. Binding target is grok-video-official / grok-video / grok-video as given in the notes. Excluded grok-imagine-video-480p (1384 ±8, 19,443 votes, rank 13) because the notes give no source verbatim quote containing those figures. Excluded unlabeled FilmBench per-axis columns, the 55.97 single-clip example, and the −10.2 multi-shot drop (no stated scale or task type). Excluded unlabeled What-If World Table 2 columns and unlabeled Force/Degree Table 6 cells. Excluded H2R-Bench 0–1 component metrics. Excluded VBench/VBench-2.0 (no opened table scoring this model), Artificial Analysis (HTML blocked; recaps omitted), Design Arena (JS shell, no usable table), vendor blogs, OpenRouter re-host, product reviews, Reddit, V2V-Bench, and VEFX-Bench (video e",
+  "records": [
+    {
+      "benchmark_name": "LM Arena Text-to-Image",
+      "benchmark_version": "Aug 25, 2026",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Source names gpt-image-2, the same public API id as OpenRouter openai/gpt-image-2. The (medium) tag is a generation quality setting, not a different snapshot. No source named the dated pin gpt-image-2-2026-04-21.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "gpt-image-2 (medium)",
+        "source_model_version": "medium",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "mai-image-2.6-preview",
+        "grok-imagine-image-2.0 (low)",
+        "reve-2.1",
+        "muse-image",
+        "reve-2.0",
+        "gemini-3.1-flash-image (nano-banana-2) [web-search]",
+        "seedream-5.0-pro",
+        "qwen-image-3.0-pro",
+        "mai-image-2.5",
+        "gpt-image-1.5-high-fidelity"
+      ],
+      "conditions": {
+        "board_stamp": "Aug 25, 2026",
+        "board_votes": 6047075,
+        "models_on_board": 76,
+        "quality": "medium"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Primary live arena with a stated blind pairwise protocol, published ± interval, and 75,014 votes on this row. Quality is pinned to medium rather than an unspecified default.",
+      "evaluation_method": "Community voters compare two unlabeled images from the same prompt. Scores are Arena Elo with a published ± interval and a vote count. Blind pairwise human preference. Overall board: 6,047,075 votes, 76 models.",
+      "evaluator": "Arena.ai (LM Arena)",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Dated API revision is not named.",
+        "Evaluated at medium quality, not an unnamed default.",
+        "Dynamic leaderboard; scores can change after the Aug 25, 2026 stamp."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall text-to-image board. Notes map it to mixed prompt adherence and cinematic quality preference, so the number is holistic rather than a scene subscore.",
+          "task_type": "T2I",
+          "value": 1382.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the same overall text-to-image table as the Elo 1382 row.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://lmarena.ai/leaderboard/text-to-image",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-25",
+        "publisher": "Arena.ai (LM Arena)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://lmarena.ai/leaderboard/text-to-image",
+        "summary": "Live LM Arena text-to-image overall board dated Aug 25, 2026, read 2026-08-26. gpt-image-2 (medium) is rank 1 with Arena Elo 1382 ±4 on 75,014 model votes (6,047,075 votes and 76 models on the board). Blind pairwise human preference.",
+        "verbatim_quote": "| 1 | 1 1 | gpt-image-2 (medium) OpenAI · Proprietary | 1382 ±4 | 75,014 |"
+      },
+      "record_id": "lmarena-t2i-overall-gpt-image-2-medium-2026-08-25",
+      "statistics": {
+        "confidence_interval": "±4",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 75014,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "LM Arena Text-to-Image — Text Rendering",
+      "benchmark_version": "Aug 25, 2026",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Same gpt-image-2 API id at the medium quality setting. Dated revision unspecified.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "gpt-image-2 (medium)",
+        "source_model_version": "medium",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "mai-image-2.6-preview",
+        "grok-imagine-image-2.0 (low)",
+        "reve-2.1",
+        "muse-image",
+        "gemini-3.1-flash-image (nano-banana-2) [web-search]",
+        "qwen-image-3.0-pro",
+        "gpt-image-1.5-high-fidelity"
+      ],
+      "conditions": {
+        "board_stamp": "Aug 25, 2026",
+        "board_votes": 1702599,
+        "models_on_board": 76,
+        "quality": "medium"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Same Arena blind-pairwise protocol restricted to Text Rendering, with a published ±7 interval and 28,072 votes on this model.",
+      "evaluation_method": "Same Arena blind human pairwise protocol, restricted to the Text Rendering category. Header: 1,702,599 votes, 76 models.",
+      "evaluator": "Arena.ai (LM Arena)",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Dated API revision is not named.",
+        "Medium quality setting.",
+        "Dynamic board."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "text_rendering",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Score is from the Text Rendering category board, not the overall mix.",
+          "task_type": "T2I",
+          "value": 1428.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "text_rendering",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the Text Rendering table that reports Elo 1428.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://arena.ai/leaderboard/text-to-image/text-rendering",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-25",
+        "publisher": "Arena.ai (LM Arena)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/text-to-image/text-rendering",
+        "summary": "LM Arena Text Rendering subcategory, stamp Aug 25, 2026 (1,702,599 votes, 76 models). gpt-image-2 (medium) rank 1, Elo 1428 ±7, 28,072 votes.",
+        "verbatim_quote": "| 1 | 1 1 | gpt-image-2 (medium) OpenAI · Proprietary | 1428 ±7 | 28,072 |"
+      },
+      "record_id": "lmarena-t2i-text-rendering-gpt-image-2-medium-2026-08-25",
+      "statistics": {
+        "confidence_interval": "±7",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 28072,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "LM Arena Text-to-Image — Portraits",
+      "benchmark_version": "Aug 10, 2026",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Same gpt-image-2 API id at medium quality. Dated revision unspecified.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "gpt-image-2 (medium)",
+        "source_model_version": "medium",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "grok-imagine-image-2.0 (low)",
+        "mai-image-2.6-preview",
+        "reve-2.1",
+        "muse-image",
+        "seedream-5.0-pro",
+        "gpt-image-1.5-high-fidelity",
+        "gemini-3-pro-image-2k (nano-banana-pro)"
+      ],
+      "conditions": {
+        "board_stamp": "Aug 10, 2026",
+        "board_votes": 1496317,
+        "models_on_board": 76,
+        "quality": "medium"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Arena Portraits cut with published ±9 interval and 13,687 votes. Board stamp Aug 10, 2026 is older than the Aug 25 overall board.",
+      "evaluation_method": "Same Arena blind pairwise protocol, Portraits category. Header: 1,496,317 votes, 76 models.",
+      "evaluator": "Arena.ai (LM Arena)",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Portraits board stamp Aug 10, 2026 is older than the Aug 25, 2026 overall board.",
+        "Dated API revision is not named.",
+        "Medium quality setting."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "portrait",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Portraits category Elo. Notes also mention human consistency and identity as related scenes; those are not separate published subscores, so only portrait is used.",
+          "task_type": "T2I",
+          "value": 1429.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "portrait",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the Portraits table that reports Elo 1429.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://arena.ai/leaderboard/text-to-image/portraits",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-10",
+        "publisher": "Arena.ai (LM Arena)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/text-to-image/portraits",
+        "summary": "LM Arena Portraits subcategory, stamp Aug 10, 2026 (1,496,317 votes, 76 models). gpt-image-2 (medium) rank 1, Elo 1429 ±9, 13,687 votes.",
+        "verbatim_quote": "| 1 | 1 1 | gpt-image-2 (medium) OpenAI · Proprietary | 1429 ±9 | 13,687 |"
+      },
+      "record_id": "lmarena-t2i-portraits-gpt-image-2-medium-2026-08-10",
+      "statistics": {
+        "confidence_interval": "±9",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 13687,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "LM Arena Text-to-Image — Photorealistic & Cinematic Imagery",
+      "benchmark_version": "Aug 25, 2026",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Same gpt-image-2 API id at medium quality. Dated revision unspecified.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "gpt-image-2 (medium)",
+        "source_model_version": "medium",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "grok-imagine-image-2.0 (low)",
+        "mai-image-2.6-preview",
+        "reve-2.1",
+        "muse-image",
+        "seedream-5.0-pro",
+        "gemini-3.1-flash-image (nano-banana-2) [web-search]",
+        "gpt-image-1.5-high-fidelity"
+      ],
+      "conditions": {
+        "board_stamp": "Aug 25, 2026",
+        "board_votes": 2685079,
+        "models_on_board": 76,
+        "quality": "medium"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Arena cinematic/photorealistic cut with published ±6 interval and 28,818 votes on this model.",
+      "evaluation_method": "Same Arena protocol, Photorealistic & Cinematic Imagery category. Header: 2,685,079 votes, 76 models.",
+      "evaluator": "Arena.ai (LM Arena)",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Dated API revision is not named.",
+        "Medium quality setting.",
+        "Dynamic board."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Photorealistic & Cinematic Imagery category Elo. Notes name cinematic quality as the scene; photorealism is not a separate published subscore.",
+          "task_type": "T2I",
+          "value": 1380.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the Photorealistic & Cinematic Imagery table that reports Elo 1380.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://arena.ai/leaderboard/text-to-image/photorealistic",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-25",
+        "publisher": "Arena.ai (LM Arena)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/ja/leaderboard/text-to-image/photorealistic",
+        "summary": "LM Arena Photorealistic & Cinematic Imagery subcategory, stamp Aug 25, 2026 (2,685,079 votes, 76 models). gpt-image-2 (medium) rank 1, Elo 1380 ±6, 28,818 votes.",
+        "verbatim_quote": "| 1 | 1 1 | gpt-image-2 (medium) OpenAI · Proprietary | 1380 ±6 | 28,818 |"
+      },
+      "record_id": "lmarena-t2i-photorealistic-gpt-image-2-medium-2026-08-25",
+      "statistics": {
+        "confidence_interval": "±6",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 28818,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Text-to-Image Arena",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Leaderboard and model card name GPT Image 2 (high) / GPT-Image-2, the same API id at the high quality setting. Dated snapshot is not named.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "GPT Image 2 (high)",
+        "source_model_version": "high",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "MAI-Image-2.6-Preview",
+        "Reve 2.1",
+        "Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+        "GPT Image 1.5 (high)",
+        "MAI-Image-2.5",
+        "Nano Banana Pro",
+        "Qwen-Image-3.0-Pro",
+        "Seedream 5.0 Pro"
+      ],
+      "conditions": {
+        "images_per_prompt": 1,
+        "output_resolution": "1024x1024",
+        "quality": "high",
+        "release": "Apr 2026",
+        "seed": 42
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent arena with published methodology (blind pairwise, Bradley–Terry MLE, FLUX.1 [schnell]=1000), stated 95% CI, and 14,330 samples. High quality setting is a generation parameter of the same id.",
+      "evaluation_method": "Blind pairwise voting of two outputs from the same prompt without model identities. Ratings from Bradley-Terry MLE rescaled to Elo, anchored on FLUX.1 [schnell] = 1000. One image per prompt, seed 42, generated at each model's highest resolution then downscaled to 1024×1024.",
+      "evaluator": "Artificial Analysis",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Dated API revision is not named.",
+        "Evaluated at high quality, not an unnamed default.",
+        "Per-capability Elo numbers for this model were not on any page opened.",
+        "USD per 1,000 images is omitted because that scale is not used."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Headline overall Elo. Taxonomy includes text rendering, physics, human anatomy, retail/product, and live-action film, but the notes state this number is not a per-scene cut.",
+          "task_type": "T2I",
+          "value": 1371.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the overall text-to-image table that reports Elo 1,371.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/image/methodology",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/image/leaderboard/text-to-image",
+        "summary": "Artificial Analysis text-to-image arena, read 2026-08-26. GPT Image 2 (high) rank 1, Elo 1371, 95% CI -10/10, 14,330 samples. Model card also prints Elo 1370.53; the ranked table integer 1,371 is the reported figure. Price is not recorded.",
+        "verbatim_quote": "| 1 | 1 | OpenAI | GPT Image 2 (high) | 1,371 | -10/10 | 14,330 | Apr 2026 | $211.0 /1k imgs |\nGPT Image 2 (high) currently leads the Artificial Analysis Text to Image Arena with an Elo score of 1371.\nGPT Image 2 (high) has an Elo score of 1371 across 14,330 comparisons on the Text to Image Leaderboard."
+      },
+      "record_id": "artificial-analysis-t2i-gpt-image-2-high-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-10/10",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 14330,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Image Editing Arena",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "HIGH",
+        "mapping_rationale": "Same GPT Image 2 (high) API id as the text-to-image arena. Dated snapshot not named.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "GPT Image 2 (high)",
+        "source_model_version": "high",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "MAI-Image-2.6-Preview",
+        "MAI-Image-2.5-Pro",
+        "Reve 2.1",
+        "MAI-Image-2.5",
+        "GPT Image 1.5 (high)",
+        "Nano Banana 2",
+        "Qwen-Image-3.0-Pro",
+        "Seedream 5.0 Pro",
+        "Nano Banana Pro"
+      ],
+      "conditions": {
+        "quality": "high",
+        "release": "Apr 2026"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Same Artificial Analysis arena protocol on a separate editing board, with stated CI and 18,352 samples. Instruction-plus-reference editing, not a dedicated identity-consistency suite.",
+      "evaluation_method": "Blind pairwise votes on edited outputs from the same input image and editing instruction. For image-editing models, each prompt is paired with a reference image from a curated set. Bradley-Terry Elo.",
+      "evaluator": "Artificial Analysis",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Dated API revision is not named.",
+        "High quality setting.",
+        "Not a dedicated identity-consistency benchmark; each prompt is paired with a reference image plus an edit instruction."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall editing-arena Elo, not a per-scene cut. Notes mention reference adherence and edit-instruction adherence as the mix; the published number is the headline Elo.",
+          "task_type": "I2I",
+          "value": 1257.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 5 (table also shows 4-6) on the editing board that reports Elo 1,257.",
+          "task_type": "I2I",
+          "value": 5.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/image/methodology",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/image/leaderboard/editing",
+        "summary": "Artificial Analysis image-editing arena, read 2026-08-26. GPT Image 2 (high) rank 5, Elo 1257, 95% CI -6/6, 18,352 samples. Separate from the text-to-image arena. Input image plus editing instruction.",
+        "verbatim_quote": "5 | 4-6 | OpenAI | GPT Image 2 (high) | 1,257 | -6/6 | 18,352 | Apr 2026 | $211.0 /1k imgs\n5. GPT Image 2 (high) (Elo 1257)."
+      },
+      "record_id": "artificial-analysis-editing-gpt-image-2-high-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-6/6",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 18352,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "ImageBench Benchmark V1.2",
+      "benchmark_version": "V1.2",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Exact OpenRouter-style id openai/gpt-image-2. Quality setting and dated pin are not stated, so the snapshot is not fully pinned.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "openai/gpt-image-2",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "fal/google/nano-banana-2",
+        "fal/reve/2.1",
+        "xai/grok-imagine-2",
+        "fal/google/nano-banana-pro",
+        "fal/bytedance/seedream-v5-pro",
+        "fal/microsoft/mai-image-2.5",
+        "fal/qwen-image-2-pro"
+      ],
+      "conditions": {
+        "blend": "50/50 capability and estimated preference",
+        "models_ranked": 52,
+        "prompts": 192
+      },
+      "credibility": "B",
+      "credibility_rationale": "Independent suite with a stated 192-image protocol, but scoring is automatic VLM pass/fail blended with an aesthetic model, and quality/revision of gpt-image-2 is unspecified.",
+      "evaluation_method": "Benchmark V1.2 ranked by pass rate on 192 prompts. 52 models ranked by Overall — capability (graded pass/fail by VLM judges across 192 prompts in six categories) blended 50/50 with aesthetic Estimated Preference. V1 contains 64 tests, each with 3 prompt variants (192 images). score = PASS count / total evaluated images.",
+      "evaluator": "ImageBench",
+      "human_or_automatic": "mixed",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Quality setting not stated.",
+        "Dated pin gpt-image-2-2026-04-21 is not named.",
+        "No per-category numeric pass rates for openai/gpt-image-2 on the pages opened.",
+        "CI not stated."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Overall",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Published Overall is a 50/50 blend across six categories, not a per-scene score.",
+          "task_type": "T2I",
+          "value": 80.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Capability pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Capability half of Overall (VLM pass/fail on 192 prompts). Per-category rates were not on the opened pages.",
+          "task_type": "T2I",
+          "value": 87.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Estimated Preference",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Aesthetic half of the 50/50 Overall blend; still an overall figure, not a scene cut.",
+          "task_type": "T2I",
+          "value": 73.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Latency",
+          "metric_scale_id": "seconds",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Latency column on the same overall row; not a scene quality score.",
+          "task_type": "T2I",
+          "value": 45.3
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 of 52 on the V1.2 overall table.",
+          "task_type": "T2I",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://imagebench.ai/methodology-v1",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "ImageBench",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "independent_benchmark",
+        "source_url": "https://imagebench.ai/imagebench-v1",
+        "summary": "ImageBench Benchmark V1.2 live table, read 2026-08-26. openai/gpt-image-2 rank 1 of 52: Overall 80.0, Capability 87.0%, Est. Preference 73.0, latency 45.3s. 192 images per model. Quality setting not named. No per-category pass rates on the pages opened.",
+        "verbatim_quote": "| 1 | openai/gpt-image-2 | 80.0 | 87.0 % | 73.0 | token-based | 45.3s |"
+      },
+      "record_id": "imagebench-v1.2-openai-gpt-image-2-2026-08-26",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 192,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "ImageBench RealBench V1",
+      "benchmark_version": "snapshot 6/23/2026",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Exact id openai/gpt-image-2. Quality setting and dated pin are not stated.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "openai/gpt-image-2",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "fal/google/nano-banana-pro",
+        "fal/bytedance/seedream-v4",
+        "local/z-image-turbo-6b",
+        "bfl/flux-2-max"
+      ],
+      "conditions": {
+        "board_votes": 17761,
+        "images": 139,
+        "rated_real": 1572,
+        "snapshot": "6/23/2026",
+        "votes": 3418
+      },
+      "credibility": "B",
+      "credibility_rationale": "Human real-vs-AI protocol with stated vote counts, but a dated 6/23/2026 snapshot, unspecified quality/revision, and no CI.",
+      "evaluation_method": "A visual Turing test: each model's realism score is the share of human votes that judged its AI images as real, voted on by the ImageBench community in a real-vs-AI game. Models need at least 10 votes to appear.",
+      "evaluator": "ImageBench",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Snapshot is 6/23/2026, not the Aug 26 read date of live boards.",
+        "Quality setting not stated.",
+        "CI not stated."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Realism score",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Share of votes judging outputs as real photographs. Notes map this to cinematic quality / photorealism, not a portrait-only cut.",
+          "task_type": "T2I",
+          "value": 46.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "Leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 3 on the RealBench table that reports 46%.",
+          "task_type": "T2I",
+          "value": 3.0
+        }
+      ],
+      "protocol_url": "https://imagebench.ai/realbench-v1",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-06-23",
+        "publisher": "ImageBench",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "independent_benchmark",
+        "source_url": "https://imagebench.ai/realbench-v1",
+        "summary": "ImageBench RealBench V1 snapshot from 6/23/2026, read 2026-08-26. openai/gpt-image-2 rank 3, realism 46% (1,572 of 3,418 votes judged real), 139 images. Quality unspecified.",
+        "verbatim_quote": "A visual Turing test for image models: can their output pass as a real photograph? Each model's **realism score** is the share of human votes that judged its AI images as real\n| 3 | openai/gpt-image-2 | 46 % | 1,572 / 3,418 | 139 |\n17,761 votes · snapshot from 6/23/2026"
+      },
+      "record_id": "imagebench-realbench-v1-openai-gpt-image-2-2026-06-23",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": 3418,
+        "human_eval_size_stated_by_source": true,
+        "sample_size": 139,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Qwen-Image-Bench",
+      "benchmark_version": "2605.28091v2",
+      "binding": {
+        "exact_version": "gpt-image-2",
+        "is_alias": false,
+        "logical_name": "gpt-image-2-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Paper name GPT Image 2 and Hugging Face column gpt-image-2 match the public API id. Quality setting and dated snapshot are not named, so mapping to a particular revision of the API we run is unspecified.",
+        "model_id": "openai/gpt-image-2",
+        "provider": "openrouter",
+        "source_model_name": "GPT Image 2",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Nano Banana 2.0",
+        "GPT Image 1.5",
+        "Nano Banana Pro",
+        "Qwen Image 2.0 Pro",
+        "Seedream 5.0",
+        "Seedream 4.5",
+        "Seedream 4.0",
+        "FLUX 2 Max",
+        "FLUX 2 Pro",
+        "GPT Image 1"
+      ],
+      "conditions": {
+        "models": 18,
+        "prompts_per_language": 1000,
+        "score_scale": "[0,100]"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic 18-model protocol with 1,000 prompts and a stated [0,100] scale, but the judge is Q-Judger trained by Qwen authors who also ship competing Qwen Image models, quality/revision is unspecified, and no CI is given for these scores.",
+      "evaluation_method": "1,000 stratified bilingual prompts; all 18 models evaluated on ZH and EN; one image per prompt. Q-Judger (Qwen3.6-27B) trained on labels from 80 professional annotators, blind, ≥3 reviews. L3 facets 0/1/2 aggregate L3→L2→L1→Overall. Scores on a [0,100] scale. Table 2 is Chinese prompts.",
+      "evaluator": "Qwen / Alibaba authors (Niantong Li et al.)",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Authors also ship Qwen Image models on the same table.",
+        "Quality setting not named.",
+        "English pillar table was not extracted.",
+        "CI for GPT Image 2 scores is not stated.",
+        "Field-wide Physical Logic / Anatomical Fidelity ceilings are not GPT Image 2 scores.",
+        "Graphic Design “exceeding 90” / “above 84” bounds are not point values and are not recorded."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Overall (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "chinese_text",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 overall on Chinese prompts. Closest Chinese-text evidence in the notes; it is overall quality on the ZH set, not a dedicated CJK OCR accuracy trial. Prose 64.7 is the same figure rounded and is not a second measurement.",
+          "task_type": "T2I",
+          "value": 64.69
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Overall (EN)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "English overall from the findings sentence. No English pillar table was recovered.",
+          "task_type": "T2I",
+          "value": 65.2
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Quality (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 L1 Quality pillar on Chinese prompts. Mixed pillar; not treated as a single scene subscore.",
+          "task_type": "T2I",
+          "value": 58.65
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Aesthetics (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Aesthetics pillar; notes map this to cinematic quality.",
+          "task_type": "T2I",
+          "value": 67.53
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Alignment (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Alignment pillar, described as prompt adherence.",
+          "task_type": "T2I",
+          "value": 65.85
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Real-world Fidelity (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Real-world Fidelity. Notes group this pillar with physics and human consistency; Physical Logic field-wide ceilings are not used as this model's score.",
+          "task_type": "T2I",
+          "value": 57.38
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Creative Generation (ZH)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Creative Generation pillar. Notes discuss text layout and design applications inside this pillar but give no separate Text Accuracy number for this model.",
+          "task_type": "T2I",
+          "value": 75.23
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2605.28091v2",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-06-25",
+        "publisher": "Qwen / Alibaba authors (Niantong Li et al.)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research-pass",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2605.28091v2",
+        "summary": "Qwen-Image-Bench paper arXiv 2605.28091v2 (revised 25 Jun 2026). GPT Image 2 / dataset column gpt-image-2. Chinese Table 2: Quality 58.65, Aesthetics 67.53, Alignment 65.85, Real-world Fidelity 57.38, Creative Generation 75.23, Overall 64.69. Prose also gives ZH 64.7 (rounded) and EN 65.2. Automatic Q-Judger scores on 1,000 prompts. Authors also ship Qwen Image models on the same table. Quality setting not named.",
+        "verbatim_quote": "Our findings reveal that GPT Image 2 achieves the highest overall score (ZH: 64.7, EN: 65.2) across all five pillars\nGPT Image 2 58.65 67.53 65.85 57.38 75.23 64.69\nTable 2: Overall performance of 18 T2I models on Qwen-Image-Bench under Chinese prompts. Scores are on a [ 0,100 ] scale"
+      },
+      "record_id": "qwen-image-bench-arxiv-2605.28091v2-gpt-image-2",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 1000,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "What-If World",
+      "benchmark_version": "arXiv:2605.27589v1",
+      "binding": {
+        "exact_version": "grok-imagine-video",
+        "is_alias": false,
+        "logical_name": "grok-imagine-video-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "The paper does not name grok-imagine-video vs 1.5. Exact name is Grok Imagine. Mapping confidence MEDIUM as in the notes.",
+        "model_id": "x-ai/grok-imagine-video",
+        "provider": "openrouter",
+        "source_model_name": "Grok Imagine",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Veo 3.1",
+        "Seedance 2.0",
+        "Kling 3.0",
+        "Seedance 1.5",
+        "Cosmos-Predict2",
+        "Wan2.2",
+        "HunyuanVideo-1.5",
+        "CogVideoX"
+      ],
+      "conditions": {
+        "access": "hosted APIs via kie.ai",
+        "prompt_pairs": 319
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic paper with a stated VLM-judge protocol, stated n=319 prompt pairs, and scores as pass rates. Version is unspecified; models accessed via kie.ai.",
+      "evaluation_method": "Automatic VLM judge (Gemini 3.1-Pro) on the APEO rubric, validated against human annotation. Task is image-to-video: shared real initial frame plus a contrastive prompt pair. All scores are pass rates (%).",
+      "evaluator": "Gemini 3.1-Pro VLM judge on the APEO rubric",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Paper does not name grok-imagine-video vs 1.5.",
+        "Closed-source models accessed through hosted APIs via kie.ai.",
+        "Per-primitive APEO figures in the notes (Force/Degree 70.7, Spatial Alignment 54.5, Surface Friction 49.1, Material/Medium 51.7, Obstacle Configuration 52.5, Temporal Sequencing 36.9) had no verbatim quote and were dropped.",
+        "Unidentified Table 2 columns 69.2, 49.2, 70.5, 67.2, 69.7, 45.1 were not mapped."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "p_Avg / APEO",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes call APEO the primary paired metric and physics the primary scene. Shared real initial frame plus contrastive prompt pair.",
+          "task_type": "I2V",
+          "value": 51.7
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "s_Avg",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Single-video s_Avg; notes do not assign it to one primitive. Holistic average on this physics-focused bench.",
+          "task_type": "I2V",
+          "value": 69.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "P_p paired physics",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes identify P_p as paired physics.",
+          "task_type": "I2V",
+          "value": 42.6
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 last column rank 1 for Grok Imagine on the overall leaderboard.",
+          "task_type": "I2V",
+          "value": 1.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Longitudinal Braking pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted Longitudinal Braking score on this physics benchmark.",
+          "task_type": "I2V",
+          "value": 0.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Longitudinal Acceleration pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted Longitudinal Acceleration score on this physics benchmark.",
+          "task_type": "I2V",
+          "value": 83.0
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2605.27589v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-05-26",
+        "publisher": "arXiv cs.CV; UCLA / University of Tennessee / Amazon authors",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2605.27589v1",
+        "summary": "What-If World (arXiv:2605.27589v1, 26 May 2026) leaderboard names Grok Imagine. Primary paired metric p_Avg / APEO 51.7%, rank 1, s_Avg 69.0%, paired physics P_p 42.6%. Longitudinal Braking 0% and Longitudinal Acceleration 83% are stated. 319 prompt pairs stated. Citation [70] is xAI (2025) Grok imagine linking to x.ai/grok. Closed-source models accessed through hosted APIs via kie.ai.",
+        "verbatim_quote": "| Grok Imagine ∗ | 69.2 | 49.2 | 70.5 | 42.6 | 67.2 | 69.7 | 45.1 | 69.0 | 51.7 | 1 |\n*Table 2 : What-If World Benchmark Leaderboard. All scores are pass rates (%).*\nThe best-performing model, Grok Imagine, achieves only 51.7% APEO\nGrok scores 0% on Longitudinal Braking but 83% on Longitudinal Acceleration"
+      },
+      "record_id": "what-if-world-grok-imagine",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 319,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "H2R-Bench",
+      "benchmark_version": "arXiv:2608.13049v1",
+      "binding": {
+        "exact_version": "grok-imagine-video",
+        "is_alias": false,
+        "logical_name": "grok-imagine-video-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Seven-frame conditioning is consistent with the reference-to-video path on this family, but the paper does not pin grok-imagine-video vs 1.5. Mapping confidence MEDIUM as in the notes.",
+        "model_id": "x-ai/grok-imagine-video",
+        "provider": "openrouter",
+        "source_model_name": "Grok Imagine Video",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0",
+        "Wan2.7",
+        "Kling-V3",
+        "Veo 3.1",
+        "Mitty-EPIC14B"
+      ],
+      "conditions": {
+        "embodiments": 2,
+        "group": "frame-conditioned",
+        "max_source_frames": 7,
+        "output": "1280x720, 121 frames @ 24 fps",
+        "source_videos": 120,
+        "transfer_cases": 240
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic paper with a stated automatic protocol, stated n=240 transfer cases, and stated percentile 95% CIs. Human check is metric validation (three raters, 660 videos, ρ=0.883), not the Grok n. Version unspecified.",
+      "evaluation_method": "Automatic (Gemini 3.5 Flash, Qwen3.7-Plus, GPT-5.4 averaged on M1–M4; M5 is imaging/aesthetic/temporal metrics). Human check: three raters, 660 videos, ρ = 0.883. 240 transfer cases from 120 source videos × two embodiments.",
+      "evaluator": "Gemini 3.5 Flash, Qwen3.7-Plus, GPT-5.4 averaged; M5 imaging/aesthetic/temporal metrics",
+      "human_or_automatic": "mixed",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Paper does not pin grok-imagine-video vs 1.5.",
+        "Grok is in the frame-conditioned group, not video-conditioned.",
+        "M1–M5 0–1 columns (0.661 goal, 0.443 contact, and the rest) omitted because that 0–1 scale is not an allowed metric_scale_id."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "H2RCore (Parallel-Jaw Gripper)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "H2RCore aggregates five metrics. Notes list reference adherence, motion/action, physics-like contact, and embodiment; the aggregate is not a single scene column.",
+          "task_type": "R2V",
+          "value": 50.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "H2RCore (Dexterous Hand)",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Same H2RCore aggregate on the Dexterous Hand embodiment; not a single scene column.",
+          "task_type": "R2V",
+          "value": 49.2
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2608.13049",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-08-13",
+        "publisher": "arXiv cs.RO; Shanghai Jiao Tong University / Shanghai Artificial Intelligence Laboratory",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2608.13049",
+        "summary": "H2R-Bench (arXiv:2608.13049v1, 13 Aug 2026) places Grok Imagine Video in the frame-conditioned group. H2RCore 50.1 (Parallel-Jaw Gripper) and 49.2 (Dexterous Hand) on 0–100, with stated CIs. 240 transfer cases from 120 source videos × two embodiments stated. Citation is xAI (2026) Grok Imagine API. Output profile 1280×720, 121 frames @ 24 fps. Native interface: image-conditioned with multiple source frames (up to seven uniformly spaced frames when supported).",
+        "verbatim_quote": "| Grok Imagine Video | 0.661 | 0.729 | 0.443 | 0.268 | 0.792 | 50.1 | 0.678 | 0.729 | 0.469 | 0.198 | 0.804 | 49.2 |\n*Table 2: … H2RCore aggregates all five metrics on a 0–100 scale.*\n| Grok Imagine | 50.1 [49.0, 51.1] | 49.2 [48.3, 50.1] |\n*Table S4: Main-evaluation H2RCore point estimates and percentile 95% confidence intervals.*"
+      },
+      "record_id": "h2r-bench-grok-imagine-video",
+      "statistics": {
+        "confidence_interval": "Parallel-Jaw Gripper 50.1 [49.0, 51.1]; Dexterous Hand 49.2 [48.3, 50.1]",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": 660,
+        "human_eval_size_stated_by_source": true,
+        "sample_size": 240,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "FilmBench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "grok-video",
+        "is_alias": true,
+        "logical_name": "grok-video-official",
+        "mapping_confidence": "LOW",
+        "mapping_rationale": "The paper’s citation is the 1.5 blog (bibliography entry 26, “Grok imagine video 1.5: native audio generation and sota image-to-video workflow”), not grok-video.",
+        "model_id": "grok-video",
+        "provider": "grok",
+        "source_model_name": "Grok Imagine Video",
+        "source_model_version": "1.5",
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0",
+        "HappyHorse 1.1",
+        "HappyHorse 1.0",
+        "Kling 3.0",
+        "Kling 3.0 Omni",
+        "Veo 3.1",
+        "Vidu Q3 Pro",
+        "Hailuo 2.3",
+        "Vidu Q2 Pro"
+      ],
+      "conditions": {
+        "settings": "default API settings",
+        "videos_per_prompt": 1
+      },
+      "credibility": "C",
+      "credibility_rationale": "Academic protocol with stated N and 0–100 scores, but the paper cites Grok imagine video 1.5 rather than grok-video, so the binding is a version mismatch.",
+      "evaluation_method": "T2V and R2V prompts reverse-engineered from award-winning films; automatic cinematic-language agent (FilmOps), with model-level Spearman ρ = 0.95 (T2V) / 0.96 (R2V) vs human ranking. One video per prompt, default API settings.",
+      "evaluator": "FilmOps cinematic-language agent; human-validated ranking",
+      "human_or_automatic": "mixed",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Unlabeled T2V columns 82.0, 89.0, 71.6 and unlabeled R2V columns 71.2, 90.3, 69.3 were not recorded as named metrics.",
+        "The 55.97 multi-shot clip example is not an overall score and was not recorded.",
+        "The multi-shot drop −10.2 has no stated scale or task type and was not recorded.",
+        "Confidence interval not stated for these scores."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "T2V_overall",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes label 80.9 as T2V overall on the stated 0–100 scale; cinematic axes are mixed and other table columns are unlabeled.",
+          "task_type": "T2V",
+          "value": 80.9
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "R2V_overall",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes label 76.9 as R2V overall on the stated 0–100 scale.",
+          "task_type": "R2V",
+          "value": 76.9
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "scene_space",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "reference_adherence",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Notes give this R2V visual-following column as scene-space alongside reference adherence.",
+          "task_type": "R2V",
+          "value": 85.2
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "character_appearance",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "identity",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes explicitly identify character-appearance 86.0 as identity.",
+          "task_type": "R2V",
+          "value": 86.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "prop_reference",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "MULTI_REFERENCE",
+          "scenario": "reference_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes give this R2V visual-following column as prop-reference.",
+          "task_type": "R2V",
+          "value": 48.6
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2607.24241v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-07-27",
+        "publisher": "arXiv",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2607.24241v1",
+        "summary": "FilmBench (arXiv:2607.24241v1) scores Grok Imagine Video on a 0–100 scale: T2V overall 80.9 (N=515) and R2V overall 76.9 (N=654). R2V visual following: scene-space 85.2, character-appearance 86.0, prop-reference 48.6. Automatic FilmOps scoring with human-validated ranking. Bibliography cites the Grok imagine video 1.5 blog.",
+        "verbatim_quote": "| Grok Imagine Video | 80.9 | 82.0 | 89.0 | 71.6 | Table 7: Per-axis scores (0–100) by model, T2V (N=515). | Grok Imagine Video | 76.9 | 71.2 | 90.3 | 69.3 | Table 8: Per-axis scores (0–100) by model, R2V (N=654). | Grok Imagine Video | 85.2 | 86.0 | 48.6 |"
+      },
+      "record_id": "filmbench-arxiv-2607.24241v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": "T2V N=515; R2V N=654",
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "What-If World",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "grok-video",
+        "is_alias": true,
+        "logical_name": "grok-video-official",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Paper is dated before public Grok Imagine Video 1.5 reports (late May 2026) and does not name grok-video or 1.5. Cite: xAI (2025) Grok imagine: multimodal image and video generation model.",
+        "model_id": "grok-video",
+        "provider": "grok",
+        "source_model_name": "Grok Imagine",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Veo 3.1",
+        "Seedance 2.0",
+        "Seedance 1.5",
+        "Kling 3.0",
+        "HunyuanVideo 1.5",
+        "Wan2.2",
+        "Cosmos-Predict2",
+        "CogVideoX 1.5"
+      ],
+      "conditions": {
+        "access": "hosted APIs via kie.ai",
+        "initial_frame": "nuScenes / DROID",
+        "judge": "Gemini 3.1 Pro"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic I2V protocol with stated N=319 and named pass-rate columns, but the source name is Grok Imagine with no exact grok-video revision.",
+      "evaluation_method": "319 prompt pairs from a shared real initial frame (nuScenes / DROID); APEO rubric (Adherence, Physics, Environment, Outcome) via Gemini 3.1 Pro as VLM judge. Human agreement cited at 82.30% vs 84.03% inter-human.",
+      "evaluator": "Gemini 3.1 Pro VLM judge",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Unlabeled Table 2 columns other than P_p 42.6, APEO 51.7, and rank 1 were not recorded.",
+        "Force/Degree Table 6 per-column scores were unlabeled and not recorded.",
+        "CI not stated for the 51.7% APEO."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "APEO",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "51.7% is the overall APEO pass rate (Adherence, Physics, Environment, Outcome), not a single scene.",
+          "task_type": "I2V",
+          "value": 51.7
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "physics_paired_pass_rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes identify 42.6% as column P_p, physics paired pass rate.",
+          "task_type": "I2V",
+          "value": 42.6
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard_rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 1 on the same overall What-If World leaderboard row.",
+          "task_type": "I2V",
+          "value": 1.0
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2605.27589v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-05-26",
+        "publisher": "arXiv",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2605.27589v1",
+        "summary": "What-If World (arXiv:2605.27589v1) image-to-video leaderboard: Grok Imagine APEO 51.7% pass rate, physics paired pass rate 42.6% (column P_p), rank 1. 319 prompt pairs from a shared real initial frame; Gemini 3.1 Pro VLM judge. Closed-source models accessed via kie.ai.",
+        "verbatim_quote": "| Grok Imagine ∗ | 69.2 | 49.2 | 70.5 | 42.6 | 67.2 | 69.7 | 45.1 | 69.0 | 51.7 | 1 | Table 2 : What-If World Benchmark Leaderboard. All scores are pass rates (%). The best-performing model, Grok Imagine, achieves only 51.7% APEO"
+      },
+      "record_id": "what-if-world-arxiv-2605.27589v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 319,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Physics-IQ",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "grok-video",
+        "is_alias": true,
+        "logical_name": "grok-video-official",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Model table names Grok Imagine Video; result tables name Grok Video. Cite accessed 2026-04-29, Grok Imagine API. Access date is before 1.5; no exact version string matching grok-video.",
+        "model_id": "grok-video",
+        "provider": "grok",
+        "source_model_name": "Grok Video",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Sora 2",
+        "Wan 2.2",
+        "HunyuanV-1.5",
+        "P-Video",
+        "Cosmos3-N"
+      ],
+      "conditions": {
+        "access_date": "2026-04-29",
+        "api": "Grok Imagine API",
+        "clip": "5 s continuation after a 3 s real physics clip",
+        "fps": 24,
+        "resolution": "1280×720",
+        "runs": 4
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic automatic IoU/MSE protocol with stated N, run count, and generation settings, but access is Grok Imagine API on 2026-04-29 with no exact grok-video version string.",
+      "evaluation_method": "Image-to-video continuation of 5 s after a 3 s real physics clip; 198 videos; four independent generation sets; original vs verified prompts and ground truth. Automatic IoU/MSE metrics. Scores multiplied by 100 and reported as points; μ ± σ_STD over 4 runs.",
+      "evaluator": "automatic IoU/MSE metrics",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "± figures are standard deviations over 4 runs, not a confidence interval.",
+        "CI not stated."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "original_bpp",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Physics-IQ original continuation of real physics clips; notes map the scene as physics.",
+          "task_type": "I2V",
+          "value": 34.8
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "verified_bpp",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Physics-IQ Verified score on the same physics continuation task.",
+          "task_type": "I2V",
+          "value": 34.8
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2606.18943v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-06-17",
+        "publisher": "arXiv",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2606.18943v1",
+        "summary": "Physics-IQ (arXiv:2606.18943v1) image-to-video continuation: Grok Video original bpp 34.8 ± 0.8 (Table 3, original GT, best-practice prompts) and verified bpp 34.8 ± 0.6 (Table 4, verified GT, best-practice prompts). Scores multiplied by 100 and reported as points. 198 videos; 4 runs. Access date 2026-04-29, Grok Imagine API, 24 fps, 1280×720, text + one frame.",
+        "verbatim_quote": "Grok Video original bpp 34.8 ± 0.8 Table 3 : Main Results Overview (Physics-IQ Original). … All scores are multiplied by 100 and reported as points. Visualized data: μ ± σ_STD over 4 runs. Grok Video verified bpp 34.8 ± 0.6"
+      },
+      "record_id": "physics-iq-arxiv-2606.18943v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": "198 videos per set; 4 runs",
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Human Creativity Benchmark",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "grok-video",
+        "is_alias": true,
+        "logical_name": "grok-video-official",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Model table names grok-imagine-video; results also say Grok Imagine / Grok Imagine Video. Source does not name grok-video or an exact revision.",
+        "model_id": "grok-video",
+        "provider": "grok",
+        "source_model_name": "grok-imagine-video",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Veo 3.1",
+        "Kling 3.0",
+        "Seedance 1.5"
+      ],
+      "conditions": {
+        "domain": "Ad Video",
+        "likert_midpoint": 3
+      },
+      "credibility": "B",
+      "credibility_rationale": "Human professional-creative protocol with quoted pairwise and Likert numbers, but model id is grok-imagine-video without an exact grok-video revision, and video-only N is not stated.",
+      "evaluation_method": "Professional creatives from Contra; product-video / ad-video domain; ideation / mockup / refinement; pairwise forced ranking plus 1–5 scalar ratings on prompt adherence, usability, visual appeal. Image-to-video for product video.",
+      "evaluator": "Contra professional creatives",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Video-only pairwise N is not separately stated; overall benchmark is roughly 15,000 judgments across five domains and that N was not used as the video sample.",
+        "0.361 and 56.5% are not treated as the same number.",
+        "Parenthetical Table 2 figures such as (0.375; 0.0010) are unexplained in the notes and were not recorded.",
+        "Appendix 56.5% sentence does not specify whether the figure is video-only."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "pairwise_win_rate_ideation",
+          "metric_scale_id": "pairwise-win-rate",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "commercial_product",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Ad Video pairwise win rate from Table 2. Notes list workflow phases ideation / mockup / refinement as the three cells in that order; columns are not named in the quoted row.",
+          "task_type": "I2V",
+          "value": 0.111
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "pairwise_win_rate_mockup",
+          "metric_scale_id": "pairwise-win-rate",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "commercial_product",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Ad Video pairwise win rate from Table 2, second of three workflow-phase cells listed as ideation / mockup / refinement.",
+          "task_type": "I2V",
+          "value": 0.194
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "pairwise_win_rate_refinement",
+          "metric_scale_id": "pairwise-win-rate",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "commercial_product",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Ad Video pairwise win rate from Table 2, third of three workflow-phase cells. Notes say not to treat 0.361 and 56.5% as the same number.",
+          "task_type": "I2V",
+          "value": 0.361
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "refinement_lead",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "commercial_product",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Quoted appendix sentence “Grok Imagine Video leads Refinement (56.5%)”; the sentence does not restatedomain, and notes do not treat it as the same number as 0.361.",
+          "task_type": "I2V",
+          "value": 56.5
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "visual_appeal",
+          "metric_scale_id": "likert-1-5",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Likert visual appeal on a 1–5 scale; notes list cinematic quality among this benchmark’s scenes.",
+          "task_type": "I2V",
+          "value": 3.72
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "usability",
+          "metric_scale_id": "likert-1-5",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "commercial_product",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Likert usability on a 1–5 scale in the product/ad-video setting.",
+          "task_type": "I2V",
+          "value": 3.69
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2606.30561v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-06-29",
+        "publisher": "arXiv",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2606.30561v1",
+        "summary": "Human Creativity Benchmark (arXiv:2606.30561v1): Ad Video pairwise win rates for Grok Imagine 0.111, 0.194, 0.361 as published (not converted). Appendix: Grok Imagine Video leads Refinement (56.5%). Likert 1–5: Visual Appeal 3.72, Usability 3.69. Professional creatives; image-to-video product/ad video.",
+        "verbatim_quote": "| Ad Video | Grok Imagine | 0.111 (0.375; 0.0010) | 0.194 (0.502; 0.5446) | 0.361 (-0.042; 0.1375) | Table 2. Pairwise preference outcomes across workflow phases. Each cell reports a model’s pairwise win rate for the given domain and phase Grok Imagine Video leads Refinement (56.5%) Grok-Imagine on Visual Appeal climbs to 3.72, the highest score overall, with Grok-Imagine on Usability close behind at 3.69."
+      },
+      "record_id": "human-creativity-benchmark-arxiv-2606.30561v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": null,
+        "sample_size_stated_by_source": false
+      }
+    },
+    {
+      "benchmark_name": "H2R-Bench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "grok-video",
+        "is_alias": true,
+        "logical_name": "grok-video-official",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Paper date is after 1.5 existed; the source still does not name 1.5 or grok-video. Cite: xAI (2026) Grok Imagine API. Placed in the frame-conditioned group, not full-video-conditioned.",
+        "model_id": "grok-video",
+        "provider": "grok",
+        "source_model_name": "Grok Imagine Video",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0",
+        "Wan2.7",
+        "Kling-V3",
+        "Veo 3.1",
+        "Mitty-EPIC14B",
+        "LTX-2.3",
+        "SkyReels-V3-R2V",
+        "Wan2.2",
+        "LongCat",
+        "HunyuanVideo 1.5-I2V"
+      ],
+      "conditions": {
+        "embodiments": 2,
+        "source_videos": 120,
+        "transfer_cases": 240
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic protocol with stated 240 cases and percentile 95% CIs, but Grok Imagine API is unnamed as grok-video or 1.5 and frame-conditioned generation is mapped onto I2V.",
+      "evaluation_method": "120 human source videos × 2 robot embodiments = 240 transfer cases; MLLM judges (Gemini 3.5 Flash, Qwen3.7-Plus, GPT-5.4) averaged on transfer metrics; H2RCore is a 0–100 weighted aggregate. Automatic, with a 660-video human check.",
+      "evaluator": "Gemini 3.5 Flash, Qwen3.7-Plus, GPT-5.4 MLLM judges (averaged)",
+      "human_or_automatic": "mixed",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "0–1 component scores (goal 0.661, contact 0.443, embodiment 0.268, and the rest) omitted; that custom 0–1 scale is not recorded.",
+        "Task is frame-conditioned generation (not T2V); mapped to I2V because the schema has no frame-conditioned label.",
+        "Paper date is after 1.5 existed, but the source does not name 1.5 or grok-video."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "H2RCore_parallel_jaw",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "H2RCore is a 0–100 weighted aggregate of transfer metrics; notes mix physics, motion, human consistency, and reference adherence, so the aggregate is generic.",
+          "task_type": "I2V",
+          "value": 50.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "H2RCore_dexterous_hand",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Same H2RCore aggregate for the dexterous-hand embodiment.",
+          "task_type": "I2V",
+          "value": 49.2
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2608.13049",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-08-13",
+        "publisher": "arXiv",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2608.13049",
+        "summary": "H2R-Bench (arXiv:2608.13049v1) frame-conditioned Grok Imagine Video H2RCore 50.1 (parallel-jaw, 95% CI [49.0, 51.1]) and 49.2 (dexterous hand, 95% CI [48.3, 50.1]) on a 0–100 scale. 120 human source videos × 2 robot embodiments = 240 transfer cases. Cite: xAI (2026) Grok Imagine API.",
+        "verbatim_quote": "| Grok Imagine Video | 0.661 | 0.729 | 0.443 | 0.268 | 0.792 | 50.1 | 0.678 | 0.729 | 0.469 | 0.198 | 0.804 | 49.2 | H2RCore aggregates all five metrics on a 0–100 scale. | Grok Imagine | 50.1 [49.0, 51.1] | 49.2 [48.3, 50.1] | Table S4: Main-evaluation H2RCore point estimates and percentile 95% confidence intervals."
+      },
+      "record_id": "h2r-bench-arxiv-2608.13049v1",
+      "statistics": {
+        "confidence_interval": "parallel-jaw [49.0, 51.1]; dexterous hand [48.3, 50.1]",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": 660,
+        "human_eval_size_stated_by_source": true,
+        "sample_size": 240,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Text-to-Video Arena (with audio)",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "The live table names Veo 3.1 Fast (creator Google; released Jan 2026 on the table). Notes judge this the public Fast tier but the page does not name veo-3.1-fast-generate-001 vs preview.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 Fast",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Wan 3.0",
+        "Gemini Omni Flash",
+        "MiniMax H3",
+        "Dreamina Seedance 2.0 720p",
+        "Veo 3.1 Lite",
+        "Veo 3.1",
+        "Kling 3.0 1080p Pro",
+        "Vidu Q3 Pro",
+        "grok-imagine-video"
+      ],
+      "conditions": {
+        "audio": true,
+        "blind_pairwise": true,
+        "rank_band": "12-17",
+        "table_model_release": "Jan 2026"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Artificial Analysis Video Arena with human blind pairwise votes, a public methodology page, stated 95% CI, and stated sample size 18,842. Live/dynamic board is a limitation of the reading, not of the protocol.",
+      "evaluation_method": "Artificial Analysis Video Arena: human, blind pairwise preference. Users compare two videos generated from the same text prompt without knowing which model created each video. Scores are Elo (arena-elo) and leaderboard rank. Text-to-video with audio.",
+      "evaluator": "Artificial Analysis Video Arena",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Live leaderboard; values can change after 2026-08-26.",
+        "No per-scene dimension scores.",
+        "API revision (generate-001 vs preview) not named.",
+        "Rank band 12-17 is not stored as a point measurement.",
+        "Pricing $9.00/min omitted (not usd-per-second or usd-per-video)."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "The board publishes overall cinematic/preference quality only and does not publish per-scene scores for motion, physics, identity, camera, text, Chinese text, lip-sync, reference, or first/last frame.",
+          "task_type": "T2V",
+          "value": 1085.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 16 is the holistic text-to-video (with audio) standing on the same overall-preference board, not a scene axis.",
+          "task_type": "T2V",
+          "value": 16.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/methodology",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/video/leaderboard/text-to-video",
+        "summary": "Live Artificial Analysis text-to-video (with audio) arena row for Google Veo 3.1 Fast on 2026-08-26: Elo 1,085, rank 16, rank band 12-17, stated 95% CI -5/5, stated n=18,842. Price cell omitted (disallowed scale).",
+        "verbatim_quote": "| 16 | 12-17 | Google | Veo 3.1 Fast | 1,085 | -5/5 | 18,842 | Jan 2026 | $9.00 /min |"
+      },
+      "record_id": "aa-t2v-with-audio-veo-3.1-fast-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-5/5",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 18842,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Image-to-Video Arena (with audio)",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "The live table names Veo 3.1 Fast (creator Google; released Jan 2026 on the table). Notes judge this the public Fast tier but the page does not name veo-3.1-fast-generate-001 vs preview.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 Fast",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Dreamina Seedance 2.0 720p",
+        "MiniMax H3",
+        "Gemini Omni Flash",
+        "grok-imagine-video-1.5",
+        "Veo 3.1",
+        "grok-imagine-video",
+        "Kling 3.0 1080p Pro",
+        "Veo 3.1 Lite"
+      ],
+      "conditions": {
+        "audio": true,
+        "blind_pairwise": true,
+        "rank_band": "11-16",
+        "table_model_release": "Jan 2026"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Artificial Analysis Video Arena with human blind pairwise votes, a public methodology page, stated 95% CI, and stated sample size 15,397. Same Elo method as T2V on the same input image. Live/dynamic board.",
+      "evaluation_method": "Artificial Analysis Video Arena: human, blind pairwise preference using the same Elo method as text-to-video on the same input image. Users compare two videos without knowing which model created each video. Image-to-video with audio.",
+      "evaluator": "Artificial Analysis Video Arena",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Live leaderboard; values can change after 2026-08-26.",
+        "No per-scene dimension scores.",
+        "API revision (generate-001 vs preview) not named.",
+        "Rank band 11-16 is not stored as a point measurement.",
+        "Pricing $9.00/min omitted (not usd-per-second or usd-per-video)."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall preference on image-conditioned clips. Identity/reference adherence only insofar as voters prefer animation of a given still; no dimension split, so the Elo is holistic.",
+          "task_type": "I2V",
+          "value": 1072.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Rank 12 is the holistic image-to-video (with audio) standing on the same overall-preference board.",
+          "task_type": "I2V",
+          "value": 12.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/methodology",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/video/leaderboard/image-to-video",
+        "summary": "Live Artificial Analysis image-to-video (with audio) arena row for Google Veo 3.1 Fast on 2026-08-26: Elo 1,072, rank 12, rank band 11-16, stated 95% CI -6/6, stated n=15,397. Price cell omitted.",
+        "verbatim_quote": "| 12 | 11-16 | Google | Veo 3.1 Fast | 1,072 | -6/6 | 15,397 | Jan 2026 | $9.00 /min |"
+      },
+      "record_id": "aa-i2v-with-audio-veo-3.1-fast-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-6/6",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 15397,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Video Arena (without audio, dated I2V)",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "The post names Veo 3.1 Fast. Notes judge this the Fast tier without audio. Revision unspecified.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 Fast",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Veo 3.1",
+        "Veo 3"
+      ],
+      "conditions": {
+        "audio": false,
+        "snapshot_date": "2025-10-30"
+      },
+      "credibility": "C",
+      "credibility_rationale": "Evaluator's own dated arena announcement with human blind votes, but the post states neither Elo nor sample size nor CI. Rank-only frozen snapshot from 2025-10-30.",
+      "evaluation_method": "Same Artificial Analysis Video Arena; human blind votes. Explicitly in testing without audio. Dated board announcement; rank only.",
+      "evaluator": "Artificial Analysis Video Arena",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "No Elo figure is published in the post.",
+        "Sample size and CI not stated.",
+        "T2V sentence in the same post is about Veo 3.1, not Fast, and is omitted.",
+        "Revision unspecified.",
+        "Not the 2026-08-26 live board."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall I2V preference rank. First/last frame is mentioned as a product feature, not scored.",
+          "task_type": "I2V",
+          "value": 2.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/methodology",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2025-10-30",
+        "publisher": "Artificial Analysis (@ArtificialAnlys)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://x.com/ArtificialAnlys/status/1983938159839998249",
+        "summary": "Frozen 2025-10-30 Artificial Analysis Video Arena announcement: Veo 3.1 Fast ranked #2 on image-to-video without audio. No Elo in the post. The T2V sentence is about Veo 3.1, not Fast, and is not recorded as a Fast measurement.",
+        "verbatim_quote": "In our testing (without audio), Veo 3.1 Fast secured #2 in Image to Video, outperforming the regular Veo 3.1 which placed #5, and the older Veo 3 which now ranks at #16. However, for Text to Video, Veo 3 maintains its #2 position while Veo 3.1 drops to #5."
+      },
+      "record_id": "aa-x-i2v-without-audio-veo-3.1-fast-2025-10-30",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": null,
+        "sample_size_stated_by_source": false
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Text-to-Video",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Arena names veo-3.1-fast-audio, not veo-3.1-fast. Notes keep it as a Fast-family entry with audio and do not treat it as the bare OpenRouter id.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-fast-audio",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "gemini-omni-flash",
+        "flux-3-video",
+        "dreamina-seedance-2.0-720p",
+        "minimax-h3",
+        "sora-2-pro",
+        "veo-3.1-audio",
+        "veo-3.1-audio-1080p",
+        "grok-imagine-video-720p"
+      ],
+      "conditions": {
+        "audio": true,
+        "snapshot_last_updated": "2026-08-14",
+        "snapshot_url": "https://raw.githubusercontent.com/oolong-tea-2026/arena-ai-leaderboards/main/data/2026-08-26/text-to-video.json"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Arena.ai human blind side-by-side Elo/Bradley-Terry with stated 95% CI and stated vote count 39,441. Snapshot of a live board. Named variant is an audio Fast sibling, not veo-3.1-fast.",
+      "evaluation_method": "Human blind side-by-side votes; Elo / Bradley-Terry. CI is the 95% interval (ci field).",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH versus veo-3.1-fast: source id is veo-3.1-fast-audio.",
+        "Live/dynamic board; snapshot last_updated Aug 14, 2026.",
+        "No per-scene dimension scores.",
+        "Live pages required login; numbers are from the machine-readable snapshot."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall preference only; no scene-axis split on this board.",
+          "task_type": "T2V",
+          "value": 1361.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Holistic text-to-video rank on the same overall-preference board.",
+          "task_type": "T2V",
+          "value": 11.0
+        }
+      ],
+      "protocol_url": null,
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai (formerly LMSYS Chatbot Arena)",
+        "retrieved_at": "2026-08-26T02:50:08Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/text-to-video",
+        "summary": "Arena.ai text-to-video snapshot (last_updated Aug 14, 2026; fetched 2026-08-26) for Google veo-3.1-fast-audio: rank 11, Elo 1361.0, ci 10.0, votes 39441.",
+        "verbatim_quote": "\"rank\": 11, \"model\": \"veo-3.1-fast-audio\", \"vendor\": \"Google\", \"score\": 1361.0, \"ci\": 10.0, \"votes\": 39441"
+      },
+      "record_id": "arena-ai-t2v-veo-3.1-fast-audio-2026-08-26",
+      "statistics": {
+        "confidence_interval": "±10",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 39441,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Text-to-Video",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Arena names veo-3.1-fast-audio-1080p, not veo-3.1-fast. Notes keep it as a Fast-family 1080p audio sibling and do not treat it as the bare OpenRouter id.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-fast-audio-1080p",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "gemini-omni-flash",
+        "flux-3-video",
+        "dreamina-seedance-2.0-720p",
+        "minimax-h3",
+        "sora-2-pro",
+        "veo-3.1-audio",
+        "veo-3.1-audio-1080p",
+        "grok-imagine-video-720p"
+      ],
+      "conditions": {
+        "audio": true,
+        "resolution": "1080p",
+        "snapshot_last_updated": "2026-08-14",
+        "snapshot_url": "https://raw.githubusercontent.com/oolong-tea-2026/arena-ai-leaderboards/main/data/2026-08-26/text-to-video.json"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Arena.ai human blind side-by-side Elo/Bradley-Terry with stated 95% CI and stated vote count 25,771. Snapshot of a live board. Named variant is a 1080p audio Fast sibling, not veo-3.1-fast.",
+      "evaluation_method": "Human blind side-by-side votes; Elo / Bradley-Terry. CI is the 95% interval (ci field).",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH versus veo-3.1-fast: source id is veo-3.1-fast-audio-1080p.",
+        "Live/dynamic board; snapshot last_updated Aug 14, 2026.",
+        "No per-scene dimension scores.",
+        "Live pages required login; numbers are from the machine-readable snapshot."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall preference only; no scene-axis split on this board.",
+          "task_type": "T2V",
+          "value": 1358.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Holistic text-to-video rank on the same overall-preference board.",
+          "task_type": "T2V",
+          "value": 12.0
+        }
+      ],
+      "protocol_url": null,
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai (formerly LMSYS Chatbot Arena)",
+        "retrieved_at": "2026-08-26T02:50:08Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/text-to-video",
+        "summary": "Arena.ai text-to-video snapshot (last_updated Aug 14, 2026; fetched 2026-08-26) for Google veo-3.1-fast-audio-1080p: rank 12, Elo 1358.0, ci 10.0, votes 25771.",
+        "verbatim_quote": "\"rank\": 12, \"model\": \"veo-3.1-fast-audio-1080p\", \"vendor\": \"Google\", \"score\": 1358.0, \"ci\": 10.0, \"votes\": 25771"
+      },
+      "record_id": "arena-ai-t2v-veo-3.1-fast-audio-1080p-2026-08-26",
+      "statistics": {
+        "confidence_interval": "±10",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 25771,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Image-to-Video",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Arena names veo-3.1-fast-audio, not veo-3.1-fast. Notes keep it as a Fast-family entry with audio and do not treat it as the bare OpenRouter id.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-fast-audio",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "minimax-h3",
+        "dreamina-seedance-2.5-720p",
+        "dreamina-seedance-2.0-720p",
+        "gemini-omni-flash",
+        "grok-imagine-video-1.5-720p",
+        "veo-3.1-audio",
+        "veo-3.1-audio-1080p"
+      ],
+      "conditions": {
+        "audio": true,
+        "snapshot_last_updated": "2026-08-14",
+        "snapshot_url": "https://raw.githubusercontent.com/oolong-tea-2026/arena-ai-leaderboards/main/data/2026-08-26/image-to-video.json"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Arena.ai human blind side-by-side Elo/Bradley-Terry with stated 95% CI and stated vote count 99,932. Snapshot of a live board. Named variant is an audio Fast sibling, not veo-3.1-fast.",
+      "evaluation_method": "Human blind side-by-side votes; Elo / Bradley-Terry. CI is the 95% interval (ci field).",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH versus veo-3.1-fast: source id is veo-3.1-fast-audio.",
+        "Live/dynamic board; snapshot last_updated Aug 14, 2026.",
+        "No per-scene dimension scores.",
+        "Live pages required login; numbers are from the machine-readable snapshot."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall I2V preference; identity/reference only as implied by animating a still. No dimension split.",
+          "task_type": "I2V",
+          "value": 1384.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Holistic image-to-video rank on the same overall-preference board.",
+          "task_type": "I2V",
+          "value": 12.0
+        }
+      ],
+      "protocol_url": null,
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai (formerly LMSYS Chatbot Arena)",
+        "retrieved_at": "2026-08-26T02:50:08Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/image-to-video",
+        "summary": "Arena.ai image-to-video snapshot (last_updated Aug 14, 2026; fetched 2026-08-26) for Google veo-3.1-fast-audio: rank 12, Elo 1384.0, ci 9.0, votes 99932.",
+        "verbatim_quote": "\"rank\": 12, \"model\": \"veo-3.1-fast-audio\", \"vendor\": \"Google\", \"score\": 1384.0, \"ci\": 9.0, \"votes\": 99932"
+      },
+      "record_id": "arena-ai-i2v-veo-3.1-fast-audio-2026-08-26",
+      "statistics": {
+        "confidence_interval": "±9",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 99932,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Image-to-Video",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Arena names veo-3.1-fast-audio-1080p, not veo-3.1-fast. Notes keep it as a Fast-family 1080p audio sibling and do not treat it as the bare OpenRouter id.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-fast-audio-1080p",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "minimax-h3",
+        "dreamina-seedance-2.5-720p",
+        "dreamina-seedance-2.0-720p",
+        "gemini-omni-flash",
+        "grok-imagine-video-1.5-720p",
+        "veo-3.1-audio",
+        "veo-3.1-audio-1080p"
+      ],
+      "conditions": {
+        "audio": true,
+        "resolution": "1080p",
+        "snapshot_last_updated": "2026-08-14",
+        "snapshot_url": "https://raw.githubusercontent.com/oolong-tea-2026/arena-ai-leaderboards/main/data/2026-08-26/image-to-video.json"
+      },
+      "credibility": "A",
+      "credibility_rationale": "Independent Arena.ai human blind side-by-side Elo/Bradley-Terry with stated 95% CI and stated vote count 54,455. Snapshot of a live board. Named variant is a 1080p audio Fast sibling, not veo-3.1-fast.",
+      "evaluation_method": "Human blind side-by-side votes; Elo / Bradley-Terry. CI is the 95% interval (ci field).",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH versus veo-3.1-fast: source id is veo-3.1-fast-audio-1080p.",
+        "Live/dynamic board; snapshot last_updated Aug 14, 2026.",
+        "No per-scene dimension scores.",
+        "Live pages required login; numbers are from the machine-readable snapshot."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Overall I2V preference; identity/reference only as implied by animating a still. No dimension split.",
+          "task_type": "I2V",
+          "value": 1371.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Holistic image-to-video rank on the same overall-preference board.",
+          "task_type": "I2V",
+          "value": 14.0
+        }
+      ],
+      "protocol_url": null,
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai (formerly LMSYS Chatbot Arena)",
+        "retrieved_at": "2026-08-26T02:50:08Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/image-to-video",
+        "summary": "Arena.ai image-to-video snapshot (last_updated Aug 14, 2026; fetched 2026-08-26) for Google veo-3.1-fast-audio-1080p: rank 14, Elo 1371.0, ci 10.0, votes 54455.",
+        "verbatim_quote": "\"rank\": 14, \"model\": \"veo-3.1-fast-audio-1080p\", \"vendor\": \"Google\", \"score\": 1371.0, \"ci\": 10.0, \"votes\": 54455"
+      },
+      "record_id": "arena-ai-i2v-veo-3.1-fast-audio-1080p-2026-08-26",
+      "statistics": {
+        "confidence_interval": "±10",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 54455,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Curious Refuge Labs",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Page uses Veo 3.1 Fast, distinct from their companion Veo 3.1 Quality review. High on the public Fast name. No API snapshot, so revision unspecified.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 Fast",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Veo 3.1 Quality"
+      ],
+      "conditions": {
+        "non_affiliated_claim": true,
+        "scale": "likert-1-10"
+      },
+      "credibility": "C",
+      "credibility_rationale": "Named five-category Labs protocol on a 1-10 scale with human editorial scoring. Sample size and CI are not stated. Mixed generation examples with no T2V/I2V split. Only qualitative comparison to Veo 3.1 Quality.",
+      "evaluation_method": "Human editorial scoring by Curious Refuge Labs across five categories on the source /10 scale. Page states: This Review is Non-Biased and Not Affiliated with Google. Mixed generation examples; score not split into T2V vs I2V.",
+      "evaluator": "Curious Refuge Labs",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Sample size not stated; clip count not inferred.",
+        "CI not stated.",
+        "Labs score is not split into T2V vs I2V.",
+        "No other model numeric scores on this page; Quality comparison is qualitative only.",
+        "Physics, Chinese text, lip-sync, reference, and first/last frame not scored.",
+        "No API snapshot; revision unspecified."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Prompt Adherence",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Source category is Prompt Adherence on the Labs /10 scale.",
+          "task_type": "ANY",
+          "value": 7.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Temporal Consistency",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Notes map temporal consistency plus face stability in the write-up to identity/human consistency. Physics, Chinese text, lip-sync, reference, and first/last frame were not scored.",
+          "task_type": "ANY",
+          "value": 6.5
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Visual Fidelity",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Visual Fidelity is overall look; notes list cinematic quality among scored scenes, not a physics or text axis.",
+          "task_type": "ANY",
+          "value": 7.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Motion Quality",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Source category is Motion Quality.",
+          "task_type": "ANY",
+          "value": 6.9
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Style & Cinematic Realism",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Source category is Style & Cinematic Realism.",
+          "task_type": "ANY",
+          "value": 6.5
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Total Curious Refuge Labs Score",
+          "metric_scale_id": "likert-1-10",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Holistic Labs total across the five categories. The Labs score is not split into T2V vs I2V.",
+          "task_type": "ANY",
+          "value": 6.9
+        }
+      ],
+      "protocol_url": "https://curiousrefuge.com/blog/veo-31-fast-ai-video-generator-review",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2025-10-23",
+        "publisher": "Curious Refuge (Tyler Smith)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "third_party_benchmark",
+        "source_url": "https://curiousrefuge.com/blog/veo-31-fast-ai-video-generator-review",
+        "summary": "Curious Refuge Labs human editorial review of Veo 3.1 Fast (23 Oct 2025): five /10 category scores plus total 6.9/10. Page states the review is non-biased and not affiliated with Google. Sample size not stated.",
+        "verbatim_quote": "In our Curious Refuge Labs™ review, Veo 3.1 Fast was scored across five categories: Prompt Adherence, Temporal Consistency, Visual Fidelity, Motion Quality, and Style & Cinematic Realism. The average scores were: Prompt Adherence: 7.3/10 Temporal Consistency: 6.5/10 Visual Fidelity: 7.1/10 Motion Quality: 6.9/10 Style & Cinematic Realism: 6.5/10 Total Curious Refuge Labs™ Score: 6.9/10"
+      },
+      "record_id": "curious-refuge-labs-veo-3.1-fast-2025-10-23",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": null,
+        "sample_size_stated_by_source": false
+      }
+    },
+    {
+      "benchmark_name": "FilmBench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "LOW",
+        "mapping_rationale": "Exact name used is Veo 3.1 (also Veo-3.1), not Veo 3.1 Fast. Notes classify this as VERSION_MISMATCH and keep the record on purpose.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0",
+        "HappyHorse 1.1",
+        "HappyHorse 1.0",
+        "Kling 3.0 Omni",
+        "Kling 3.0",
+        "Vidu Q3 Pro",
+        "Grok Imagine Video",
+        "Hailuo 2.3"
+      ],
+      "conditions": {
+        "one_video_per_prompt": true,
+        "setup": "official APIs / public checkpoints with default settings"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Independent academic FilmBench with stated T2V N=515, one video per prompt, automatic FilmOps rater (Spearman ρ=0.95 vs human experts at model level). Measures Veo 3.1, not Fast. CI not stated.",
+      "evaluation_method": "Automatic FilmOps agent; official APIs / public checkpoints with default settings, generating one video per prompt. Model-level ranking vs human experts at Spearman ρ = 0.95 (T2V). Scale 0-100 as published.",
+      "evaluator": "Automatic FilmOps agent",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH: Veo 3.1, not Veo 3.1 Fast.",
+        "CI not stated.",
+        "Chinese text, lip-sync, first/last frame, and commercial/product not reported.",
+        "Automatic rater, not human scores for these Veo numbers."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "T2V overall",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 7 overall T2V score is a holistic aggregate, not a single scene axis.",
+          "task_type": "T2V",
+          "value": 80.8
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Instruction Following",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 7 Instruction Following. Notes also list camera motion/shot craft under this axis; the recorded scenario is prompt adherence from the axis name.",
+          "task_type": "T2V",
+          "value": 78.5
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Temporal Continuity",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Notes map temporal continuity to identity/human consistency (character-appearance, temporal).",
+          "task_type": "T2V",
+          "value": 90.4
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Aesthetic Quality",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "NONE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 7 Aesthetic Quality on the published 0-100 film-quality axis.",
+          "task_type": "T2V",
+          "value": 73.6
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2607.24241v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-07-27",
+        "publisher": "arXiv:2607.24241v1 (Alibaba Group, Moku Lab / Hujing, Beijing Film Academy)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2607.24241v1",
+        "summary": "FilmBench Table 7 T2V per-axis scores (0-100) for Veo 3.1, not Fast: overall 80.8, Instruction Following 78.5, Temporal Continuity 90.4, Aesthetic Quality 73.6. Stated N=515 prompts, one video per prompt.",
+        "verbatim_quote": "| Veo 3.1 | 80.8 | 78.5 | 90.4 | 73.6 | Caption: Per-axis scores (0–100) by model, T2V (N=515)."
+      },
+      "record_id": "filmbench-t2v-veo-3.1-2026-07-27",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 515,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "FilmBench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "LOW",
+        "mapping_rationale": "Exact name used is Veo 3.1 (also Veo-3.1), not Veo 3.1 Fast. Notes classify this as VERSION_MISMATCH and keep the record on purpose.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0",
+        "HappyHorse 1.1",
+        "HappyHorse 1.0",
+        "Kling 3.0 Omni",
+        "Kling 3.0",
+        "Vidu Q3 Pro",
+        "Grok Imagine Video",
+        "Hailuo 2.3",
+        "Vidu Q2 Pro"
+      ],
+      "conditions": {
+        "one_video_per_prompt": true,
+        "setup": "official APIs / public checkpoints with default settings"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Independent academic FilmBench with stated R2V N=654, one video per prompt, automatic FilmOps rater (Spearman ρ=0.96 vs human experts at model level). Measures Veo 3.1, not Fast. CI not stated.",
+      "evaluation_method": "Automatic FilmOps agent; official APIs / public checkpoints with default settings, generating one video per prompt. Model-level ranking vs human experts at Spearman ρ = 0.96 (R2V). Scale 0-100 as published. Task is reference-to-video, not image-to-video.",
+      "evaluator": "Automatic FilmOps agent",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH: Veo 3.1, not Veo 3.1 Fast.",
+        "CI not stated.",
+        "R2V is not image-to-video.",
+        "Chinese text, lip-sync, first/last frame, and commercial/product not reported."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "R2V overall",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 8 overall R2V score is a holistic aggregate. Task is reference-to-video, not image-to-video.",
+          "task_type": "R2V",
+          "value": 78.2
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Instruction Following",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 8 Instruction axis. Notes also list camera motion/shot craft under Instruction Following.",
+          "task_type": "R2V",
+          "value": 74.7
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Temporal Continuity",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Notes map temporal continuity to identity/human consistency (character-appearance, temporal).",
+          "task_type": "R2V",
+          "value": 89.2
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Aesthetic Quality",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 8 Aesthetic Quality on the published 0-100 film-quality axis.",
+          "task_type": "R2V",
+          "value": 70.8
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2607.24241v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-07-27",
+        "publisher": "arXiv:2607.24241v1 (Alibaba Group, Moku Lab / Hujing, Beijing Film Academy)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2607.24241v1",
+        "summary": "FilmBench Table 8 R2V per-axis scores (0-100) for Veo 3.1, not Fast: overall 78.2, Instruction 74.7, Temporal 89.2, Aesthetic 70.8. Stated N=654. R2V kept distinct from image-to-video.",
+        "verbatim_quote": "| Veo 3.1 | 78.2 | 74.7 | 89.2 | 70.8 | Caption: Per-axis scores (0–100) by model, R2V (N=654)."
+      },
+      "record_id": "filmbench-r2v-veo-3.1-2026-07-27",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 654,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "FilmBench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1-fast",
+        "is_alias": false,
+        "logical_name": "veo-3.1-fast-openrouter",
+        "mapping_confidence": "LOW",
+        "mapping_rationale": "Exact name used is Veo 3.1, not Veo 3.1 Fast. Notes classify this as VERSION_MISMATCH and keep the record on purpose.",
+        "model_id": "google/veo-3.1-fast",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Vidu Q2 Pro"
+      ],
+      "conditions": {
+        "one_video_per_prompt": true,
+        "setup": "official APIs / public checkpoints with default settings"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Independent academic FilmBench R2V visual-following table for Veo 3.1 (not Fast), automatic FilmOps rater. Table 9 caption in the notes does not restate sample size or CI.",
+      "evaluation_method": "Automatic FilmOps agent; official APIs / public checkpoints with default settings, generating one video per prompt. R2V visual following axes on the published 0-100 scale.",
+      "evaluator": "Automatic FilmOps agent",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "VERSION_MISMATCH: Veo 3.1, not Veo 3.1 Fast.",
+        "Table 9 caption in the notes does not restate N; sample size not recorded here.",
+        "CI not stated.",
+        "R2V is not image-to-video."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "scene-space",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "reference_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 9 R2V visual following scene-space is a reference-following axis.",
+          "task_type": "R2V",
+          "value": 74.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "character-appearance",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "identity",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes map character-appearance to identity.",
+          "task_type": "R2V",
+          "value": 73.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "prop-reference",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "reference_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 9 prop-reference is a reference-following axis.",
+          "task_type": "R2V",
+          "value": 44.3
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2607.24241v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-07-27",
+        "publisher": "arXiv:2607.24241v1 (Alibaba Group, Moku Lab / Hujing, Beijing Film Academy)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_assistant",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2607.24241v1",
+        "summary": "FilmBench Table 9 R2V visual following for Veo 3.1, not Fast: scene-space 74.3, character-appearance 73.3, prop-reference 44.3. Table 9 caption in the notes does not restate N.",
+        "verbatim_quote": "| Veo 3.1 | 74.3 | 73.3 | 44.3 |"
+      },
+      "record_id": "filmbench-r2v-visual-following-veo-3.1-2026-07-27",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": null,
+        "sample_size_stated_by_source": false
+      }
+    },
+    {
+      "benchmark_name": "V-ReasonBench",
+      "benchmark_version": "2511.16668v1",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Source names Veo-3.1 and cites Google DeepMind’s Veo product page, not an API snapshot. No generate-001 / preview / Fast distinction. Same generation as veo-3.1, not a different numbered version.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo-3.1",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Sora-2",
+        "Hailuo-02",
+        "Vidu-Q2",
+        "Kling-2.5-Turbo-Pro",
+        "Seedance-1.0-Lite"
+      ],
+      "conditions": {
+        "n_generated_videos": 9780,
+        "n_reasoning_instances": 326,
+        "pass_at_k": 5,
+        "scoring": "mask-based, grid-based, and Gemini-2.5-Pro VLM judge converted to pass/fail",
+        "videos_per_instance_model": 5
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic paper arXiv:2511.16668v1 with a stated pass@5 protocol, named comparison set, and stated n=326 instances / 9,780 videos. Automatic primary score; human alignment is validation only. Model snapshot is product-page Veo-3.1, not an API revision. No CI.",
+      "evaluation_method": "Image-to-video Chain-of-Frame (initial image + instruction → video; last frame scored). Automatic mask-based, grid-based, and Gemini-2.5-Pro VLM judge converted to pass/fail; pass@5.",
+      "evaluator": "Luo, Zhao, Lin et al.; Gemini-2.5-Pro VLM judge",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "No generate-001 / preview / Fast distinction; citation is the Veo product page.",
+        "No confidence interval stated.",
+        "Human alignment is validation, not the primary score.",
+        "Last-frame evaluation is the scoring method, not a published first/last-frame interpolation metric."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Structured Problem-Solving pass@5",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Structured Problem-Solving pass@5 on Chain-of-Frame I2V (initial image + instruction). Mapped to prompt_adherence as structured instruction following; not a dedicated prompt-adherence subscore name.",
+          "task_type": "I2V",
+          "value": 26.29
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Spatial Cognition pass@5",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Spatial Cognition pass@5. Notes list motion among this paper’s scenes; spatial cognition is not a motion-only label.",
+          "task_type": "I2V",
+          "value": 26.47
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Pattern-based Inference pass@5",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Pattern-based Inference pass@5. No notes mapping of this dimension onto a specific router scene, so generic.",
+          "task_type": "I2V",
+          "value": 10.91
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Physical Dynamics pass@5",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Physical Dynamics pass@5, the paper’s physics dimension.",
+          "task_type": "I2V",
+          "value": 33.33
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Average pass@5",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Average pass@5 across dimensions. Holistic; last-frame scoring is the method, not a first/last-frame interpolation subscore.",
+          "task_type": "I2V",
+          "value": 24.25
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2511.16668",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2025-11-20",
+        "publisher": "Luo, Zhao, Lin et al. (NUS / HKUST(GZ) / HKU / USYD / CUHK / LIGHTSPEED)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2511.16668",
+        "summary": "V-ReasonBench image-to-video Chain-of-Frame eval of Veo-3.1: automatic mask/grid/Gemini-2.5-Pro VLM judge converted to pass/fail pass@5. Table 2 reports Structured Problem-Solving 26.29, Spatial Cognition 26.47, Pattern-based Inference 10.91, Physical Dynamics 33.33, Average 24.25. 326 reasoning instances, 5 videos per instance-model pair, 9,780 videos. Compared with Sora-2, Hailuo-02, Vidu-Q2, Kling-2.5-Turbo-Pro, Seedance-1.0-Lite.",
+        "verbatim_quote": "Veo-3.1 [14] 26.29 26.47 10.91 33.33 24.25 A pass@5 score for each model is calculated within each dimension"
+      },
+      "record_id": "v-reasonbench-veo-3.1-arxiv-2511.16668v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 326,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "What-If World",
+      "benchmark_version": "2605.27589v1",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo 3.1, closed-source, accessed via kie.ai API; bib is “Veo 3.1 technical report”. API snapshot not given.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Grok Imagine",
+        "Seedance 2.0",
+        "Seedance 1.5",
+        "Kling 3.0",
+        "Cosmos-Predict2",
+        "HunyuanVideo1.5",
+        "Wan2.2",
+        "CogVideoX1.5"
+      ],
+      "conditions": {
+        "access": "kie.ai API",
+        "judge": "Gemini 3.1-Pro APEO",
+        "n_prompt_pairs": 319,
+        "videos_per_prompt": 1
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic paper arXiv:2605.27589v1 with a stated APEO protocol, n=319 prompt pairs, and named comparisons. Automatic VLM judge; 421 human annotations are judge validation (82.30%), not the model score. kie.ai access, API snapshot unspecified. No CI on model scores.",
+      "evaluation_method": "Image-to-video with a shared real initial frame and contrastive prompt pair. Automatic VLM judge (Gemini 3.1-Pro) on APEO; pass rates (%). Validated against 421 human annotations.",
+      "evaluator": "Cai, Song, Zhang et al.; Gemini 3.1-Pro",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "API snapshot not given; accessed via kie.ai.",
+        "No CI on model scores.",
+        "Unlabeled Table 2 values 66.8, 69.7, 70.1, 70.5, 44.8 were not named in the notes and were dropped.",
+        "Primitive slices Spatial Alignment 60.8, Force/Degree 59.6, Temporal Sequencing 40.5, Surface Friction 34.2, Material/Medium 64.2 have no verbatim quote and were dropped.",
+        "82.30% is judge–human agreement, not a Veo 3.1 score."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "paired APEO p Avg",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Primary paired metric p Avg 50.9% is a holistic pass rate across APEO, not a single-scene subscore.",
+          "task_type": "I2V",
+          "value": 50.9
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "paired APEO rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 rank 2 by paired p Avg; holistic leaderboard rank.",
+          "task_type": "I2V",
+          "value": 2.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "single-video average pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Single-video average 68.9 is a holistic pass rate, not a scene slice.",
+          "task_type": "I2V",
+          "value": 68.9
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Physics paired pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes identify 40.1 as Physics paired; Table 2 contains 40.1.",
+          "task_type": "I2V",
+          "value": 40.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Adherence paired pass rate",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Notes identify 48.0 as Adherence paired; Table 2 contains 48.0.",
+          "task_type": "I2V",
+          "value": 48.0
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2605.27589v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-05-26",
+        "publisher": "Cai, Song, Zhang et al. (UCLA / University of Tennessee / Amazon)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2605.27589v1",
+        "summary": "What-If World I2V contrastive-prompt eval of Veo 3.1 via kie.ai. Automatic Gemini 3.1-Pro APEO judge. Table 2 pass rates: paired APEO / p Avg 50.9 (rank 2), single-video average 68.9, Physics paired 40.1, Adherence paired 48.0. n=319 prompt pairs, one video per prompt. Unlabeled Table 2 cells and primitive slices without a quote were not recorded.",
+        "verbatim_quote": "Veo 3.1 ∗ | 66.8 | 48.0 | 69.7 | 40.1 | 70.1 | 70.5 | 44.8 | 68.9 | 50.9 | 2 All scores are pass rates (%). Ranked by the primary paired metric p Avg, however, the ordering shifts to Grok Imagine (51.7%), Veo 3.1 (50.9%), and Seedance 2.0 (41.8%)"
+      },
+      "record_id": "what-if-world-veo-3.1-arxiv-2605.27589v1",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 319,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "WorldReasonBench",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "LOW",
+        "mapping_rationale": "Leaderboard row is Veo3.1-Fast. Abstract also says Veo 3.1 as a class, but the scored row is the Fast SKU, not standard veo-3.1. Kept as a mismatch on purpose.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo3.1-Fast",
+        "source_model_version": "Fast",
+        "version_match": "VERSION_MISMATCH",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance2.0",
+        "Sora2",
+        "Kling",
+        "Wan2.6",
+        "HunyuanVideo-1.5",
+        "Wan2.2-14B",
+        "LongCat-Video",
+        "Cosmos-Predict2.5",
+        "LTX2.3",
+        "UniVideo"
+      ],
+      "conditions": {
+        "closed_source": true,
+        "n_annotators": 15,
+        "n_generators": 11,
+        "n_test_cases": 436
+      },
+      "credibility": "C",
+      "credibility_rationale": "Independent GitHub benchmark with a stated ScorePR/S(v) protocol, 436 cases, and ~6K expert pairs, but the scored row is Veo3.1-Fast (VERSION_MISMATCH to veo-3.1). No CI on ScorePR. Unlabeled columns not used.",
+      "evaluation_method": "Image-to-video given an initial state and an action. Automatic ScorePR / AccQA plus human Elo from expert pairwise ratings. Protocol: ScorePR and S(v); 436 cases; ~6K expert pairs.",
+      "evaluator": "UniX-AI-Lab",
+      "human_or_automatic": "mixed",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Scored model is Veo3.1-Fast, not standard veo-3.1.",
+        "No CI on ScorePR.",
+        "ScorePR columns 55.0, 35.1, 25.7, 28.6 and Elo-table cells 1151, 4, 36.0, 0 are unlabeled in the notes and were dropped."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "ScorePR",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "First highlighted ScorePR % cell for Veo3.1-Fast is 35.3; holistic process-aware reasoning, not a scene subscore.",
+          "task_type": "I2V",
+          "value": 35.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Human Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Human Elo table cell 1253 is overall expert-pairwise Elo, not a scene subscore.",
+          "task_type": "I2V",
+          "value": 1253.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Both quoted tables list rank 2 for Veo3.1-Fast.",
+          "task_type": "I2V",
+          "value": 2.0
+        }
+      ],
+      "protocol_url": "https://github.com/UniX-AI-Lab/WorldReasonBench/",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-08-26",
+        "publisher": "UniX-AI-Lab",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "independent_benchmark",
+        "source_url": "https://github.com/UniX-AI-Lab/WorldReasonBench/",
+        "summary": "WorldReasonBench README leaderboard for Veo3.1-Fast (not standard veo-3.1): ScorePR 35.3%, Human Elo 1253, rank 2. I2V given an initial state and an action. 436 test cases, ~6K expert pairs, 15 annotators, 11 generators. Unlabeled ScorePR/Elo table columns were not recorded.",
+        "verbatim_quote": "| 2 | Veo3.1-Fast | Closed | 35.3 | 55.0 | 35.1 | 25.7 | 28.6 | Score PR (Process-aware Reasoning, %) | 2 | Veo3.1-Fast | 1253 | 1151 | 4 | 36.0 | 0 | 35.3 |"
+      },
+      "record_id": "worldreasonbench-veo3.1-fast-2026-08-26",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": "~6K",
+        "human_eval_size_stated_by_source": true,
+        "sample_size": 436,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Text-to-Video Arena",
+      "benchmark_version": "2026-08-14",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named veo-3.1 with an audio/resolution suffix; snapshot not given. Closest row to google/veo-3.1 is veo-3.1-audio. Fast rows are a different SKU and were not used.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-audio",
+        "source_model_version": "audio",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "gemini-omni-flash",
+        "flux-3-video",
+        "dreamina-seedance-2.0-720p",
+        "dreamina-seedance-2.5-720p",
+        "muse-video",
+        "minimax-h3",
+        "happyhorse-1.0",
+        "sora-2-pro",
+        "grok-imagine-video-720p",
+        "wan2.7-t2v",
+        "sora-2",
+        "veo-3-audio",
+        "veo-3"
+      ],
+      "conditions": {
+        "audio": true,
+        "n_models": 45,
+        "n_votes_board": 616845,
+        "n_votes_row": 13743,
+        "rank_spread": "8 16"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live Arena.ai T2V leaderboard with stated blind pairwise protocol, 13,743 votes for this row, and stated CI ±14. Audio suffix; API snapshot unspecified. Dynamic page dated 14 Aug 2026, read 26 Aug 2026.",
+      "evaluation_method": "Human blind pairwise Arena score (Elo-style) on text-to-video.",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Row is veo-3.1-audio, not an API snapshot of google/veo-3.1.",
+        "Live board (dynamic).",
+        "Overall preference, not a lip-sync subscore.",
+        "veo-3.1-fast-audio rows were not used."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena score",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Blind pairwise Arena score is overall preference. Audio row is not a lip-sync subscore.",
+          "task_type": "T2V",
+          "value": 1364.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 9 for veo-3.1-audio.",
+          "task_type": "T2V",
+          "value": 9.0
+        }
+      ],
+      "protocol_url": "https://arena.ai/leaderboard/text-to-video",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai (formerly LMArena)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/text-to-video",
+        "summary": "Arena.ai Text-to-Video live board 14 Aug 2026, read 26 Aug 2026. veo-3.1-audio (Google, proprietary) Arena score 1364 ±14, rank 9 (spread 8–16), 13,743 votes. Board 616,845 votes, 45 models. Closest named row to google/veo-3.1; Fast rows not used.",
+        "verbatim_quote": "| 9 | 8 16 | veo-3.1-audio … | 1364 ±14 | 13,743 |"
+      },
+      "record_id": "lmarena-t2v-veo-3.1-audio-2026-08-14",
+      "statistics": {
+        "confidence_interval": "±14",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 13743,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Arena.ai Image-to-Video Arena",
+      "benchmark_version": "2026-08-14",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named veo-3.1 with an audio suffix; snapshot not given. Same mapping as the T2V veo-3.1-audio row: closest to google/veo-3.1, not Fast.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "veo-3.1-audio",
+        "source_model_version": "audio",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "minimax-h3",
+        "dreamina-seedance-2.5-720p",
+        "dreamina-seedance-2.0-720p",
+        "gemini-omni-flash",
+        "grok-imagine-video-1.5-720p",
+        "flux-3-video-20260811",
+        "happyhorse-1.0",
+        "wan2.7-i2v",
+        "grok-imagine-video-720p",
+        "vidu-q3-pro",
+        "kling-v3-pro",
+        "veo-3-audio"
+      ],
+      "conditions": {
+        "audio": true,
+        "n_models": 45,
+        "n_votes_board": 1737792,
+        "n_votes_row": 25156,
+        "rank_spread": "10 13"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live Arena.ai I2V leaderboard with stated blind pairwise protocol, 25,156 votes for this row, and stated CI ±11. Audio suffix; API snapshot unspecified. Dynamic.",
+      "evaluation_method": "Human blind pairwise Arena score on image-to-video.",
+      "evaluator": "Arena.ai",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Row is veo-3.1-audio, not an API snapshot of google/veo-3.1.",
+        "Live board (dynamic).",
+        "Overall I2V preference, not a first-frame interpolation subscore."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena score",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Blind pairwise I2V Arena score is overall preference, not a first-frame or reference subscore.",
+          "task_type": "I2V",
+          "value": 1397.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 10 for veo-3.1-audio.",
+          "task_type": "I2V",
+          "value": 10.0
+        }
+      ],
+      "protocol_url": "https://arena.ai/leaderboard/image-to-video",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-14",
+        "publisher": "Arena.ai",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://arena.ai/leaderboard/image-to-video",
+        "summary": "Arena.ai Image-to-Video live board 14 Aug 2026, read 26 Aug 2026. veo-3.1-audio Arena score 1397 ±11, rank 10 (spread 10–13), 25,156 votes. Board 1,737,792 votes, 45 models.",
+        "verbatim_quote": "| 10 | 10 13 | veo-3.1-audio … | 1397 ±11 | 25,156 |"
+      },
+      "record_id": "lmarena-i2v-veo-3.1-audio-2026-08-14",
+      "statistics": {
+        "confidence_interval": "±11",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 25156,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Text-to-Video Arena (With Audio)",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo 3.1, not Fast/Lite. Creator Google; released Jan 2026. API snapshot not given.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Wan 3.0",
+        "Gemini Omni Flash",
+        "MiniMax H3",
+        "Dreamina Seedance 2.0 720p",
+        "Wan2.7-260612",
+        "HappyHorse-1.1/1.0",
+        "Kling 3.0 1080p (Pro)",
+        "SkyReels V4",
+        "Veo 3.1 Lite",
+        "Veo 3.1 Fast",
+        "Vidu Q3 Pro",
+        "grok-imagine-video"
+      ],
+      "conditions": {
+        "audio": true,
+        "model_released": "Jan 2026",
+        "n_samples": 9222,
+        "rank_range": "12-16"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live Artificial Analysis T2V With Audio arena with stated blind comparisons, 9,222 samples, and 95% CI -6/6. Named Veo 3.1 not Fast/Lite; snapshot unspecified. Dynamic; no board publication date in the notes.",
+      "evaluation_method": "Human blind comparisons in the Artificial Analysis Video Arena, text-to-video With Audio board.",
+      "evaluator": "Artificial Analysis",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Live board (dynamic); no board publication date in the notes.",
+        "API snapshot unspecified.",
+        "Overall preference on the With Audio board, not a lip-sync subscore.",
+        "$24.00/min was not recorded: no allowed per-minute USD metric_scale_id; not converted to usd-per-video."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "With-audio T2V Arena Elo is overall human preference, not a lip-sync subscore.",
+          "task_type": "T2V",
+          "value": 1088.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 13 for Veo 3.1.",
+          "task_type": "T2V",
+          "value": 13.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/video/leaderboard/text-to-video",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/video/leaderboard/text-to-video",
+        "summary": "Artificial Analysis Text-to-Video With Audio live board, read 26 Aug 2026. Veo 3.1 (not Lite/Fast) Arena Elo 1,088, rank 13 (range 12–16), 9,222 samples, 95% CI -6/6. Price $24.00/min is on the row but was not recorded as a score (no allowed per-minute USD scale).",
+        "verbatim_quote": "| 13 | 12-16 | Google | Veo 3.1 | 1,088 | -6/6 | 9,222 | Jan 2026 | $24.00 /min |"
+      },
+      "record_id": "artificial-analysis-t2v-audio-veo-3.1-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-6/6",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 9222,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "Artificial Analysis Image-to-Video Arena (With Audio)",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo 3.1, not Fast/Lite. Same mapping as the AA T2V Veo 3.1 row.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Dreamina Seedance 2.0 720p",
+        "MiniMax H3",
+        "Gemini Omni Flash",
+        "grok-imagine-video-1.5",
+        "HappyHorse-1.1/1.0",
+        "MAGI-2 Preview",
+        "Wan 2.7",
+        "SkyReels V4",
+        "Veo 3.1 Fast",
+        "Kling 3.0 1080p (Pro)",
+        "Veo 3.1 Lite"
+      ],
+      "conditions": {
+        "audio": true,
+        "model_released": "Jan 2026",
+        "n_samples": 8672,
+        "rank_range": "7-10"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live Artificial Analysis I2V With Audio arena with stated blind pairwise protocol, 8,672 samples, and 95% CI -7/7. Named Veo 3.1 not Fast/Lite; snapshot unspecified. Dynamic.",
+      "evaluation_method": "Human blind pairwise comparisons in the Artificial Analysis Video Arena, image-to-video With Audio board.",
+      "evaluator": "Artificial Analysis",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Live board (dynamic); no board publication date in the notes.",
+        "API snapshot unspecified.",
+        "Overall I2V preference, not a first-frame interpolation subscore.",
+        "$24.00/min was not recorded as a score."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "With-audio I2V Arena Elo is overall human preference, not a first-frame interpolation subscore.",
+          "task_type": "I2V",
+          "value": 1085.0
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 8 for Veo 3.1.",
+          "task_type": "I2V",
+          "value": 8.0
+        }
+      ],
+      "protocol_url": "https://artificialanalysis.ai/video/leaderboard/image-to-video",
+      "provenance": {
+        "dynamic": true,
+        "published_at": null,
+        "publisher": "Artificial Analysis",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://artificialanalysis.ai/video/leaderboard/image-to-video",
+        "summary": "Artificial Analysis Image-to-Video With Audio live board, read 26 Aug 2026. Veo 3.1 Arena Elo 1,085, rank 8 (range 7–10), 8,672 samples, 95% CI -7/7. Price not recorded as a score.",
+        "verbatim_quote": "| 8 | 7-10 | Google | Veo 3.1 | 1,085 | -7/7 | 8,672 | Jan 2026 | $24.00 /min |"
+      },
+      "record_id": "artificial-analysis-i2v-audio-veo-3.1-2026-08-26",
+      "statistics": {
+        "confidence_interval": "-7/7",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 8672,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "SuperCLUE Text-to-Video Arena",
+      "benchmark_version": "2026-08-11",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo 3.1 at 720p; no API id. Release date on the row 2025.10.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 [720p]",
+        "source_model_version": "720p",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0 [720p]",
+        "可灵 3.0 [720p]",
+        "Wan 2.7 [1080p]",
+        "HappyHorse-1.0",
+        "PixVerse V6",
+        "veo-3.0-generate-preview",
+        "Luma Ray 3",
+        "Vidu Q3",
+        "Hailuo-02",
+        "可灵 2.5 Turbo"
+      ],
+      "conditions": {
+        "n_battles_board": 53390,
+        "n_battles_row": 3863,
+        "n_models": 22,
+        "resolution": "720p",
+        "row_release_date": "2025.10"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live SuperCLUE T2V arena with stated anonymous user battles, 3863 battles for this row, and stated CI +23.8/-26.2. 720p named row; API id unspecified. Dynamic.",
+      "evaluation_method": "Human scoring based on anonymous user battle votes, text-to-video.",
+      "evaluator": "SuperCLUE / CLUE",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "720p row; no API id.",
+        "Live board (dynamic).",
+        "Chinese-prompt arena overall preference, not a Chinese-glyph / OCR metric."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Anonymous-battle Elo is overall preference. Notes: Chinese-prompt arena, not a Chinese-glyph rendering subscore.",
+          "task_type": "T2V",
+          "value": 1206.8
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "NONE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 3 for Veo 3.1 [720p].",
+          "task_type": "T2V",
+          "value": 3.0
+        }
+      ],
+      "protocol_url": "https://www.superclueai.com/arena?type=video&tab=board",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-11",
+        "publisher": "SuperCLUE / CLUE",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://www.superclueai.com/arena?type=video&tab=board",
+        "summary": "SuperCLUE Text-to-Video arena 11 Aug 2026, read 26 Aug 2026. Veo 3.1 [720p] Elo 1206.8 (+23.8/-26.2), rank 3, 3863 battles. Board 22 models, 53,390 battles. Chinese-prompt arena, not a Chinese-glyph rendering metric.",
+        "verbatim_quote": "| 3 | Veo 3.1 [720p] Google | Google | 1206.8 +23.8/-26.2 | +23.8/-26.2 | 3863 | 2025.10 |"
+      },
+      "record_id": "superclue-t2v-arena-veo-3.1-720p-2026-08-11",
+      "statistics": {
+        "confidence_interval": "+23.8/-26.2",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 3863,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "SuperCLUE Reference-to-Video Arena",
+      "benchmark_version": "2026-08-11",
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo 3.1 [720p]; no API id. Same unspecified-revision mapping as the SuperCLUE T2V 720p row.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo 3.1 [720p]",
+        "source_model_version": "720p",
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 2.0 [720p]",
+        "Wan 2.7 [1080p]",
+        "可灵 3.0 Omni [1080p]",
+        "Vidu Q3",
+        "HappyHorse-1.0",
+        "Vidu Q2",
+        "可灵 O1",
+        "vivago2.0",
+        "可灵 1.6",
+        "PixVerse V5",
+        "Seedance 1.0 lite"
+      ],
+      "conditions": {
+        "n_battles_board": 28042,
+        "n_battles_row": 5202,
+        "n_models": 12,
+        "resolution": "720p",
+        "row_release_date": "2025.10"
+      },
+      "credibility": "B",
+      "credibility_rationale": "Live SuperCLUE R2V arena with stated anonymous battles, 5202 battles for this row, and stated CI +21.8/-21.9. 720p named row; API id unspecified. Dynamic.",
+      "evaluation_method": "Human anonymous battles on SuperCLUE reference-to-video / image-to-video arena.",
+      "evaluator": "SuperCLUE / CLUE",
+      "human_or_automatic": "human",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "720p row; no API id.",
+        "Live board (dynamic).",
+        "Overall R2V preference, not separate reference-adherence, identity, or first/last-frame subscores."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Arena Elo",
+          "metric_scale_id": "arena-elo",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Anonymous-battle Elo on the Reference-to-Video board is overall preference, not a reference-adherence or identity subscore.",
+          "task_type": "R2V",
+          "value": 1118.5
+        },
+        {
+          "higher_is_better": false,
+          "metric_name": "leaderboard rank",
+          "metric_scale_id": "leaderboard-rank",
+          "reference_mode": "REFERENCE_IMAGE",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted table rank 3 for Veo 3.1 [720p].",
+          "task_type": "R2V",
+          "value": 3.0
+        }
+      ],
+      "protocol_url": "https://superclueai.com/arena?type=video&tab=r2vboard",
+      "provenance": {
+        "dynamic": true,
+        "published_at": "2026-08-11",
+        "publisher": "SuperCLUE / CLUE",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "arena_leaderboard",
+        "source_url": "https://superclueai.com/arena?type=video&tab=r2vboard",
+        "summary": "SuperCLUE Reference-to-Video arena 11 Aug 2026, read 26 Aug 2026. Veo 3.1 [720p] Elo 1118.5 (+21.8/-21.9), rank 3, 5202 battles. Board 12 models, 28,042 battles.",
+        "verbatim_quote": "| 3 | Veo 3.1 [720p] Google | Google | 1118.5 +21.8/-21.9 | +21.8/-21.9 | 5202 | 2025.10 |"
+      },
+      "record_id": "superclue-r2v-arena-veo-3.1-720p-2026-08-11",
+      "statistics": {
+        "confidence_interval": "+21.8/-21.9",
+        "confidence_interval_stated_by_source": true,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 5202,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "EmbodiedCLUE-World",
+      "benchmark_version": null,
+      "binding": {
+        "exact_version": "veo-3.1",
+        "is_alias": false,
+        "logical_name": "veo-3.1-openrouter",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Named Veo-3.1; API snapshot not given.",
+        "model_id": "google/veo-3.1",
+        "provider": "openrouter",
+        "source_model_name": "Veo-3.1",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Doubao-Seedance-2.0",
+        "Kling-3.0",
+        "Vidu-Q3-Pro",
+        "Runway-Gen-4.5",
+        "Hailuo-2.3",
+        "Wan2.7-i2v"
+      ],
+      "conditions": {
+        "n_models": 7,
+        "n_tasks": 12,
+        "protocol": "12-metric RoboCasa-GR1; VLM + non-VLM + failure diagnosis"
+      },
+      "credibility": "C",
+      "credibility_rationale": "Third-party SuperCLUE WeChat report of a stated 12-metric RoboCasa-GR1 protocol, but the public source is a WeChat post, n is 12 tasks / 7 models, no CI, and the Veo-3.1 snapshot is unspecified.",
+      "evaluation_method": "Image-to-video embodied desktop manipulation on RoboCasa-GR1. Automatic hybrid of VLM metrics, non-VLM metrics, and failure diagnosis, weighted overall. 12 tasks, 7 embodied world models.",
+      "evaluator": "SuperCLUE",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "Source is a WeChat article, not the full protocol paper.",
+        "12 desktop tasks and 7 models; no CI.",
+        "API snapshot unspecified.",
+        "Overall weighted score only; no quoted physics/motion/human-consistency subscores."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "overall score",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "FIRST_FRAME",
+          "scenario": "generic",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Quoted 71.70 is the weighted overall 分 for Veo-3.1 (middle of Hailuo-2.3 74.00, Veo-3.1 71.70, Wan2.7-i2v 68.40). Holistic 12-metric overall, not a physics/motion/human-consistency subscore.",
+          "task_type": "I2V",
+          "value": 71.7
+        }
+      ],
+      "protocol_url": "https://mp.weixin.qq.com/s/1J4omU2SyTjTQbGzM-jttA",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-05-21",
+        "publisher": "SuperCLUE",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "research_notes",
+        "source_type": "third_party_benchmark",
+        "source_url": "https://mp.weixin.qq.com/s/1J4omU2SyTjTQbGzM-jttA",
+        "summary": "EmbodiedCLUE-World WeChat report 21 May 2026. 12-metric protocol on RoboCasa-GR1; VLM + non-VLM + failure diagnosis. Veo-3.1 overall 71.70. Seven embodied world models; 12 desktop tasks. I2V embodied manipulation, not T2V.",
+        "verbatim_quote": "Hailuo-2.3、Veo-3.1 和 Wan2.7-i2v 分别获得 74.00、71.70 和 68.40 分 Doubao-Seedance-2.0 以 77.20 分位列第一，Kling-3.0 以 77.10 分"
+      },
+      "record_id": "embodiedclue-world-veo-3.1-2026-05-21",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": 12,
+        "sample_size_stated_by_source": true
+      }
+    },
+    {
+      "benchmark_name": "WBench",
+      "benchmark_version": "arXiv:2605.25874v1",
+      "binding": {
+        "exact_version": "wan-2.7",
+        "is_alias": false,
+        "logical_name": "wan-2.7-official",
+        "mapping_confidence": "MEDIUM",
+        "mapping_rationale": "Source name Wan 2.7 with no API id and no dated snapshot. Appendix B also calls it a publicly released open-weights checkpoint, which contradicts the API-only row in the same table; that does not change the name they scored.",
+        "model_id": "wan-2.7",
+        "provider": "wan",
+        "source_model_name": "Wan 2.7",
+        "source_model_version": null,
+        "version_match": "EXACT_VERSION_UNSPECIFIED_REVISION",
+        "version_match_stated_by_source": false
+      },
+      "comparison_models": [
+        "Seedance 1.5",
+        "Kling 3.0",
+        "YUME 1.5",
+        "HY-Video 1.5",
+        "LTX 2.3",
+        "LongCat-Video",
+        "Kairos 3.0",
+        "Cosmos 2.5"
+      ],
+      "conditions": {
+        "appendix_length_field": "80",
+        "interaction_turns": 1058,
+        "interface": "API",
+        "navigation_cases": 158,
+        "protocol": "iterative last-frame I2V",
+        "resolution": "1920×1080",
+        "test_cases": 289
+      },
+      "credibility": "B",
+      "credibility_rationale": "Academic WBench protocol with 289 cases / 1,058 turns and 22 automatic sub-metrics, human-validated at Spearman ρ ≥ 0.94. Wan 2.7 version is unspecified; Appendix B contradicts itself on open weights versus API. No confidence interval for these automatic scores. The 400-annotator study validates metrics, not Wan 2.7.",
+      "evaluation_method": "289 test cases, 1,058 interaction turns, 22 automatic sub-metrics on five dimensions. Scores ∈ [0,100], higher is better. Automatic scoring with specialist vision models and VLMs. Wan 2.7 run as text-driven commercial API under the same iterative I2V protocol. Appendix B.1: Wan 2.7 | API | 1920×1080 | 80.",
+      "evaluator": "Ying, Hu, Ren, Li, Chen, Wang, Cao, Cai, Ding (Fudan University & Meituan LongCat)",
+      "human_or_automatic": "automatic",
+      "layer": "benchmark_prior",
+      "limitations": [
+        "No confidence interval stated for these automatic scores.",
+        "The 400-annotator human study is a validation of the metrics, not a Wan 2.7 human score.",
+        "Table 2 mixes navigation split (158 cases) with non-navigation event editing, subject action, and perspective switching.",
+        "Appendix B.1 API row contradicts the same appendix calling Wan 2.7 an open-weights checkpoint.",
+        "Do not merge paper Interaction average 72.1 with the live Full-split Interaction 64.4."
+      ],
+      "measurements": [
+        {
+          "higher_is_better": true,
+          "metric_name": "Video quality average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Paper Table 2 video quality average, mapped to cinematic quality.",
+          "task_type": "I2V",
+          "value": 81.5
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Setting adherence",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Setting adherence from Table 2 / prose, mapped to prompt adherence.",
+          "task_type": "I2V",
+          "value": 91.4
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Setting/Scene",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Setting/Scene subscore, mapped to prompt adherence.",
+          "task_type": "I2V",
+          "value": 88.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Setting/Subject",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "identity",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Setting/Subject (subject appearance), primary mapping to identity.",
+          "task_type": "I2V",
+          "value": 94.6
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Setting/Subject",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 subject appearance also listed under human consistency.",
+          "task_type": "I2V",
+          "value": 94.6
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Setting/Subject",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "portrait",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 subject appearance also listed under portrait.",
+          "task_type": "I2V",
+          "value": 94.6
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Interaction/Navigation",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "camera_motion",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Interaction/Navigation mapped to camera motion.",
+          "task_type": "I2V",
+          "value": 66.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Event editing",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 event editing, primary mapping to prompt adherence.",
+          "task_type": "I2V",
+          "value": 84.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Event editing",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 event editing also listed under motion.",
+          "task_type": "I2V",
+          "value": 84.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Subject action",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 subject action, primary mapping to motion.",
+          "task_type": "I2V",
+          "value": 83.4
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Subject action",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 subject action also listed under human consistency.",
+          "task_type": "I2V",
+          "value": 83.4
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Perspective switching",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "camera_motion",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 perspective switching mapped to camera motion.",
+          "task_type": "I2V",
+          "value": 55.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Interaction average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Interaction average (mixed splits), listed under motion, camera motion, and prompt adherence.",
+          "task_type": "I2V",
+          "value": 72.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Interaction average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "camera_motion",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Interaction average (mixed splits), listed under camera motion.",
+          "task_type": "I2V",
+          "value": 72.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Interaction average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "prompt_adherence",
+          "scenario_mapping_confidence": "MEDIUM",
+          "scenario_mapping_rationale": "Table 2 Interaction average (mixed splits), listed under prompt adherence.",
+          "task_type": "I2V",
+          "value": 72.1
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Consistency average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "identity",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Consistency average, listed under identity and human consistency.",
+          "task_type": "I2V",
+          "value": 81.6
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Consistency average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Consistency average, listed under human consistency.",
+          "task_type": "I2V",
+          "value": 81.6
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Consistency/Subject",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "identity",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Consistency/Subject, listed under identity and human consistency.",
+          "task_type": "I2V",
+          "value": 90.7
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Consistency/Subject",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "human_consistency",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Consistency/Subject, listed under human consistency.",
+          "task_type": "I2V",
+          "value": 90.7
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Physical average",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Paper physical average mapped to physics.",
+          "task_type": "I2V",
+          "value": 71.8
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Causal fidelity",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "physics",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Causal fidelity cited as the driver of the physical average; mapped to physics.",
+          "task_type": "I2V",
+          "value": 83.3
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Video Quality/Dynamic",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "motion",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 Video Quality/Dynamic mapped to motion.",
+          "task_type": "I2V",
+          "value": 100.0
+        },
+        {
+          "higher_is_better": true,
+          "metric_name": "Aesthetic",
+          "metric_scale_id": "percent-0-100",
+          "reference_mode": "LAST_FRAME",
+          "scenario": "cinematic_quality",
+          "scenario_mapping_confidence": "HIGH",
+          "scenario_mapping_rationale": "Table 2 aesthetic mapped to cinematic quality.",
+          "task_type": "I2V",
+          "value": 61.4
+        }
+      ],
+      "protocol_url": "https://arxiv.org/html/2605.25874v1",
+      "provenance": {
+        "dynamic": false,
+        "published_at": "2026-05-25",
+        "publisher": "Ying, Hu, Ren, Li, Chen, Wang, Cao, Cai, Ding (Fudan University & Meituan LongCat)",
+        "retrieved_at": "2026-08-26T00:00:00Z",
+        "retrieved_by": "notes-author",
+        "source_type": "academic_paper",
+        "source_url": "https://arxiv.org/html/2605.25874v1",
+        "summary": "WBench paper (arXiv:2605.25874, 25 May 2026) scores Wan 2.7 as a text-driven commercial API under iterative last-frame I2V. Table 2 automatic scores on a 0–100 scale include video quality 81.5, setting 91.4, physical 71.8, and navigation 66.0.",
+        "verbatim_quote": "Text-driven models lead narrowly (Seedance 1.5 at 82.1, Wan 2.7 at 81.5). Wan 2.7 (91.4) and Kling 3.0 (91.0) far exceed the best world models. Table 2 Setting/Scene: 88.3. Table 2 Setting/Subject: 94.6. Wan 2.7 … scores only 66.0 on navigation. Table 2 Event editing: 84.0. Table 2 Subject action: 83.4. Table 2 Perspective switching: 55.0. Table 2 Interaction average: 72.1. Table 2 Consistency average: 81.6. Table 2 Consistency/Subject: 90.7. Wan 2.7 leads (71.8), driven by exceptionally high causal fidelity (83.3). Table 2 Video Quality/Dynamic: 100.0. Table 2 Aesthetic: 61.4."
+      },
+      "record_id": "wbench-paper-wan-2.7",
+      "statistics": {
+        "confidence_interval": null,
+        "confidence_interval_stated_by_source": false,
+        "human_eval_size": null,
+        "human_eval_size_stated_by_source": false,
+        "sample_size": "289 cases / 1,058 turns",
+        "sample_size_stated_by_source": true
+      }
+    }
+  ],
+  "research_tool": "grok-cli (two stage: search, then structure with the web disabled)"
+}

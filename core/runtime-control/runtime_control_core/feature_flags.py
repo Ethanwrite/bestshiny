@@ -15,6 +15,11 @@ class FeatureFlagDefaults:
     voyage_memory: bool = False
     auto_evaluation: bool = False
     adaptive_router: bool = False
+    # Conservative lower-confidence-bound routing. Separate from
+    # `adaptive_router` on purpose: that one blends production means into the
+    # score, this one substitutes an interval's lower edge, and a deployment
+    # may reasonably want either without the other.
+    router_lcb: bool = False
     auto_retry: bool = False
 
 

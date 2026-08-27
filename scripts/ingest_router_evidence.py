@@ -148,10 +148,13 @@ def main() -> int:
     now = datetime.now(UTC)
     layers = [EvidenceLayer(value) for value in (arguments.layer or [layer.value for layer in _LAYER_FILES])]
     summary: dict[str, object] = {"generated_at": now.isoformat(), "layers": {}}
-    exit_code = 0
+    accepted_total = 0
+    considered_total = 0
 
     for layer in layers:
         report, gaps, notes = ingest_layer(layer, now=now)
+        accepted_total += len(report.accepted)
+        considered_total += report.considered
         by_reason: dict[str, int] = defaultdict(int)
         for item in report.rejected:
             by_reason[item.reason] += 1
@@ -199,7 +202,12 @@ def main() -> int:
         REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         REPORT_PATH.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", "utf-8")
         print(f"\nreport {REPORT_PATH.relative_to(ROOT)}")
-    return exit_code
+    if considered_total and not accepted_total:
+        # Every candidate refused is a research regression, not a clean run, and
+        # a wrapper that keys off the exit status should be able to see it.
+        print("\nno record survived ingest", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _counts(items: list) -> dict[str, int]:  # type: ignore[type-arg]

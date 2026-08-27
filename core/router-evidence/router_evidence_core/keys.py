@@ -248,7 +248,10 @@ class ConditionBucket(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     duration_bucket: Literal["<=2s", "2-5s", "5-8s", "8-12s", ">12s", "n/a"] = "n/a"
-    resolution: str = Field(default="n/a", min_length=1, max_length=32)
+    #: No pipe, because `token` joins on one and the posterior unpacks the
+    #: result back into three fields. A resolution containing a separator would
+    #: not corrupt one cell, it would raise out of the whole computation.
+    resolution: str = Field(default="n/a", min_length=1, max_length=32, pattern=r"^[^|]+$")
     reference_mode: ReferenceMode = ReferenceMode.NONE
 
     @staticmethod

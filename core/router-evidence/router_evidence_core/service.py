@@ -33,7 +33,7 @@ from production_domain.models import (
     RouterReplayRun,
     new_id,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -42,6 +42,10 @@ from .lcb import PosteriorLookup
 from .observations import OutcomeName, ProductionObservation, PromptComplexity
 from .posterior import PosteriorLevel, PosteriorRecord, PosteriorRun
 from .replay import ReplayResult
+
+#: Width of `router_observations.id`. The contract allows a wider string, so
+#: the boundary refuses what will not fit rather than truncating or replacing it.
+_OBSERVATION_ID_LENGTH = 36
 
 
 class UnattributableObservation(ValueError):
@@ -83,6 +87,12 @@ class RouterObservationService:
             raise UnattributableObservation(
                 f"{observation.provider}:{observation.model_id} has no exact version"
             )
+        if len(observation.observation_id) > _OBSERVATION_ID_LENGTH:
+            raise UnattributableObservation(
+                f"observation_id {observation.observation_id!r} is longer than the "
+                f"{_OBSERVATION_ID_LENGTH}-character column; shorten it rather than "
+                "letting it be replaced by one nothing can look up"
+            )
 
         values = self._row_values(observation)
         with self.database.session() as session:
@@ -116,7 +126,10 @@ class RouterObservationService:
     def _row_values(observation: ProductionObservation) -> dict[str, Any]:
         now = datetime.now(UTC)
         return {
-            "id": observation.observation_id if len(observation.observation_id) <= 36 else new_id(),
+            # Not silently swapped for a fresh uuid when it is too long: a row
+            # stored under an identifier the caller never chose cannot be found
+            # again by the one they passed, and nothing downstream can detect it.
+            "id": observation.observation_id,
             "occurred_at": observation.occurred_at,
             "provider": observation.provider,
             "model_id": observation.model_id,
@@ -350,10 +363,19 @@ class RouterObservationService:
             )
 
     def latest_posterior_run_id(self) -> str | None:
+        """The most recently *saved* run, not the most recently dated one.
+
+        Ordered by `created_at` — the row's insert time — with `calculated_at`
+        only as a secondary key. The previous ordering used `id` as its
+        tiebreak, and `id` is a uuid4: two runs sharing a `calculated_at`
+        resolved to whichever uuid happened to sort higher, so which snapshot
+        the router read was not reproducible.
+        """
+
         with self.database.session() as session:
             return session.scalar(
                 select(RouterPosterior.run_id)
-                .order_by(RouterPosterior.calculated_at.desc(), RouterPosterior.id.desc())
+                .order_by(RouterPosterior.created_at.desc(), RouterPosterior.calculated_at.desc())
                 .limit(1)
             )
 
@@ -370,6 +392,10 @@ class RouterObservationService:
     def coverage_counts(self) -> dict[str, int]:
         """Observations per ``provider:model_id@exact_version``, for the report."""
 
+        # Grouped in the database rather than by transferring every row and
+        # counting in Python: the result is a dozen entries however large the
+        # table grows, and an operator page load should not read the whole
+        # observation history to produce it.
         with self.database.session() as session:
             rows = list(
                 session.execute(
@@ -377,14 +403,18 @@ class RouterObservationService:
                         RouterObservation.provider,
                         RouterObservation.model_id,
                         RouterObservation.exact_version,
+                        func.count(),
+                    ).group_by(
+                        RouterObservation.provider,
+                        RouterObservation.model_id,
+                        RouterObservation.exact_version,
                     )
                 )
             )
-        counts: dict[str, int] = {}
-        for provider, model_id, exact_version in rows:
-            token = f"{provider}:{model_id}@{exact_version}"
-            counts[token] = counts.get(token, 0) + 1
-        return dict(sorted(counts.items()))
+        return {
+            f"{provider}:{model_id}@{exact_version}": int(count)
+            for provider, model_id, exact_version, count in sorted(rows)
+        }
 
 
 def _to_record(row: RouterPosterior) -> PosteriorRecord:

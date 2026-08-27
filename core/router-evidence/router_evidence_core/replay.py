@@ -343,8 +343,18 @@ class ReplayHarness:
         builder = ConservativeLcbBuilder(lookup, self.lcb_settings)
 
         versions = dict(versions_by_model_key or {})
+        # The *latest* version seen for each router key, not the first. `fit` is
+        # chronological, so overwriting keeps the version in force at the end of
+        # the fit window — the one the evaluation window is actually running.
+        # Taking the first silently evaluated the superseded snapshot whenever a
+        # profile was bumped mid-history.
+        ambiguous: dict[str, set[str]] = defaultdict(set)
         for observation in fit:
-            versions.setdefault(f"{observation.provider}:{observation.model_id}", observation.exact_version)
+            model_key = f"{observation.provider}:{observation.model_id}"
+            ambiguous[model_key].add(observation.exact_version)
+            if model_key not in (versions_by_model_key or {}):
+                versions[model_key] = observation.exact_version
+        collapsed = sorted(key for key, seen in ambiguous.items() if len(seen) > 1)
 
         grouped: dict[ReplayContext, list[ProductionObservation]] = defaultdict(list)
         for observation in evaluate:
@@ -423,6 +433,15 @@ class ReplayHarness:
             notes.append(
                 f"the posterior policy fell back to the baseline in {posterior.fell_back} contexts "
                 "for want of a sufficient cell"
+            )
+        if collapsed:
+            # The router key has no room for a version, so a model that changed
+            # snapshot mid-history is evaluated on its latest one only. Said out
+            # loud, because it is the one place this harness has to collapse a
+            # distinction the rest of the package refuses to.
+            notes.append(
+                "these models ran under more than one exact version in the fit window and were "
+                f"replayed on the most recent of each: {', '.join(collapsed)}"
             )
 
         return ReplayResult(

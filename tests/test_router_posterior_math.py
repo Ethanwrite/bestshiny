@@ -116,3 +116,25 @@ def test_an_impossible_variance_raises_rather_than_widening_silently() -> None:
         moment_match(0.5, 0.5)
     with pytest.raises(ValueError, match="strictly inside"):
         moment_match(0.0, 0.01)
+
+
+def test_the_percentile_is_nearest_rank_at_every_sample_count() -> None:
+    """`round(x + 0.5)` is not `ceil`: it breaks halves to even.
+
+    The old form returned the right rank for twenty samples and the wrong one
+    for ten and fifty — an off-by-one that depended on nothing but parity, and
+    at p90 of ten samples returned the maximum.
+    """
+
+    import math
+
+    from router_evidence_core.posterior import CostLatencySummary
+
+    for count in range(1, 60):
+        values = [float(index) for index in range(count)]
+        for fraction in (0.5, 0.9, 0.95):
+            expected = max(0, min(count - 1, math.ceil(fraction * count) - 1))
+            assert CostLatencySummary._percentile(values, fraction) == float(expected), (
+                count,
+                fraction,
+            )

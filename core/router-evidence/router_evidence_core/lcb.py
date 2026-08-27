@@ -326,8 +326,14 @@ class ConservativeLcbBuilder:
         existing = result.adjustments.setdefault(router_key, {})
         proposed = record.posterior_lower_quantile
         existing[dimension] = min(existing.get(dimension, 1.0), proposed)
-        result.sample_counts[router_key] = max(
-            result.sample_counts.get(router_key, 0), record.observation_count
+        # The *smallest* backing count, not the largest. The router reads this
+        # to decide how much weight the production term carries, and reporting
+        # 300 because one dimension has 300 would apply that confidence to a
+        # dimension backed by 25. Every other tie in this module resolves
+        # pessimistically; so does this one.
+        result.sample_counts[router_key] = min(
+            result.sample_counts.get(router_key, record.observation_count),
+            record.observation_count,
         )
 
 

@@ -267,3 +267,39 @@ def test_crossposts_collapse_to_the_earliest() -> None:
     kept, duplicates = deduplicate([_post("late", "2026-07-05"), _post("early", "2026-07-01")])
     assert [item.record_id for item in kept] == ["early"]
     assert duplicates[0].record_id == "late"
+
+
+def test_a_sample_size_in_the_quote_does_not_validate_a_score() -> None:
+    """The check the design leans on hardest, and the way it used to be fooled.
+
+    `value * 100` expanded 0.87 to "87", and the quote's "87 prompts" matched —
+    so a fabricated score validated against a sentence about sample size. The
+    percent form is still offered (0.939 really is published as "93.9"), but a
+    bare integer that only matches after scaling no longer passes on its own.
+    """
+
+    payload = _candidate()
+    payload["measurements"][0]["value"] = 0.87  # type: ignore[index]
+    payload["provenance"]["verbatim_quote"] = "We ran 87 prompts across four models."  # type: ignore[index]
+    report = EvidenceIngestor(now=NOW).ingest(EvidenceLayer.BENCHMARK, [payload], identity=IDENTITY)
+    assert not report.accepted
+    assert report.rejected[0].reason == "UNQUOTED_NUMBER"
+
+
+def test_the_percent_form_of_a_ratio_still_validates() -> None:
+    payload = _candidate()
+    payload["measurements"][0]["value"] = 0.939  # type: ignore[index]
+    payload["provenance"]["verbatim_quote"] = "Wan 2.7 reaches 93.9 on the physics dimension."  # type: ignore[index]
+    report = EvidenceIngestor(now=NOW).ingest(EvidenceLayer.BENCHMARK, [payload], identity=IDENTITY)
+    assert len(report.accepted) == 1
+
+
+def test_a_value_outside_its_own_scale_is_refused() -> None:
+    """A percentage filed as a 0-1 ratio: the scale, the number, or both are wrong."""
+
+    payload = _candidate()
+    payload["measurements"][0]["value"] = 57.0  # type: ignore[index]
+    payload["measurements"][0]["metric_scale_id"] = "pairwise-win-rate"  # type: ignore[index]
+    payload["provenance"]["verbatim_quote"] = "It won 57 of the head-to-head comparisons."  # type: ignore[index]
+    report = EvidenceIngestor(now=NOW).ingest(EvidenceLayer.BENCHMARK, [payload], identity=IDENTITY)
+    assert report.rejected[0].reason == "VALUE_OUT_OF_SCALE"

@@ -215,3 +215,19 @@ def test_a_simulation_spends_only_simulated_budget_and_says_it_was_offline() -> 
     assert simulation.allowed == 11
     assert simulation.budget_spent == Decimal("484")
     assert simulation.refusals_by_reason["BUDGET_EXHAUSTED"] == 9
+
+
+def test_two_simulations_on_one_policy_do_not_share_a_budget() -> None:
+    """A simulator that spends real state is not reproducible."""
+
+    policy = ExplorationPolicy(_lookup(), _permissive())
+    requests = [
+        (CANDIDATE, TaskType.T2V, Scenario.MOTION, "STANDARD", Decimal("44"), CONDITIONS)
+        for _ in range(20)
+    ]
+    first = policy.simulate(requests)
+    second = policy.simulate(requests)
+    assert first.allowed == second.allowed == 11
+    assert first.budget_spent == second.budget_spent == Decimal("484")
+    # And the policy is left as it was found.
+    assert policy.budget_remaining == Decimal("500")

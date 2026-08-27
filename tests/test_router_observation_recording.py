@@ -175,3 +175,65 @@ def test_the_planner_writes_the_routing_context_onto_the_request() -> None:
         "exact_version",
     ):
         assert f'"{field}":' in source
+
+
+def test_a_retry_that_re_routes_does_not_inherit_the_version(  # type: ignore[no-untyped-def]
+    container, project, output_asset
+) -> None:
+    """The contamination this whole package exists to prevent, at its likeliest source.
+
+    A retry copies the original request's metadata. If it also copied
+    `routing_context.exact_version`, an attempt that re-routed to a different
+    model would be filed under `newProvider:newModel@oldVersion` — a pair that
+    never ran, and one nothing downstream could detect as wrong.
+    """
+
+    runtime = container.visual_runtime
+    retargeted = runtime._retargeted_routing_context(
+        ROUTING_CONTEXT, "wan", "wan-2.7"
+    )
+    assert retargeted is not None
+    assert retargeted["exact_version"] == "wan-2.7-manual-v4"
+    assert retargeted["exact_version"] != ROUTING_CONTEXT["exact_version"]
+    # Everything else about the shot is unchanged — only the target moved.
+    assert retargeted["scenario"] == ROUTING_CONTEXT["scenario"]
+    assert retargeted["task_type"] == ROUTING_CONTEXT["task_type"]
+
+
+def test_a_retry_onto_a_model_the_registry_cannot_name_drops_the_context(container, project) -> None:  # type: ignore[no-untyped-def]
+    """No observation beats a mislabelled one."""
+
+    runtime = container.visual_runtime
+    assert runtime._retargeted_routing_context(ROUTING_CONTEXT, "nobody", "no-such-model") is None
+    assert runtime._retargeted_routing_context(None, "wan", "wan-2.7") is None
+
+
+def test_a_generation_quoted_at_zero_records_zero_not_unobserved(container, project, output_asset) -> None:  # type: ignore[no-untyped-def]
+    """`None` means not observed; a free generation was observed to cost nothing."""
+
+    from production_domain.models import GenerationJob
+
+    job_id = _job(container, project, output_asset, key="obs-zero")
+    with container.database.session() as session:
+        session.get(GenerationJob, job_id).quoted_credits = 0
+    _evaluate(container, job_id)
+    observation = container.router_observations.observations()[0]
+    assert observation.cost_credits == 0.0
+    assert observation.cost_credits is not None
+
+
+def test_a_database_error_while_recording_does_not_fail_evaluation(  # type: ignore[no-untyped-def]
+    container, project, output_asset, monkeypatch
+) -> None:
+    """The docstring promises this; a ValueError-only catch did not keep it."""
+
+    import sqlalchemy as sa
+
+    def explode(_observation):  # type: ignore[no-untyped-def]
+        raise sa.exc.OperationalError("SELECT 1", {}, Exception("deadlock detected"))
+
+    monkeypatch.setattr(container.router_observations, "record", explode)
+    job_id = _job(container, project, output_asset, key="obs-dberr")
+    result, _plan, _retry = _evaluate(container, job_id)
+    assert result is not None
+    assert container.router_observations.observations() == []

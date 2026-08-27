@@ -156,7 +156,11 @@ def test_the_snapshot_is_cached_and_not_queried_per_request(container, project) 
     assert first is second
 
 
-def test_a_new_run_replaces_the_cached_snapshot(container, project) -> None:  # type: ignore[no-untyped-def]
+def test_a_newer_run_is_not_picked_up_until_the_ttl_expires(container, project) -> None:  # type: ignore[no-untyped-def]
+    """The cache is the point: without it every generation queries for a run id."""
+
+    from production_engine.runtime import _LCB_SNAPSHOT_TTL_SECONDS
+
     container.feature_flags.set("router_lcb", True)
     service = container.router_observations
     _seed(service, provider="wan", model_id="wan-2.7", version=WAN_PROFILE_VERSION, rate=0.85)
@@ -172,7 +176,34 @@ def test_a_new_run_replaces_the_cached_snapshot(container, project) -> None:  # 
             service.observations(), run_id="run-2", outcomes=[OutcomeName.ACCEPTED_OUTPUT]
         )
     )
+    # Inside the window the saved run is not even looked for.
+    assert runtime._conservative_lcb_lookup() is first
+
+    # Past it, the newer run replaces the snapshot.
+    runtime._lcb_snapshot_checked_at -= _LCB_SNAPSHOT_TTL_SECONDS + 1
     assert runtime._conservative_lcb_lookup() is not first
+    assert runtime._lcb_snapshot is not None and runtime._lcb_snapshot[0] == "run-2"
+
+
+def test_the_latest_run_is_the_last_saved_not_the_last_dated(container, project) -> None:  # type: ignore[no-untyped-def]
+    """Ties used to break on a uuid, so which snapshot the router read was random."""
+
+    from datetime import UTC, datetime
+
+    service = container.router_observations
+    _seed(service, provider="wan", model_id="wan-2.7", version=WAN_PROFILE_VERSION, rate=0.85, count=30)
+    stamp = datetime(2026, 8, 27, tzinfo=UTC)
+    for run_id in ("run-a", "run-b", "run-c"):
+        service.save_posterior_run(
+            HierarchicalPosteriorEngine().compute(
+                service.observations(),
+                run_id=run_id,
+                outcomes=[OutcomeName.ACCEPTED_OUTPUT],
+                now=stamp,
+            )
+        )
+    # All three share `calculated_at` exactly; insertion order decides.
+    assert service.latest_posterior_run_id() == "run-c"
 
 
 def test_the_router_itself_was_not_changed() -> None:

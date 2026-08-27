@@ -220,3 +220,31 @@ def test_a_reference_video_shot_is_video_to_video_whatever_else_it_carries() -> 
     )
     assert router_task_type(requirements) is TaskType.V2V
     assert router_reference_mode(requirements) is ReferenceMode.REFERENCE_VIDEO
+
+
+def test_the_reported_sample_count_is_the_weakest_dimensions(container=None) -> None:  # type: ignore[no-untyped-def]
+    """The router reads this to weight the production term.
+
+    Reporting the largest count across dimensions applied the confidence of a
+    well-backed dimension to a thin one; the smallest is the honest figure and
+    matches every other tie-break in this module.
+    """
+
+    dense = _observations(WAN, 200, accepted_rate=0.8)
+    thin = [
+        item.model_copy(update={"observation_id": f"qc-{index}", "qc_identity_score": 0.7})
+        for index, item in enumerate(_observations(WAN, 40, accepted_rate=0.8))
+    ]
+    run = HierarchicalPosteriorEngine().compute(
+        dense + thin,
+        run_id="counts",
+        outcomes=[OutcomeName.ACCEPTED_OUTPUT, OutcomeName.QC_IDENTITY],
+    )
+    result = ConservativeLcbBuilder(PosteriorLookup(run.records), LcbSettings(enabled=True)).build(
+        [WAN], task_type=TaskType.T2V, scenario=Scenario.MOTION, conditions=CONDITIONS
+    )
+    applied = [decision for decision in result.decisions if decision.applied]
+    assert len(applied) >= 2
+    assert result.sample_counts["wan:wan-2.7"] == min(
+        decision.observation_count for decision in applied
+    )

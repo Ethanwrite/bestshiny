@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -69,10 +70,11 @@ from router_evidence_core import (
     router_scenario,
     router_task_type,
 )
-from router_evidence_core.service import RouterObservationService, UnattributableObservation
+from router_evidence_core.service import RouterObservationService
 from runtime_control_core import FeatureFlagService
 from skill_core import PromptCompilerService
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from style_core import ProjectStyleService
 from video_adapter_core import AdapterInput, ModelGenerationRequest, VideoAdapterRegistry
 
@@ -90,6 +92,13 @@ class PreparedAutopilotGeneration:
 
 def _new_trace_id() -> str:
     return secrets.token_hex(16)
+
+
+#: How long a posterior snapshot may be reused before the runtime looks for a
+#: newer offline run. A minute: long enough that a burst of generations pays for
+#: one query rather than one each, short enough that an operator who has just
+#: saved a run sees it take effect without a restart.
+_LCB_SNAPSHOT_TTL_SECONDS = 60.0
 
 
 class VisualProductionRuntime:
@@ -132,11 +141,15 @@ class VisualProductionRuntime:
         self.generation_admission = generation_admission
         self.styles = styles
         self.router_observations = router_observations
-        # A posterior snapshot is loaded at most once per run id and held for
-        # the life of the process. Reading `router_posteriors` inside a request
-        # would put an offline artefact back in the hot path, which is the one
-        # thing the offline/online split is for.
+        # The posterior snapshot is an offline artefact, so the routing path
+        # must not query for it per request — that would put the offline side
+        # back in the hot path, which is the one thing the split is for. The
+        # snapshot is materialised once per run id and the check for a newer
+        # run is rate-limited to `_LCB_SNAPSHOT_TTL_SECONDS`, so a freshly saved
+        # run is picked up within a minute without every generation paying for
+        # a query.
         self._lcb_snapshot: tuple[str, PosteriorLookup] | None = None
+        self._lcb_snapshot_checked_at: float = 0.0
 
     def submit_passenger(
         self,
@@ -600,6 +613,23 @@ class VisualProductionRuntime:
         self._record_router_observation(job_id, metadata, result)
         return result, plan, retry_job
 
+    def _retargeted_routing_context(
+        self, context: object, provider: str, model_id: str
+    ) -> dict[str, Any] | None:
+        """The routing context, re-pointed at the model a retry actually uses.
+
+        Returns ``None`` when there is no context to carry or the registry
+        cannot name the new target's version, which makes the recorder skip the
+        attempt rather than attribute it to the wrong snapshot.
+        """
+
+        if not isinstance(context, dict):
+            return None
+        profile = self.router.registry.get(model_id, provider)
+        if profile is None or not str(profile.version).strip():
+            return None
+        return {**context, "exact_version": profile.version}
+
     def _record_router_observation(
         self,
         job_id: str,
@@ -667,7 +697,10 @@ class VisualProductionRuntime:
                 generation_success=succeeded,
                 provider_failure=None if succeeded else (error_code or "UNKNOWN_FAILURE"),
                 latency_ms=latency_ms,
-                cost_credits=float(quoted_credits) if quoted_credits else None,
+                # `is not None`, not truthiness: a generation quoted at zero
+                # credits was observed to cost nothing, which is not the same
+                # as its cost not having been observed.
+                cost_credits=float(quoted_credits) if quoted_credits is not None else None,
                 cost_usd=float(actual_cost) if actual_cost is not None else None,
                 accepted_output=(
                     result.decision == EvaluationDecision.ACCEPT if succeeded else None
@@ -687,9 +720,17 @@ class VisualProductionRuntime:
                 metadata={"evaluator_version": result.evaluator_version},
             )
             self.router_observations.record(observation)
-        except (ValueError, LookupError, UnattributableObservation):
-            # Includes the contract's own refusals — an alias binding, a failed
-            # generation carrying a score. Not writing is the correct outcome.
+        except (ValueError, LookupError):
+            # The contract's own refusals — an alias binding, a failed
+            # generation carrying a score. `UnattributableObservation` is a
+            # `ValueError`, so it lands here too. Not writing is correct.
+            return
+        except SQLAlchemyError:
+            # Anything the database refuses: a serialization failure under
+            # concurrent evaluation, a constraint this code did not anticipate.
+            # The docstring above promises that collecting evidence never fails
+            # the user's request, and a `ValueError` catch does not keep that
+            # promise — `OperationalError` is not one.
             return
 
     def _execute_retry(
@@ -794,6 +835,18 @@ class VisualProductionRuntime:
             or bool(metadata.get("references_strengthened")),
             "retry_plan": plan.model_dump(mode="json"),
         }
+        if target_changed:
+            # `routing_context.exact_version` describes the model the *previous*
+            # attempt ran. Carrying it onto a retry that re-routes would file
+            # this attempt's outcome under `newProvider:newModel@oldVersion` — a
+            # pair that never ran, and the cross-version contamination the
+            # observation table exists to prevent. Re-resolve it from the
+            # registry, and drop the context entirely when the registry cannot
+            # name the new target: no observation is better than a mislabelled
+            # one.
+            retry_metadata["routing_context"] = self._retargeted_routing_context(
+                metadata.get("routing_context"), next_provider, next_model
+            )
         retry_request = GenerationRequest.model_validate(
             {
                 **request,
@@ -900,11 +953,22 @@ class VisualProductionRuntime:
         Returns ``None`` rather than an empty lookup when no offline run has
         ever been saved, so the caller can tell "nothing computed yet" from
         "computed, and it had nothing to say about these models".
+
+        Both the run-id check and the materialisation are cached. Without the
+        first cache every routed generation issued a `router_posteriors` query
+        just to learn that the answer had not changed.
         """
 
         if self.router_observations is None:
             return None
+        now = time.monotonic()
+        if (
+            self._lcb_snapshot is not None
+            and now - self._lcb_snapshot_checked_at < _LCB_SNAPSHOT_TTL_SECONDS
+        ):
+            return self._lcb_snapshot[1]
         run_id = self.router_observations.latest_posterior_run_id()
+        self._lcb_snapshot_checked_at = now
         if run_id is None:
             return None
         if self._lcb_snapshot is None or self._lcb_snapshot[0] != run_id:

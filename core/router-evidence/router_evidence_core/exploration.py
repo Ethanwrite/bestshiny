@@ -208,28 +208,38 @@ class ExplorationPolicy:
         in its own data, that it did not happen.
         """
 
+        # Spend is tracked per simulation, not on the policy. Accumulating it
+        # on `self` made a second `simulate()` start from a depleted budget and
+        # refuse everything, and left `evaluate()` — which reads the budget and
+        # never decrements it — disagreeing with `simulate()` about what the
+        # budget meant. Each run now starts where the constraints say.
         simulation = ExplorationSimulation(online=False)
-        for candidate, task_type, scenario, criticality, cost, conditions in requests:
-            simulation.considered += 1
-            verdict = self.evaluate(
-                candidate,
-                task_type=task_type,
-                scenario=scenario,
-                asset_criticality=criticality,
-                estimated_cost_credits=cost,
-                conditions=conditions,
-            )
-            simulation.verdicts.append(verdict)
-            if verdict.allowed:
-                simulation.allowed += 1
-                self._spent += cost
-                simulation.budget_spent += cost
-            else:
-                simulation.refused += 1
-                for reason in verdict.reasons:
-                    simulation.refusals_by_reason[reason] = (
-                        simulation.refusals_by_reason.get(reason, 0) + 1
-                    )
+        previously_spent = self._spent
+        self._spent = Decimal("0")
+        try:
+            for candidate, task_type, scenario, criticality, cost, conditions in requests:
+                simulation.considered += 1
+                verdict = self.evaluate(
+                    candidate,
+                    task_type=task_type,
+                    scenario=scenario,
+                    asset_criticality=criticality,
+                    estimated_cost_credits=cost,
+                    conditions=conditions,
+                )
+                simulation.verdicts.append(verdict)
+                if verdict.allowed:
+                    simulation.allowed += 1
+                    self._spent += cost
+                    simulation.budget_spent += cost
+                else:
+                    simulation.refused += 1
+                    for reason in verdict.reasons:
+                        simulation.refusals_by_reason[reason] = (
+                            simulation.refusals_by_reason.get(reason, 0) + 1
+                        )
+        finally:
+            self._spent = previously_spent
         return simulation
 
 

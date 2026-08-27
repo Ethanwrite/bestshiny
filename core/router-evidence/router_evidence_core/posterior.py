@@ -44,6 +44,7 @@ units, with percentiles rather than a distribution.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -191,12 +192,18 @@ class CostLatencySummary:
         Chosen over interpolation because it always returns a value that was
         actually observed, which matters when someone checks a p90 against the
         log.
+
+        `math.ceil`, not `round(x + 0.5)`. The two agree until `fraction * n`
+        is an integer, at which point `round` sees a half and breaks the tie to
+        even — so p90 of ten samples returned the maximum and p90 of twenty
+        returned the correct rank, an off-by-one that depended on nothing but
+        parity.
         """
 
         if not values:
             raise ValueError("no values")
         ordered = sorted(values)
-        index = max(0, min(len(ordered) - 1, round(fraction * len(ordered) + 0.5) - 1))
+        index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
         return ordered[index]
 
 

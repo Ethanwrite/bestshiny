@@ -169,35 +169,42 @@ class IngestReport:
 def _quote_supports(value: float, quote: str) -> bool:
     """Whether the quoted text plausibly contains the number claimed.
 
-    Deliberately generous about formatting and strict about the digits: 0.939
-    may appear as "0.939", "93.9%" or "93.9", and each of those is the same
-    measurement written differently. It will not accept a quote that contains
-    no number at all, which is the case that matters.
+    Generous about formatting and strict about the digits: 0.939 may appear as
+    "0.939", "93.9%" or "93.9", and each of those is the same measurement
+    written differently.
+
+    The percent form needs one extra condition, and it is the whole point of
+    this function. Scaling a 0-1 value by a hundred turns 0.87 into "87", which
+    matches "we ran 87 prompts" — a sentence about sample size validating a
+    claimed score. So a scaled match only counts when the number in the quote
+    *reads* like a percentage: it carries a `%`, or it has a fractional part.
+    "93.9" and "87%" still pass; a bare "87" no longer does.
     """
 
     candidates = _NUMBER.findall(quote)
     if not candidates:
         return False
-    targets = {
-        f"{value:g}",
-        f"{value:.1f}",
-        f"{value:.2f}",
-        f"{value:.3f}",
-        f"{value * 100:g}",
-        f"{value * 100:.1f}",
-        f"{value / 100:g}",
-    }
-    normalised = {item.replace(",", "").rstrip("%") for item in candidates}
-    for target in targets:
-        if target in normalised:
-            return True
-        # Trailing-zero differences: "3.75" quoted as "3.750".
-        for item in normalised:
-            try:
-                if abs(float(item) - float(target)) < 1e-9:
-                    return True
-            except ValueError:  # pragma: no cover - regex already constrained this
+
+    literal = {f"{value:g}", f"{value:.1f}", f"{value:.2f}", f"{value:.3f}"}
+    scaled: set[str] = set()
+    if 0.0 <= value <= 1.0:
+        scaled = {f"{value * 100:g}", f"{value * 100:.1f}", f"{value * 100:.2f}"}
+
+    for raw in candidates:
+        cleaned = raw.replace(",", "")
+        percentish = cleaned.endswith("%") or "." in cleaned
+        cleaned = cleaned.rstrip("%")
+        for targets, allowed in ((literal, True), (scaled, percentish)):
+            if not allowed:
                 continue
+            if cleaned in targets:
+                return True
+            for target in targets:
+                try:
+                    if abs(float(cleaned) - float(target)) < 1e-9:
+                        return True
+                except ValueError:  # pragma: no cover - regex already constrained this
+                    continue
     return False
 
 

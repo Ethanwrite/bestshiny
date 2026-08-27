@@ -332,3 +332,23 @@ def test_an_observation_links_to_a_shot_and_a_job(container, project) -> None:  
         shot_id,
         job_id,
     )
+
+
+def test_an_over_long_observation_id_is_refused_not_replaced(container, project) -> None:  # type: ignore[no-untyped-def]
+    """A row stored under an id the caller never chose cannot be found again."""
+
+    service = RouterObservationService(container.database)
+    with pytest.raises(UnattributableObservation, match="longer than"):
+        service.record(_observation(observation_id="o" * 40))
+    assert service.observations() == []
+
+
+def test_coverage_counts_agree_with_the_rows_they_summarise(container, project) -> None:  # type: ignore[no-untyped-def]
+    service = RouterObservationService(container.database)
+    for index in range(7):
+        service.record(_observation(index))
+    for index in range(7, 11):
+        service.record(_observation(index, exact_version="wan-2.7-manual-v5"))
+    counts = service.coverage_counts()
+    assert counts == {"wan:wan-2.7@wan-2.7": 7, "wan:wan-2.7@wan-2.7-manual-v5": 4}
+    assert sum(counts.values()) == len(service.observations())

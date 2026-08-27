@@ -239,7 +239,11 @@ def _build_measured_priors(snapshot: LayerSnapshot) -> list[LayerPrior]:
             notes.append(f"UNBOUNDED_SCALE_{scale.kind.value}")
         if unit_values:
             mean = sum(unit_values) / len(unit_values)
-            pseudo = strength.contribution(len(entries))
+            # Sized from the records that actually carried a number, not from
+            # every record bound to the key. Four records stating a result in
+            # words and one publishing 0.82 is one measurement, and charging
+            # the full ceiling for it claims five agreeing sources.
+            pseudo = strength.contribution(len(unit_values))
             clamped = min(max(mean, 1e-3), 1.0 - 1e-3)
             alpha, beta = clamped * pseudo, (1.0 - clamped) * pseudo
         priors.append(

@@ -43,17 +43,69 @@ def test_the_registry_loads_and_is_referentially_whole(service) -> None:  # type
     assert len(service.registry.compiled_from) == 2
 
 
-def test_every_binding_names_a_model_this_platform_actually_runs(service, registered_models) -> None:  # type: ignore[no-untyped-def]
-    """A binding to a model that is not in the model registry is dead evidence."""
+def test_every_active_binding_names_a_model_this_platform_actually_runs(  # type: ignore[no-untyped-def]
+    service, registered_models
+) -> None:
+    """A binding to a model that is not in the model registry is dead evidence.
 
+    Retired entries are exempt, and deliberately so. Execution and provenance are
+    separate facts: a model can stop being routable without its verdict changing.
+    A retired row keeps the source, provider and version identity it was recorded
+    under — rewriting or deleting it to match the current routing table would
+    make the registry a description of today rather than a record of what was
+    checked, which is the one thing it exists to be.
+    """
+
+    retired = {
+        item.logical_name
+        for item in service.registry.unbacked_models
+        if item.lifecycle == "RETIRED"
+    }
     bound = {b.logical_name: b.provider_model_id for b in service.registry.bindings}
     bound.update({u.logical_name: u.provider_model_id for u in service.registry.unbacked_models})
     for logical_name, provider_model_id in sorted(bound.items()):
+        if logical_name in retired:
+            continue
         assert logical_name in registered_models, f"{logical_name} is not a registered model"
         assert registered_models[logical_name]["provider_model_id"] == provider_model_id, (
             f"{logical_name} is registered as "
             f"{registered_models[logical_name]['provider_model_id']}, not {provider_model_id}"
         )
+
+
+def test_a_retired_entry_says_when_why_and_what_took_over(service, registered_models) -> None:  # type: ignore[no-untyped-def]
+    """Retirement is a claim, and a claim with no detail is just a deletion.
+
+    The successor has to be a model that really is in the registry, so a retired
+    row points somewhere real rather than into a gap.
+    """
+
+    retired = [
+        item for item in service.registry.unbacked_models if item.lifecycle == "RETIRED"
+    ]
+    assert retired, "expected at least one retired evidence entry"
+    for item in retired:
+        assert item.retired_on
+        assert item.retirement_reason
+        assert item.superseded_by is not None
+        successor = registered_models.get(item.superseded_by.logical_name)
+        assert successor is not None, f"{item.logical_name} is superseded by an unknown model"
+        assert successor["provider_model_id"] == item.superseded_by.provider_model_id
+        # The verdict and what it was recorded against are untouched.
+        assert item.status == "NO_EXTERNAL_EVIDENCE"
+        assert item.provider_model_id
+
+
+def test_a_retired_model_is_not_expected_to_still_be_registered(service, registered_models) -> None:  # type: ignore[no-untyped-def]
+    """The whole point: these two are gone from model_definitions, on purpose."""
+
+    retired = {
+        item.logical_name
+        for item in service.registry.unbacked_models
+        if item.lifecycle == "RETIRED"
+    }
+    assert retired == {"grok-video-official", "veo-3.1-quality-official"}
+    assert not (retired & set(registered_models))
 
 
 def test_every_registered_video_or_image_model_has_a_verdict(service, registered_models) -> None:  # type: ignore[no-untyped-def]

@@ -48,7 +48,8 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
     config = load_model_infrastructure_config(CONFIG_PATH)
     provider_ids = {item.provider_model_id for item in config.models}
     # 22 + the three OpenRouter Veo 3.1 variants added 2026-08-25.
-    assert len(config.models) == 25
+    # 25 - 2 duplicate 'official' records + 1 OpenRouter Wan 3.0 route.
+    assert len(config.models) == 24
     assert {
         "openai/gpt-5.6-sol",
         "anthropic/claude-opus-5",
@@ -69,9 +70,11 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
         "flow-veo-3.1",
         "NARWHAL",
         "doubao-seedance-2-5-260628",
-        "veo-3.1-quality",
-        "grok-video",
         "wan-2.7",
+        # The DashScope Wan 3.0 record: a published ID this account cannot reach.
+        "wan3.0-video",
+        # The route it can — OpenRouter, listed 2026-08-24.
+        "alibaba/wan-3.0",
     } <= provider_ids
     assert all(not item.live_enabled for item in config.models)
     source = CONFIG_PATH.read_text(encoding="utf-8")

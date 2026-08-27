@@ -76,6 +76,10 @@ TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}
 # a typo in a per-model ceiling, or a model run twice, is caught here instead.
 GLOBAL_CANARY_COST_CEILING_USD = Decimal("10")
 
+# The listing endpoint's hard cap. Asking for exactly it turns "there are more
+# than this" into something the caller can see rather than silently under-count.
+_PERMIT_PAGE = 100
+
 
 @dataclass(frozen=True)
 class Target:
@@ -142,6 +146,134 @@ TARGETS = {
         quote={"media_type": "video", "duration": 4, "resolution": "720p", "reference_count": 0},
     ),
 }
+
+
+def _video_target(
+    name: str,
+    *,
+    provider: str,
+    model: str,
+    duration: int,
+    resolution: str,
+    max_cost_usd: str,
+    prompt: str = "a paper lantern drifting upward over a wet street at night",
+) -> Target:
+    """One video model at the smallest request its own capability profile allows.
+
+    Duration and resolution are not stylistic here. They are the two axes every
+    one of these providers prices on, so the smallest admissible pair is the
+    cheapest possible proof that the wire format, the auth and the poll parsing
+    are right. Anything larger is a bigger bill for identical evidence.
+    """
+
+    return Target(
+        name=name,
+        provider=provider,
+        model=model,
+        max_requests=1,
+        max_cost_usd=max_cost_usd,
+        permit_hours=2,
+        body={
+            "media_type": "video",
+            "provider": provider,
+            "model": model,
+            "prompt": prompt,
+            "aspect_ratio": "16:9",
+            "resolution": resolution,
+            "duration": duration,
+        },
+        quote={
+            "media_type": "video",
+            "duration": duration,
+            "resolution": resolution,
+            "reference_count": 0,
+        },
+    )
+
+
+# Phase two, cheapest first. Each ceiling is the published minimum for that
+# request plus a margin for rounding — never a round number chosen for comfort,
+# because the ceiling is what the global budget is charged for while the permit
+# is live. Durations are each model's own `min_duration`; resolutions are the
+# cheapest entry in its own `supported_resolutions`.
+TARGETS.update(
+    {
+        # 1s at 480p, xAI's own floor, at OpenRouter's published 0.05 USD/s.
+        "grok-imagine-video": _video_target(
+            "grok-imagine-video",
+            provider="openrouter",
+            model="x-ai/grok-imagine-video",
+            duration=1,
+            resolution="480p",
+            max_cost_usd="0.15",
+        ),
+        # Veo durations are the discrete set 4/6/8 — 4 is the floor, not 1.
+        "veo-3.1-lite": _video_target(
+            "veo-3.1-lite",
+            provider="openrouter",
+            model="google/veo-3.1-lite",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="0.40",
+        ),
+        "kling-3-standard": _video_target(
+            "kling-3-standard",
+            provider="openrouter",
+            model="kwaivgi/kling-v3.0-std",
+            duration=3,
+            resolution="720p",
+            max_cost_usd="0.70",
+        ),
+        "veo-3.1-fast": _video_target(
+            "veo-3.1-fast",
+            provider="openrouter",
+            model="google/veo-3.1-fast",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="0.70",
+        ),
+        "kling-3-pro": _video_target(
+            "kling-3-pro",
+            provider="openrouter",
+            model="kwaivgi/kling-v3.0-pro",
+            duration=3,
+            resolution="720p",
+            max_cost_usd="0.90",
+        ),
+        # Already VERIFIED_LIVE on three clips; kept so the target set is the
+        # whole registry and a re-verification after a contract change is one
+        # command rather than a hand-built request.
+        "wan-2.7": _video_target(
+            "wan-2.7",
+            provider="wan",
+            model="wan-2.7",
+            duration=2,
+            resolution="720p",
+            max_cost_usd="0.40",
+        ),
+        # 2s at 480p, the floor of OpenRouter's own published duration set
+        # (2-30) at its cheapest resolution. USD 0.10 at list; the endpoint
+        # currently carries a 15% discount, so the charge should come in at
+        # 0.085 and the ceiling covers the list figure either way.
+        "wan-3.0": _video_target(
+            "wan-3.0",
+            provider="openrouter",
+            model="alibaba/wan-3.0",
+            duration=2,
+            resolution="480p",
+            max_cost_usd="0.20",
+        ),
+        "seedance-2.5": TARGETS["video"],
+        "veo-3.1": _video_target(
+            "veo-3.1",
+            provider="openrouter",
+            model="google/veo-3.1",
+            duration=4,
+            resolution="720p",
+            max_cost_usd="2.00",
+        ),
+    }
+)
 
 
 @dataclass
@@ -239,6 +371,29 @@ def _report_events(engine, job_id: str, report: Report) -> None:  # type: ignore
     report.evidence["credit_events"] = [event["event_type"] for event in events]
 
 
+def _permit_exposure(permit: dict[str, Any]) -> Decimal:
+    """What this permit can still cost, plus whatever it already drew.
+
+    A permit that is still ACTIVE is worth its whole authorisation: nothing has
+    stopped it from drawing the rest of it. A permit that is EXHAUSTED or
+    EXPIRED can never draw again, so it is worth what it actually drew, plus
+    anything still held against a usage nobody has reconciled — an UNCERTAIN
+    usage might yet turn out to have been billed.
+
+    Charging a dead permit its full authorisation for ever is the rule that
+    would have ended this audit before it began: two refused attempts, USD 8 of
+    ceilings, USD 0 billed, and every remaining model locked out of a budget
+    none of them had spent.
+    """
+
+    authorised = Decimal(str(permit.get("max_cost_usd") or "0"))
+    actual = Decimal(str(permit.get("actual_cost_usd") or "0"))
+    held = Decimal(str(permit.get("reserved_cost_usd") or "0"))
+    if str(permit.get("status")) == "ACTIVE":
+        return max(authorised, actual + held)
+    return actual + held
+
+
 def _global_ceiling_remaining(settings: Settings, api: str, report: Report) -> Decimal | None:
     """Refuse to mint another permit once the audit as a whole has spent enough.
 
@@ -246,22 +401,35 @@ def _global_ceiling_remaining(settings: Settings, api: str, report: Report) -> D
     and a sequence is exactly what a model-by-model audit is.
     """
 
-    status, body = _call(f"{api}/internal/live-canary-permits", token=settings.platform_api_key)
+    status, body = _call(
+        f"{api}/internal/live-canary-permits?limit={_PERMIT_PAGE}",
+        token=settings.platform_api_key,
+    )
     if status != 200:
         report.say(FAIL, "global ceiling", f"cannot read permits: HTTP {status}")
         return None
-    committed = Decimal("0")
-    for permit in body.get("items", body if isinstance(body, list) else []):
-        if not isinstance(permit, dict):
-            continue
-        # What a permit authorises is what it can still cost, so the ceiling is
-        # measured against the authorisation, not against what has been drawn.
-        committed += Decimal(str(permit.get("max_cost_usd") or "0"))
+    # The endpoint answers `{"limit": n, "permits": [...]}`. Reading the wrong
+    # key here did not raise: it defaulted to an empty list, so the ceiling
+    # counted nothing and authorised everything.
+    listed = body.get("permits")
+    if not isinstance(listed, list):
+        report.say(FAIL, "global ceiling", f"permit listing has no permits array: {sorted(body)}")
+        return None
+    if len(listed) >= _PERMIT_PAGE:
+        # A ceiling computed from part of the history is not a ceiling.
+        report.say(FAIL, "global ceiling", f"{len(listed)} permits fills the page; cannot total them")
+        return None
+    committed = sum((_permit_exposure(item) for item in listed if isinstance(item, dict)), Decimal("0"))
+    drawn = sum(
+        (Decimal(str(item.get("actual_cost_usd") or "0")) for item in listed if isinstance(item, dict)),
+        Decimal("0"),
+    )
     remaining = GLOBAL_CANARY_COST_CEILING_USD - committed
     report.say(
         OK if remaining > 0 else FAIL,
         "global ceiling",
-        f"USD {committed} of {GLOBAL_CANARY_COST_CEILING_USD} authorised, USD {remaining} left",
+        f"USD {committed} of {GLOBAL_CANARY_COST_CEILING_USD} exposed across {len(listed)} permit(s), "
+        f"USD {drawn} actually drawn, USD {remaining} left",
     )
     return remaining if remaining > 0 else None
 
@@ -279,7 +447,14 @@ def _mint_permit(settings: Settings, target: Target, api: str, report: Report) -
             f"USD {target.max_cost_usd} would exceed the remaining USD {remaining}",
         )
         return None
-    expires_at = datetime.now(UTC) + timedelta(hours=target.permit_hours)
+    # Snapped to the hour, because the Idempotency-Key below is bucketed by hour
+    # while the permit facts carry the exact expiry. With a to-the-microsecond
+    # timestamp the two disagree: the key says "same request", the facts say
+    # "different request", and a second run inside the same hour is refused 409
+    # instead of replaying the permit it already minted. Snapping up keeps the
+    # authorised window at least as long as asked for.
+    requested = datetime.now(UTC) + timedelta(hours=target.permit_hours)
+    expires_at = requested.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     status, body = _call(
         f"{api}/internal/live-canary-permits",
         token=settings.platform_api_key,

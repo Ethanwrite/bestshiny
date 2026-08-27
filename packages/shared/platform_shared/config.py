@@ -14,8 +14,20 @@ class Settings(BaseSettings):
     max_upload_request_overhead_bytes: int = 65_536
     max_image_pixels: int = 50_000_000
     max_provider_download_bytes: int = 100 * 1024 * 1024
+    # A provider with no entry here cannot deliver a result: the transfer stage
+    # fails closed, which is the right default for a host nobody has confirmed
+    # and the wrong one for a provider the platform actually routes to. Only
+    # `google_flow` was ever listed, so every OpenRouter, Ark and DashScope
+    # generation reached `COMPLETED` at the provider — billed — and then failed
+    # at the fetch with "provider media host is not allowlisted".
+    #
+    # `openrouter.ai` is the host OpenRouter's own `/v1/videos/{id}` response
+    # returns for a finished clip, read from a real completed job. Ark and
+    # DashScope stay unlisted until a canary shows what theirs are: a guessed
+    # host is either a hole in an SSRF fence or another silent failure.
     provider_media_allowed_hosts: str = (
-        "google_flow=labs.google,*.googleusercontent.com,*.googleapis.com,*.googlevideo.com"
+        "google_flow=labs.google,*.googleusercontent.com,*.googleapis.com,*.googlevideo.com;"
+        "openrouter=openrouter.ai,*.openrouter.ai"
     )
     s3_endpoint_url: str = ""
     s3_region: str = "us-east-1"

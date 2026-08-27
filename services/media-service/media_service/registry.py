@@ -210,7 +210,15 @@ class MediaRegistry:
         host = parsed.hostname.lower().rstrip(".")
         patterns = self.provider_media_hosts.get(provider, ())
         if not patterns or not any(self._host_matches(host, pattern) for pattern in patterns):
-            raise RemoteMediaSecurityError("provider media host is not allowlisted")
+            # Name the host. The generation that hits this has already been paid
+            # for, and without the host the operator is left re-running a billed
+            # call to learn a string the provider already told us. A hostname
+            # from a provider response is untrusted, so it is bounded before it
+            # reaches a log line.
+            raise RemoteMediaSecurityError(
+                f"provider media host is not allowlisted: {provider} returned {host[:120]!r}; "
+                "add it to PROVIDER_MEDIA_ALLOWED_HOSTS if it is the provider's own CDN"
+            )
 
         try:
             addresses = await asyncio.to_thread(

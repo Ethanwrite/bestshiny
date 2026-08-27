@@ -278,9 +278,6 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.model_infrastructure_config,
     )
     default_sync = model_infrastructure.ensure_defaults()
-    # After the rows exist, not before: 0044's migration can only mark models
-    # that were already seeded when it ran.
-    model_infrastructure.reconcile_pricing_status()
     model_registry = ModelCapabilityRegistry(database)
     providers = ProviderRouter(
         model_registry,
@@ -544,6 +541,17 @@ def build_container(settings: Settings | None = None) -> Container:
         "image",
         available=bool(seedream_runtime.enabled and seedance.configured),
     )
+
+    # Last, not straight after `ensure_defaults()`. The block above rewrites
+    # `provider_model_id` for every model an operator has declared, and a status
+    # derived before those writes describes a row that no longer exists. That is
+    # not hypothetical, and it goes wrong in both directions: Wan's row moved to
+    # the ID `WAN2_7_T2V_MODEL_ID` names while its price stayed keyed on the
+    # family key, so it reported VERIFIED and refused at the till; Doubao's row
+    # moved off `CONFIGURE_DOUBAO_MODEL_ID` onto a priced ID and reported
+    # UNVERIFIED. The report and the till have to read the same row.
+    model_infrastructure.reconcile_pricing_status()
+
     openrouter_capabilities = {"video"} if openrouter_video_models else set()
     openrouter_models = set(openrouter_video_models)
     if openrouter_image_available:

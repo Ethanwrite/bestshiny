@@ -50,18 +50,28 @@ def test_continuity_hard_and_reanchor_decisions(container, project):
 
 
 def test_capability_resolver_falls_back_or_degrades(container, project):
+    # This is an *execution* test, and execution retargets to the canonical
+    # OpenRouter routes now that `grok` and `veo_official` are retired — they
+    # were capability records on providers whose every call raised
+    # PROVIDER_NOT_CONFIGURED. Their evidence keeps its own identity in the
+    # External Evidence Registry, marked RETIRED; that is a separate fact from
+    # what can be dispatched, and nothing here rewrites it.
+    #
+    # `seedance` is not a stand-in for retired evidence: it is picked because it
+    # genuinely does i2v and genuinely does not do start/end, which is the shape
+    # this test needs. `openrouter` does both.
     fallback = container.capability_resolver.resolve(
         GenerationPolicy.START_END_FRAME.value,
-        "grok",
-        ["veo_official"],
+        "seedance",
+        ["openrouter"],
         project_id=project.id,
     )
-    assert fallback.provider == "veo_official"
+    assert fallback.provider == "openrouter"
     assert fallback.policy == GenerationPolicy.START_END_FRAME.value
     degraded = container.capability_resolver.resolve(
         GenerationPolicy.START_END_FRAME.value,
-        "grok",
-        [],
+        "seedance",
+        ["seedance"],
         project_id=project.id,
     )
     assert degraded.policy == GenerationPolicy.IMAGE_TO_VIDEO.value

@@ -1,4 +1,7 @@
 .env
+# `.env` is an exact match, so a hand-made backup beside it — `.env.bak-audit-…`
+# — is untracked *and* stageable. One `git add -A` publishes every provider key.
+.env.bak*
 .venv/
 __pycache__/
 *.py[cod]

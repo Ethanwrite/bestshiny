@@ -53,6 +53,9 @@ flowchart TB
   FlowAffinity["FlowProjectAllocator\nsticky account/project + migration plan"]
   Ledger["Workspace Credits\nReserve -> Settle/Refund/Reconcile"]
   Evidence["Production Evidence\nexecution + billing + outcome + cost"]
+  RouterObs["Router Observations\nconditions + outcomes, one per attempt"]
+  Layers["External Evidence Layers\nofficial | benchmark | community"]
+  Posterior["Offline Posterior + Replay\nrun by hand, never in a request"]
   Media["Media/Asset Registry\nlineage + storage quota"]
   DB[("PostgreSQL + pgvector\nor SQLite")]
   Store[("Local/S3-compatible storage")]
@@ -90,7 +93,19 @@ flowchart TB
   Evidence --> DB
   Media --> DB
   Media --> Store
+  Visual --> RouterObs
+  RouterObs --> DB
+  RouterObs -. "offline only" .-> Posterior
+  Layers -. "refused: no calibration bridge" .-> Posterior
+  Posterior -. "LCB flag OFF" .-> Visual
 ```
+
+Everything below `Visual --> RouterObs` is dotted for a reason. Observations flow *out* of the
+request path; the posterior is computed by an operator running a script and never inside a
+generation; the external layers are offered to it and refused for want of a calibration bridge; and
+the only edge back into routing is behind `feature_router_lcb`, which is off. With the flag off that
+return edge does not exist at runtime — the router receives byte-for-byte the evidence it received
+before any of this was added.
 
 Passenger and Autopilot share `VisualProductionRuntime`, `GenerationGateway`, `MediaRegistry`, storage, routing,
 provider execution and accounting. A second generation engine or wallet is not allowed.
@@ -105,6 +120,7 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Domain/contracts | `packages/domain/`, `packages/contracts/` | WIP through migration `0033`; DePay checkout sessions, callback receipts and payment-ledger rows are schema-backed |
 | Payments | `core/payments/`, `apps/web/wallet.js` | DePay shared-link QR checkout, signed callback posting and authenticated Alchemy purchase/reorg reconciliation are implemented offline; real payment is not yet executed |
 | Model infrastructure | `core/model-registry/`, `core/entitlements/`, `config/model-registry/` | Persistent single capability truth and role runtime |
+| Router evidence | `core/router-evidence/`, `config/router-evidence/`, `core/external-evidence/` | Four isolated evidence layers, offline hierarchical posterior, replay harness; LCB flag off, exploration has no call site, zero production observations |
 | Director/QA/cost | `core/character/`, `core/style/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state and locked-style generation/commit gates |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
@@ -381,6 +397,12 @@ automatic 0.939 measure three different things. Human and automatic judge scores
 dimension are stored separately. Aggregates are stored at `mapping_confidence: LOW` and can never stand in
 for a capability. A source that published words instead of numbers stores a null value.
 
+This registry is **not** superseded and **not** merged into the four-layer system added on
+2026-08-26 (see *Router evidence* below). They are separate frozen artefacts with separate loaders:
+`registry-v1.json` is the 2026-08-25 research bound to `capability_prior`, and
+`config/router-evidence/*.json` is the 2026-08-26 research keyed for the offline posterior. Nothing
+reads both, which is the same rule the four layers apply to each other.
+
 Today ten of the twelve generative models here have no diagnostic external evidence — see
 `docs/OPEN_ISSUES.md` §2.25. `FEATURE_EXTERNAL_PRIOR` is **false** by default: the registry is a read-only
 data asset and `GET /internal/models/external-evidence` is how it is read. Its immediate use is to say which
@@ -388,41 +410,125 @@ data asset and `GET /internal/models/external-evidence` is how it is read. Its i
 
 ## Router evidence: four layers and an offline posterior
 
-Added 2026-08-26 and documented in full in [`docs/ROUTER_EVIDENCE.md`](docs/ROUTER_EVIDENCE.md).
-`core/router-evidence/router_evidence_core` holds four kinds of evidence and never lets them meet:
-`official_prior`, `benchmark_prior` and `community_prior` are frozen files under
-`config/router-evidence/` (one per layer, one loader each, no accessor that returns two layers), and
-`production_posterior` is computed from the `router_observations` table. Every number is addressed by
-`provider · model_id · exact_version · task_type · scenario · metric_scale_id`, plus a condition
-bucket of duration/resolution/reference mode for production, and two numbers may only combine when
-those match.
+Added 2026-08-26, reviewed and corrected 2026-08-27, documented in full in
+[`docs/ROUTER_EVIDENCE.md`](docs/ROUTER_EVIDENCE.md). Truth label: **Fixture evidence** for the
+posterior and replay machinery (exercised against synthetic history); the three external layers are
+real public evidence with recorded provenance; there is **no production data at all** yet.
 
-`router_observations` is a second, wider production record written alongside `model_metrics`, which
-is unchanged and still feeds the adaptive router. It carries the generation conditions and every
-observed outcome — delivery, what the human did next, and the automated quality checks — with `None`
-meaning *not observed* rather than zero, and a database constraint refusing a failed generation that
-carries a quality score. `VisualProductionRuntime.evaluate_job` writes one row per evaluated
-generation, using a `routing_context` stamped onto the request at decision time so the outcome is
-filed against the cell that actually ran.
+**Four kinds of evidence that fail differently, kept apart.** A vendor's own number is optimistic in
+a predictable direction; a benchmark is honest about a task that may not be yours; a community
+report is real experience with an unknown denominator; only production observations describe what a
+user here will get. `official_prior`, `benchmark_prior` and `community_prior` are three frozen files
+under `config/router-evidence/` with one loader each, and `EvidenceLayerStore` deliberately exposes
+no `all_records()` and no `merged()` — a test asserts the absence, because the one thing that store
+must never make easy is a list with a benchmark score and a Reddit comment in it.
+`production_posterior` is computed from the `router_observations` table.
 
-The posterior is Beta, hierarchical and offline: a fixed Jeffreys global prior, then exact version,
-task, scenario and condition, each level shrinking the next by 4–6 pseudo-observations plus the
-global floor. There is no level above the exact version, which is the mechanical guarantee that one
-version's data cannot move another's. Cost and latency have no posterior — they are unbounded, and
-are summarised in their own units.
+**The isolation key is the unit of everything.** `provider · model_id · exact_version · task_type ·
+scenario · metric_scale_id`, plus a `ConditionBucket` of duration bucket, resolution and reference
+mode for production. Two numbers may only combine when those match. `EvidenceKey.token` and
+`ConditionBucket.token` are `|`-joined and round-tripped through the database, so `resolution` is
+constrained to exclude that separator: a label containing one would not corrupt a single cell, it
+would raise out of the whole posterior computation.
 
-External evidence reaches the production posterior only through a calibration bridge, and
-`calibration.BRIDGES` is empty: as of 2026-08-26 all 112 eligible external priors are refused with
-`NO_CALIBRATION_BRIDGE`, so the three external layers are a reporting surface, read at
-`GET /internal/models/router-evidence`.
+**`exact_version` pins our configuration, not always the provider's weights.** It is
+`ModelCapabilityProfile.version` (`wan-2.7-manual-v4`). Where a provider's model id carries a dated
+snapshot (`doubao-seedance-2-5-260628`) the pair really does identify the weights; where the id is a
+repointable alias (`google/veo-3.1`) it does not, and `model_is_alias` quarantines such an
+observation rather than attributing it. No provider wired here reports a resolved snapshot, so that
+flag is currently never set — recorded as OPEN_ISSUES §2.31.
 
-`feature_router_lcb` is **false**. With it off the router receives exactly the evidence it received
-before this existed; `VideoModelRouter` itself is untouched, because the conservative lower bound is
-delivered through the per-request `RoutingEvidence` the router already accepted. Turning it on
-additionally requires a replay on file that passed — regret, failure rate, cost, predictive interval
-coverage and unscored-context share all checked — which `scripts/router_posterior_run.py` produces.
-Exploration is built as an offline simulator with six constraints and has no feature flag and no call
-site; a test asserts that nothing under `services/`, `apps/`, `agents/` or `providers/` imports it.
+**Production observations are wider than `model_metrics`, which is unchanged** and still feeds the
+adaptive router. `router_observations` carries the generation conditions and every observed
+outcome — delivery, what the human did next, and the automated quality checks. `None` means *not
+observed* and never zero, so a shot nobody rated does not become a one-star and a generation quoted
+at zero credits is recorded as costing zero rather than as having no cost observed. A check
+constraint refuses a failed generation carrying a quality score: otherwise a provider outage reads
+as a quality problem and teaches the router to avoid a good model permanently.
+
+**Attribution is decided when the model is chosen, not when the outcome arrives.**
+`prepare_autopilot_generation` stamps a `routing_context` onto the request — task, scene, reference
+mode, conditions, criticality and the exact version of the model it picked — and
+`VisualProductionRuntime.evaluate_job` reads it back. The shot spec can be edited between the two,
+and an observation filed under the scene the shot *became* would be attributed to a cell that never
+ran. A retry is the hard case and was wrong until the review: `_execute_retry` builds its metadata
+from `{**metadata, ...}`, and `RetryPlan` exists to re-route to a *different* model, so the context
+carried the previous target's version onto the new one and produced observations keyed to a
+provider/model/version triple that never existed. `_retargeted_routing_context` now re-resolves the
+version from the registry whenever the target changes, and returns nothing when the registry cannot
+name the new target — the recorder then skips, because no observation beats a mislabelled one.
+
+**The write boundary refuses rather than coerces.** An alias binding, a missing version, or an
+`observation_id` too long for its column all raise `UnattributableObservation` instead of being
+defaulted, truncated or replaced. Silently rewriting an identifier is the one failure nothing
+downstream can detect. Writes are idempotent on `generation_job_id`, so a retried worker or a
+replayed webhook cannot inflate the counts the LCB gate reads. Collecting evidence is never allowed
+to fail the user's request: the recorder absorbs the contract's own refusals *and* database errors,
+which a `ValueError`-only catch did not — a PostgreSQL serialization failure under concurrent
+evaluation would have failed a request whose generation had already succeeded and been billed.
+
+**The posterior is Beta, hierarchical and offline.** A fixed Jeffreys global prior, then exact
+version, task, scenario and condition bucket, each level shrinking the next by 4–6
+pseudo-observations *plus* the global floor. The floor matters: without it a cell whose parent is
+already near certainty inherits a near-zero pseudo-count on one side, and thirty consecutive
+successes produce a Beta with `b` below 0.01 and an interval of `[0.99999, 1.0]`. There is no level
+above the exact version, and the global level is a *constant* rather than an estimate over other
+models — together those are the mechanical guarantee that one version's data cannot move another's,
+rather than a discipline someone has to remember. Cost and latency have no posterior; they are
+unbounded, and are summarised in their own units with nearest-rank percentiles.
+
+**External evidence reaches the production posterior only through a calibration bridge, and there
+are none.** `calibration.BRIDGES` is empty, so all 112 eligible external priors are refused with
+`NO_CALIBRATION_BRIDGE` and every refusal is reported — a silent empty result looks identical to
+"there was no evidence". The three external layers are therefore a reporting surface today, read at
+`GET /internal/models/router-evidence`. They are still the answer to "why is this model's
+`capability_prior` a hand-authored number", which is the question the older frozen
+`registry-v1.json` was built for and which this supersedes in scope without replacing.
+
+**`feature_router_lcb` is false, and `VideoModelRouter` is untouched.** The conservative lower bound
+is delivered through the per-request `RoutingEvidence` the router already accepted, so with the flag
+off the router receives byte-for-byte the evidence it received before this existed; a test pins the
+router's version string, `rank`'s signature and its four scoring profiles. Three fallbacks return
+the caller's evidence object unchanged: flag off, no snapshot saved, no cell sufficient (≥20
+observations, ESS ≥10, interval width ≤0.55). Where two outcomes would touch one router dimension
+the more pessimistic wins, and the backing count handed to the router is the **smallest** across the
+adjusted dimensions — the router reads that number to weight the production term, and reporting the
+largest would apply one dimension's 300 observations to another's 25.
+
+**The offline/online boundary is a cached snapshot, not a query.** `_conservative_lcb_lookup`
+materialises one posterior run and rate-limits even the check for a newer one to
+`_LCB_SNAPSHOT_TTL_SECONDS` (60s). Before the review it issued a `router_posteriors` query per
+routed generation, which put the offline artefact back in the hot path — the one thing the split
+exists to prevent. `latest_posterior_run_id` orders by `created_at`, the row's insert time; it
+previously tiebroke on `id`, a uuid4, so which snapshot the router read was not reproducible.
+
+**Enabling the LCB requires a replay on file that passed.** `ReplayHarness` splits history
+chronologically, fits on the earlier window and scores on the later one, comparing policies on
+context buckets because only the arm that actually ran has an outcome. It checks interval coverage
+against the **posterior predictive** interval rather than the posterior — the observable is a mean
+over a finite window and carries its own sampling error on top — and gates on regret, failure rate,
+cost tolerance, coverage calibration and unscored-context share together, so a policy cannot buy
+quality with money or with reliability. The router key has no room for a version, so a model that
+ran under more than one exact version in the fit window is replayed on the latest and the result
+says which models that applied to: the one place this system has to collapse a distinction the rest
+of it refuses to.
+
+**Exploration has no feature flag and no call site.** It ships as an offline simulator with six
+constraints — budget, criticality ceiling, per-generation cost, minimum evidence, failure-rate
+ceiling, and an allowlist of exact *versions* rather than model ids so a silent snapshot change
+cannot inherit permission. A flag is something someone can turn on; the absence of a call site is
+not, and a test walks the AST of `services/`, `apps/`, `agents/` and `providers/` to keep it that
+way. The simulator holds no state between runs, so repeated simulation is reproducible.
+
+**Research is delegated; validation is not.** `scripts/research_router_evidence.py` drives the Grok
+CLI in two stages — search in prose, then structure with the web disabled — and this repository only
+validates. `EvidenceIngestor` refuses an unquoted number, an unregistered scale, a value outside its
+own declared scale, an unattributed sample size and a version the source never named; it marks and
+keeps aliases and near-miss versions, because a deleted one gets re-derived from the same page later
+and attached silently to the wrong model. The quote check is the one the design leans on hardest and
+was the loosest: scaling a 0-1 value by a hundred turned 0.87 into "87" and matched "we ran 87
+prompts", so a sentence about sample size validated a claimed score. A scaled match now counts only
+when the number in the quote reads as a percentage — a `%` or a fractional part.
 
 ## Model capability and role runtime
 
@@ -799,6 +905,20 @@ Phase III introduces these durable evidence rows:
 | `DecisionOutcomeRecord` | shot features, continuity, generation policy, provider/model, candidate, QA, user outcome and cost |
 | `RunAPIBenchmark` | edge task hash, fact-lock/fallback, latency, quality, actual cost and optional acceptance |
 | `LiveCanaryPermit` / `LiveCanaryUsage` | bounded live authorization and each reserved/uncertain/settled operation |
+| `RouterObservation` | one generation attempt with its conditions and every observed outcome, for the offline posterior |
+| `RouterPosterior` | one saved cell of one offline posterior run, immutable per `run_id` |
+| `RouterReplayRun` | one historical replay with its verdict — the evidence the LCB flag's precondition rests on |
+
+`RouterObservation` sits **beside** `ModelMetric`, not in place of it. `ModelMetric` records a metric
+name and a value against a provider and a model id, and still drives the adaptive router unchanged;
+it cannot say which snapshot ran, what was asked of it, or under what conditions, and each of those
+changes what an outcome means. Nothing was migrated between them — the old rows carry no version,
+task type or scenario, and inventing them is the contamination the new table exists to prevent, so
+`router_observations` starts empty on purpose.
+
+A `RouterReplayRun` row with `passed=false` is as important as one with true: it is the evidence that
+`feature_router_lcb` must stay off, and `failure_reasons()` in the report says which of regret,
+failure rate, cost or interval calibration failed.
 
 Gateway completion parses a constrained set of Provider usage/billing fields and stores a response hash/reference,
 not the raw response. When no trustworthy amount or credits exist, evidence is `UNKNOWN`, estimates remain separate
@@ -1008,6 +1128,18 @@ create path therefore treats a stale fence as conclusive only once the key is kn
 that exists is a claim for the same request (a differing request hash is still an `IdempotencyConflict`), and
 the idempotent answer is the competitor's job rather than a 409.
 
+**Evidence tables enforce what analysis cannot repair.** `router_observations` carries a check
+constraint refusing a row that failed generation and still holds a quality score or a rating — nothing
+was produced, so there is nothing to judge, and a provider outage recorded as a quality problem would
+teach the router to avoid a good model permanently. Its unique constraint on `generation_job_id` makes
+a duplicated webhook or a retried worker collapse onto the row already there rather than inflating
+every count that reads it, including the effective sample size the LCB gate depends on.
+`router_posteriors` is immutable per `run_id`: a re-run gets a new one rather than overwriting, so a
+decision taken last week can still be explained by the numbers that were on file last week. Its
+ordering constraint checks the two quantiles against each other and says nothing about the mean —
+a heavily skewed Beta, the shape a cell with a long run of identical outcomes takes, can have a mean
+outside its own central interval, and a constraint assuming otherwise rejects correct arithmetic.
+
 **Every plpgsql guard declares its SQLSTATE.** A `RAISE EXCEPTION` with no ERRCODE reports `P0001`, which
 SQLAlchemy raises as `ProgrammingError` — while the same guard under SQLite raises `IntegrityError`. Integrity
 guards use `23514`; the character-state head fence deliberately uses `40001`, because a stale fence means
@@ -1074,6 +1206,15 @@ references are fingerprinted; prompt bodies, vectors, raw Provider responses and
 `POST/GET /internal/live-canary-permits` creates explicitly confirmed, idempotent permits and lists permit/usage
 state. These are development/operator APIs, not a redesigned analytics dashboard.
 
+`GET /internal/models/router-evidence` returns the four evidence layers **as four keys rather than one
+merged list**, because merging them is what the structure exists to prevent: per-layer version, record
+and eligibility counts, source-type distribution, per-model-per-version coverage, marked conflicts,
+records bound to versions nobody confirmed, and the models with too little evidence to say anything
+about. Its `lcb` block answers the question an operator actually has — is the lower bound affecting
+routing right now, and if not, which of the three fallbacks is in force — and its `exploration` block
+states in its own data that nothing is online. `GET /internal/models/external-evidence` continues to
+serve the older frozen `registry-v1.json` unchanged.
+
 Authenticated narrative-state read and audit APIs expose state hashes, lineage, patches and validation decisions but
 never grant callers the ability to mark embedding output authoritative. State initialization and human confirmation
 reject the development-auth bypass so actor provenance cannot be fabricated.
@@ -1116,6 +1257,21 @@ blockers include:
    fetchable-URL providers can actually reach; the retry/admission payload recompilation, the reference-mode
    split, the fail-closed Flow key mapping and the OpenRouter/Ark payload allowlists are implemented and
    covered by Mock payload contract tests, but no live canary has exercised them.
+
+Router evidence is deliberately *not* on that list, because it blocks nothing: with
+`feature_router_lcb` false and no exploration call site, the routing behaviour of this release is
+identical to the one before it. Its own readiness reads:
+
+    Evidence infrastructure   READY     154 records across three isolated layers, with provenance
+    Production posterior      NOT READY router_observations is empty; it fills as the platform is used
+    LCB                       OFF       precondition is a replay on file that passed; none can exist yet
+    Exploration               OFF       no feature flag and no call site
+
+That is the intended state rather than an unfinished one. 154 pieces of public evidence are an
+evidence registry, not a production posterior, and the distance between the two is a calibration
+bridge that does not exist and traffic that has not happened. Six model×layer research pairs are
+still gaps (`docs/OPEN_ISSUES.md` §1.14) and closing them needs Grok balance, which is exhausted —
+neither blocks anything above.
 
 No further Provider integration is required for the persistent-state milestone. The remaining visual blocker is a
 trusted, calibrated implementation behind the existing reviewer contract, not permission to treat Voyage embeddings

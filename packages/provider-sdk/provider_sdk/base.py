@@ -21,6 +21,235 @@ class ProviderReferenceMode(StrEnum):
 
 
 @dataclass(frozen=True)
+class VideoConstraintViolation:
+    """One specific way an observed video fails a provider's declared bounds.
+
+    ``adaptable`` records whether transcoding can close the gap without
+    changing what the video *means*. Container, codec, resolution, frame rate,
+    bitrate and byte size can all be adapted by re-encoding a derived copy.
+    Duration and aspect ratio cannot: trimming removes content and cropping
+    reframes it, and both are semantic edits nobody asked for. Those fail
+    closed until a human makes the cut explicitly.
+    """
+
+    code: str
+    detail: str
+    adaptable: bool
+
+    def __str__(self) -> str:
+        return f"{self.code} ({self.detail})"
+
+
+def _parse_aspect_ratio(value: str) -> float:
+    numerator, separator, denominator = value.partition(":")
+    if not separator:
+        raise ValueError(f"aspect ratio {value!r} is not of the form W:H")
+    width, height = float(numerator), float(denominator)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"aspect ratio {value!r} must have positive terms")
+    return width / height
+
+
+@dataclass(frozen=True)
+class VideoReferenceConstraints:
+    """What a provider will actually accept as a reference *video*.
+
+    Same philosophy as the image bounds: these are transport facts about one
+    provider, never a reason to touch the user's original. A video outside
+    them gets a derived, revalidated copy — except where closing the gap would
+    change the content itself. Trimming an over-long clip and cropping a
+    mismatched aspect ratio are semantic edits, so both fail closed with the
+    specific unmet constraint instead of being "fixed" silently; a human crop
+    or trim selection is a separate, explicit act.
+
+    ``accepted_containers`` and ``accepted_codecs`` are what the provider
+    documents (containers as MIME types, codecs as ffprobe ``codec_name``
+    values such as ``h264``/``hevc``/``vp9``). ``accepted_aspect_ratios`` of
+    ``None`` accepts any shape. ``None`` on a numeric bound means the provider
+    declares no limit there — the dimension is simply not checked.
+    """
+
+    accepted_containers: frozenset[str] = frozenset({"video/mp4"})
+    preferred_container: str = "video/mp4"
+    accepted_codecs: frozenset[str] = frozenset({"h264"})
+    preferred_codec: str = "h264"
+    accepted_aspect_ratios: frozenset[str] | None = None
+    max_width: int | None = None
+    max_height: int | None = None
+    max_bitrate_bps: int | None = None
+    max_frame_rate: float | None = None
+    max_duration_seconds: float | None = None
+    max_bytes: int | None = None
+
+    # Two observed ratios within 2% describe the same framing; anything past
+    # that is a genuinely different shape, not encoder rounding.
+    ASPECT_RATIO_TOLERANCE = 0.02
+
+    def __post_init__(self) -> None:
+        if not self.accepted_containers:
+            raise ValueError("a video constraint must accept at least one container")
+        if self.preferred_container not in self.accepted_containers:
+            raise ValueError("preferred_container must be one of accepted_containers")
+        if not self.accepted_codecs:
+            raise ValueError("a video constraint must accept at least one codec")
+        if self.preferred_codec not in self.accepted_codecs:
+            raise ValueError("preferred_codec must be one of accepted_codecs")
+        if self.accepted_aspect_ratios is not None:
+            if not self.accepted_aspect_ratios:
+                raise ValueError("accepted_aspect_ratios cannot be empty; use None for any")
+            for ratio in self.accepted_aspect_ratios:
+                _parse_aspect_ratio(ratio)
+        for bound_name in (
+            "max_width",
+            "max_height",
+            "max_bitrate_bps",
+            "max_frame_rate",
+            "max_duration_seconds",
+            "max_bytes",
+        ):
+            bound = getattr(self, bound_name)
+            if bound is not None and bound <= 0:
+                raise ValueError(f"{bound_name} must be positive when declared")
+
+    def aspect_ratio_accepted(self, width: int, height: int) -> bool:
+        if self.accepted_aspect_ratios is None:
+            return True
+        if width <= 0 or height <= 0:
+            return False
+        observed = width / height
+        return any(
+            abs(observed - declared) <= declared * self.ASPECT_RATIO_TOLERANCE
+            for declared in map(_parse_aspect_ratio, self.accepted_aspect_ratios)
+        )
+
+    def violations(
+        self,
+        *,
+        container_mime_type: str,
+        codec: str,
+        width: int,
+        height: int,
+        frame_rate: float,
+        duration_seconds: float,
+        bit_rate_bps: int,
+        size_bytes: int,
+        duration_slack_seconds: float = 0.0,
+    ) -> tuple[VideoConstraintViolation, ...]:
+        """Every declared bound the observed video fails, each named specifically.
+
+        ``duration_slack_seconds`` exists for revalidating a transcoded copy:
+        container muxing rounds duration to its timebase, so an output can
+        read a few hundredths of a second longer than a source that was
+        within the cap. The source itself is always checked with zero slack.
+        """
+
+        found: list[VideoConstraintViolation] = []
+        if container_mime_type.lower() not in self.accepted_containers:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_CONTAINER_NOT_ACCEPTED",
+                    detail=f"{container_mime_type} is not in {sorted(self.accepted_containers)}",
+                    adaptable=True,
+                )
+            )
+        if codec.lower() not in self.accepted_codecs:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_CODEC_NOT_ACCEPTED",
+                    detail=f"{codec} is not in {sorted(self.accepted_codecs)}",
+                    adaptable=True,
+                )
+            )
+        if not self.aspect_ratio_accepted(width, height):
+            accepted = sorted(self.accepted_aspect_ratios or ())
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_ASPECT_RATIO_NOT_ACCEPTED",
+                    detail=(
+                        f"{width}x{height} does not match {accepted}; automatic cropping "
+                        "changes what the video shows, so an explicit manual crop "
+                        "selection is required"
+                    ),
+                    adaptable=False,
+                )
+            )
+        if self.max_width is not None and width > self.max_width:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_WIDTH_EXCEEDS_LIMIT",
+                    detail=f"{width}px wide exceeds the {self.max_width}px limit",
+                    adaptable=True,
+                )
+            )
+        if self.max_height is not None and height > self.max_height:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_HEIGHT_EXCEEDS_LIMIT",
+                    detail=f"{height}px tall exceeds the {self.max_height}px limit",
+                    adaptable=True,
+                )
+            )
+        if self.max_bitrate_bps is not None and bit_rate_bps > self.max_bitrate_bps:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_BITRATE_EXCEEDS_LIMIT",
+                    detail=f"{bit_rate_bps} bps exceeds the {self.max_bitrate_bps} bps limit",
+                    adaptable=True,
+                )
+            )
+        if self.max_frame_rate is not None and frame_rate > self.max_frame_rate:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_FRAME_RATE_EXCEEDS_LIMIT",
+                    detail=f"{frame_rate:g} fps exceeds the {self.max_frame_rate:g} fps limit",
+                    adaptable=True,
+                )
+            )
+        if (
+            self.max_duration_seconds is not None
+            and duration_seconds > self.max_duration_seconds + duration_slack_seconds
+        ):
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_DURATION_EXCEEDS_LIMIT",
+                    detail=(
+                        f"{duration_seconds:g}s exceeds the {self.max_duration_seconds:g}s limit; "
+                        "automatic trimming removes content, so an explicit manual trim "
+                        "is required"
+                    ),
+                    adaptable=False,
+                )
+            )
+        if self.max_bytes is not None and size_bytes > self.max_bytes:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_BYTES_EXCEED_LIMIT",
+                    detail=f"{size_bytes} bytes exceeds the {self.max_bytes}-byte limit",
+                    adaptable=True,
+                )
+            )
+        return tuple(found)
+
+    def key_fragment(self) -> str:
+        """Stable identity of these bounds, embedded in the rendition cache key."""
+
+        containers = "+".join(sorted(self.accepted_containers))
+        codecs = "+".join(sorted(self.accepted_codecs))
+        ratios = (
+            "+".join(sorted(self.accepted_aspect_ratios))
+            if self.accepted_aspect_ratios is not None
+            else "any"
+        )
+        return (
+            f"cont={containers};contpref={self.preferred_container};"
+            f"cod={codecs};codpref={self.preferred_codec};ar={ratios};"
+            f"w={self.max_width or 0};h={self.max_height or 0};"
+            f"br={self.max_bitrate_bps or 0};fps={self.max_frame_rate or 0:g};"
+            f"dur={self.max_duration_seconds or 0:g};bytes={self.max_bytes or 0}"
+        )
+
+
+@dataclass(frozen=True)
 class ProviderReferenceConstraints:
     """What a provider will actually accept as a reference image.
 
@@ -35,16 +264,23 @@ class ProviderReferenceConstraints:
     ``None`` on a bound means the provider declares no limit, which is not the
     same as an unlimited provider — it means we have not established one, so no
     derived copy is made and the original is sent as-is.
+
+    ``video`` declares how the provider takes a reference *video*. ``None``
+    means nobody has established that this provider takes video references at
+    all, so a video asset stays unadaptable and fails closed rather than being
+    transcoded against guessed limits. A declared ``video`` always validates:
+    even an original inside every bound is probed before it is sent.
     """
 
     max_pixels: int | None = None
     max_bytes: int | None = None
     accepted_mime_types: frozenset[str] = frozenset({"image/png", "image/jpeg", "image/webp"})
     preferred_mime_type: str = "image/jpeg"
+    video: VideoReferenceConstraints | None = None
 
     @property
     def bounded(self) -> bool:
-        return self.max_pixels is not None or self.max_bytes is not None
+        return self.max_pixels is not None or self.max_bytes is not None or self.video is not None
 
     def accepts(self, *, mime_type: str, pixels: int | None, size_bytes: int) -> bool:
         if mime_type.lower() not in self.accepted_mime_types:
@@ -57,10 +293,15 @@ class ProviderReferenceConstraints:
         """Stable identity of these bounds, so changed limits do not reuse a copy."""
 
         formats = "+".join(sorted(self.accepted_mime_types))
-        return (
+        base = (
             f"px={self.max_pixels or 0};bytes={self.max_bytes or 0};"
             f"fmt={formats};pref={self.preferred_mime_type}"
         )
+        # Appended only when declared, so every image rendition cached before
+        # video constraints existed keeps its key byte-for-byte.
+        if self.video is not None:
+            return f"{base};video[{self.video.key_fragment()}]"
+        return base
 
 
 @dataclass

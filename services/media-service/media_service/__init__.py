@@ -34,6 +34,14 @@ from .renditions import (
     RenditionDerivationFailed,
     RenditionResolver,
     ResolvedRendition,
+    VideoReferenceUnadaptable,
+)
+from .video_renditions import (
+    VIDEO_TRANSCODER_VERSION,
+    VideoAdaptationFailed,
+    VideoReferenceTranscoder,
+    VideoStreamFacts,
+    VideoTranscodeResult,
 )
 
 __all__ = [
@@ -60,6 +68,12 @@ __all__ = [
     "RenditionDerivationFailed",
     "RenditionResolver",
     "ResolvedRendition",
+    "VIDEO_TRANSCODER_VERSION",
+    "VideoAdaptationFailed",
+    "VideoReferenceTranscoder",
+    "VideoReferenceUnadaptable",
+    "VideoStreamFacts",
+    "VideoTranscodeResult",
     "StorageQuotaReservation",
     "StorageReservationConflict",
     "WorkspaceStorageQuota",

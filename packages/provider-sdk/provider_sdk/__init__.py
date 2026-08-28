@@ -7,6 +7,8 @@ from .base import (
     ProviderReferenceConstraints,
     ProviderReferenceMode,
     ProviderSubmission,
+    VideoConstraintViolation,
+    VideoReferenceConstraints,
 )
 from .budget import (
     InMemoryProviderBudgetRepository,
@@ -71,6 +73,8 @@ __all__ = [
     "ProviderReferenceConstraints",
     "ProviderReferenceMode",
     "ProviderSubmission",
+    "VideoConstraintViolation",
+    "VideoReferenceConstraints",
     "ProviderError",
     "RetryCategory",
     "NotConfiguredProvider",

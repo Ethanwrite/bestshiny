@@ -621,6 +621,78 @@ record with no job created, a hand-created shot with a hand-saved mode being re-
 automatically with first-shot semantics, a replay reusing the plan without a second decision, and a
 manual risk override surviving the generation preflight.
 
+## 1f. 2026-08-27 — video references: validated, adapted, or refused by name
+
+Until now a video reference had exactly one behaviour: `RenditionResolver` reported it
+unadaptable and the generation failed closed. Correct — transcoding against limits nobody
+declared would ship a guess to a paid call — but it meant every video-reference provider
+needed originals already inside its limits. The gap is now closed from the declaration side,
+with the same shape the image plane has had since `media_renditions` (`0035`).
+
+**Providers declare, in `ProviderReferenceConstraints.video`.** A `VideoReferenceConstraints`
+carries accepted containers and codecs (with a preferred target for each), frame-size,
+bitrate, frame-rate, duration, byte and aspect-ratio limits. `None` keeps today's meaning —
+nobody established that this provider takes video — and such a reference still fails closed
+unchanged. The field appends to `ProviderReferenceConstraints.key()` **only when declared**,
+so every image rendition cached before this change keeps its constraint key byte-for-byte.
+
+**A declared consumer always validates.** The original is ffprobed (codec, dimensions,
+frame rate, duration, bitrate, audio presence) even when it fits every bound — the provider
+boundary only ever consumes encodings whose facts were observed, not assumed. When it fails
+adaptable bounds, ffmpeg derives a copy in a worker thread (`asyncio.to_thread` in the
+Gateway's `_provider_reference_url`, so an 8-minute transcode does not stall every other job
+on the event loop): remux-only (`-c copy`) when the container is the only gap, otherwise
+re-encode with uniform scaling, fps capping and a bitrate solved from the byte budget —
+bytes/duration is the whole budget, audio and muxing spend part of it before the picture
+gets any. **Every attempt is re-probed and checked against the full constraint set**; only a
+passing copy is stored, and a rate-control overshoot tightens the target and retries rather
+than shipping the overweight file.
+
+**What adaptation must never do is change meaning.** Trimming an over-long clip removes
+content; cropping a mismatched aspect ratio reframes it. Both refuse with the specific
+constraint (`VIDEO_DURATION_EXCEEDS_LIMIT`, `VIDEO_ASPECT_RATIO_NOT_ACCEPTED`, carried
+machine-readably on `VideoReferenceUnadaptable.violations` and named in the
+`PROVIDER_REFERENCE_URL_UNAVAILABLE` message) — an explicit manual crop or trim is a
+separate human act, not a default. A byte or bitrate budget too small for a legible clip of
+that duration (under ~100 kbps of video) refuses the same way instead of shipping mush.
+
+**The cache key is source, bounds and tool.** `media_renditions.constraint_key` for video is
+`video:<transcoder-version>:<sha256(source sha256 + full constraint key + transcoder
+version)[:40]>` — new original bytes, any changed bound, or a bumped
+`VIDEO_TRANSCODER_VERSION` each produce a new rendition instead of reusing one built for a
+different question. The row's `metadata_json` records both probes, the violations that
+caused derivation, attempts, and remux/re-encode, so "why does this copy exist" is
+answerable from the row.
+
+**What this deliberately does not do.** No shipped provider declares `video` yet: per
+OPEN_ISSUES §2.9's residual, declarations are read from vendor documentation per provider
+(Wan R2V's `reference_video` bounds first) rather than guessed here, so behaviour at every
+existing provider is unchanged until someone writes the numbers down with a source. The
+originals rule is untouched — the user's bytes are never re-encoded, replaced or deleted.
+
+**Tests:** `tests/test_video_reference_adaptation.py` (twelve) builds real clips with ffmpeg
+and pins: image keys unchanged; undeclared consumers still refuse; an in-bounds original is
+probed and sent as-is; an out-of-bounds vp9/webm/60fps clip arrives as h264/mp4 within every
+bound with uniform (uncropped) scaling and full metadata; cache reuse, and new renditions on
+changed constraints or transcoder version; aspect-ratio and duration conflicts refusing by
+name with nothing derived; an unmeetable byte budget naming itself; container-only remux;
+and `reference_url` handing out only the validated rendition — never the raw original —
+or refusing with the violated constraint named in the failure the Gateway sees.
+
+**Verification state of this branch (2026-08-27).** Run to completion and green:
+`ruff check .`, `mypy` (Success, 160 source files), `git diff --check`, and the two media
+suites on the SQLite engine — `tests/test_video_reference_adaptation.py` +
+`tests/test_media_reference_plane.py`, 25 passed. **The full matrix was not completed
+here**: both halves were started and then deliberately stopped on the user's instruction
+to leave database testing to a dedicated session — SQLite at ~78% and PostgreSQL at ~30%,
+zero failures observed up to the stop, which is progress evidence and *not* a gate. There
+is **no migration in this change** (the `media_renditions` schema is untouched; video
+renditions reuse `constraint_key` with a `video:*` scheme; alembic head stays
+`0052_shot_dependencies`), so what the follow-up session owes is the ordinary two-half
+matrix, not a schema step. Baseline for comparison: `main` at `9a06dcf` passed 1077
+(SQLite) / 1079 (PostgreSQL); this branch adds twelve tests, so expect 1089 / 1091 with
+the same skips.
+
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 
 `Database.create_all()` ran from `build_container()` on every startup. It creates tables missing from ORM

@@ -7,6 +7,7 @@ import mimetypes
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Protocol, cast
 from urllib.parse import quote, urlencode
@@ -49,6 +50,37 @@ class StorageProvider(Protocol):
     def put(self, stream: BinaryIO, *, filename: str, mime_type: str | None = None) -> StoredObject: ...
     def open(self, key: str, mode: str = "rb") -> BinaryIO: ...
     def path_for(self, key: str) -> Path: ...
+
+    def put_exact(self, stream: BinaryIO, *, key: str, mime_type: str | None = None) -> StoredObject:
+        """Write bytes at exactly ``key``, replacing whatever is there.
+
+        ``put`` names an object after its content, which is what deduplication
+        wants and exactly what a *staging* write must not have: a crashed
+        attempt has to be able to re-run and land on the byte-identical key it
+        used before, so retries overwrite one slot instead of accreting
+        orphans. The caller owns the key's uniqueness; two writers racing on
+        one key is a protocol error above this layer.
+        """
+        ...
+
+    def delete(self, key: str) -> bool:
+        """Remove one object; True when something was actually removed.
+
+        Exists for reclaiming staging leftovers. Nothing in the media plane
+        calls this on an adopted asset's key — the sweeper checks the database
+        before it deletes, and that check is the only thing that makes this
+        method safe to have at all.
+        """
+        ...
+
+    def list_keys(self, prefix: str) -> list[tuple[str, datetime]]:
+        """Every stored key under ``prefix`` with its last-modified time.
+
+        The store is the ground truth for what staging holds: a process that
+        died between writing an object and recording it anywhere leaves no row
+        to enumerate, so cleanup must enumerate the objects themselves.
+        """
+        ...
 
     def presigned_upload(
         self,
@@ -225,6 +257,64 @@ class LocalStorage:
         public_url = f"{self.public_base_url}/v1/storage/{key}" if self.public_base_url else None
         return StoredObject(key, str(destination), public_url, sha, size, actual_mime)
 
+    def put_exact(self, stream: BinaryIO, *, key: str, mime_type: str | None = None) -> StoredObject:
+        destination = self.path_for(key)
+        digest = hashlib.sha256()
+        size = 0
+        temporary: Path | None = None
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent,
+                prefix=".staging-",
+                suffix=".tmp",
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                while chunk := stream.read(1024 * 1024):
+                    if size + len(chunk) > self.max_object_bytes:
+                        raise StorageLimitExceeded(self.max_object_bytes)
+                    digest.update(chunk)
+                    size += len(chunk)
+                    output.write(chunk)
+        except BaseException:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            raise
+        assert temporary is not None
+        # Replace, not skip-if-exists: the key is the caller's slot, and a
+        # retry must leave the slot holding what the retry wrote.
+        temporary.replace(destination)
+        actual_mime = mime_type or mimetypes.guess_type(destination.name)[0] or "application/octet-stream"
+        public_url = f"{self.public_base_url}/v1/storage/{key}" if self.public_base_url else None
+        return StoredObject(key, str(destination), public_url, digest.hexdigest(), size, actual_mime)
+
+    def delete(self, key: str) -> bool:
+        try:
+            path = self.path_for(key)
+        except ValueError:
+            return False
+        if not path.is_file():
+            return False
+        path.unlink(missing_ok=True)
+        return True
+
+    def list_keys(self, prefix: str) -> list[tuple[str, datetime]]:
+        base = self.path_for(prefix.rstrip("/")) if prefix else self.root
+        if not base.is_dir():
+            return []
+        found: list[tuple[str, datetime]] = []
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.name.endswith(".tmp"):
+                continue
+            found.append(
+                (
+                    path.relative_to(self.root).as_posix(),
+                    datetime.fromtimestamp(path.stat().st_mtime, tz=UTC),
+                )
+            )
+        return found
+
     def path_for(self, key: str) -> Path:
         candidate = (self.root / key).resolve()
         if self.root not in candidate.parents:
@@ -363,6 +453,69 @@ class S3CompatibleStorage:
         self.client.upload_file(str(destination), self.bucket, key, ExtraArgs={"ContentType": actual_mime})
         public_url = f"{self.public_base_url}/v1/storage/{key}" if self.public_base_url else None
         return StoredObject(key, str(destination), public_url, sha, size, actual_mime)
+
+    def put_exact(self, stream: BinaryIO, *, key: str, mime_type: str | None = None) -> StoredObject:
+        destination = self.path_for(key, download=False)
+        digest = hashlib.sha256()
+        size = 0
+        temporary: Path | None = None
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
+                temporary = Path(output.name)
+                while chunk := stream.read(1024 * 1024):
+                    if size + len(chunk) > self.max_object_bytes:
+                        raise StorageLimitExceeded(self.max_object_bytes)
+                    digest.update(chunk)
+                    size += len(chunk)
+                    output.write(chunk)
+        except BaseException:
+            if temporary:
+                temporary.unlink(missing_ok=True)
+            raise
+        assert temporary is not None
+        # Replace, not skip-if-exists: the key is the caller's slot, and a
+        # retry must leave the slot holding what the retry wrote.
+        temporary.replace(destination)
+        actual_mime = mime_type or mimetypes.guess_type(destination.name)[0] or "application/octet-stream"
+        self.client.upload_file(str(destination), self.bucket, key, ExtraArgs={"ContentType": actual_mime})
+        public_url = f"{self.public_base_url}/v1/storage/{key}" if self.public_base_url else None
+        return StoredObject(key, str(destination), public_url, digest.hexdigest(), size, actual_mime)
+
+    def delete(self, key: str) -> bool:
+        existed = self.stat(key) is not None
+        try:
+            self.client.delete_object(Bucket=self.bucket, Key=key)
+        except Exception:
+            return False
+        # The processing cache holds a copy under the same key; an object the
+        # store no longer has must not stay readable from the cache.
+        try:
+            cached = self.path_for(key, download=False)
+        except ValueError:
+            return existed
+        cached.unlink(missing_ok=True)
+        return existed
+
+    def list_keys(self, prefix: str) -> list[tuple[str, datetime]]:
+        found: list[tuple[str, datetime]] = []
+        try:
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                for item in page.get("Contents", []):
+                    key = item.get("Key")
+                    modified = item.get("LastModified")
+                    if not key or modified is None:
+                        continue
+                    if modified.tzinfo is None:
+                        modified = modified.replace(tzinfo=UTC)
+                    found.append((str(key), modified))
+        except Exception:
+            # An unlistable bucket means nothing can be *safely* reclaimed;
+            # an empty answer makes the sweeper do nothing, which is the
+            # fail-closed direction for a deleter.
+            return []
+        return found
 
     def path_for(self, key: str, *, download: bool = True) -> Path:
         candidate = (self.cache_root / key).resolve()

@@ -1,12 +1,12 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-27
+Snapshot date: 2026-08-28
 Repository: `ai-director-platform`
-Branch: `main` at `03cef85`, plus the uncommitted explicit-dependencies / frame-anchor-planner
-working-tree change described in [`HANDOFF.md`](HANDOFF.md) §1d
+Branch: `claude/batch-candidate-atomicity` over `main` at `9a06dcf` (the former uncommitted
+§1d/§1e working-tree change has since landed as PRs #7 and #8)
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0052_shot_dependencies`
+Migration head: `0052_shot_dependencies` (unchanged by this branch; no migration was needed)
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
@@ -833,6 +833,55 @@ The refusal now names the host — `{provider} returned {host!r}` — bounded to
 a hostname from a provider response is untrusted input. Without it an operator had to re-run a
 billed call to learn a string the provider had already sent.
 
+### Completion is staged, then atomic
+
+*Added 2026-08-28.* A completed generation used to be persisted in pieces: empty sibling `CREATED`
+candidate rows pre-created in one committed transaction, one media row per artefact in others, and
+the job completion in a last one. A process death between any two left half a batch — empty
+candidates bound to nothing, or paid artefacts without a completed job — and a retried poll could
+allocate a second set of sibling rows. The order is now inverted:
+
+```text
+provider result
+-> validate every artefact
+-> write each to staging/generation/{job_id}/{sha256(provider_job_id)[:16]}/{index}.{ext}
+-> ONE transaction: sibling candidates + media rows + job bindings
+                    + billing evidence + credit settlement + completion
+```
+
+Three properties carry it. **The staging key is deterministic** — a pure function of the job and
+its provider attempt — so a crashed attempt that re-runs overwrites its own slots instead of
+accreting orphans. **Adoption is in place**: the completion transaction records the staging key as
+`MediaAsset.storage_key`; nothing is copied, so a rolled-back transaction leaves only unreferenced
+staging objects behind. **The finalize is fenced**: the transaction opens with the same conditional
+claim update as before (`RESERVED`, claim token, `output_asset_id IS NULL`), so replaying it —
+a dead worker waking after its lease was taken over, a duplicate poll — matches zero rows and
+creates nothing. Sibling candidates are born `VALIDATING` with their artefact in hand; the empty
+`CREATED` placeholder no longer exists in the flow. A rejected extra image is still recorded and
+skipped rather than failing the batch that paid for it, and attempt numbers are still allocated
+under the Shot row lock, in the same lock order candidate creation uses.
+
+Staged objects nothing adopted are reclaimed by `media_service.sweep_generation_staging`, run by
+the worker on `GENERATION_STAGING_SWEEP_INTERVAL_SECONDS` (default 3600; `0` disables) and on
+demand at `POST /internal/maintenance/generation-staging`. The storage listing is the ground truth
+— the crash that strands an object is the crash that leaves no row to enumerate — and the database
+is the safety check: a slot is deleted only when it is past `GENERATION_STAGING_TTL_SECONDS`
+(default 86 400), its job (parsed from the key) is terminal or unknown, and no `MediaAsset`
+references the key. A live job's slots are kept whatever their age, which is safe because adoption
+happens only under a `RESERVED` claim that a terminal job can never hold again. Adopted objects
+keep their staging-prefixed keys for the life of the media; the sweeper counts them as
+`kept_referenced` rather than ever touching them.
+
+Rows the retired pre-creation scheme left behind — `CREATED`, no job from either direction, no
+media — are found and closed by `scripts/retire_empty_candidates.py` (audit by default, `--apply`
+to retire). Retirement is a fenced status change to the new terminal `CandidateStatus.RETIRED`
+with a `DecisionRecord` per row, never a delete: the attempt sequence stays truthful. Legitimate
+`CREATED` candidates are bound to their job in the transaction that creates them, so they can
+never satisfy the audit predicate. `tests/test_batch_candidate_atomicity.py` kills the process at
+seven seams of the completion flow — around each media staging, inside the transaction before and
+after candidate creation, before and after the completion commit — and proves a successor gateway
+converges to exactly one completed job, three candidates and three media rows every time.
+
 ### Original and derivative
 
 The user's original bytes are immutable. A provider's upload cap is a fact about that provider,
@@ -944,13 +993,13 @@ Gateway matched. Three additions reconcile it without a second completion path:
 | --- | --- |
 | `ProviderSubmission.result` | A provider whose generation call is synchronous returns its terminal `ProviderJob` with the submission |
 | `ProviderJob.outputs` | Inline artefacts (`ProviderInlineOutput`: bytes plus MIME type) in place of `output_url` |
-| `MediaRegistry.register_provider_bytes()` | Stores inline bytes through the same content validation a downloaded artefact passes |
+| `MediaRegistry.stage_inline_provider_output()` | Validates inline bytes like a downloaded artefact, then writes them to their deterministic staging slot |
 
 The confirmation transaction skips the poll delay when a result is already in hand, then claims the poll and
 runs the existing completion path, so billing evidence, credit settlement, candidate and shot status,
-idempotency and canary settlement are not duplicated. Batch images beyond the first are registered as project
-media bound to the shot but not to the candidate — the workspace paid for them, and a candidate may own only
-one artefact.
+idempotency and canary settlement are not duplicated. Batch images beyond the first each become their own
+sibling candidate on the shot, created inside the completion transaction beside the media they own; a job
+with no shot or candidate binding keeps the extras as project media, because there is no choice to offer.
 
 The result is held in the Gateway process between confirmation and poll, both inside one `process()` call.
 Process death in that window loses the artefact but not the accounting: `get_job` for an image reports
@@ -1341,6 +1390,12 @@ the fatal window from "before the poll" to "between the read and the completion 
 SHA-256 re-checked on read, and a mismatch fails `submitted=True` so a corrupt artefact reaches reconciliation
 rather than being published as a paid result. The row is an inbox, not the media plane — the bytes move into the
 media plane on completion, through the same content validation a downloaded artefact passes.
+
+**A completed batch commits as one transaction.** Provider output is staged to deterministic
+storage slots first; sibling candidates, media rows, job bindings, billing evidence, credit
+settlement and the terminal status then commit or roll back together, fenced by the completion
+claim. No migration was needed — `CandidateStatus.RETIRED` is a value in the existing status
+column, and staging is a storage-layer concept. See "Completion is staged, then atomic" above.
 
 **A stale timeline fence is not conclusive on its own.** The fence is evaluated under the Shot's row lock, so
 the loser of a race between two requests carrying the same `idempotency_key` reads the Shot only after the

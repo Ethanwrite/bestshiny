@@ -61,6 +61,7 @@ launch.
 - Flow Affinity：首次自动分配、sticky account/project、本地 active 唯一、远端 ID 跨全部历史状态永久唯一、显式迁移计划与 local job/account/project/provider job 四元 poll 标识已实现；默认 provisioner fail closed，本轮未调用真实 Flow。
 - 不可洗白来源：Provider 参考素材上传只写独立 binding，不覆盖 `MediaAsset` 生成来源；角色 identity、canonical promotion 与 candidate commit 都在终点复核 Provider trust。
 - Media：内容字节按 SHA-256 共享，镜头/候选来源链保持独立；供应商媒体上传带并发 claim、租约和付费边界 fencing，本地与 S3/R2/MinIO 存储共用同一注册表。工作空间存储已按真实 `size_bytes` 执行原子 reserve/settle/release，不确定结果保留 hold 而不盲目释放。
+- 批量候选原子性（2026-08-28）：供应商产物先验证、再写入确定性 staging key（`staging/generation/{job}/{attempt}/{index}`），随后由**单个数据库事务**创建 sibling candidates、MediaAsset 与 job 绑定并完成结算；finalize 由完成栅栏保证幂等，重放不产生重复候选。事务失败只留下可回收的 staging 对象，由 TTL 清扫器（worker 定时 + `POST /internal/maintenance/generation-staging`）在「任务已终态且无 MediaAsset 引用」时回收；不再预创建空的 `CREATED` sibling 候选，历史遗留空行由 `scripts/retire_empty_candidates.py` 一次性审计并安全退役（状态置 `RETIRED`，非删除）。
 - Workbench：注册/登录遮罩、自主创作/智能导演双模式、中文画面描述优化、人物主参考 v1/v2 重新提交、场景/产品/道具通用版本上传及指定镜头重做入口；界面只显示通俗说法，内部合同和模型指令默认收起。
 
 ## One-command start (Docker)

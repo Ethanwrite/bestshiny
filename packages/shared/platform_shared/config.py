@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     # Uploads reclaimed per sweep. A bound, not a target: whatever is left over
     # is picked up by the next one.
     expired_upload_sweep_limit: int = 200
+    # How long a staged generation artefact may sit unadopted before the
+    # sweeper may reclaim it. Generous on purpose: a slot is only deletable
+    # once its job is terminal or unknown and no media row references it, so
+    # the TTL is about giving an operator's reconciliation a window, not about
+    # correctness.
+    generation_staging_ttl_seconds: int = 86_400
+    # How often the worker sweeps the generation staging area.
+    # `POST /internal/maintenance/generation-staging` runs the same sweep on
+    # demand. Set to 0 to disable and drive it from cron or an operator.
+    generation_staging_sweep_interval_seconds: int = 3600
+    # Staged objects deleted per sweep. A bound, not a target.
+    generation_staging_sweep_limit: int = 500
     web_origins: str = "http://localhost:3000,http://127.0.0.1:18081"
     platform_api_key: str = ""
     deployment_environment: Literal["development", "test", "production"] = "production"

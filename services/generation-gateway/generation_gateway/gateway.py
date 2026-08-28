@@ -19,7 +19,12 @@ from entitlement_core import (
     WorkspaceCreditService,
     WorkspaceCreditTransition,
 )
-from media_service import MediaRegistry, ProviderReferenceUrlUnavailable
+from media_service import (
+    MediaRegistry,
+    ProviderReferenceUrlUnavailable,
+    StagedProviderOutput,
+    generation_staging_prefix,
+)
 from model_registry_core import ModelInfrastructureService, RuntimeModelState
 from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
@@ -1704,111 +1709,271 @@ class GenerationGateway:
         )
         session.flush()
 
-    def _allocate_sibling_candidates(self, shot_id: str, count: int) -> list[tuple[str, int]]:
-        """Reserve one candidate row per extra image in a paid batch.
+    @staticmethod
+    def _allocate_sibling_candidates_in(
+        session: Session, shot_id: str, count: int
+    ) -> list[tuple[str, int]]:
+        """Create one candidate row per extra image, inside the caller's transaction.
 
         The workspace asked for N images and paid for N, so it gets N things it
-        can choose between. Reserving the rows before the media is registered
-        lets each image be bound to its own candidate from the moment it is
-        stored, rather than being relabelled afterwards — the lineage key that
-        deduplicates media includes the candidate, so a later rebind would be a
-        different row, not an edit.
+        can choose between. The rows are created in the completion transaction
+        beside the media they own — never ahead of it: a pre-created empty
+        CREATED row was a promise the process might die before keeping, and an
+        orphaned promise is indistinguishable from a live one.
+
+        The Shot row is locked first, the same lock order candidate creation
+        uses, so attempt numbers stay unique against a concurrent generation
+        request on the same shot.
         """
 
-        allocated: list[tuple[str, int]] = []
-        with self.database.session() as session:
-            with session.no_autoflush:
-                session.execute(update(Shot).where(Shot.id == shot_id).values(updated_at=Shot.updated_at))
-                highest = int(
-                    session.scalar(
-                        select(func.coalesce(func.max(GenerationCandidate.attempt_number), 0)).where(
-                            GenerationCandidate.shot_id == shot_id
-                        )
+        with session.no_autoflush:
+            session.execute(update(Shot).where(Shot.id == shot_id).values(updated_at=Shot.updated_at))
+            highest = int(
+                session.scalar(
+                    select(func.coalesce(func.max(GenerationCandidate.attempt_number), 0)).where(
+                        GenerationCandidate.shot_id == shot_id
                     )
-                    or 0
                 )
-            for offset in range(1, count + 1):
-                candidate = GenerationCandidate(
-                    id=str(uuid.uuid4()),
-                    shot_id=shot_id,
-                    attempt_number=highest + offset,
-                    status=CandidateStatus.CREATED.value,
-                    metadata_json={"batch_index": offset},
-                )
-                session.add(candidate)
-                allocated.append((candidate.id, offset))
-            session.flush()
+                or 0
+            )
+        allocated: list[tuple[str, int]] = []
+        for offset in range(1, count + 1):
+            candidate = GenerationCandidate(
+                id=str(uuid.uuid4()),
+                shot_id=shot_id,
+                attempt_number=highest + offset,
+                status=CandidateStatus.VALIDATING.value,
+                metadata_json={"batch_index": offset},
+            )
+            session.add(candidate)
+            allocated.append((candidate.id, offset))
+        session.flush()
         return allocated
 
-    def _register_batch_siblings(
+    async def _stage_provider_outputs(
         self,
         job_id: str,
-        project_id: str,
-        asset_type: str,
-        result: ProviderJob,
         *,
         provider_name: str,
         provider_job_id: str,
-        shot_id: str | None,
-        candidate_id: str | None,
-    ) -> list[tuple[str, str]]:
-        """Turn the extra images of a paid batch into selectable candidates.
+        capability: str,
+        asset_type: str,
+        result: ProviderJob,
+    ) -> tuple[StagedProviderOutput, list[tuple[int, StagedProviderOutput]]]:
+        """Validate every provider artefact and write it to its staging slot.
 
-        A job still owns exactly one output asset, so image 1 remains the job's
-        result. Images 2..n each become their own candidate on the same shot, so
-        the batch is a choice the user makes rather than loose media beside the
-        one result they were given. When the job is not shot-bound there is no
-        candidate to make, and the extras stay as project media.
+        Nothing here touches the database beyond append-only events. The slot
+        keys are a pure function of the job and its provider attempt, so a
+        crashed attempt that re-runs overwrites its own slots instead of
+        leaving new orphans, and the completion transaction can be replayed
+        against the same staged bytes.
 
-        Returns ``(candidate_id, asset_id)`` pairs for the caller to finalize
-        inside the completion transaction; an empty ``candidate_id`` means the
-        image was kept as media only.
+        The job's own artefact (output 1) must stage or the poll fails as it
+        always did; a rejected extra image is recorded and skipped, never
+        allowed to fail the generation that already paid for its siblings.
         """
 
-        extras = result.outputs[1:]
-        if not extras:
-            return []
-        reserved: list[tuple[str, int]] = []
-        if shot_id and candidate_id:
-            try:
-                reserved = self._allocate_sibling_candidates(shot_id, len(extras))
-            except Exception as exc:
-                # Losing the candidate rows must not lose the images. Fall back
-                # to keeping them as project media and say so.
-                with self.database.session() as session:
-                    self._event(session, job_id, "MEDIA_ERROR", stage="batch_candidates", error=str(exc))
-                reserved = []
-        registered: list[tuple[str, str]] = []
-        for index, output in enumerate(extras, start=1):
-            sibling_candidate_id = reserved[index - 1][0] if len(reserved) >= index else None
-            try:
-                sibling = self.media.register_provider_bytes(
-                    project_id,
-                    asset_type,
-                    output.content,
-                    stem=f"{job_id}-{index}",
-                    mime_type=output.mime_type,
-                    provider=provider_name,
-                    provider_media_id=f"{provider_job_id}#{index}",
-                    shot_id=shot_id,
-                    generation_candidate_id=sibling_candidate_id,
-                    metadata={"batch_index": index, "generation_job_id": job_id},
+        key_prefix = generation_staging_prefix(job_id, provider_job_id)
+        if result.outputs:
+            primary = self.media.stage_inline_provider_output(
+                result.outputs[0].content,
+                key_prefix=key_prefix,
+                index=0,
+                stem=job_id,
+                mime_type=result.outputs[0].mime_type,
+                asset_type=asset_type,
+            )
+            extras: list[tuple[int, StagedProviderOutput]] = []
+            for index, output in enumerate(result.outputs[1:], start=1):
+                try:
+                    staged = self.media.stage_inline_provider_output(
+                        output.content,
+                        key_prefix=key_prefix,
+                        index=index,
+                        stem=f"{job_id}-{index}",
+                        mime_type=output.mime_type,
+                        asset_type=asset_type,
+                    )
+                except Exception as exc:
+                    with self.database.session() as session:
+                        self._event(
+                            session,
+                            job_id,
+                            "MEDIA_ERROR",
+                            stage="batch_sibling",
+                            batch_index=index,
+                            error=str(exc),
+                        )
+                    continue
+                extras.append((index, staged))
+        else:
+            assert result.output_url is not None
+            suffix = "mp4" if capability == "video" else "png"
+            primary = await self.media.download_provider_output_to_staging(
+                result.output_url,
+                key_prefix=key_prefix,
+                index=0,
+                filename=f"{job_id}.{suffix}",
+                provider=provider_name,
+                asset_type=asset_type,
+            )
+            extras = []
+        with self.database.session() as session:
+            self._event(
+                session,
+                job_id,
+                "MEDIA_STAGED",
+                key_prefix=key_prefix,
+                staged_count=1 + len(extras),
+            )
+        return primary, extras
+
+    def _finalize_completed_generation(
+        self,
+        job_id: str,
+        *,
+        claim_token: str,
+        provider_job_id: str,
+        poll_fence_conditions: list[Any],
+        provider_name: str,
+        project_id: str,
+        shot_id: str | None,
+        candidate_id: str | None,
+        asset_type: str,
+        primary: StagedProviderOutput,
+        extras: list[tuple[int, StagedProviderOutput]],
+        raw: dict[str, Any] | None,
+    ) -> GenerationJob | None:
+        """Adopt the staged artefacts and complete the job — one transaction.
+
+        Media rows, sibling candidate rows, every job binding, billing
+        evidence, credit settlement and the terminal status commit or roll
+        back together. The claim fence at the top is what makes repeated
+        execution safe: a second finalize of the same job matches zero rows
+        and returns ``None`` without creating anything, and a rolled-back
+        attempt leaves only unreferenced staging objects for the TTL sweeper.
+        """
+
+        with self.database.session() as session:
+            completed = session.execute(
+                update(GenerationJob)
+                .where(
+                    GenerationJob.id == job_id,
+                    GenerationJob.status == JobStatus.RESERVED.value,
+                    GenerationJob.claim_token == claim_token,
+                    GenerationJob.provider_job_id == provider_job_id,
+                    GenerationJob.submission_state == "CONFIRMED",
+                    GenerationJob.output_asset_id.is_(None),
+                    *poll_fence_conditions,
                 )
-            except Exception as exc:
-                # The job's own artefact is already stored; a rejected extra
-                # image must be recorded, never allowed to fail the generation.
-                with self.database.session() as session:
+                .values(
+                    status=JobStatus.COMPLETED.value,
+                    safe_to_retry=False,
+                    next_retry_at=None,
+                    claim_token=None,
+                    claim_expires_at=None,
+                    completed_at=utcnow(),
+                )
+            )
+            if not self._updated_one_row(completed):
+                return None
+            job = session.get(GenerationJob, job_id)
+            if job is None:  # pragma: no cover - guarded by the conditional update.
+                raise LookupError("generation job not found")
+            session.refresh(job)
+            asset, _reused = self.media.adopt_staged_output_in(
+                session,
+                project_id,
+                asset_type,
+                primary,
+                provider=provider_name,
+                provider_media_id=provider_job_id,
+                shot_id=shot_id,
+                generation_candidate_id=candidate_id,
+            )
+            job.output_asset_id = asset.id
+            # The artefact is in the media plane now, so the inbox copy has
+            # done its job. Same transaction as the completion, so the bytes
+            # are never dropped by a completion that rolls back.
+            self._discard_synchronous_result(session, job_id)
+            self._record_provider_billing_evidence(
+                session,
+                job,
+                provider_job_id=provider_job_id,
+                raw=raw,
+            )
+            if self.workspace_credits is not None:
+                credit_settlement = self.workspace_credits.settle_generation(
+                    session,
+                    job,
+                    reason="GENERATION_COMPLETED",
+                )
+                if credit_settlement.applied and not credit_settlement.replayed:
                     self._event(
                         session,
-                        job_id,
-                        "MEDIA_ERROR",
-                        stage="batch_sibling",
-                        batch_index=index,
-                        error=str(exc),
+                        job.id,
+                        "CREDIT_SETTLED",
+                        credits=credit_settlement.settled_credits,
                     )
-                continue
-            registered.append((sibling_candidate_id or "", sibling.id))
-        return registered
+            if candidate_id:
+                candidate = session.get(GenerationCandidate, candidate_id)
+                if candidate:
+                    candidate.output_asset_id = asset.id
+                    candidate.status = CandidateStatus.VALIDATING.value
+                if shot_id:
+                    shot = session.get(Shot, shot_id)
+                    if shot:
+                        shot.status = ShotStatus.VALIDATING.value
+            idem = session.scalar(
+                select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
+            )
+            idem.status = "SUCCEEDED"
+            idem.result_asset_id = asset.id
+            sibling_summary: list[tuple[str, str]] = []
+            if extras:
+                reserved: list[tuple[str, int]] = []
+                if shot_id and candidate_id:
+                    reserved = self._allocate_sibling_candidates_in(session, shot_id, len(extras))
+                for position, (batch_index, staged) in enumerate(extras):
+                    sibling_candidate_id = reserved[position][0] if position < len(reserved) else None
+                    sibling_asset, _sibling_reused = self.media.adopt_staged_output_in(
+                        session,
+                        project_id,
+                        asset_type,
+                        staged,
+                        provider=provider_name,
+                        provider_media_id=f"{provider_job_id}#{batch_index}",
+                        shot_id=shot_id,
+                        generation_candidate_id=sibling_candidate_id,
+                        metadata={"batch_index": batch_index, "generation_job_id": job.id},
+                    )
+                    if sibling_candidate_id is not None:
+                        sibling = session.get(GenerationCandidate, sibling_candidate_id)
+                        if sibling is not None:
+                            sibling.generation_job_id = job.id
+                            sibling.output_asset_id = sibling_asset.id
+                    sibling_summary.append((sibling_candidate_id or "", sibling_asset.id))
+            self._event(session, job.id, "MEDIA_DOWNLOADED", asset_id=asset.id)
+            if sibling_summary:
+                self._event(
+                    session,
+                    job.id,
+                    "MEDIA_BATCH_SIBLINGS_REGISTERED",
+                    asset_ids=[asset_id for _candidate, asset_id in sibling_summary],
+                    candidate_ids=[candidate for candidate, _asset in sibling_summary if candidate],
+                )
+            self._event(session, job.id, "VIDEO_GENERATED", candidate_id=candidate_id)
+            self._event(session, job.id, "DYNAMIC_QA_STARTED", candidate_id=candidate_id)
+            self._event(
+                session,
+                job.id,
+                "PROVIDER_JOB_COMPLETED",
+                provider_job_id=provider_job_id,
+            )
+            self._event(session, job.id, "JOB_COMPLETED", output_asset_id=asset.id)
+            self.scheduler.release_job_in_session(session, job.id, success=True)
+            session.flush()
+            return job
 
     def _require_job(self, job_id: str) -> GenerationJob:
         job = self.get(job_id)
@@ -2987,142 +3152,41 @@ class GenerationGateway:
                     raise LookupError("generation job not found")
                 return latest
             asset_type = AssetType.VIDEO.value if capability == "video" else AssetType.IMAGE.value
-            if result.outputs:
-                asset = self.media.register_provider_bytes(
-                    project_id,
-                    asset_type,
-                    result.outputs[0].content,
-                    stem=job_id,
-                    mime_type=result.outputs[0].mime_type,
-                    provider=provider.name,
-                    provider_media_id=provider_job_id,
-                    shot_id=shot_id,
-                    generation_candidate_id=candidate_id,
-                )
-                sibling_outputs = self._register_batch_siblings(
-                    job_id,
-                    project_id,
-                    asset_type,
-                    result,
-                    provider_name=provider.name,
-                    provider_job_id=provider_job_id,
-                    shot_id=shot_id,
-                    candidate_id=candidate_id,
-                )
-            else:
-                assert result.output_url is not None
-                sibling_outputs = []
-                suffix = "mp4" if capability == "video" else "png"
-                asset = await self.media.download_and_register(
-                    project_id,
-                    asset_type,
-                    result.output_url,
-                    filename=f"{job_id}.{suffix}",
-                    provider=provider.name,
-                    provider_media_id=provider_job_id,
-                    shot_id=shot_id,
-                    generation_candidate_id=candidate_id,
-                )
-            finalized = False
-            with self.database.session() as session:
-                completed = session.execute(
-                    update(GenerationJob)
-                    .where(
-                        GenerationJob.id == job_id,
-                        GenerationJob.status == JobStatus.RESERVED.value,
-                        GenerationJob.claim_token == claim_token,
-                        GenerationJob.provider_job_id == provider_job_id,
-                        GenerationJob.submission_state == "CONFIRMED",
-                        GenerationJob.output_asset_id.is_(None),
-                        *poll_fence_conditions,
-                    )
-                    .values(
-                        output_asset_id=asset.id,
-                        status=JobStatus.COMPLETED.value,
-                        safe_to_retry=False,
-                        next_retry_at=None,
-                        claim_token=None,
-                        claim_expires_at=None,
-                        completed_at=utcnow(),
-                    )
-                )
-                if self._updated_one_row(completed):
-                    job = session.get(GenerationJob, job_id)
-                    if job is None:  # pragma: no cover - guarded by the conditional update.
-                        raise LookupError("generation job not found")
-                    session.refresh(job)
-                    finalized = True
-                    # The artefact is in the media plane now, so the inbox copy
-                    # has done its job. Same transaction as the completion, so
-                    # the bytes are never dropped by a completion that rolls
-                    # back.
-                    self._discard_synchronous_result(session, job_id)
-                    self._record_provider_billing_evidence(
-                        session,
-                        job,
-                        provider_job_id=provider_job_id,
-                        raw=result.raw,
-                    )
-                    if self.workspace_credits is not None:
-                        credit_settlement = self.workspace_credits.settle_generation(
-                            session,
-                            job,
-                            reason="GENERATION_COMPLETED",
-                        )
-                        if credit_settlement.applied and not credit_settlement.replayed:
-                            self._event(
-                                session,
-                                job.id,
-                                "CREDIT_SETTLED",
-                                credits=credit_settlement.settled_credits,
-                            )
-                    if candidate_id:
-                        candidate = session.get(GenerationCandidate, candidate_id)
-                        if candidate:
-                            candidate.output_asset_id = asset.id
-                            candidate.status = CandidateStatus.VALIDATING.value
-                        if shot_id:
-                            shot = session.get(Shot, shot_id)
-                            if shot:
-                                shot.status = ShotStatus.VALIDATING.value
-                    idem = session.scalar(
-                        select(GenerationIdempotency).where(GenerationIdempotency.generation_job_id == job.id)
-                    )
-                    idem.status = "SUCCEEDED"
-                    idem.result_asset_id = asset.id
-                    for sibling_candidate_id, sibling_asset_id in sibling_outputs:
-                        if not sibling_candidate_id:
-                            continue
-                        sibling = session.get(GenerationCandidate, sibling_candidate_id)
-                        if sibling is None:  # pragma: no cover - just inserted.
-                            continue
-                        sibling.generation_job_id = job.id
-                        sibling.output_asset_id = sibling_asset_id
-                        sibling.status = CandidateStatus.VALIDATING.value
-                    self._event(session, job.id, "MEDIA_DOWNLOADED", asset_id=asset.id)
-                    if sibling_outputs:
-                        self._event(
-                            session,
-                            job.id,
-                            "MEDIA_BATCH_SIBLINGS_REGISTERED",
-                            asset_ids=[asset_id for _candidate, asset_id in sibling_outputs],
-                            candidate_ids=[candidate for candidate, _asset in sibling_outputs if candidate],
-                        )
-                    self._event(session, job.id, "VIDEO_GENERATED", candidate_id=candidate_id)
-                    self._event(session, job.id, "DYNAMIC_QA_STARTED", candidate_id=candidate_id)
-                    self._event(
-                        session,
-                        job.id,
-                        "PROVIDER_JOB_COMPLETED",
-                        provider_job_id=provider_job_id,
-                    )
-                    self._event(session, job.id, "JOB_COMPLETED", output_asset_id=asset.id)
-                    self.scheduler.release_job_in_session(session, job.id, success=True)
-            if not finalized:
+            # Two phases with nothing between them but storage. Phase one
+            # writes every artefact to its deterministic staging slot; phase
+            # two adopts them all — media rows, sibling candidates, job
+            # bindings, billing, settlement — in one database transaction. A
+            # process death anywhere leaves either recyclable staging objects
+            # or a completed job; never half a batch.
+            primary, extras = await self._stage_provider_outputs(
+                job_id,
+                provider_name=provider.name,
+                provider_job_id=provider_job_id,
+                capability=capability,
+                asset_type=asset_type,
+                result=result,
+            )
+            job = self._finalize_completed_generation(
+                job_id,
+                claim_token=claim_token,
+                provider_job_id=provider_job_id,
+                poll_fence_conditions=poll_fence_conditions,
+                provider_name=provider.name,
+                project_id=project_id,
+                shot_id=shot_id,
+                candidate_id=candidate_id,
+                asset_type=asset_type,
+                primary=primary,
+                extras=extras,
+                raw=result.raw,
+            )
+            if job is None:
                 current = self.get(job_id)
                 if current is None:  # pragma: no cover - deleted concurrently by an administrator.
                     raise LookupError("generation job not found")
                 return current
+            asset_id = job.output_asset_id
+            assert asset_id is not None
             try:
                 self._settle_live_generation_canary(
                     job_id=job_id,
@@ -3143,7 +3207,7 @@ class GenerationGateway:
                     )
             if shot_id and not candidate_id and capability == "video" and self.continuity:
                 try:
-                    end_frame = self.continuity.extract_and_chain(shot_id, asset.id)
+                    end_frame = self.continuity.extract_and_chain(shot_id, asset_id)
                     with self.database.session() as session:
                         self._event(session, job_id, "END_FRAME_EXTRACTED", asset_id=end_frame.id)
                 except Exception as exc:

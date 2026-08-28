@@ -136,6 +136,23 @@ coverage report names them. Closing them needs a balance and one command:
 
 Only you can top the balance up. Cost of the first two passes was roughly USD 10 of Grok credit.
 
+### 1.16 One-time: retire the empty candidates the old batch flow left behind
+
+Added 2026-08-28 with the batch-atomicity change. The retired pre-creation scheme could strand
+empty `CREATED` candidate rows (batch siblings allocated before their media existed, orphaned by a
+crash). The current pipeline can no longer produce them; existing databases may still hold some.
+Against the production database, once, after the change is deployed:
+
+```bash
+.venv/bin/python scripts/retire_empty_candidates.py                # audit — read-only JSON
+.venv/bin/python scripts/retire_empty_candidates.py --apply        # fenced retirement
+```
+
+The audit only matches rows that are `CREATED`, bound to no job from either direction, own no
+media, and are older than 24 hours; retirement is a status change to `RETIRED` plus a
+`DecisionRecord` per row, never a delete. Cost: none. Risk: none beyond reading the report first,
+which is what the two-step shape is for.
+
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 
 `FEATURE_ROUTER_LCB` is `false` and must stay false until a replay passes. A replay needs
@@ -366,6 +383,7 @@ has not purchased has the same 50 — which is the more urgent half of this deci
 | 2.34 | **The local `api` container image is not rebuilt by anything and drifts behind the migration chain.** It runs a built image (`build: .`), not mounted source — only a media-cache volume is mounted — so `git pull` and merges change nothing for it. On 2026-08-27 it was five migrations stale and crash-looped with `Can't locate revision identified by '0051_token_pricing'`, which reads exactly like a bad merge and is not one. `docker compose build api && docker compose up -d api` after any migration lands. Nothing enforces it. | `docker-compose.yml` |
 | 2.35 | **Five models are deliberately unpriced after `0051`.** The migration priced the twelve per-token models from vendor documentation and left the rest alone rather than guessing: `grok-imagine-video` on the OpenRouter route among them. An unpriced model refuses to quote rather than quoting a made-up number, which is the intended behaviour — but it means those models cannot be used until someone reads their published rate. | `migrations/versions/0051_token_pricing_profiles.py` |
 | 2.36 | **The PostgreSQL half of the test matrix cannot be run as a foreground tool call.** It takes ~11 minutes; the tool timeout caps at 10, so the run is SIGKILLed at exit 137 partway through and looks like a crash. pytest peaks at ~600 MB RSS, there are no jetsam entries and the Postgres container never dies — it is a harness limit, not resource pressure. Run it detached (`nohup … & disown`) and poll for the exit code. Costs nothing to work around, wastes an hour if you do not know it. | — |
+| 2.37 | **Adopted generation output keeps its `staging/generation/…` key for ever, so the staging listing grows with the media plane.** Added 2026-08-28, deliberately: adopting the staged object in place is what makes a rolled-back completion leave *only* recyclable staging objects, with no copy step to crash inside. The cost is that `sweep_generation_staging` lists every adopted object on every run and keeps them as `kept_referenced` — correctness is untouched (the sweep is chunked, so kept keys cannot starve deletable ones), but at large media volumes the hourly listing gets linearly slower. If it ever matters, the options are a date-partitioned key scheme the sweeper can skip wholesale, or a post-adoption promotion job that moves objects to content-addressed keys and updates the row — the second reintroduces a two-step mutation and should not be done casually. | `services/media-service/media_service/staging.py` |
 
 ## 3. Incomplete work
 

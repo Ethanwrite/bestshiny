@@ -209,6 +209,37 @@ class PromptCompilerService:
         return props
 
     @staticmethod
+    def _prompt_facts(
+        dependency_facts: list[dict[str, Any]],
+        series_facts: list[dict[str, Any]],
+    ) -> list[str]:
+        """Render narrative facts as compact prompt lines, each exactly once.
+
+        The structured entries keep travelling untouched through
+        ``continuity_context.facts`` into ``continuity_assertions``; these
+        strings are the model-facing rendering of the same material.
+        """
+
+        rendered: list[str] = []
+        for fact in dependency_facts:
+            parts = [f"explicit_dependency[{fact.get('dependency_type', '')}]"]
+            for key in ("fact_key", "obligation_key", "source_shot_id"):
+                if fact.get(key):
+                    parts.append(f"{key}={fact[key]}")
+            rendered.append(f"{' '.join(parts)}: {fact.get('value', '')}")
+        for fact in series_facts:
+            name = fact.get("name")
+            if name == "open_obligation":
+                rendered.append(f"open_obligation: {fact.get('value', '')}")
+            elif name == "known_fact":
+                rendered.append(f"known_fact[{fact.get('holder', '')}]: {fact.get('value', '')}")
+            else:
+                rendered.append(
+                    json.dumps(fact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                )
+        return list(dict.fromkeys(rendered))
+
+    @staticmethod
     def _state_value(state: dict[str, Any], path: str) -> Any:
         current: Any = state
         for part in path.split("."):
@@ -571,6 +602,19 @@ class PromptCompilerService:
                 "policy": continuity_policy,
                 "previous_shot_id": start_state.get("previous_shot_id"),
                 "previous_final_frame_asset_id": start_state.get("previous_final_frame_asset_id"),
+                # Dependency, series and obligation facts live INSIDE the spec,
+                # because the spec is the one artefact every prompt surface
+                # renders: `to_neutral_prompt` (the positive/legacy prompt) and
+                # every adapter's `Continuity:` line. Facts that lived only in
+                # `continuity_assertions` were metadata about the prompt, not
+                # part of it, and never reached a model. Each fact is rendered
+                # once here and nowhere else in the spec, so no prompt surface
+                # repeats it.
+                **(
+                    {"facts": prompt_facts}
+                    if (prompt_facts := self._prompt_facts(dependency_facts, series_facts))
+                    else {}
+                ),
             },
             style_lock=locked_style,
             constraints=list(dict.fromkeys(constraints)),

@@ -39,7 +39,25 @@ from production_domain.models import (
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .engine import ContinuityDecisionEngine, ContinuityRiskVector
+from .engine import ContinuityDecision, ContinuityDecisionEngine, ContinuityRiskVector
+
+
+class FrameAnchorPlanUnresolved(ValueError):
+    """A frame anchor plan exists and can no longer be executed.
+
+    ``ValueError`` on purpose, mirroring ``ShotDependencyUnresolved``: the
+    generate route answers 409, and the caller moves the shot to
+    ``USER_REVIEW_REQUIRED`` rather than generating from a plan whose anchors
+    have stopped resolving.
+    """
+
+    def __init__(self, shot_id: str, reason_codes: list[str]):
+        self.shot_id = shot_id
+        self.reason_codes = tuple(dict.fromkeys(reason_codes))
+        super().__init__(
+            f"shot {shot_id} frame anchor plan cannot be executed "
+            f"({', '.join(self.reason_codes)}); review required"
+        )
 
 
 class FrameAnchorStrategy:
@@ -104,6 +122,29 @@ class FrameAnchorPlan:
             "scene_asset_id": self.scene_asset_id,
             "requires_keyframe_generation": self.requires_keyframe_generation,
         }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> FrameAnchorPlan:
+        return cls(
+            target_shot_id=str(data["target_shot_id"]),
+            source_shot_id=data.get("source_shot_id"),
+            strategy=str(data["strategy"]),
+            continuity_mode=str(data["continuity_mode"]),
+            transition_type=str(data.get("transition_type") or "UNRECORDED"),
+            risk_score=float(data.get("risk_score") or 0.0),
+            reasons=tuple(str(item) for item in data.get("reasons") or []),
+            anchor_subjects=tuple(
+                AnchorSubject(
+                    character_id=str(subject.get("character_id") or ""),
+                    name=str(subject.get("name") or ""),
+                    identity_version_id=subject.get("identity_version_id"),
+                    master_asset_id=subject.get("master_asset_id"),
+                )
+                for subject in data.get("anchor_subjects") or []
+            ),
+            scene_asset_id=data.get("scene_asset_id"),
+            requires_keyframe_generation=bool(data.get("requires_keyframe_generation")),
+        )
 
 
 @dataclass
@@ -510,15 +551,10 @@ class FrameAnchorPlanner:
                     project_id=self._project_id(session, shot),
                     shot_id=shot.id,
                     decision_type="FRAME_ANCHOR_PLAN",
-                    input_features={
-                        "source_shot_id": plan.source_shot_id,
-                        "transition_type": plan.transition_type,
-                        "risk_score": plan.risk_score,
-                        "anchor_subjects": [
-                            subject.character_id for subject in plan.anchor_subjects
-                        ],
-                        "scene_asset_id": plan.scene_asset_id,
-                    },
+                    # The complete plan, not a digest: first shots have no
+                    # transition row to carry it, and `ensure_plan` reuses a
+                    # still-current plan from here instead of re-deciding.
+                    input_features={"plan": plan.as_json()},
                     selected_action=plan.strategy,
                     reason_codes=list(plan.reasons),
                     model_version=self.version,
@@ -526,6 +562,113 @@ class FrameAnchorPlanner:
                 )
             )
             session.flush()
+
+    def record_manual_decision(
+        self, shot_id: str, decision: ContinuityDecision
+    ) -> FrameAnchorPlan:
+        """Register an operator's continuity decision as a first-class plan.
+
+        A manual risk vector can carry facts the structured rows cannot see —
+        a reverse shot, an axis change the compiler never wrote down. The
+        operator's mode is therefore honoured without the canon downgrade
+        second-guessing it, and the decision is recorded exactly like an
+        automatic plan, so `ensure_plan` reuses it instead of overriding it
+        at generation time. Anchor subjects and the scene anchor are still
+        resolved here: a manual mode changes *what* was decided, never who
+        the frame must carry.
+        """
+
+        with self.database.session() as session:
+            target = session.get(Shot, shot_id)
+            if target is None:
+                raise LookupError("shot not found")
+            if target.status == ShotStatus.COMMITTED.value or target.committed_candidate_id:
+                raise ValueError("a committed shot's frame strategy is history, not a plan")
+            facts = self._pair_facts(session, target)
+        strategy = _MODE_TO_STRATEGY[decision.mode]
+        with self.database.session() as session:
+            anchor_subjects = (
+                self._anchor_subjects(session, facts.project_id, facts.subject_state())
+                if strategy != FrameAnchorStrategy.INHERIT_LAST_FRAME
+                else ()
+            )
+            scene_asset_id = (
+                self._scene_asset_id(session, facts.project_id, facts.target.scene_id)
+                if strategy == FrameAnchorStrategy.RECONSTRUCT_FIRST_FRAME
+                else None
+            )
+        plan = FrameAnchorPlan(
+            target_shot_id=shot_id,
+            source_shot_id=facts.source.id if facts.source is not None else None,
+            strategy=strategy,
+            continuity_mode=decision.mode,
+            transition_type=facts.transition_type or "MANUAL_OVERRIDE",
+            risk_score=decision.risk_score,
+            reasons=tuple(dict.fromkeys([*decision.reasons, "MANUAL_RISK_OVERRIDE"])),
+            anchor_subjects=anchor_subjects,
+            scene_asset_id=scene_asset_id,
+            requires_keyframe_generation=(
+                strategy == FrameAnchorStrategy.RECONSTRUCT_FIRST_FRAME
+            ),
+        )
+        self._apply(plan)
+        return plan
+
+    def stored_plan(self, shot_id: str) -> FrameAnchorPlan | None:
+        """The most recent recorded plan for this shot, or ``None``."""
+
+        with self.database.session() as session:
+            record = session.scalar(
+                select(DecisionRecord)
+                .where(
+                    DecisionRecord.shot_id == shot_id,
+                    DecisionRecord.decision_type == "FRAME_ANCHOR_PLAN",
+                )
+                .order_by(DecisionRecord.created_at.desc(), DecisionRecord.id.desc())
+            )
+            raw = (record.input_features or {}).get("plan") if record is not None else None
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("planner_version") != self.version:
+            # A plan from an older planner is a record, not a decision this
+            # version stands behind.
+            return None
+        try:
+            return FrameAnchorPlan.from_json(raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def ensure_plan(self, shot_id: str) -> FrameAnchorPlan | None:
+        """The generation preflight gate: every generatable shot has a plan.
+
+        A stored plan is reused only while it is still *current* — same
+        planner version, same predecessor, and the shot's continuity mode is
+        still the one the plan decided. Anything else (a manually created
+        shot, a manually edited mode, a re-chained pair, an older planner)
+        is re-planned here, so no generatable adjacent pair can bypass the
+        planner by construction. Committed shots are history: their stored
+        plan is returned as-is and never recomputed.
+        """
+
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                raise LookupError("shot not found")
+            committed = shot.status == ShotStatus.COMMITTED.value or bool(
+                shot.committed_candidate_id
+            )
+            previous_shot_id = shot.previous_shot_id
+            continuity_mode = shot.continuity_mode
+        stored = self.stored_plan(shot_id)
+        if committed:
+            return stored
+        if (
+            stored is not None
+            and stored.source_shot_id == previous_shot_id
+            and stored.continuity_mode == continuity_mode
+        ):
+            return stored
+        return self.plan_pair(shot_id)
 
     def plan_episode(self, episode_id: str) -> list[FrameAnchorPlan]:
         """Plan every adjacent pair of an episode, in narrative order.

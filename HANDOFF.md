@@ -532,6 +532,95 @@ ledger and dependency facts, and the planner's per-pair decisions including tran
 committed-shot immunity and end-frame wiring. All run on both engine halves; the recompile guard
 test is the one that found the transition-cascade defect above.
 
+## 1e. 2026-08-27 — the same truths on every path: retrieval, prompt, anchors, retry
+
+A review of §1d against the whole pipeline found four places where a decision was made once and
+then not honoured somewhere else. All four are closed; no schema change.
+
+**A model-switch retry lost the retrieval context.** `_execute_retry` recompiled the prompt for the
+new target from a hand-built context of five transport fields — no `assembled_text`, so the forced
+`EXPLICIT_DEPENDENCY` and `OPEN_OBLIGATION` segments stage one had won were absent from exactly the
+attempt that most needed them. The original adapter context is now persisted on the request as
+`metadata["retrieval_context"]`, and a retry recompiles against it verbatim, overriding only the
+transport-facing fields (references, frames, style control). A retry switches the provider- or
+model-facing representation and nothing else: assembled text, continuity facts, subject anchors,
+scene anchors and the frame anchor plan all reach the fallback attempt byte-for-byte, and reference
+strengthening now draws from the plan's anchor subjects instead of everything canonical.
+
+**`SERIES_FACT` never reached a model.** Ledger facts flowed into `continuity_assertions` — metadata
+*about* the prompt — while `positive_prompt` serialized only the spec, and the adapters build the
+provider prompt from the spec too. Dependency, series and obligation facts are now rendered once
+into `spec.continuity["facts"]`, which every prompt surface serializes: the neutral/positive prompt,
+the legacy `compiled_prompt`, and every adapter's `Continuity:` line. The structured entries keep
+travelling to `continuity_assertions` unchanged, and a test pins exactly one occurrence per fact in
+the neutral prompt.
+
+**The planner's anchors did not control the request.** `anchor_subjects`, `scene_asset_id` and
+`requires_keyframe_generation` were computed, recorded, and then generation collected references the
+old way — every binding's assets and every canonical scene plate. The plan now governs the request:
+character references narrow to the anchor subjects (their identity masters added), the scene
+reference is the plate the planner chose (the runtime's canonical merge filters other scene plates
+out, unless a caller supplied one explicitly), and `requires_keyframe_generation` is consumed — the
+plan rides the request metadata and the candidate's generation plan, the reconstruction inputs are
+guaranteed present in the reference set, and a plan whose anchors no longer resolve refuses rather
+than submitting a reconstruction with nothing to reconstruct from.
+
+**Manually created shots bypassed the planner.** `POST /v1/shots` accepts a `continuity_mode`, and
+generation trusted whatever was saved. `FrameAnchorPlanner.ensure_plan()` is now a generation
+preflight inside `create_candidate` — every generatable shot passes it: a stored plan is reused only
+while still current (same planner version, same predecessor, mode untouched); anything stale,
+absent, manually created or manually edited is re-planned on the spot; a shot with no predecessor
+gets explicit first-shot semantics; committed shots return their recorded plan untouched. The full
+plan is stored on the `FRAME_ANCHOR_PLAN` decision record (first shots have no transition row to
+carry it), and explicit `plan-frame-anchors` calls are now an inspect/re-plan surface, not a
+correctness requirement.
+
+**Three follow-through gaps, closed in the same pass.** First, the retry fix above only served jobs
+that *stored* a retrieval context; a job planned before the field existed still fell back to the
+five transport fields. Stage one is deterministic over database state, so
+`_rebuild_retrieval_context` now re-derives it exactly — dependencies, obligations, canonical
+truth, temporal state, no similarity re-run — and only a request with no shot at all keeps the bare
+transport context. Second, **automatic role selection**: the planner named the characters the frame
+must carry, but a caller who supplied no bindings generated without them. Anchor subjects with a
+confirmed identity are now bound automatically in `create_candidate` through the same
+`CharacterIdentityService.binding` the API route uses; a required subject that cannot be bound is a
+plan failure. Third, **the plan failure mechanism**: an unexecutable plan used to be an anonymous
+`ValueError`. `FrameAnchorPlanUnresolved` now mirrors the dependency gate — the shot moves to
+`USER_REVIEW_REQUIRED` with a `FRAME_ANCHOR_PLAN_RESOLUTION` decision record naming the reason
+(`ANCHOR_REFERENCES_UNRESOLVED`, `ANCHOR_SUBJECT_UNBINDABLE:<id>`), and no job or charge exists.
+
+**And one collision the gate itself exposed: a manual override is a plan, not a bypass.** The
+three-shot e2e declares shot 3 a reverse shot through the manual risk route — a fact the structured
+rows cannot see — and the preflight, finding no recorded plan, re-derived "continuous same scene"
+and overrode the operator. `plan_continuity` now registers its decision through
+`FrameAnchorPlanner.record_manual_decision`: the operator's mode is honoured (no canon downgrade
+second-guessing a human), anchor subjects and the scene anchor are still resolved, the plan is
+recorded like any automatic one (`MANUAL_RISK_OVERRIDE` in its reasons), and `ensure_plan` reuses
+it. The gate re-plans only what nothing stands behind — a hand-saved mode with no plan, a
+re-chained pair, an older planner version.
+
+**Three loops the review then closed all the way.** (1) A failure *inside* the planner itself —
+`plan_pair` raising during the preflight — used to escape as an anonymous error with no record.
+Every planner failure at the gate now lands in the same mechanism: `FRAME_ANCHOR_PLAN_RESOLUTION`
+record with `FRAME_ANCHOR_PLANNING_FAILED:<type>`, shot to review, typed `FrameAnchorPlanUnresolved`,
+no job. (2) Character material filtering only covered scene plates; canonical CHARACTER-registry
+assets still merged in project-wide. The canonical merge now excludes a CHARACTER asset attributable
+(by recorded `character_id` or by name) to a character outside the anchor set — reference videos
+included — while caller-supplied references, which carry the bindings' own assets, remain exempt.
+(3) An old task's retry whose stage-one rebuild finds broken owed material now forces review: the
+shot moves to `USER_REVIEW_REQUIRED` with a `SHOT_DEPENDENCY_RESOLUTION` record marked
+`stage: RETRY`, the retry candidate is cleaned up, and `sync_candidate` holds the evaluated
+candidate in `USER_REVIEW_REQUIRED` instead of mislabelling the refusal `VISUAL_EVALUATION_ERROR`.
+
+**Tests:** `tests/test_pipeline_semantic_consistency.py` (eleven) pins the five invariants —
+retrieval context surviving fallback for stored *and* pre-storage jobs, `SERIES_FACT` on the
+positive/neutral, legacy and adapter prompts exactly once, plan anchors excluding unrelated
+character and scene assets from the request with `requires_keyframe_generation` consumed, automatic
+binding of anchor subjects when the caller names no one, an unexecutable plan entering review on
+record with no job created, a hand-created shot with a hand-saved mode being re-planned
+automatically with first-shot semantics, a replay reusing the plan without a second decision, and a
+manual risk override surviving the generation preflight.
+
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 
 `Database.create_all()` ran from `build_container()` on every startup. It creates tables missing from ORM

@@ -6,12 +6,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from character_core import (
+    CharacterIdentityService,
     CharacterStateError,
     PersistentCharacterStateService,
     canonical_json_hash,
     preview_character_state_transition,
     required_visual_state_paths,
 )
+from continuity_core import FrameAnchorPlan, FrameAnchorPlanner, FrameAnchorPlanUnresolved
 from cost_core import CostEngine
 from evaluation_core import EvaluationDecision, EvaluationEvidence
 from generation_gateway import GenerationGateway
@@ -96,6 +98,8 @@ class CandidatePipeline:
         generation_admission: GenerationAdmissionService | None = None,
         character_states: PersistentCharacterStateService | None = None,
         styles: ProjectStyleService | None = None,
+        frame_anchors: FrameAnchorPlanner | None = None,
+        characters: CharacterIdentityService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -108,6 +112,8 @@ class CandidatePipeline:
         self.generation_admission = generation_admission
         self.character_states = character_states or PersistentCharacterStateService(database)
         self.styles = styles
+        self.frame_anchors = frame_anchors
+        self.characters = characters
         self.timeline = AuthoritativeTimelineStateEngine(database)
         self.policy = GenerationPolicyEngine(database)
 
@@ -115,6 +121,43 @@ class CandidatePipeline:
     def _embedding(value: str) -> list[float]:
         digest = hashlib.sha256(value.encode("utf-8")).digest()
         return [round(byte / 255, 6) for byte in digest[:16]]
+
+    def _shot_project_id(self, shot_id: str) -> str:
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                raise LookupError("shot not found")
+            return shot.scene.episode.project_id
+
+    def _record_generation_review(
+        self,
+        shot_id: str,
+        project_id: str,
+        *,
+        decision_type: str,
+        model_version: str,
+        policy_version: str,
+        reason_codes: tuple[str, ...],
+    ) -> None:
+        """A generation preflight refused: the shot goes to review, on record."""
+
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is not None and shot.status != ShotStatus.COMMITTED.value:
+                shot.status = ShotStatus.USER_REVIEW_REQUIRED.value
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=shot_id,
+                    decision_type=decision_type,
+                    input_features={"reason_codes": list(reason_codes)},
+                    selected_action="REVIEW_REQUIRED",
+                    reason_codes=list(reason_codes),
+                    model_version=model_version,
+                    policy_version=policy_version,
+                )
+            )
+            session.flush()
 
     def _record_dependency_review(
         self, shot_id: str, project_id: str, reason_codes: tuple[str, ...]
@@ -125,23 +168,28 @@ class CandidatePipeline:
         similarity-only context in place of material the shot is owed.
         """
 
-        with self.database.session() as session:
-            shot = session.get(Shot, shot_id)
-            if shot is not None and shot.status != ShotStatus.COMMITTED.value:
-                shot.status = ShotStatus.USER_REVIEW_REQUIRED.value
-            session.add(
-                DecisionRecord(
-                    project_id=project_id,
-                    shot_id=shot_id,
-                    decision_type="SHOT_DEPENDENCY_RESOLUTION",
-                    input_features={"reason_codes": list(reason_codes)},
-                    selected_action="REVIEW_REQUIRED",
-                    reason_codes=list(reason_codes),
-                    model_version="shot-dependency-gate-v1",
-                    policy_version="dependency-gate-v1",
-                )
-            )
-            session.flush()
+        self._record_generation_review(
+            shot_id,
+            project_id,
+            decision_type="SHOT_DEPENDENCY_RESOLUTION",
+            model_version="shot-dependency-gate-v1",
+            policy_version="dependency-gate-v1",
+            reason_codes=reason_codes,
+        )
+
+    def _record_plan_review(
+        self, shot_id: str, project_id: str, reason_codes: tuple[str, ...]
+    ) -> None:
+        """A frame anchor plan that cannot be executed moves the shot to review."""
+
+        self._record_generation_review(
+            shot_id,
+            project_id,
+            decision_type="FRAME_ANCHOR_PLAN_RESOLUTION",
+            model_version="frame-anchor-gate-v1",
+            policy_version="frame-anchor-gate-v1",
+            reason_codes=reason_codes,
+        )
 
     @staticmethod
     def _dot_state_path(path: str) -> str:
@@ -324,6 +372,28 @@ class CandidatePipeline:
         proposed_by_user_id: str | None = None,
         state_delta_source: str = CharacterStateProposalSource.RULES.value,
     ) -> tuple[GenerationCandidate, bool]:
+        # The Frame Anchor Planner is a system-level generation gate, not a
+        # step a caller opts into. Every generatable shot — compiled or
+        # manually created — passes through here: a still-current stored plan
+        # is reused, anything stale or absent is planned now, and the shot
+        # state read below already reflects the decision. Explicit
+        # `plan-frame-anchors` calls remain an inspect/re-plan surface only.
+        # A planner that cannot produce a plan is itself a review condition:
+        # the failure is recorded and typed, never an anonymous error.
+        anchor_plan: FrameAnchorPlan | None = None
+        if self.frame_anchors is not None:
+            try:
+                anchor_plan = self.frame_anchors.ensure_plan(shot_id)
+            except LookupError:
+                # Shot not found — the 404 the caller expects, not a plan failure.
+                raise
+            except FrameAnchorPlanUnresolved as exc:
+                self._record_plan_review(shot_id, self._shot_project_id(shot_id), exc.reason_codes)
+                raise
+            except (ValueError, KeyError) as exc:
+                codes = (f"FRAME_ANCHOR_PLANNING_FAILED:{type(exc).__name__}",)
+                self._record_plan_review(shot_id, self._shot_project_id(shot_id), codes)
+                raise FrameAnchorPlanUnresolved(shot_id, list(codes)) from exc
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
             if not shot:
@@ -339,6 +409,7 @@ class CandidatePipeline:
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             continuity_mode = shot.continuity_mode
+            input_state_id = shot.input_state_id
             planning_input_state = (
                 session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             )
@@ -389,6 +460,56 @@ class CandidatePipeline:
                 )
                 if media_id
             )
+            # The planner chose one scene anchor; resolve its canonical media
+            # here so the reference set below can carry exactly that plate
+            # instead of every scene the project owns.
+            anchor_scene_media_id = (
+                session.scalar(
+                    select(AssetVersion.primary_media_asset_id)
+                    .join(Asset, Asset.canonical_version_id == AssetVersion.id)
+                    .where(Asset.id == anchor_plan.scene_asset_id)
+                )
+                if anchor_plan is not None and anchor_plan.scene_asset_id
+                else None
+            )
+        # Automatic role selection: the planner named the characters this
+        # shot's frame must carry, and a caller who supplied no binding for one
+        # of them does not silently generate without it. Subjects with a
+        # confirmed identity are bound here through the same service the API
+        # route uses; a required subject that cannot be bound is a plan
+        # failure, not a shrug.
+        if anchor_plan is not None and self.characters is not None and anchor_plan.anchor_subjects:
+            already_bound = {
+                str(binding.get("character_id"))
+                for binding in (character_bindings or [])
+                if binding.get("character_id")
+            }
+            auto_bindings: list[dict] = []
+            unbindable: list[str] = []
+            for subject in anchor_plan.anchor_subjects:
+                if not subject.character_id or subject.character_id in already_bound:
+                    continue
+                if not subject.identity_version_id:
+                    # No confirmed identity — nothing exists to bind. Downgraded
+                    # plans carry such subjects by design.
+                    continue
+                try:
+                    auto_bindings.append(
+                        self.characters.binding(
+                            subject.character_id,
+                            project_id=project_id,
+                            timeline_state_id=input_state_id,
+                        )
+                    )
+                except (LookupError, ValueError):
+                    if anchor_plan.requires_keyframe_generation:
+                        unbindable.append(f"ANCHOR_SUBJECT_UNBINDABLE:{subject.character_id}")
+            if unbindable:
+                self._record_plan_review(shot_id, project_id, tuple(unbindable))
+                raise FrameAnchorPlanUnresolved(shot_id, unbindable)
+            if auto_bindings:
+                character_bindings = [*(character_bindings or []), *auto_bindings]
+
         effective_character_bindings = deepcopy(character_bindings or [])
         bindings_by_character = {
             str(binding.get("character_id")): binding for binding in effective_character_bindings
@@ -527,18 +648,50 @@ class CandidatePipeline:
                 if continuity_mode == ContinuityMode.HYBRID.value
                 else start_frame_asset_id
             )
+            # The planner decided *which* characters and scene anchor this
+            # shot's frame. Those decisions govern the reference set: bindings
+            # are narrowed to the anchor subjects (their identity masters
+            # added), and the scene reference is the plate the planner chose —
+            # not every character or scene the project happens to own. Without
+            # a plan (planner unwired), the previous everything-canonical
+            # behaviour stands.
+            anchor_subject_ids = (
+                {subject.character_id for subject in anchor_plan.anchor_subjects}
+                if anchor_plan is not None
+                else set()
+            )
+            anchor_master_asset_ids = (
+                [
+                    subject.master_asset_id
+                    for subject in anchor_plan.anchor_subjects
+                    if subject.master_asset_id
+                ]
+                if anchor_plan is not None
+                else []
+            )
             canonical_character_assets = tuple(
                 dict.fromkeys(
-                    str(asset_id)
-                    for binding in (character_bindings or [])
-                    for asset_id in binding.get("canonical_assets", [])
-                    if asset_id
+                    [
+                        *(
+                            str(asset_id)
+                            for binding in (character_bindings or [])
+                            if not anchor_subject_ids
+                            or str(binding.get("character_id")) in anchor_subject_ids
+                            for asset_id in binding.get("canonical_assets", [])
+                            if asset_id
+                        ),
+                        *anchor_master_asset_ids,
+                    ]
                 )
             )
             scene_references = tuple(
                 dict.fromkeys(
                     [
-                        *canonical_scene_reference_ids,
+                        *(
+                            [anchor_scene_media_id]
+                            if anchor_scene_media_id
+                            else canonical_scene_reference_ids
+                        ),
                         *[
                             asset.id
                             for asset in supplied_references
@@ -547,6 +700,18 @@ class CandidatePipeline:
                     ]
                 )
             )
+            if (
+                anchor_plan is not None
+                and anchor_plan.requires_keyframe_generation
+                and not (anchor_master_asset_ids or anchor_scene_media_id)
+            ):
+                # The plan stood on canon that has since disappeared. Refusing
+                # here beats submitting a keyframe reconstruction with nothing
+                # to reconstruct from — and the refusal is a review state, on
+                # record, not an anonymous error.
+                codes = ("ANCHOR_REFERENCES_UNRESOLVED",)
+                self._record_plan_review(shot_id, project_id, codes)
+                raise FrameAnchorPlanUnresolved(shot_id, list(codes))
             policy_assets = AvailableGenerationAssets(
                 previous_end_frame_asset_id=previous_end_frame_asset_id,
                 start_frame_asset_id=start_frame_asset_id,
@@ -606,6 +771,7 @@ class CandidatePipeline:
                     reference_asset_ids=effective_reference_asset_ids,
                     estimated_cost=0.0,
                     allowed_providers=allowed_providers,
+                    frame_anchor_plan=(anchor_plan.as_json() if anchor_plan is not None else None),
                 )
             except ShotDependencyUnresolved as exc:
                 self._record_dependency_review(shot_id, project_id, exc.reason_codes)
@@ -635,6 +801,14 @@ class CandidatePipeline:
                 "penalties": prepared.router.candidates[0].penalties,
                 "router_version": prepared.router.router_version,
                 "prompt_record_id": prepared.prompt_record_id,
+                **(
+                    {
+                        "frame_anchor": anchor_plan.as_json(),
+                        "requires_keyframe_generation": anchor_plan.requires_keyframe_generation,
+                    }
+                    if anchor_plan is not None
+                    else {}
+                ),
             }
 
             def initialize_candidate(session, job: GenerationJob, replayed: bool) -> None:  # type: ignore[no-untyped-def]
@@ -730,6 +904,14 @@ class CandidatePipeline:
             "fallback_providers": plan.fallback_providers,
             "degraded_from": plan.degraded_from,
             "reasons": plan.reasons,
+            **(
+                {
+                    "frame_anchor": anchor_plan.as_json(),
+                    "requires_keyframe_generation": anchor_plan.requires_keyframe_generation,
+                }
+                if anchor_plan is not None
+                else {}
+            ),
         }
         candidate_id = new_id()
         request = GenerationRequest(
@@ -750,7 +932,10 @@ class CandidatePipeline:
             idempotency_key=idempotency_key,
             generation_policy=plan.policy,
             cost_estimate=estimated_cost,
-            metadata={"generation_plan": generation_plan},
+            metadata={
+                "generation_plan": generation_plan,
+                **({"frame_anchor": anchor_plan.as_json()} if anchor_plan is not None else {}),
+            },
         )
 
         def initialize_legacy_candidate(session, job: GenerationJob, replayed: bool) -> None:  # type: ignore[no-untyped-def]
@@ -882,6 +1067,30 @@ class CandidatePipeline:
                     visual_result, retry_plan, retry_job = self.visual_runtime.evaluate_job(
                         job.id, evaluation_evidence
                     )
+                except (ShotDependencyUnresolved, FrameAnchorPlanUnresolved):
+                    # A retry that cannot rebuild its owed context, or a plan
+                    # that stopped being executable, is a review condition —
+                    # not an anonymous evaluation error. The shot was already
+                    # moved to review where the refusal was raised; the
+                    # candidate follows it instead of hard-failing.
+                    with self.database.session() as session:
+                        held = session.execute(
+                            update(GenerationCandidate)
+                            .where(
+                                GenerationCandidate.id == candidate_id,
+                                GenerationCandidate.status == CandidateStatus.VALIDATING.value,
+                                GenerationCandidate.qa_result_id == legacy_qa.id,
+                            )
+                            .values(status=CandidateStatus.USER_REVIEW_REQUIRED.value)
+                        )
+                        qa_result = session.get(QAResult, legacy_qa.id)
+                        if affected_rows(held) == 1 and qa_result:
+                            qa_result.decision = QADecision.USER_REVIEW_REQUIRED.value
+                            qa_result.summary = (
+                                "USER_REVIEW_REQUIRED: retry refused — dependencies or "
+                                "frame anchor plan need review"
+                            )
+                    raise
                 except Exception:
                     with self.database.session() as session:
                         failed = session.execute(

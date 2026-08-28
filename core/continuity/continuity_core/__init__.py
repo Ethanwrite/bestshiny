@@ -3,6 +3,7 @@ from .frame_anchor import (
     AnchorSubject,
     FrameAnchorPlan,
     FrameAnchorPlanner,
+    FrameAnchorPlanUnresolved,
     FrameAnchorStrategy,
 )
 
@@ -12,6 +13,7 @@ __all__ = [
     "ContinuityDecisionEngine",
     "ContinuityRiskVector",
     "FrameAnchorPlan",
+    "FrameAnchorPlanUnresolved",
     "FrameAnchorPlanner",
     "FrameAnchorStrategy",
 ]

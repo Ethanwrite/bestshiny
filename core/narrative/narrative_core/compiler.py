@@ -410,6 +410,41 @@ class NarrativeCompiler:
                             "cannot recompile: shots outside this episode declare explicit "
                             "dependencies on its shots; remove those dependencies first"
                         )
+                    # A later episode that continues from this one chains its
+                    # first shot to this episode's last. Recompiling would
+                    # delete the shot that chain points at; refuse with the
+                    # reason rather than surfacing a foreign-key violation.
+                    external_chain = session.scalar(
+                        select(Shot.id)
+                        .where(
+                            Shot.previous_shot_id.in_(old_shot_ids),
+                            Shot.id.not_in(old_shot_ids),
+                        )
+                        .limit(1)
+                    )
+                    if external_chain is not None:
+                        raise RuntimeError(
+                            "cannot recompile: a later episode continues from this episode's "
+                            "shots; unlink or recompile that continuation first"
+                        )
+                    # The mirror direction: this episode is itself a linked
+                    # continuation, so an earlier episode's tail points at the
+                    # first shot about to be deleted. The continuation service
+                    # unlinks before recompiling and re-links afterwards; a
+                    # plain recompile must not silently sever that contract.
+                    inbound_chain = session.scalar(
+                        select(Shot.id)
+                        .where(
+                            Shot.next_shot_id.in_(old_shot_ids),
+                            Shot.id.not_in(old_shot_ids),
+                        )
+                        .limit(1)
+                    )
+                    if inbound_chain is not None:
+                        raise RuntimeError(
+                            "cannot recompile: this episode is a linked continuation of an "
+                            "earlier one; confirm it through its episode continuation instead"
+                        )
                     session.execute(
                         delete(ShotDependency).where(
                             ShotDependency.target_shot_id.in_(old_shot_ids)

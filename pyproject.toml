@@ -84,6 +84,8 @@ packages = [
   "core/payments/payment_core",
   "core/external-evidence/external_evidence_core",
   "core/router-evidence/router_evidence_core",
+  "core/creative-director/creative_director_core",
+  "core/episode-continuation/episode_continuation_core",
 ]
 
 [tool.pytest.ini_options]
@@ -112,6 +114,8 @@ pythonpath = [
   "core/payments",
   "core/external-evidence",
   "core/router-evidence",
+  "core/creative-director",
+  "core/episode-continuation",
 ]
 
 [tool.ruff]
@@ -126,6 +130,7 @@ select = ["E", "F", "I", "B", "UP"]
 "apps/api/video_platform_api/auth.py" = ["B008"]
 "apps/api/video_platform_api/runtime_routes.py" = ["B008"]
 "apps/api/video_platform_api/admin_routes.py" = ["B008"]
+"apps/api/video_platform_api/creative_routes.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -152,4 +157,6 @@ files = [
   "core/payments",
   "core/external-evidence",
   "core/router-evidence",
+  "core/creative-director",
+  "core/episode-continuation",
 ]

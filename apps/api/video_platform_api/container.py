@@ -9,6 +9,7 @@ from browser_runtime import BrowserRuntime
 from character_core import CharacterIdentityService, PersistentCharacterStateService
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine
+from creative_director_core import CreativeDirectorService
 from deepseek_provider import DeepSeekProvider
 from director_production import AgentOrchestrator, CandidatePipeline
 from entitlement_core import (
@@ -18,6 +19,7 @@ from entitlement_core import (
     WorkspaceCreditService,
     WorkspaceModelResolver,
 )
+from episode_continuation_core import ContinuationContextBuilder, EpisodeContinuationService
 from evaluation_core import GenerationEvaluator, RetryEngine
 from generation_gateway import (
     DirectAPIResourceRegistry,
@@ -157,6 +159,8 @@ class Container:
     benchmarks: ModelBenchmarkSuite
     visual_runtime: VisualProductionRuntime
     credit_pricing: CreditPricingEngine
+    creative_director: CreativeDirectorService
+    episode_continuations: EpisodeContinuationService
 
     @property
     def video_prompt_compiler(self) -> PromptCompilerService:
@@ -747,6 +751,26 @@ def build_container(settings: Settings | None = None) -> Container:
         candidates,
         frame_anchors=frame_anchors,
     )
+    # Both upper-level services reuse the chain below them: the creative
+    # director compiles through the orchestrator and writes the ledger, the
+    # continuation service compiles through the same narrative compiler and
+    # plans through the same frame anchor planner. Neither owns a provider
+    # path - paid work is emitted as structured actions the API executes
+    # through admission and the visual runtime.
+    creative_director = CreativeDirectorService(
+        database,
+        orchestrator=orchestrator,
+        ledger=narrative_ledger,
+        model_roles=model_roles,
+    )
+    episode_continuations = EpisodeContinuationService(
+        database,
+        context_builder=ContinuationContextBuilder(database, narrative_ledger),
+        narrative=narrative,
+        frame_anchors=frame_anchors,
+        ledger=narrative_ledger,
+        model_roles=model_roles,
+    )
     return Container(
         settings=settings,
         database=database,
@@ -805,4 +829,6 @@ def build_container(settings: Settings | None = None) -> Container:
         benchmarks=benchmarks,
         visual_runtime=visual_runtime,
         credit_pricing=credit_pricing,
+        creative_director=creative_director,
+        episode_continuations=episode_continuations,
     )

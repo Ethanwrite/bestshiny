@@ -3703,6 +3703,338 @@ class AuthLoginThrottle(Base, TimestampMixin):
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class CreativeSessionStatus(StrEnum):
+    """Lifecycle of one AI-creative-director conversation.
+
+    Every transition is forward-only except ABANDONED; approvals move the
+    session, never edits. The stage names mirror the product flow:
+    idea -> clarify -> brief -> key visuals -> visual bible -> beats -> compile.
+    """
+
+    INTAKE = "INTAKE"
+    CLARIFYING = "CLARIFYING"
+    BRIEF_PROPOSED = "BRIEF_PROPOSED"
+    BRIEF_APPROVED = "BRIEF_APPROVED"
+    VISUALS_IN_PROGRESS = "VISUALS_IN_PROGRESS"
+    BIBLE_PROPOSED = "BIBLE_PROPOSED"
+    BIBLE_LOCKED = "BIBLE_LOCKED"
+    BEATS_PROPOSED = "BEATS_PROPOSED"
+    COMPILED = "COMPILED"
+    ABANDONED = "ABANDONED"
+
+
+class CreativeFormat(StrEnum):
+    SHORT_DRAMA = "SHORT_DRAMA"
+    ADVERTISEMENT = "ADVERTISEMENT"
+    PRODUCT_SHOWCASE = "PRODUCT_SHOWCASE"
+    SOCIAL_SHORT = "SOCIAL_SHORT"
+    MUSIC_VISUAL = "MUSIC_VISUAL"
+    FASHION_LOOKBOOK = "FASHION_LOOKBOOK"
+    BEAUTY_TUTORIAL = "BEAUTY_TUTORIAL"
+    CONCEPT_FILM = "CONCEPT_FILM"
+    UNSPECIFIED = "UNSPECIFIED"
+
+
+class CreativeAnchorStatus(StrEnum):
+    PENDING = "PENDING"
+    GENERATING = "GENERATING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class CreativeActionStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    EXECUTED = "EXECUTED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class CreativeSession(Base, TimestampMixin):
+    """One stateful creative-director engagement over a project."""
+
+    __tablename__ = "creative_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('INTAKE', 'CLARIFYING', 'BRIEF_PROPOSED', 'BRIEF_APPROVED', "
+            "'VISUALS_IN_PROGRESS', 'BIBLE_PROPOSED', 'BIBLE_LOCKED', 'BEATS_PROPOSED', "
+            "'COMPILED', 'ABANDONED')",
+            name="ck_creative_session_status",
+        ),
+        CheckConstraint(
+            "format IN ('SHORT_DRAMA', 'ADVERTISEMENT', 'PRODUCT_SHOWCASE', 'SOCIAL_SHORT', "
+            "'MUSIC_VISUAL', 'FASHION_LOOKBOOK', 'BEAUTY_TUTORIAL', 'CONCEPT_FILM', 'UNSPECIFIED')",
+            name="ck_creative_session_format",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeSessionStatus.INTAKE.value, nullable=False
+    )
+    format: Mapped[str] = mapped_column(
+        String(40), default=CreativeFormat.UNSPECIFIED.value, nullable=False
+    )
+    #: Head pointers into the append-only revision tables below. They are
+    #: projections, not truth: the revision rows are.
+    current_brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_bible_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_beat_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    compiled_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
+
+
+class CreativeTurn(Base, TimestampMixin):
+    """Append-only dialogue ledger: what was said, asked, and extracted."""
+
+    __tablename__ = "creative_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_creative_turn_sequence"),
+        CheckConstraint("speaker IN ('USER', 'DIRECTOR')", name="ck_creative_turn_speaker"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: Questions the director chose to ask on this turn - each carries the gap
+    #: code it targets, so a question is never re-asked for an answered gap.
+    questions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: The structured brief patch this turn produced (empty for pure replies).
+    extracted_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: MODEL:<role> when a model reasoned about this turn, DETERMINISTIC when
+    #: the rules engine did, USER for user turns. Model outage degrades to the
+    #: rules engine loudly, never silently.
+    reasoner: Mapped[str] = mapped_column(String(60), default="USER", nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class CreativeBriefRevision(Base, TimestampMixin):
+    """Append-only CreativeBrief revisions; approval freezes one."""
+
+    __tablename__ = "creative_briefs"
+    __table_args__ = (
+        UniqueConstraint("session_id", "revision", name="uq_creative_brief_revision"),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'SUPERSEDED')",
+            name="ck_creative_brief_status",
+        ),
+        CheckConstraint("length(content_hash) = 64", name="ck_creative_brief_hash_length"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
+    fields_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The gap report computed for this revision: which fields are missing,
+    #: their value weight, and which already have an asked question.
+    completeness_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VisualBibleVersion(Base, TimestampMixin):
+    """Versioned visual bible; LOCKED versions are immutable by contract.
+
+    Locking is the version-lock the product promises after user approval: the
+    service refuses any further mutation of a LOCKED row, and later changes
+    append a new version that supersedes it.
+    """
+
+    __tablename__ = "visual_bibles"
+    __table_args__ = (
+        UniqueConstraint("session_id", "version", name="uq_visual_bible_version"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'LOCKED', 'SUPERSEDED')",
+            name="ck_visual_bible_status",
+        ),
+        CheckConstraint("version > 0", name="ck_visual_bible_version_positive"),
+        CheckConstraint(
+            "status != 'LOCKED' OR locked_at IS NOT NULL",
+            name="ck_visual_bible_locked_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
+    brief_id: Mapped[str] = mapped_column(ForeignKey("creative_briefs.id"), nullable=False)
+    content_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(120))
+
+
+class CreativeVisualAnchor(Base, TimestampMixin):
+    """One key visual the director wants generated and bound.
+
+    The anchor is the structured intent; the generation itself always goes
+    through the existing Passenger image path (admission, credits, router,
+    gateway) - never a direct provider call from creative code.
+    """
+
+    __tablename__ = "creative_visual_anchors"
+    __table_args__ = (
+        UniqueConstraint("session_id", "anchor_key", name="uq_creative_anchor_key"),
+        CheckConstraint(
+            "kind IN ('CHARACTER', 'SCENE', 'STYLE', 'PRODUCT', 'PROP', 'MOOD')",
+            name="ck_creative_anchor_kind",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'GENERATING', 'READY', 'FAILED')",
+            name="ck_creative_anchor_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    anchor_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    #: Structured prompt parts (subject / style / constraints), composed into a
+    #: provider prompt only at action-execution time.
+    prompt_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeAnchorStatus.PENDING.value, nullable=False
+    )
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"))
+    media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id"))
+    failure_code: Mapped[str | None] = mapped_column(String(240))
+
+
+class CreativeAction(Base, TimestampMixin):
+    """Append-only structured actions - the director's only door to execution.
+
+    The creative director never calls a provider; it emits one of these rows
+    and the API layer executes it through the existing admission, credit,
+    router and gateway chain. The row is the audit that nothing else happened.
+    """
+
+    __tablename__ = "creative_actions"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_creative_action_sequence"),
+        UniqueConstraint("idempotency_key", name="uq_creative_action_idempotency"),
+        CheckConstraint(
+            "kind IN ('GENERATE_KEY_VISUAL', 'CREATE_EPISODE', 'COMPILE_EPISODE', "
+            "'OPEN_OBLIGATION', 'ESTABLISH_FACT')",
+            name="ck_creative_action_kind",
+        ),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'EXECUTED', 'FAILED', 'SKIPPED')",
+            name="ck_creative_action_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeActionStatus.PROPOSED.value, nullable=False
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(250))
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CreativeBeat(Base, TimestampMixin):
+    """One beat of a proposed beat plan, with its structured shot intents."""
+
+    __tablename__ = "creative_beats"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "plan_revision", "sequence", name="uq_creative_beat_sequence"
+        ),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'SUPERSEDED')",
+            name="ck_creative_beat_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    plan_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
+    #: {intent, summary, location, time, characters, shots: [ShotIntent...]}
+    beat_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class EpisodeContinuation(Base, TimestampMixin):
+    """The bridge from a finished episode to the next one.
+
+    Holds the computed EpisodeContinuationContext snapshot (what the next
+    episode inherits and what it must not), the proposed brief and beats, and
+    the compiled result. One row per (project, previous episode, next number),
+    so preparation is idempotent and confirmation is replayable.
+    """
+
+    __tablename__ = "episode_continuations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "previous_episode_id",
+            "next_episode_number",
+            name="uq_episode_continuation_target",
+        ),
+        CheckConstraint(
+            "status IN ('BRIEF_PROPOSED', 'CONFIRMED', 'COMPILED', 'ABANDONED')",
+            name="ck_episode_continuation_status",
+        ),
+        CheckConstraint(
+            "continuation_mode IN ('CONTINUOUS', 'TIME_JUMP', 'LOCATION_CHANGE')",
+            name="ck_episode_continuation_mode",
+        ),
+        CheckConstraint("next_episode_number > 1", name="ck_episode_continuation_number"),
+        CheckConstraint("length(context_hash) = 64", name="ck_episode_continuation_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    previous_episode_id: Mapped[str] = mapped_column(
+        ForeignKey("episodes.id"), index=True, nullable=False
+    )
+    next_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), index=True)
+    next_episode_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="BRIEF_PROPOSED", nullable=False)
+    #: CONTINUOUS inherits the previous ending frame inside the same location;
+    #: TIME_JUMP / LOCATION_CHANGE inherit narrative and character state only.
+    continuation_mode: Mapped[str] = mapped_column(String(40), nullable=False)
+    time_gap: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    new_location: Mapped[str | None] = mapped_column(String(200))
+    #: The EpisodeContinuationContext snapshot this proposal reasoned from.
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    brief_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    beats_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: Prior proposal revisions, appended when a re-proposal replaces them.
+    revisions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    reasoner: Mapped[str] = mapped_column(String(60), default="DETERMINISTIC", nullable=False)
+    script_rendered: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_by: Mapped[str | None] = mapped_column(String(120))
+
+
 def _install_character_state_integrity_ddl() -> None:
     """Install the create-all equivalent of migration 0028's state ledger guards."""
 

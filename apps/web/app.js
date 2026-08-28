@@ -48,6 +48,9 @@ function restoreSubmissions() {
 
 const state = {
   projects: [], project: null, episode: null, shot: null, candidates: [], characters: [],
+  episodes: [],               // rich strip rows from /v1/projects/{id}/episodes
+  creative: { sessions: [], session: null },
+  continuation: { mode: "CONTINUOUS", view: null },
   selectedCharacterId: null, page: "create", passengerMedia: "image", passengerOriginal: null,
   passengerPrompts: { image: "", video: "" }, passengerJobs: { image: null, video: null },
   passengerReferenceUpload: null, modelProfiles: [], imageModelProfiles: [], passengerModels: [],
@@ -95,6 +98,8 @@ const simpleLabel = (value) => ({
   REFERENCE_FRAME: "From reference frame",
   HARD_CONTINUITY: "Hard continuity", HYBRID: "End frame + reference",
   RE_ANCHOR: "Re-anchor character and scene",
+  IN_PRODUCTION: "In production", PROPOSED: "Proposed", APPROVED: "Approved",
+  LOCKED: "Locked", SUPERSEDED: "Superseded", PENDING: "Pending",
   CAMERA_AXIS_CHANGE: "Crosses the axis", SCENE_CHANGE: "Scene changes",
   TIMELINE_JUMP: "Time jump",
   LOW_PREVIOUS_FRAME_QUALITY: "Previous end frame is soft",
@@ -354,6 +359,7 @@ async function loadCredits() {
    ============================================================ */
 const PAGE_HINT = {
   create: "Describe the frame, pick a model, generate.",
+  "ai-director": "Bring a vague idea; approve the brief, visuals, bible and beats.",
   director: "Compile a script, then direct one shot at a time.",
   productions: "Every generation job, with progress, cost and recovery.",
   admin: "Provider gateway, skills, evidence and verified uploads.",
@@ -368,11 +374,14 @@ function switchPage(page) {
     node.hidden = node.dataset.page !== page;
   });
   $("appBody").classList.toggle("no-inspector", page === "admin");
-  $("appActionBar").hidden = page === "admin";
+  $("appActionBar").hidden = page === "admin" || page === "ai-director";
   if ($("modeDescription")) $("modeDescription").textContent = PAGE_HINT[page] || "";
 
   if (page === "admin" && state.authUser) loadOperations().catch((error) => toast(error.message));
   if (page === "productions") refreshProductions().catch((error) => toast(error.message));
+  if (page === "ai-director" && state.project) {
+    loadCreativeSessions().catch((error) => toast(error.message));
+  }
 }
 
 /* ============================================================
@@ -995,13 +1004,20 @@ async function selectProject(id) {
     $("referenceFileName").hidden = true;
     renderPassengerJob(null);
   }
+  const projectChanged = state.project?.id !== id;
   state.project = await request(`/v1/projects/${id}`);
   $("projectSelect").value = id;
+  if (projectChanged) { state.creative.session = null; renderCreative(); }
   await loadLogicalAssets();
   await loadCharacters();
-  if (state.project.episodes.length) await loadEpisode(state.project.episodes[0].id);
+  await loadEpisodeStrip();
+  const keepEpisode = !projectChanged && state.episode
+    && state.project.episodes.some((episode) => episode.id === state.episode.id);
+  if (keepEpisode) await loadEpisode(state.episode.id);
+  else if (state.project.episodes.length) await loadEpisode(state.project.episodes[0].id);
   else resetProductionView();
   if (!state.passengerJobs[state.passengerMedia]) await renderPassengerJob(null);
+  if (state.page === "ai-director") await loadCreativeSessions();
   syncOperationsContext();
 }
 
@@ -1051,6 +1067,7 @@ async function loadEpisode(id) {
   $("scriptInput").value = state.episode.script_source || "";
   $("scriptOriginalView").textContent = state.episode.script_source || "No script recorded for this episode.";
   $("episodeStatus").textContent = simpleLabel(state.episode.status);
+  renderEpisodeStrip();
   renderScenes(); renderShots();
   const firstShot = state.episode.scenes.flatMap((scene) => scene.shots)[0];
   if (firstShot) await selectShot(firstShot.id);
@@ -1310,7 +1327,7 @@ async function compileScript() {
   if (!state.project) { toast("Create a project first"); return; }
   const script = $("scriptInput").value.trim();
   if (!script) { toast("Paste a script first"); return; }
-  let episodeId = state.project.episodes[0]?.id;
+  let episodeId = state.episode?.id || state.project.episodes[0]?.id;
   if (!episodeId) {
     const episode = await request(`/v1/projects/${state.project.id}/episodes`, {
       method: "POST",
@@ -1961,6 +1978,376 @@ async function confirmPasswordReset(event) {
 }
 
 /* ============================================================
+   Create with AI Director page
+   ============================================================ */
+const CREATIVE_STAGE_LABEL = {
+  INTAKE: "Idea", CLARIFYING: "Clarifying", BRIEF_PROPOSED: "Brief proposed",
+  BRIEF_APPROVED: "Brief approved", VISUALS_IN_PROGRESS: "Key visuals",
+  BIBLE_PROPOSED: "Bible drafted", BIBLE_LOCKED: "Bible locked",
+  BEATS_PROPOSED: "Beats proposed", COMPILED: "Compiled", ABANDONED: "Abandoned",
+};
+
+async function loadCreativeSessions() {
+  if (!state.project) return;
+  state.creative.sessions = await request(`/v1/creative/sessions?project_id=${encodeURIComponent(state.project.id)}`);
+  $("creativeSessionCount").textContent = state.creative.sessions.length;
+  const list = $("creativeSessionList");
+  if (!state.creative.sessions.length) {
+    list.className = "shot-tree empty-state";
+    list.textContent = "No sessions yet for this project.";
+    return;
+  }
+  list.className = "shot-tree";
+  list.innerHTML = state.creative.sessions.map((session) => `
+    <button class="tree-shot ${state.creative.session?.session?.id === session.id ? "active" : ""}" data-creative-session="${session.id}" type="button">
+      <span class="tree-shot-label">${escapeHTML(session.title || "Untitled")}</span>
+      <span class="badge">${escapeHTML(CREATIVE_STAGE_LABEL[session.status] || session.status)}</span>
+    </button>`).join("");
+}
+
+async function openCreativeSession(id) {
+  state.creative.session = await request(`/v1/creative/sessions/${id}`);
+  renderCreative();
+  await loadCreativeSessions();
+}
+
+async function startCreativeSession() {
+  if (!state.project) { toast("Create a project first"); return; }
+  const idea = $("creativeIdeaInput").value.trim();
+  if (!idea) { toast("Tell the director what you want to make"); return; }
+  const started = await request("/v1/creative/sessions", {
+    method: "POST",
+    body: JSON.stringify({ project_id: state.project.id, idea }),
+  });
+  $("creativeIdeaInput").value = "";
+  await openCreativeSession(started.session_id);
+}
+
+async function sendCreativeReply() {
+  const session = state.creative.session;
+  if (!session) return;
+  const content = $("creativeReplyInput").value.trim();
+  if (!content) return;
+  $("creativeReplyInput").value = "";
+  await request(`/v1/creative/sessions/${session.session.id}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+  await openCreativeSession(session.session.id);
+}
+
+function renderCreativeTurns(turns) {
+  return turns.map((turn) => {
+    const questions = (turn.questions || []).map((question) =>
+      `<li>${escapeHTML(question.question)}</li>`).join("");
+    return `<div class="creative-turn is-${turn.speaker.toLowerCase()}">
+      <b>${turn.speaker === "USER" ? "You" : "Director"}</b>
+      <p>${escapeHTML(turn.content)}</p>
+      ${questions ? `<ul>${questions}</ul>` : ""}
+      ${turn.speaker === "DIRECTOR" && turn.reasoner ? `<small class="mono">${escapeHTML(turn.reasoner)}</small>` : ""}
+    </div>`;
+  }).join("");
+}
+
+const CREATIVE_BRIEF_ROWS = [
+  ["Format", (fields) => fields.format],
+  ["Core idea", (fields) => fields.logline],
+  ["Duration", (fields) => fields.duration_seconds ? `${fields.duration_seconds}s` : null],
+  ["Aspect", (fields) => fields.aspect_ratio],
+  ["Platform", (fields) => fields.platform],
+  ["Look", (fields) => fields.visual_style?.medium],
+  ["Tone", (fields) => (fields.tone || []).join(", ") || null],
+  ["Characters", (fields) => (fields.characters || []).map((character) => character.name).join(", ") || null],
+  ["Setting", (fields) => fields.setting?.location],
+  ["Product", (fields) => fields.product?.name],
+];
+
+function renderCreative() {
+  const view = state.creative.session;
+  const hasSession = Boolean(view);
+  $("creativeEmpty").hidden = hasSession;
+  $("creativeFlow").hidden = !hasSession;
+  if (!hasSession) {
+    $("creativeStageCrumb").textContent = "No session";
+    $("creativeStageChip").textContent = "Idea";
+    return;
+  }
+  const status = view.session.status;
+  $("creativeStageCrumb").textContent = view.session.title || "Session";
+  $("creativeStageChip").textContent = CREATIVE_STAGE_LABEL[status] || status;
+  $("creativeTurns").innerHTML = renderCreativeTurns(view.turns);
+  $("creativeTurns").scrollTop = $("creativeTurns").scrollHeight;
+  $("creativeReplyRow").hidden = status === "COMPILED" || status === "ABANDONED";
+
+  // Brief card
+  const brief = view.brief;
+  const briefVisible = Boolean(brief) && status !== "COMPILED";
+  $("creativeBriefCard").hidden = !briefVisible;
+  if (briefVisible) {
+    $("creativeBriefStatus").textContent = simpleLabel(brief.status);
+    $("creativeBriefFields").innerHTML = CREATIVE_BRIEF_ROWS
+      .map(([label, read]) => [label, read(brief.fields)])
+      .filter(([, value]) => value)
+      .map(([label, value]) => `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`)
+      .join("");
+    $("creativeApproveBriefBtn").hidden = !["CLARIFYING", "BRIEF_PROPOSED"].includes(status);
+  }
+
+  // Key visuals card
+  const anchors = view.anchors || [];
+  const visualsVisible = anchors.length > 0;
+  $("creativeVisualsCard").hidden = !visualsVisible;
+  if (visualsVisible) {
+    const ready = anchors.filter((anchor) => anchor.status === "READY").length;
+    const failed = anchors.filter((anchor) => anchor.status === "FAILED").length;
+    $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}`;
+    $("creativeAnchorGrid").innerHTML = anchors.map((anchor) => `
+      <figure class="asset-card" data-anchor-asset="${anchor.media_asset_id || ""}">
+        <div class="asset-thumb empty-state" data-anchor-thumb="${anchor.id}">${anchor.status === "READY" ? "…" : escapeHTML(simpleLabel(anchor.status))}</div>
+        <figcaption>
+          <b>${escapeHTML(anchor.title)}</b>
+          <small>${escapeHTML(anchor.kind.toLowerCase())}${anchor.failure_code ? ` · ${escapeHTML(anchor.failure_code)}` : ""}</small>
+        </figcaption>
+      </figure>`).join("");
+    anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
+      const media = await resolveAssetMedia(anchor.media_asset_id).catch(() => null);
+      const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
+      if (media && cell) {
+        cell.classList.remove("empty-state");
+        cell.innerHTML = `<img src="${media.url}" alt="" loading="lazy" />`;
+      }
+    });
+    const terminal = anchors.every((anchor) => ["READY", "FAILED"].includes(anchor.status));
+    $("creativeRetryVisualsBtn").hidden = !failed;
+    $("creativeProposeBibleBtn").disabled = !(terminal && ready > 0) || ["BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status);
+  }
+
+  // Bible card
+  const bible = view.bible;
+  $("creativeBibleCard").hidden = !bible;
+  if (bible) {
+    $("creativeBibleStatus").textContent = simpleLabel(bible.status);
+    const content = bible.content || {};
+    $("creativeBibleContent").innerHTML = [
+      ["Version", `v${bible.version}`],
+      ["Look", content.style?.medium || content.rules?.medium],
+      ["Palette", content.rules?.palette],
+      ["Aspect", content.aspect_ratio],
+      ["Anchors", (content.anchors || []).filter((anchor) => anchor.media_asset_id).length + " bound"],
+      ["Locked", bible.locked_at ? new Date(bible.locked_at).toLocaleString() : "not yet"],
+    ].filter(([, value]) => value).map(([label, value]) =>
+      `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`).join("");
+    $("creativeLockBibleBtn").hidden = bible.status !== "DRAFT";
+  }
+
+  // Beats card
+  const beats = view.beats || [];
+  $("creativeBeatsCard").hidden = !["BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status);
+  $("creativeProposeBeatsBtn").hidden = status !== "BIBLE_LOCKED";
+  $("creativeApproveBeatsBtn").hidden = status !== "BEATS_PROPOSED";
+  if (beats.length) {
+    $("creativeBeatsStatus").textContent = simpleLabel(beats[0].status || "PROPOSED");
+    $("creativeBeatList").innerHTML = beats.map((beat) => `
+      <div class="creative-beat">
+        <b>${beat.sequence} · ${escapeHTML(beat.intent)}</b>
+        <p>${escapeHTML(beat.summary || "")}</p>
+        <small>${escapeHTML(beat.location || "")} · ${(beat.shots || []).length} shot(s)</small>
+      </div>`).join("");
+  } else {
+    $("creativeBeatList").innerHTML = "<p class='empty-inline'>No beats drafted yet.</p>";
+  }
+
+  $("creativeGoDirectorBtn").hidden = status !== "COMPILED";
+
+  // Inspector stage list
+  const stages = {
+    brief: ["BRIEF_APPROVED", "VISUALS_IN_PROGRESS", "BIBLE_PROPOSED", "BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status) ? "Approved" : (brief ? "Proposed" : "—"),
+    visuals: anchors.length ? `${anchors.filter((anchor) => anchor.status === "READY").length}/${anchors.length}` : "—",
+    bible: bible ? simpleLabel(bible.status) : "—",
+    beats: status === "COMPILED" ? "Compiled" : (beats.length ? "Proposed" : "—"),
+  };
+  document.querySelectorAll("[data-creative-stage]").forEach((node) => {
+    node.textContent = stages[node.dataset.creativeStage] || "—";
+  });
+}
+
+async function creativeApproveBrief() {
+  const view = state.creative.session;
+  if (!view?.brief) return;
+  const result = await request(`/v1/creative/sessions/${view.session.id}/brief/approve`, {
+    method: "POST",
+    body: JSON.stringify({ revision: view.brief.revision }),
+  });
+  const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
+  if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
+  else toast("Brief approved. Key visuals are generating through the ordinary pipeline.");
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeSyncVisuals() {
+  const view = state.creative.session;
+  if (!view) return;
+  await request(`/v1/creative/sessions/${view.session.id}/visuals/sync`, { method: "POST", body: "{}" });
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeRetryVisuals() {
+  const view = state.creative.session;
+  if (!view) return;
+  await request(`/v1/creative/sessions/${view.session.id}/visuals/execute`, { method: "POST", body: "{}" });
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeProposeBible() {
+  const view = state.creative.session;
+  if (!view) return;
+  await request(`/v1/creative/sessions/${view.session.id}/bible/propose`, { method: "POST", body: "{}" });
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeLockBible() {
+  const view = state.creative.session;
+  if (!view?.bible) return;
+  await request(`/v1/creative/sessions/${view.session.id}/bible/approve`, {
+    method: "POST",
+    body: JSON.stringify({ version: view.bible.version }),
+  });
+  toast("Visual bible locked. This version is now immutable.");
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeProposeBeats() {
+  const view = state.creative.session;
+  if (!view) return;
+  await request(`/v1/creative/sessions/${view.session.id}/beats/propose`, { method: "POST", body: "{}" });
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeApproveBeats() {
+  const view = state.creative.session;
+  if (!view) return;
+  const result = await request(`/v1/creative/sessions/${view.session.id}/beats/approve`, {
+    method: "POST",
+    body: JSON.stringify({ plan_revision: view.session.beat_revision }),
+  });
+  toast(`Compiled ${result.shot_ids.length} shots. Continue in Director.`);
+  await openCreativeSession(view.session.id);
+  await selectProject(state.project.id);
+  if (result.episode_id) await loadEpisode(result.episode_id);
+}
+
+async function creativeOpenInDirector() {
+  const view = state.creative.session;
+  switchPage("director");
+  if (view?.session?.compiled_episode_id) await loadEpisode(view.session.compiled_episode_id);
+}
+
+/* ============================================================
+   Episodes strip + create next episode
+   ============================================================ */
+const CONTINUATION_NOTES = {
+  CONTINUOUS: "Picks up exactly where the last shot ended — same place, and the previous tail frame may carry into the first shot.",
+  TIME_JUMP: "Time moves. Story, characters and the locked look carry over; the old scene, lighting and tail frame do not.",
+  LOCATION_CHANGE: "The place changes. Story, characters and the locked look carry over; the old scene, lighting and tail frame do not.",
+};
+
+async function loadEpisodeStrip() {
+  if (!state.project) return;
+  state.episodes = await request(`/v1/projects/${state.project.id}/episodes`);
+  renderEpisodeStrip();
+}
+
+function renderEpisodeStrip() {
+  const strip = $("episodeStrip");
+  $("episodeCount").textContent = state.episodes.length;
+  $("createNextEpisodeBtn").disabled = !state.episodes.length;
+  if (!state.episodes.length) {
+    strip.className = "episode-strip empty-state";
+    strip.textContent = "No episodes yet.";
+    return;
+  }
+  strip.className = "episode-strip";
+  strip.innerHTML = state.episodes.map((episode) => `
+    <button class="episode-chip ${state.episode?.id === episode.id ? "active" : ""}" data-episode-chip="${episode.id}" type="button" title="${escapeHTML(episode.title)}">
+      <b>EP${String(episode.episode_number).padStart(2, "0")}</b>
+      <span>${escapeHTML(simpleLabel(episode.display_status))}</span>
+      <small class="mono">${episode.committed_shot_count}/${episode.shot_count}</small>
+    </button>`).join("");
+}
+
+function setContinuationMode(mode) {
+  state.continuation.mode = mode;
+  document.querySelectorAll("[data-continuation-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.continuationMode === mode);
+  });
+  $("continuationModeNote").textContent = CONTINUATION_NOTES[mode];
+  $("continuationTimeGapField").hidden = mode === "CONTINUOUS";
+  $("continuationLocationField").hidden = mode === "CONTINUOUS";
+}
+
+function openContinuationDialog() {
+  if (!state.episodes.length) return;
+  state.continuation.view = null;
+  $("continuationPreview").hidden = true;
+  $("continuationPreview").innerHTML = "";
+  $("continuationError").textContent = "";
+  $("confirmContinuationBtn").hidden = true;
+  const last = state.episodes[state.episodes.length - 1];
+  $("continuationSubtitle").textContent =
+    `Continue after EP${String(last.episode_number).padStart(2, "0")} · ${last.title}. The story ledger, character state and locked look are inherited; what else carries depends on how it opens.`;
+  setContinuationMode(state.continuation.mode);
+  if (!$("continuationDialog").open) $("continuationDialog").showModal();
+}
+
+async function prepareContinuation() {
+  const last = state.episodes[state.episodes.length - 1];
+  if (!last) return;
+  $("continuationError").textContent = "";
+  try {
+    state.continuation.view = await request(`/v1/episodes/${last.id}/continuations`, {
+      method: "POST",
+      body: JSON.stringify({
+        continuation_mode: state.continuation.mode,
+        time_gap: $("continuationTimeGap").value.trim(),
+        new_location: $("continuationLocation").value.trim() || null,
+        guidance: $("continuationGuidance").value.trim(),
+        regenerate: Boolean(state.continuation.view),
+      }),
+    });
+  } catch (error) {
+    $("continuationError").textContent = error.message;
+    return;
+  }
+  const view = state.continuation.view;
+  const preview = $("continuationPreview");
+  preview.hidden = false;
+  preview.innerHTML = `
+    <b>EP${String(view.next_episode_number).padStart(2, "0")} proposal · ${escapeHTML(view.continuation_mode)}</b>
+    <p>${escapeHTML(view.brief.premise || "")}</p>
+    ${view.brief.carried_obligations?.length ? `<small>Carries: ${view.brief.carried_obligations.map(escapeHTML).join(" · ")}</small>` : ""}
+    <ol>${view.beats.map((beat) => `<li><b>${escapeHTML(beat.intent)}</b> — ${escapeHTML(beat.summary || "")} <small>(${escapeHTML(beat.location || "")})</small></li>`).join("")}</ol>`;
+  $("confirmContinuationBtn").hidden = false;
+}
+
+async function confirmContinuation() {
+  const view = state.continuation.view;
+  if (!view) return;
+  $("continuationError").textContent = "";
+  let result;
+  try {
+    result = await request(`/v1/continuations/${view.id}/confirm`, { method: "POST", body: "{}" });
+  } catch (error) {
+    $("continuationError").textContent = error.message;
+    return;
+  }
+  $("continuationDialog").close();
+  state.continuation.view = null;
+  toast(`EP${String(result.next_episode_number).padStart(2, "0")} compiled: ${result.compiled.shot_count} shots inherit the series state.`);
+  await selectProject(state.project.id);
+  if (result.compiled?.episode_id) await loadEpisode(result.compiled.episode_id);
+}
+
+/* ============================================================
    Wiring
    ============================================================ */
 document.querySelectorAll("[data-mode]").forEach((button) => {
@@ -2071,6 +2458,40 @@ on("closeAssetDetailsBtn", "click", () => $("assetDetailsDialog").close());
 on("manualExistingAsset", "change", guard(syncManualAssetSelection));
 on("manualAssetUploadBtn", "click", guard(uploadManualAssetVersion));
 on("lockProjectStyleBtn", "click", guard(lockSelectedProjectStyle));
+
+/* Create with AI Director */
+on("creativeStartBtn", "click", guard(startCreativeSession));
+on("creativeReplyBtn", "click", guard(sendCreativeReply));
+on("creativeReplyInput", "keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); guard(sendCreativeReply)(); }
+});
+on("creativeRefreshBtn", "click", guard(async () => {
+  if (state.creative.session) await openCreativeSession(state.creative.session.session.id);
+  else await loadCreativeSessions();
+}));
+on("creativeApproveBriefBtn", "click", guard(creativeApproveBrief));
+on("creativeSyncVisualsBtn", "click", guard(creativeSyncVisuals));
+on("creativeRetryVisualsBtn", "click", guard(creativeRetryVisuals));
+on("creativeProposeBibleBtn", "click", guard(creativeProposeBible));
+on("creativeLockBibleBtn", "click", guard(creativeLockBible));
+on("creativeProposeBeatsBtn", "click", guard(creativeProposeBeats));
+on("creativeApproveBeatsBtn", "click", guard(creativeApproveBeats));
+on("creativeGoDirectorBtn", "click", guard(creativeOpenInDirector));
+document.addEventListener("click", (event) => {
+  const sessionId = event.target.closest("[data-creative-session]")?.dataset.creativeSession;
+  if (sessionId) guard(openCreativeSession)(sessionId);
+  const episodeId = event.target.closest("[data-episode-chip]")?.dataset.episodeChip;
+  if (episodeId) guard(loadEpisode)(episodeId);
+});
+
+/* Episodes strip */
+on("createNextEpisodeBtn", "click", openContinuationDialog);
+on("cancelContinuationBtn", "click", () => $("continuationDialog").close());
+on("prepareContinuationBtn", "click", guard(prepareContinuation));
+on("confirmContinuationBtn", "click", guard(confirmContinuation));
+document.querySelectorAll("[data-continuation-mode]").forEach((button) => {
+  button.addEventListener("click", () => setContinuationMode(button.dataset.continuationMode));
+});
 
 /* Director */
 on("compileBtn", "click", guard(compileScript));

@@ -23,16 +23,17 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 
 ## 1. Gate state (all green, offline only)
 
-As of 2026-08-28 on `claude/video-reference-adaptation` merged with `main` at `f477133`
-(#10, §1f) — the merged tree carrying both §1f and §1g:
+As of 2026-08-28 on `claude/creative-director-episodes` rebased onto `main` at `4f5dd11`
+(#10, §1f; #11, §1g) — the merged tree carrying §1f, §1g and §1h:
 
 ```
-.venv/bin/python -m pytest -q                      1108 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1123 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  1110 passed, 7 skipped  (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1125 passed, 7 skipped  (PostgreSQL, detached)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 161 source files
-.venv/bin/python -m alembic heads                  0052_shot_dependencies (single head)
+.venv/bin/python -m mypy                           Success: 170 source files
+.venv/bin/python -m alembic heads                  0054_episode_continuations (single head)
+apps/web: node --check app.js + vite build         passed
 git diff --check                                   clean
 ```
 
@@ -773,6 +774,131 @@ in this session died with 571 errors when the Docker Desktop Linux VM crashed mi
 environment, not code; the engine was restarted and the recorded run is the clean one.
 One HANDOFF note for archaeology: this section was numbered 1f until #10 merged first and
 took the number, per the recorded cross-session agreement.
+## 1h. 2026-08-28 — two upper-level capabilities: the creative director, and the next episode
+
+Branch `claude/creative-director-episodes` (worktree `.worktrees/upper-capabilities`), rebased on
+`main` at `4f5dd11` after #10 and #11 merged (this section was numbered 1f before those landed and took 1f/1g, per the recorded cross-session agreement). Migration head moves to **`0054_episode_continuations`** through
+`0053_creative_director`; `REQUIRED_SCHEMA_REVISION` matches it. Offline only; no provider touched;
+no new provider path exists.
+
+Gate state on the rebased tree (2026-08-28, `main` at `4f5dd11` + this change, all green — this is
+also the §1 block above):
+
+```
+.venv/bin/python -m pytest -q                        1123 passed,  9 skipped   (SQLite, 4m03s)
+POSTGRES_PASSWORD=... pytest -q --database=postgres  1125 passed,  7 skipped   (PostgreSQL, 9m27s, detached)
+.venv/bin/ruff check .                               All checks passed
+.venv/bin/python -m mypy                             Success: 170 source files
+apps/web: node --check app.js + vite build           passed (162.6 kB js, gzip 48.9 kB)
+git diff --check                                     clean
+```
+
+Pre-rebase, the same suite on `9a06dcf` + this change read 1092/9 and 1094/7 with mypy at 168
+files; the deltas are exactly #10 and #11's tests and modules.
+
+Migration evidence, run 2026-08-28 against the compose PostgreSQL 17 + pgvector server:
+
+```
+fresh database        base -> 0054 (full chain), verify 8 new tables,
+                      downgrade -> 0052, verify tables gone, re-upgrade -> 0054   OK, then dropped
+populated dev db      0052 -> 0054 (26 model_definitions rows intact)
+(video_platform)      0054 -> 0052 (rows intact)                                  OK
+```
+
+The dev database was deliberately left at `0052_shot_dependencies`: `main`'s
+`REQUIRED_SCHEMA_REVISION` is `0052`, and the running api/worker containers check it at startup, so
+the shared stamp only moves to `0054` when this branch merges (then `alembic upgrade head` +
+`docker compose build api worker`, per §2.34's built-image hazard).
+
+**Create with AI Director** (`core/creative-director/creative_director_core`, migration `0053`,
+seven tables). A stateful director takes a vague idea instead of a script:
+`idea → dialogue clarification → CreativeBrief → key visuals → VisualBible → BeatPlan → ShotPlan →
+the existing chain`. The parts that carry the design:
+
+- **Questions are computed from gaps, never a questionnaire.** Every brief field has a per-format
+  value weight (`BRIEF_FIELD_SPECS`); a turn asks at most three missing HIGH/CRITICAL fields, an
+  asked code is never re-asked, and a rich opening idea is asked nothing. Unanswered non-critical
+  gaps are defaulted at proposal time with the default recorded in the revision's completeness
+  report — an assumed value is visible, not indistinguishable from an answer.
+- **The brief is rows, not a prompt string.** Dialogue turns, brief revisions, the visual bible,
+  anchors and beats are structured, versioned and append-mostly. The script text handed to the
+  narrative compiler is *derived* from the beat rows at approval time, one primary action per line
+  in the compiler's own action vocabulary, so compiled shots map one-to-one onto `ShotIntent`s and
+  the intents' shot type and duration are applied to the real Shot rows afterwards.
+- **The director emits structured actions and cannot reach a provider.** `creative_actions` is the
+  only door: `GENERATE_KEY_VISUAL` rows are executed by the API layer through the *same*
+  `admit_passenger → visual_runtime.submit` path as `POST /v1/images/generations` — role-resolved
+  image model, credits reserved, router, gateway — with per-action idempotency keys, so approval
+  replays create nothing twice and one refused anchor (402, plan denial) is recorded on its own row
+  while the rest proceed. Model reasoning (brief extraction, beat enrichment) goes through
+  `ModelRoleRuntime.execute_chat(DIRECTOR)` and degrades to the deterministic rules engine with
+  `reasoner=DETERMINISTIC` and reason codes on the turn — recorded, never silent.
+- **The VisualBible is version-locked on approval.** LOCKED versions are immutable and cannot be
+  re-proposed over; superseding requires a new version and a new approval. Locking is
+  service-enforced with tests (not yet a database trigger — see OPEN_ISSUES §2.39).
+- **Approving beats compiles through the existing chain**: episode row → `NarrativeCompiler` →
+  scenes/shots/states/transitions/dependencies → `FrameAnchorPlanner`, then opens the cliffhanger
+  as a real `narrative_obligations` row — which is exactly what the next-episode flow inherits.
+
+**Series → Episodes → create the next episode** (`core/episode-continuation/episode_continuation_core`,
+migration `0054`, one table). The next episode is never a re-submitted previous script:
+
+- `POST /v1/episodes/{id}/continuations` computes an **EpisodeContinuationContext** snapshot from
+  the systems that already own each truth — ending shot + output `TimelineState`, tail frame asset,
+  character state heads, `series_context()` facts/disclosures/open obligations, props and costume
+  from the ending state, style lock, locked visual bible — and stamps a per-class verdict:
+  narrative/character/visual **INHERIT** always; scene/frame **INHERIT** only for `CONTINUOUS`,
+  **RESET** for `TIME_JUMP`/`LOCATION_CHANGE`. One row per (project, previous episode, next
+  number): preparation is idempotent, re-proposal bumps a recorded revision.
+- Confirmation renders the beats to a script, compiles through the same `NarrativeCompiler`, then
+  **links the boundary**: `previous_shot_id` across episodes, a `TimelineTransition` written
+  through the existing timeline engine, and — CONTINUOUS only — a `STATE_INHERITANCE`
+  `shot_dependencies` row plus committed-state propagation (`propagate_shot`; an uncommitted
+  ending propagates at its commit, because commit already walks `next_shot` links, which now cross
+  the boundary). A jump is **reconciled on the spot** through the engine's own
+  `reconcile_transition`, with the user's declared gap as the recorded reason — nothing is left
+  stale, and nothing of the old scene, lighting or tail frame crosses.
+- **The frame anchor planner decides the boundary pair like any other pair.** One extension: a
+  *declared* CONTINUOUS transition across two scene rows that share a `location_id` counts as
+  same-scene (`CROSS_SCENE_CONTINUOUS` in the plan's reasons) — scene rows are per-episode
+  containers and the compiler never emits CONTINUOUS across scenes itself, so only an explicit
+  continuation or operator declaration can activate it. CONTINUOUS therefore plans
+  `INHERIT_LAST_FRAME` and wires EP01's end frame as EP02's start frame; a time jump plans
+  `RECONSTRUCT_FIRST_FRAME` and clears it.
+- **The boundary is a contract.** The narrative compiler now refuses to recompile an episode that a
+  later episode chains from (`previous_shot_id` guard, mirror of the dependency guard) and refuses
+  a plain recompile of a linked continuation episode (the continuation's confirm unlinks, recompiles
+  and re-links). Both directions fail loudly instead of surfacing a foreign-key violation.
+- EP02's generation context needs no new machinery: `series_context(project, episode=2)` already
+  feeds the prompt compiler, so episode 1's facts and open obligations reach episode 2's prompts —
+  a test pins the obligation text in the compiled neutral prompt after a TIME_JUMP.
+
+**API surface** (`apps/api/video_platform_api/creative_routes.py`, registered from `create_app`):
+eleven `/v1/creative/...` routes (session create/list/get, messages, brief approve, visuals
+execute/sync, bible propose/approve, beats propose/approve) and four episode routes —
+`GET /v1/projects/{id}/episodes` (the strip: per-episode `display_status` derived COMPLETED when
+every shot is committed, shot rollups, attached continuation), `POST /v1/episodes/{id}/continuations`,
+`GET /v1/continuations/{id}`, `POST /v1/continuations/{id}/confirm`. Nothing existing changed shape.
+
+**Web** (`apps/web`): a fourth nav mode **Create with AI Director** — dialogue, brief card,
+key-visual grid, bible lock, beats, compile — and an **Episodes** strip in the Director sidebar
+(`EP01 Completed / EP02 Draft / + Create next episode`) with a continuation dialog that makes the
+three modes and their inheritance consequences explicit. Existing Create/Director/Productions are
+untouched; the Director script panel now follows the *selected* episode instead of always episode 1.
+
+**Tests:** 15 new across `tests/test_creative_director.py` (8) and
+`tests/test_episode_continuation.py` (7) — gap-driven questioning with no repeats, zero-question
+rich briefs, action execution through real admission with idempotent replay, gateway-completed key
+visuals binding to anchors, bible version-lock immutability, beat approval compiling real
+scenes/shots with intents applied and the obligation opened, context snapshot idempotency,
+CONTINUOUS tail-frame inheritance (plan, mode and wired start frame), TIME_JUMP frame/scene reset
+with narrative inheritance pinned in the compiled prompt, recompile refusal in both directions,
+number-conflict refusal, and the API round trip including the strip's display status.
+
+**Deliberate boundaries.** Assembly/export of an episode's shots into one video does not exist and
+is not attempted here — recorded as OPEN_ISSUES §3.7. The DIRECTOR-role model path is exercised
+only through its deterministic degradation in mock mode (§2.38); the bible lock is service-enforced
+(§2.39).
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 

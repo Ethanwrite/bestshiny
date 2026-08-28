@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -1418,16 +1419,23 @@ class GenerationGateway:
             session.flush()
             return transition
 
-    def _provider_reference_url(
+    async def _provider_reference_url(
         self,
         job: GenerationJob,
         asset_id: str,
         provider: GenerationProvider,
     ) -> str:
-        """Resolve a fetchable URL for a provider that never ingests uploads."""
+        """Resolve a fetchable URL for a provider that never ingests uploads.
+
+        Resolution may derive a rendition on the spot — for video that is an
+        ffmpeg transcode taking real wall time — so it runs in a worker thread
+        rather than on the event loop, where it would stall every other job
+        this gateway is processing.
+        """
 
         try:
-            return self.media.reference_url(
+            return await asyncio.to_thread(
+                self.media.reference_url,
                 asset_id,
                 project_id=job.project_id,
                 provider=provider.name,
@@ -1492,7 +1500,7 @@ class GenerationGateway:
                 continue
             asset_id = str(request[source])
             if url_mode:
-                reference = self._provider_reference_url(job, asset_id, provider)
+                reference = await self._provider_reference_url(job, asset_id, provider)
                 result[url_target] = reference
                 resolved_asset_ids[asset_id] = reference
                 with self.database.session() as session:
@@ -1528,7 +1536,7 @@ class GenerationGateway:
         for raw_asset_id in request.get("reference_asset_ids") or []:
             asset_id = str(raw_asset_id)
             if url_mode:
-                reference = self._provider_reference_url(job, asset_id, provider)
+                reference = await self._provider_reference_url(job, asset_id, provider)
                 provider_references.append(reference)
                 resolved_asset_ids[asset_id] = reference
                 with self.database.session() as session:

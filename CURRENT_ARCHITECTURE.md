@@ -904,8 +904,26 @@ Derivation compresses before it downscales, refuses below 256x256 rather than sh
 reference that no longer carries identity, and under a byte cap re-encodes a lossless original
 to a lossy format on purpose: a 2048px face with mild compression carries identity a pristine
 400px face does not. Constraints that declare no bounds mean limits nobody has established, so
-the original is sent unchanged rather than guessed at. Video is reported as unadaptable rather
-than transcoded.
+the original is sent unchanged rather than guessed at.
+
+Video follows the same rules through its own constraint surface (2026-08-27).
+`ProviderReferenceConstraints.video` — a `VideoReferenceConstraints` — declares accepted
+containers and codecs, frame-size, bitrate, frame-rate, duration, byte and aspect-ratio
+limits. `None` still means nobody established that the provider takes video, and such a
+reference keeps failing closed. A declared consumer always validates: the original is
+ffprobed even when it fits every bound, and a failing one is adapted by ffmpeg
+(`media_service/video_renditions.py`) in a worker thread rather than on the gateway's
+event loop — remuxed without re-encoding when the container is the only gap, otherwise
+re-encoded with uniform scaling only. Every derived copy is re-probed against the full
+constraint set and stored only if it passes, so a provider is never handed an encoding
+whose facts were assumed rather than observed. The cache key digests the source sha256,
+the full constraint key and the transcoder version — new bytes, new bounds or a new
+transcoder each produce a new rendition. What transcoding must not do is change meaning:
+an over-long clip is not trimmed and a mismatched aspect ratio is not cropped; both refuse
+with the specific violated constraint (`VIDEO_DURATION_EXCEEDS_LIMIT`,
+`VIDEO_ASPECT_RATIO_NOT_ACCEPTED`), as does a byte or bitrate budget too small to carry a
+legible clip of that duration. No shipped provider declares `video` yet; per-provider
+declarations are read from vendor documentation, never guessed (OPEN_ISSUES §2.9).
 
 Mixing the two modes would submit a reference the provider cannot resolve, so a `FETCHABLE_URL` provider is
 never asked to upload and never receives a local asset ID or provider media ID. When no absolute `http(s)`

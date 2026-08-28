@@ -34,6 +34,7 @@ from .renditions import (
     RenditionDerivationFailed,
     RenditionResolver,
     ResolvedRendition,
+    VideoReferenceUnadaptable,
 )
 from .staging import (
     DEFAULT_STAGING_SWEEP_LIMIT,
@@ -43,6 +44,13 @@ from .staging import (
     generation_staging_prefix,
     job_id_from_staging_key,
     sweep_generation_staging,
+)
+from .video_renditions import (
+    VIDEO_TRANSCODER_VERSION,
+    VideoAdaptationFailed,
+    VideoReferenceTranscoder,
+    VideoStreamFacts,
+    VideoTranscodeResult,
 )
 
 __all__ = [
@@ -69,6 +77,12 @@ __all__ = [
     "RenditionDerivationFailed",
     "RenditionResolver",
     "ResolvedRendition",
+    "VIDEO_TRANSCODER_VERSION",
+    "VideoAdaptationFailed",
+    "VideoReferenceTranscoder",
+    "VideoReferenceUnadaptable",
+    "VideoStreamFacts",
+    "VideoTranscodeResult",
     "DEFAULT_STAGING_SWEEP_LIMIT",
     "GENERATION_STAGING_PREFIX",
     "GenerationStagingSweep",

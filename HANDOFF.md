@@ -1,15 +1,20 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-27 · Branch `main` · commit `03cef85` · **NOT PRODUCTION-READY** · everything below is
-merged **except §1d** (explicit shot dependencies + frame anchor planner), which is an uncommitted
-working-tree change on `main`
+Date: 2026-08-28 · Branch `main` at `f477133` · **NOT PRODUCTION-READY** · everything below
+through §1f is merged; §1g (video reference adaptation) is this branch,
+`claude/video-reference-adaptation`, gate-passed and awaiting review
 
-Four PRs landed on `main`, in this order:
+Eight PRs have landed on `main`, in this order:
 [#1](https://github.com/Ethanwrite/bestshiny/pull/1) production readiness on PostgreSQL and the
 pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evidence
 · [#5](https://github.com/Ethanwrite/bestshiny/pull/5) its architecture documentation
-· [#3](https://github.com/Ethanwrite/bestshiny/pull/3) model contract and pricing alignment.
-There is no open PR and no unmerged work.
+· [#3](https://github.com/Ethanwrite/bestshiny/pull/3) model contract and pricing alignment
+· [#6](https://github.com/Ethanwrite/bestshiny/pull/6) truth-document sync
+· [#7](https://github.com/Ethanwrite/bestshiny/pull/7) explicit shot dependencies and the Frame
+Anchor Planner · [#8](https://github.com/Ethanwrite/bestshiny/pull/8) pipeline semantic
+consistency · [#10](https://github.com/Ethanwrite/bestshiny/pull/10) batch candidate atomicity.
+Open: [#9](https://github.com/Ethanwrite/bestshiny/pull/9) creative director and episode
+continuation (carries migrations `0053`/`0054`; the dev database moves only when it merges).
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted
@@ -18,21 +23,24 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 
 ## 1. Gate state (all green, offline only)
 
-As of 2026-08-28 on `claude/batch-candidate-atomicity` (§1f):
+As of 2026-08-28 on `claude/video-reference-adaptation` merged with `main` at `f477133`
+(#10, §1f) — the merged tree carrying both §1f and §1g:
 
 ```
-.venv/bin/python -m pytest -q                      1096 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1108 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  1098 passed, 7 skipped  (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1110 passed, 7 skipped  (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 160 source files
+.venv/bin/python -m mypy                           Success: 161 source files
 .venv/bin/python -m alembic heads                  0052_shot_dependencies (single head)
 git diff --check                                   clean
 ```
 
-Migration evidence for §1f: fresh `alembic upgrade head` on SQLite **and** on a disposable
-PostgreSQL 17 + pgvector 0.8.6 database, `alembic check` clean (known FK-cycle warning only),
-`require_schema_revision()` green. No new migration — `0052` stays head.
+Migration evidence, re-run on this merged tree: fresh `alembic upgrade head` on SQLite
+**and** on a disposable PostgreSQL 17.11 + pgvector database, `alembic check` clean (known
+FK-cycle warning only), `require_schema_revision()` green — and, incidentally re-proven, the
+revision gate fails closed on an unstamped database. Neither §1f nor §1g adds a migration —
+`0052` stays head.
 
 **Run the PostgreSQL half detached.** It takes 11 minutes and the tool timeout is 10, so a
 foreground run is SIGKILLed at exit 137 partway through — which reads exactly like a crash and is
@@ -695,6 +703,76 @@ candidates are bound to their job in the transaction that creates them and can n
 **Operator action (one-time, after this lands):** run the audit against the production database,
 review the JSON, then re-run with `--apply`. Recorded as OPEN_ISSUES §1.16; the deliberate
 staging-namespace growth trade-off is §2.37.
+
+## 1g. 2026-08-27 — video references: validated, adapted, or refused by name
+
+Until now a video reference had exactly one behaviour: `RenditionResolver` reported it
+unadaptable and the generation failed closed. Correct — transcoding against limits nobody
+declared would ship a guess to a paid call — but it meant every video-reference provider
+needed originals already inside its limits. The gap is now closed from the declaration side,
+with the same shape the image plane has had since `media_renditions` (`0035`).
+
+**Providers declare, in `ProviderReferenceConstraints.video`.** A `VideoReferenceConstraints`
+carries accepted containers and codecs (with a preferred target for each), frame-size,
+bitrate, frame-rate, duration, byte and aspect-ratio limits. `None` keeps today's meaning —
+nobody established that this provider takes video — and such a reference still fails closed
+unchanged. The field appends to `ProviderReferenceConstraints.key()` **only when declared**,
+so every image rendition cached before this change keeps its constraint key byte-for-byte.
+
+**A declared consumer always validates.** The original is ffprobed (codec, dimensions,
+frame rate, duration, bitrate, audio presence) even when it fits every bound — the provider
+boundary only ever consumes encodings whose facts were observed, not assumed. When it fails
+adaptable bounds, ffmpeg derives a copy in a worker thread (`asyncio.to_thread` in the
+Gateway's `_provider_reference_url`, so an 8-minute transcode does not stall every other job
+on the event loop): remux-only (`-c copy`) when the container is the only gap, otherwise
+re-encode with uniform scaling, fps capping and a bitrate solved from the byte budget —
+bytes/duration is the whole budget, audio and muxing spend part of it before the picture
+gets any. **Every attempt is re-probed and checked against the full constraint set**; only a
+passing copy is stored, and a rate-control overshoot tightens the target and retries rather
+than shipping the overweight file.
+
+**What adaptation must never do is change meaning.** Trimming an over-long clip removes
+content; cropping a mismatched aspect ratio reframes it. Both refuse with the specific
+constraint (`VIDEO_DURATION_EXCEEDS_LIMIT`, `VIDEO_ASPECT_RATIO_NOT_ACCEPTED`, carried
+machine-readably on `VideoReferenceUnadaptable.violations` and named in the
+`PROVIDER_REFERENCE_URL_UNAVAILABLE` message) — an explicit manual crop or trim is a
+separate human act, not a default. A byte or bitrate budget too small for a legible clip of
+that duration (under ~100 kbps of video) refuses the same way instead of shipping mush.
+
+**The cache key is source, bounds and tool.** `media_renditions.constraint_key` for video is
+`video:<transcoder-version>:<sha256(source sha256 + full constraint key + transcoder
+version)[:40]>` — new original bytes, any changed bound, or a bumped
+`VIDEO_TRANSCODER_VERSION` each produce a new rendition instead of reusing one built for a
+different question. The row's `metadata_json` records both probes, the violations that
+caused derivation, attempts, and remux/re-encode, so "why does this copy exist" is
+answerable from the row.
+
+**What this deliberately does not do.** No shipped provider declares `video` yet: per
+OPEN_ISSUES §2.9's residual, declarations are read from vendor documentation per provider
+(Wan R2V's `reference_video` bounds first) rather than guessed here, so behaviour at every
+existing provider is unchanged until someone writes the numbers down with a source. The
+originals rule is untouched — the user's bytes are never re-encoded, replaced or deleted.
+
+**Tests:** `tests/test_video_reference_adaptation.py` (twelve) builds real clips with ffmpeg
+and pins: image keys unchanged; undeclared consumers still refuse; an in-bounds original is
+probed and sent as-is; an out-of-bounds vp9/webm/60fps clip arrives as h264/mp4 within every
+bound with uniform (uncropped) scaling and full metadata; cache reuse, and new renditions on
+changed constraints or transcoder version; aspect-ratio and duration conflicts refusing by
+name with nothing derived; an unmeetable byte budget naming itself; container-only remux;
+and `reference_url` handing out only the validated rendition — never the raw original —
+or refusing with the violated constraint named in the failure the Gateway sees.
+
+**Verification state (completed 2026-08-28, after merging `main` at `f477133`).** The
+full matrix ran green on the merged tree and is recorded in §1: 1108 passed, 9 skipped
+(SQLite) and 1110 passed, 7 skipped (PostgreSQL) — exactly the twelve tests this section
+adds over §1f's 1096/1098 — with ruff, mypy (161 source files), `git diff --check` and
+the migration evidence re-run there. There is **no migration in this change**: the
+`media_renditions` schema is untouched, video renditions reuse `constraint_key` with a
+`video:*` scheme, and `0052_shot_dependencies` stays head. An earlier PostgreSQL attempt
+in this session died with 571 errors when the Docker Desktop Linux VM crashed mid-run —
+environment, not code; the engine was restarted and the recorded run is the clean one.
+One HANDOFF note for archaeology: this section was numbered 1f until #10 merged first and
+took the number, per the recorded cross-session agreement.
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 

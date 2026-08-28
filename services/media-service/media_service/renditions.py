@@ -14,9 +14,16 @@ that are get sent repeatedly.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import math
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from PIL import Image
 from PIL.Image import Resampling
@@ -27,6 +34,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .video_renditions import (
+    VideoAdaptationFailed,
+    VideoReferenceTranscoder,
+    VideoStreamFacts,
+)
+
 # Derivation floor. Below this a "reference" has stopped carrying the identity
 # information it exists to carry, so failing is more useful than sending it.
 MINIMUM_REFERENCE_PIXELS = 256 * 256
@@ -34,6 +47,20 @@ MINIMUM_REFERENCE_PIXELS = 256 * 256
 
 class RenditionDerivationFailed(RuntimeError):
     """No encoding of this asset can satisfy the consumer's declared bounds."""
+
+
+class VideoReferenceUnadaptable(RenditionDerivationFailed):
+    """The video fails the consumer's bounds in ways transcoding must not fix.
+
+    ``violations`` names each unmet constraint with a machine-readable code, so
+    the refusal that reaches the caller says exactly which bound failed —
+    "duration exceeds the limit" or "aspect ratio requires a manual crop" —
+    rather than a generic derivation failure.
+    """
+
+    def __init__(self, message: str, *, violations: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.violations = violations
 
 
 @dataclass(frozen=True)
@@ -62,9 +89,16 @@ class RenditionResolver:
 
     version = "rendition-resolver-v1"
 
-    def __init__(self, storage: StorageProvider, *, max_derived_bytes: int = 100 * 1024 * 1024):
+    def __init__(
+        self,
+        storage: StorageProvider,
+        *,
+        max_derived_bytes: int = 100 * 1024 * 1024,
+        video_transcoder: VideoReferenceTranscoder | None = None,
+    ):
         self.storage = storage
         self.max_derived_bytes = max_derived_bytes
+        self.video_transcoder = video_transcoder or VideoReferenceTranscoder()
 
     def resolve(
         self,
@@ -83,6 +117,11 @@ class RenditionResolver:
             kind=MediaRenditionKind.ORIGINAL.value,
             derived=False,
         )
+        # A consumer that declares video bounds always validates video: even an
+        # original inside every bound is probed before it is sent, because the
+        # provider call may only ever use validated encodings.
+        if constraints.video is not None and asset.mime_type.lower().startswith("video/"):
+            return self._resolve_video(session, asset, constraints, original)
         # An unbounded consumer is not an unlimited one — it is one whose limits
         # nobody has established. Deriving a copy for it would be guessing, so
         # the original goes as it is.
@@ -95,8 +134,9 @@ class RenditionResolver:
         ):
             return original
         if not asset.mime_type.startswith("image/"):
-            # Video is not re-encoded here. Saying so is better than shipping a
-            # reference the provider will reject after it has been billed.
+            # A consumer that declared no video bounds has not established that
+            # it takes video at all; transcoding against guessed limits would
+            # ship a reference the provider may reject after it has been billed.
             raise RenditionDerivationFailed(
                 f"media asset {asset.id} is {asset.mime_type} and cannot be adapted to "
                 f"the consumer's reference constraints"
@@ -178,6 +218,21 @@ class RenditionResolver:
                 "resolver_version": self.version,
             },
         )
+        return self._insert_rendition(session, rendition)
+
+    @staticmethod
+    def _derived_resolution(row: MediaRendition) -> ResolvedRendition:
+        return ResolvedRendition(
+            storage_key=row.storage_key,
+            mime_type=row.mime_type,
+            size_bytes=row.size_bytes,
+            width=row.width,
+            height=row.height,
+            kind=row.kind,
+            derived=True,
+        )
+
+    def _insert_rendition(self, session: Session, rendition: MediaRendition) -> ResolvedRendition:
         try:
             with session.begin_nested():
                 session.add(rendition)
@@ -187,31 +242,162 @@ class RenditionResolver:
             # identical bounds, so either is correct; keep the committed one.
             winner = session.scalar(
                 select(MediaRendition).where(
-                    MediaRendition.media_asset_id == asset.id,
-                    MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
-                    MediaRendition.constraint_key == constraint_key,
+                    MediaRendition.media_asset_id == rendition.media_asset_id,
+                    MediaRendition.kind == rendition.kind,
+                    MediaRendition.constraint_key == rendition.constraint_key,
                 )
             )
             if winner is None:  # pragma: no cover - the conflict implies a winner.
                 raise
-            return ResolvedRendition(
-                storage_key=winner.storage_key,
-                mime_type=winner.mime_type,
-                size_bytes=winner.size_bytes,
-                width=winner.width,
-                height=winner.height,
-                kind=winner.kind,
-                derived=True,
+            return self._derived_resolution(winner)
+        return self._derived_resolution(rendition)
+
+    # -- video ----------------------------------------------------------------
+
+    def _video_constraint_key(self, asset: MediaAsset, constraints: ProviderReferenceConstraints) -> str:
+        """Cache identity of one adapted video: source bytes, bounds, transcoder.
+
+        Any of the three changing must produce a new rendition — new original
+        bytes are a different video, changed bounds are a different target, and
+        a new transcoder version means the same input would encode differently.
+        The digest keeps the key inside its column whatever the constraint set
+        grows to; the readable facts live in the rendition's metadata.
+        """
+
+        digest = hashlib.sha256(
+            f"{asset.sha256};{constraints.key()};{self.video_transcoder.version}".encode()
+        ).hexdigest()
+        return f"video:{self.video_transcoder.version}:{digest[:40]}"
+
+    @contextmanager
+    def _source_file(self, asset: MediaAsset) -> Iterator[Path]:
+        """The original bytes as a real local file, however storage holds them."""
+
+        if asset.local_path and os.path.isfile(asset.local_path):
+            yield Path(asset.local_path)
+            return
+        suffix = {
+            "video/mp4": ".mp4",
+            "video/quicktime": ".mov",
+            "video/webm": ".webm",
+        }.get(asset.mime_type.lower(), "")
+        temp_path: Path | None = None
+        try:
+            with self.storage.open(asset.storage_key, "rb") as stream:
+                with tempfile.NamedTemporaryFile(
+                    prefix="video-original-", suffix=suffix, delete=False
+                ) as spool:
+                    temp_path = Path(spool.name)
+                    shutil.copyfileobj(stream, spool)
+        except (FileNotFoundError, OSError) as exc:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            raise RenditionDerivationFailed(
+                f"original bytes for {asset.id} are unreadable"
+            ) from exc
+        try:
+            yield temp_path
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def _resolve_video(
+        self,
+        session: Session,
+        asset: MediaAsset,
+        constraints: ProviderReferenceConstraints,
+        original: ResolvedRendition,
+    ) -> ResolvedRendition:
+        """Validate the original against the video bounds, or derive a copy that passes.
+
+        The original is only ever *sent*, never touched: when it fails an
+        adaptable bound, ffmpeg writes a separate rendition which is re-probed
+        against the full constraint set before it is stored. A gap that only a
+        semantic edit could close — trimming duration, cropping to another
+        aspect ratio — refuses with the specific unmet constraint instead.
+        """
+
+        video = constraints.video
+        assert video is not None  # dispatched only when declared
+        constraint_key = self._video_constraint_key(asset, constraints)
+        existing = session.scalar(
+            select(MediaRendition).where(
+                MediaRendition.media_asset_id == asset.id,
+                MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
+                MediaRendition.constraint_key == constraint_key,
             )
-        return ResolvedRendition(
-            storage_key=stored.key,
-            mime_type=target_mime,
-            size_bytes=stored.size,
-            width=width,
-            height=height,
-            kind=MediaRenditionKind.PROVIDER_REFERENCE.value,
-            derived=True,
         )
+        if existing is not None:
+            # Revalidated when it was derived; the row exists only because it
+            # passed the same bounds this call would check.
+            return self._derived_resolution(existing)
+
+        try:
+            with self._source_file(asset) as source_path:
+                facts = self.video_transcoder.probe(source_path)
+                violations = self.video_transcoder.violations(
+                    facts, container_mime_type=asset.mime_type, constraints=video
+                )
+                if not violations:
+                    return original
+                unadaptable = tuple(v for v in violations if not v.adaptable)
+                if unadaptable:
+                    raise VideoReferenceUnadaptable(
+                        f"media asset {asset.id} cannot be adapted without changing "
+                        f"its content: {'; '.join(str(v) for v in unadaptable)}",
+                        violations=tuple(v.code for v in unadaptable),
+                    )
+                with tempfile.TemporaryDirectory(prefix="video-rendition-") as workdir:
+                    result = self.video_transcoder.derive(
+                        source_path,
+                        facts,
+                        source_mime_type=asset.mime_type,
+                        constraints=video,
+                        violations=violations,
+                        workdir=Path(workdir),
+                    )
+                    if result.facts.size_bytes > self.max_derived_bytes:
+                        raise RenditionDerivationFailed(
+                            f"derived reference for {asset.id} exceeds the derived-object limit"
+                        )
+                    with result.path.open("rb") as stream:
+                        stored = self.storage.put(
+                            stream,
+                            filename=f"{asset.sha256}-ref{result.path.suffix}",
+                            mime_type=result.mime_type,
+                        )
+        except VideoAdaptationFailed as exc:
+            raise VideoReferenceUnadaptable(
+                f"media asset {asset.id} cannot be given a validated video "
+                f"reference: {exc}",
+                violations=exc.violations,
+            ) from exc
+
+        rendition = MediaRendition(
+            id=new_id(),
+            media_asset_id=asset.id,
+            kind=MediaRenditionKind.PROVIDER_REFERENCE.value,
+            constraint_key=constraint_key,
+            storage_key=stored.key,
+            local_path=stored.local_path,
+            mime_type=result.mime_type,
+            sha256=stored.sha256,
+            size_bytes=stored.size,
+            width=result.facts.width,
+            height=result.facts.height,
+            metadata_json={
+                "derived_from_sha256": asset.sha256,
+                "original_size_bytes": asset.size_bytes,
+                "resolver_version": self.version,
+                "transcoder_version": self.video_transcoder.version,
+                "constraint_profile": constraints.key(),
+                "source_probe": _probe_facts(facts),
+                "output_probe": _probe_facts(result.facts),
+                "adapted_violations": [violation.code for violation in violations],
+                "transcode_attempts": result.attempts,
+                "remuxed": result.remuxed,
+            },
+        )
+        return self._insert_rendition(session, rendition)
 
     @staticmethod
     def _target_mime(source_mime: str, constraints: ProviderReferenceConstraints) -> str:
@@ -289,6 +475,21 @@ class RenditionResolver:
         )
 
 
+def _probe_facts(facts: VideoStreamFacts) -> dict[str, float | int | str | bool]:
+    """The observed stream facts, shaped for the rendition's JSON evidence."""
+
+    return {
+        "codec": facts.codec,
+        "width": facts.width,
+        "height": facts.height,
+        "frame_rate": round(facts.frame_rate, 3),
+        "duration_seconds": round(facts.duration_seconds, 3),
+        "bit_rate_bps": facts.bit_rate_bps,
+        "size_bytes": facts.size_bytes,
+        "has_audio": facts.has_audio,
+    }
+
+
 def _encode(image: Image.Image, image_format: str, *, quality: int | None) -> bytes:
     buffer = io.BytesIO()
     options: dict[str, object] = {}
@@ -314,4 +515,5 @@ __all__ = [
     "RenditionDerivationFailed",
     "RenditionResolver",
     "ResolvedRendition",
+    "VideoReferenceUnadaptable",
 ]

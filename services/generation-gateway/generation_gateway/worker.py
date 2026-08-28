@@ -104,20 +104,58 @@ def sweep_expired_uploads_once(container) -> int:  # type: ignore[no-untyped-def
     return len(result.swept)
 
 
+def sweep_generation_staging_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Reclaim staged generation output nothing can ever adopt again.
+
+    A staged artefact whose completion transaction never committed is invisible
+    to the database — the crash that stranded it is exactly the crash that left
+    no row behind — so the sweep enumerates storage and asks the database only
+    whether each slot is still claimable. A slot whose job is live, or whose
+    key a media row adopted, is kept and counted, never deleted.
+    """
+
+    from media_service import sweep_generation_staging
+
+    result = sweep_generation_staging(
+        database=container.database,
+        storage=container.media.storage,
+        ttl_seconds=container.settings.generation_staging_ttl_seconds,
+        limit=max(1, container.settings.generation_staging_sweep_limit),
+    )
+    if result.deleted:
+        logger.info(
+            "reclaimed %d staged generation object(s); kept %d live, %d adopted",
+            len(result.deleted),
+            result.kept_job_active,
+            result.kept_referenced,
+        )
+    if result.failed:
+        logger.warning("%d staged generation object(s) could not be deleted", len(result.failed))
+    return len(result.deleted)
+
+
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
-    interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
+    upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
+    staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
-    next_sweep = asyncio.get_running_loop().time() if interval else None
+    next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
+    next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
     while True:
-        if next_sweep is not None and asyncio.get_running_loop().time() >= next_sweep:
+        if next_upload_sweep is not None and asyncio.get_running_loop().time() >= next_upload_sweep:
             try:
                 await asyncio.to_thread(sweep_expired_uploads_once, container)
             except Exception:
                 # Maintenance must never take the job loop down with it.
                 logger.exception("expired upload sweep failed")
-            next_sweep = asyncio.get_running_loop().time() + interval
+            next_upload_sweep = asyncio.get_running_loop().time() + upload_interval
+        if next_staging_sweep is not None and asyncio.get_running_loop().time() >= next_staging_sweep:
+            try:
+                await asyncio.to_thread(sweep_generation_staging_once, container)
+            except Exception:
+                logger.exception("generation staging sweep failed")
+            next_staging_sweep = asyncio.get_running_loop().time() + staging_interval
         if not await process_next_job(container):
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

@@ -442,6 +442,7 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
     tmp_path,
     monkeypatch,
     register_bytes,
+    stage_stub_output,
 ) -> None:  # type: ignore[no-untyped-def]
     live, project_id = _live_media_container(tmp_path)
     provider = live.providers.get("openrouter")
@@ -553,13 +554,11 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
             raw={"usage": {"cost": "0.04", "credits_used": "4"}},
         )
 
-    output = register_bytes(live, project_id, "VIDEO", b"offline-live-canary-video")
-
-    async def offline_download(*_args: Any, **_kwargs: Any):  # type: ignore[no-untyped-def]
-        return output
+    async def offline_download(url: str, **kwargs: Any):  # type: ignore[no-untyped-def]
+        return stage_stub_output(live, kwargs["key_prefix"], b"offline-live-canary-video")
 
     monkeypatch.setattr(provider, "get_job", offline_poll)
-    monkeypatch.setattr(live.media, "download_and_register", offline_download)
+    monkeypatch.setattr(live.media, "download_provider_output_to_staging", offline_download)
     with live.database.session() as session:
         stored_job = session.get(GenerationJob, allowed_job.id)
         assert stored_job is not None

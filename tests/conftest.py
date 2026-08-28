@@ -274,3 +274,45 @@ def register_bytes():
         )[0]
 
     return register
+
+
+@pytest.fixture
+def stage_stub_output():
+    """Park bytes at a staging slot the way the media registry would, minus validation.
+
+    For tests that stub the provider-download boundary: the gateway hands the
+    stub its deterministic key prefix, the stub writes the fixture bytes there,
+    and the completion transaction adopts them exactly as it would a real
+    download — same dedupe, same bindings, same one-transaction guarantee.
+    """
+
+    def stage(
+        container,
+        key_prefix: str,
+        content: bytes,
+        *,
+        index: int = 0,
+        extension: str = ".mp4",
+        mime_type: str = "video/mp4",
+    ):
+        from media_service import MediaRegistry, StagedProviderOutput
+
+        stored = container.media.storage.put_exact(
+            io.BytesIO(content),
+            key=f"{key_prefix}{index:02d}{extension}",
+            mime_type=mime_type,
+        )
+        width, height = MediaRegistry._image_dimensions(stored.local_path, stored.mime_type)
+        return StagedProviderOutput(
+            storage_key=stored.key,
+            sha256=stored.sha256,
+            size_bytes=stored.size,
+            mime_type=stored.mime_type,
+            local_path=stored.local_path,
+            public_url=stored.public_url,
+            width=width,
+            height=height,
+            duration=MediaRegistry._video_duration(stored.local_path, stored.mime_type),
+        )
+
+    return stage

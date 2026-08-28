@@ -56,6 +56,7 @@ from media_service import (
     WorkspaceStorageQuotaExceeded,
     lineage_key,
     sweep_expired_uploads,
+    sweep_generation_staging,
 )
 from memory_core import MemoryLayer, MultimodalContent, ShotMemoryInput
 from model_registry_core import ModelRole, ShotRequirements
@@ -2169,6 +2170,27 @@ def create_app(container: Container | None = None) -> FastAPI:
             quota=storage_quota,
             limit=limit,
             reservation_stale_after_seconds=(container.settings.storage_reservation_stale_after_seconds),
+        ).as_response()
+
+    @app.post(
+        "/internal/maintenance/generation-staging",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_generation_staging_endpoint(limit: int | None = None):
+        """Reclaim staged generation output nothing can ever adopt again.
+
+        The operator-triggered face of the sweep the worker runs on
+        `GENERATION_STAGING_SWEEP_INTERVAL_SECONDS`. A staged object is deleted
+        only when it is past the TTL, its job is terminal or unknown, and no
+        media row adopted its key — so running this beside the worker, or twice
+        at once, deletes nothing a completion could still need.
+        """
+
+        return sweep_generation_staging(
+            database=container.database,
+            storage=container.media.storage,
+            ttl_seconds=container.settings.generation_staging_ttl_seconds,
+            limit=max(1, limit or container.settings.generation_staging_sweep_limit),
         ).as_response()
 
     @app.post("/v1/assets")

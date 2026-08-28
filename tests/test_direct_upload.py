@@ -1402,15 +1402,22 @@ async def test_the_worker_loop_sweeps_on_its_interval_and_survives_a_failure() -
         expired_upload_sweep_interval_seconds=3600,
         expired_upload_sweep_limit=200,
         storage_reservation_stale_after_seconds=86_400,
+        generation_staging_sweep_interval_seconds=3600,
+        generation_staging_ttl_seconds=86_400,
+        generation_staging_sweep_limit=500,
     )
     container = SimpleNamespace(
         settings=settings,
         gateway=SimpleNamespace(recover_after_restart=lambda: None),
     )
-    calls = {"sweeps": 0, "jobs": 0}
+    calls = {"sweeps": 0, "staging_sweeps": 0, "jobs": 0}
 
     def exploding_sweep(_container):  # type: ignore[no-untyped-def]
         calls["sweeps"] += 1
+        raise RuntimeError("object storage is unreachable")
+
+    def exploding_staging_sweep(_container):  # type: ignore[no-untyped-def]
+        calls["staging_sweeps"] += 1
         raise RuntimeError("object storage is unreachable")
 
     async def no_jobs(_container):  # type: ignore[no-untyped-def]
@@ -1420,6 +1427,7 @@ async def test_the_worker_loop_sweeps_on_its_interval_and_survives_a_failure() -
         return False
 
     worker_module.sweep_expired_uploads_once = exploding_sweep  # type: ignore[assignment]
+    worker_module.sweep_generation_staging_once = exploding_staging_sweep  # type: ignore[assignment]
     worker_module.process_next_job = no_jobs  # type: ignore[assignment]
     try:
         with pytest.raises(asyncio.CancelledError):
@@ -1431,7 +1439,8 @@ async def test_the_worker_loop_sweeps_on_its_interval_and_survives_a_failure() -
     # Due immediately on start — a worker that restarts often would otherwise
     # never reach its first sweep — and once only, on an hour's interval.
     assert calls["sweeps"] == 1
-    # And the job loop kept running through the failure.
+    assert calls["staging_sweeps"] == 1
+    # And the job loop kept running through both failures.
     assert calls["jobs"] == 3
 
 

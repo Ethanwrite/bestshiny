@@ -18,15 +18,21 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 
 ## 1. Gate state (all green, offline only)
 
+As of 2026-08-28 on `claude/batch-candidate-atomicity` (§1f):
+
 ```
-.venv/bin/python -m pytest -q                      1066 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1096 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  1068 passed, 7 skipped  (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1098 passed, 7 skipped  (PostgreSQL)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 159 source files
+.venv/bin/python -m mypy                           Success: 160 source files
 .venv/bin/python -m alembic heads                  0052_shot_dependencies (single head)
 git diff --check                                   clean
 ```
+
+Migration evidence for §1f: fresh `alembic upgrade head` on SQLite **and** on a disposable
+PostgreSQL 17 + pgvector 0.8.6 database, `alembic check` clean (known FK-cycle warning only),
+`require_schema_revision()` green. No new migration — `0052` stays head.
 
 **Run the PostgreSQL half detached.** It takes 11 minutes and the tool timeout is 10, so a
 foreground run is SIGKILLed at exit 137 partway through — which reads exactly like a crash and is
@@ -620,6 +626,75 @@ binding of anchor subjects when the caller names no one, an unexecutable plan en
 record with no job created, a hand-created shot with a hand-saved mode being re-planned
 automatically with first-shot semantics, a replay reusing the plan without a second decision, and a
 manual risk override surviving the generation preflight.
+
+## 1f. 2026-08-28 — batch candidate atomicity: staged output, one completion transaction
+
+Branch `claude/batch-candidate-atomicity` over `main` `9a06dcf`.
+
+### What was wrong
+
+A completed generation was persisted in pieces, each its own committed transaction: `n > 1`
+pre-created one **empty `CREATED` candidate row per extra image** before any media existed
+(`_allocate_sibling_candidates`), every artefact then became a media row in its own transaction
+(`register_provider_bytes` / `download_and_register`), and the job completion committed last. Between
+any two of those a process death stranded state the system could not tell from live work: empty
+candidates bound to nothing, media without a completed job — and because a retried poll allocated a
+*new* set of sibling rows, a crash between allocation and completion could also duplicate candidates.
+
+### What replaced it
+
+The order is inverted — storage first, database once:
+
+1. Every artefact is validated and written to a **deterministic staging slot**,
+   `staging/generation/{job_id}/{sha256(provider_job_id)[:16]}/{index}.{ext}`
+   (`MediaRegistry.stage_inline_provider_output`, `download_provider_output_to_staging`; both share
+   the SSRF boundary and content validation the old paths had). A crashed attempt that re-runs
+   overwrites its own slots; a resubmission gets a disjoint set that ages out.
+2. One transaction — fenced by the same conditional claim update as before — then creates the
+   sibling candidates (born `VALIDATING`, never empty `CREATED`), adopts every staged object in
+   place as a `MediaAsset` (`adopt_staged_output_in`; the staging key **is** the storage key,
+   nothing is copied), binds candidates/shot/idempotency, records billing evidence, settles the
+   credit, and completes the job (`GenerationGateway._finalize_completed_generation`). Replaying it
+   matches zero rows and creates nothing; a rollback leaves only unreferenced staging objects.
+3. `media_service.sweep_generation_staging` reclaims what nothing can ever adopt: past
+   `GENERATION_STAGING_TTL_SECONDS` (86 400), job terminal or unknown, no `MediaAsset` referencing
+   the key — all three, or the object is kept and counted. Worker loop on
+   `GENERATION_STAGING_SWEEP_INTERVAL_SECONDS` (3600), operator face at
+   `POST /internal/maintenance/generation-staging`. Storage grew `put_exact`/`delete`/`list_keys`
+   on both backends for this; the S3 listing failing lists nothing, which makes the sweeper do
+   nothing — the fail-closed direction for a deleter.
+
+`register_provider_bytes` is gone (its validation lives on in the staging path);
+`download_and_register` remains for its non-completion callers. No migration: `RETIRED` is a value
+in the existing status column, staging is a storage-layer concept, and `0052` stays head — verified
+by a fresh `alembic upgrade head` on SQLite **and** on a disposable PostgreSQL 17 + pgvector 0.8.6
+database, `alembic check` clean (known FK-cycle warning only), `require_schema_revision()` green.
+
+### Crash injection is the evidence
+
+`tests/test_batch_candidate_atomicity.py` kills a three-image batch at **seven seams** — before and
+after each media staging, after staging before the transaction, inside the transaction after the
+primary registration, before and after sibling-candidate creation, and after the completion commit —
+with a `BaseException` no handler sees, then lets a successor gateway (fresh objects, shared
+database/storage, expired lease) finish. Every point must satisfy: **no empty `CREATED` candidate
+exists at any moment**; pre-commit crashes leave zero candidates/media beyond the primary; recovery
+converges to exactly one completed job, three `VALIDATING` candidates, three media rows, one
+`JOB_COMPLETED` event; staging holds exactly one object per artefact (slots overwrite, never
+accrete); and a sweep far past the TTL keeps every adopted slot. A stale-claim replay of the
+finalize itself is also pinned to create nothing.
+
+### The population left behind
+
+Existing databases may hold orphans of the old scheme. `scripts/retire_empty_candidates.py` audits
+(default) and retires (`--apply`) rows that are `CREATED` + jobless from both directions + media-less
++ older than `--older-than-hours` (24). Retirement is a **fenced status change** to the new terminal
+`CandidateStatus.RETIRED` plus a `DecisionRecord` per row — never a delete, so shot attempt sequences
+stay truthful; a row that gains a binding between audit and write is skipped. Legitimate `CREATED`
+candidates are bound to their job in the transaction that creates them and can never match.
+
+**Operator action (one-time, after this lands):** run the audit against the production database,
+review the JSON, then re-run with `--apply`. Recorded as OPEN_ISSUES §1.16; the deliberate
+staging-namespace growth trade-off is §2.37.
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 

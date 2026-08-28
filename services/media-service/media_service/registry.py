@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .renditions import RenditionDerivationFailed, RenditionResolver
+from .staging import StagedProviderOutput
 
 
 class RemoteMediaSecurityError(ValueError):
@@ -1150,25 +1151,23 @@ class MediaRegistry:
         except Exception:
             return None, None
 
-    def register_provider_bytes(
+    def stage_inline_provider_output(
         self,
-        project_id: str,
-        asset_type: str,
         content: bytes,
         *,
+        key_prefix: str,
+        index: int,
         stem: str,
         mime_type: str,
-        provider: str,
-        provider_media_id: str,
-        shot_id: str | None = None,
-        generation_candidate_id: str | None = None,
-        metadata: dict | None = None,
-    ) -> MediaAsset:
-        """Store one artefact a provider returned inside its response body.
+        asset_type: str,
+    ) -> StagedProviderOutput:
+        """Validate and stage one artefact a provider returned inside its response body.
 
         Synchronous image APIs answer with bytes, so there is no URL to fetch.
         The bytes still pass the same content validation a downloaded artefact
-        does — a provider is not a trusted source of decodable media.
+        does — a provider is not a trusted source of decodable media — and are
+        then written to their deterministic staging slot. No database row is
+        touched here; adoption belongs to the completion transaction.
         """
 
         normalized_mime = (mime_type or "").split(";", 1)[0].strip().lower()
@@ -1177,36 +1176,218 @@ class MediaRegistry:
             raise RemoteMediaSecurityError(f"provider returned an unsupported media type: {mime_type}")
         if len(content) > self.max_download_bytes:
             raise StorageLimitExceeded(self.max_download_bytes)
-        filename = f"{stem}.{extension}"
         with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as buffer:
             buffer.write(content)
             buffer.seek(0)
-            binary_content = cast(BinaryIO, buffer)
-            try:
-                validated = validate_user_media_upload(
-                    binary_content,
-                    filename=filename,
-                    declared_mime=normalized_mime,
-                    asset_type=asset_type,
-                    max_bytes=self.max_download_bytes,
-                    max_image_pixels=self.max_image_pixels,
-                )
-            except UnsafeMediaUpload as exc:
-                raise RemoteMediaSecurityError(str(exc)) from exc
-            binary_content.seek(0)
-            asset, _reused = self.register(
-                project_id,
-                asset_type,
-                binary_content,
-                filename=filename,
-                mime_type=validated.mime_type,
-                shot_id=shot_id,
-                generation_candidate_id=generation_candidate_id,
-                metadata={"source": "provider_inline_response", "provider": provider, **(metadata or {})},
-                provider=provider,
-                provider_media_id=provider_media_id,
+            return self._validate_and_stage(
+                cast(BinaryIO, buffer),
+                key_prefix=key_prefix,
+                index=index,
+                filename=f"{stem}.{extension}",
+                declared_mime=normalized_mime,
+                asset_type=asset_type,
             )
-        return asset
+
+    def _validate_and_stage(
+        self,
+        stream: BinaryIO,
+        *,
+        key_prefix: str,
+        index: int,
+        filename: str,
+        declared_mime: str,
+        asset_type: str,
+        source_url: str | None = None,
+    ) -> StagedProviderOutput:
+        try:
+            validated = validate_user_media_upload(
+                stream,
+                filename=filename,
+                declared_mime=declared_mime,
+                asset_type=asset_type,
+                max_bytes=self.max_download_bytes,
+                max_image_pixels=self.max_image_pixels,
+            )
+        except UnsafeMediaUpload as exc:
+            raise RemoteMediaSecurityError(str(exc)) from exc
+        stream.seek(0)
+        stored = self.storage.put_exact(
+            stream,
+            key=f"{key_prefix}{index:02d}{validated.extension}",
+            mime_type=validated.mime_type,
+        )
+        width, height = self._image_dimensions(stored.local_path, stored.mime_type)
+        return StagedProviderOutput(
+            storage_key=stored.key,
+            sha256=stored.sha256,
+            size_bytes=stored.size,
+            mime_type=stored.mime_type,
+            local_path=stored.local_path,
+            public_url=stored.public_url,
+            width=width,
+            height=height,
+            duration=self._video_duration(stored.local_path, stored.mime_type),
+            source_url=source_url,
+        )
+
+    def adopt_staged_output_in(
+        self,
+        session: Session,
+        project_id: str,
+        asset_type: str,
+        staged: StagedProviderOutput,
+        *,
+        provider: str,
+        provider_media_id: str,
+        shot_id: str | None = None,
+        generation_candidate_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> tuple[MediaAsset, bool]:
+        """Register one staged provider artefact inside the caller's transaction.
+
+        The bytes are already validated and sitting at their staging key; this
+        records what they are, in the same transaction that creates the
+        candidate the asset belongs to and completes the job that paid for it.
+        The staging key is adopted in place — nothing is copied — so a rolled
+        back transaction leaves only unreferenced staging objects behind, which
+        is exactly what the TTL sweeper is allowed to reclaim.
+
+        Deliberately no SAVEPOINT, for the same reason as
+        ``adopt_stored_object_in``: under pysqlite a ``begin_nested()`` insert
+        survives a rollback of the enclosing transaction. A read before the
+        insert covers the duplicate; a genuine collision rolls the whole
+        completion back and the retry finds the winner on this same read.
+        """
+
+        lineage = self._lineage_key(
+            character_id=None,
+            scene_id=None,
+            shot_id=shot_id,
+            parent_asset_id=None,
+            generation_candidate_id=generation_candidate_id,
+        )
+        existing = session.scalar(
+            select(MediaAsset).where(
+                MediaAsset.project_id == project_id,
+                MediaAsset.sha256 == staged.sha256,
+                MediaAsset.asset_type == asset_type,
+                MediaAsset.lineage_key == lineage,
+            )
+        )
+        if existing is not None:
+            return existing, True
+        source_detail = {"source_url": staged.source_url} if staged.source_url else {}
+        asset = MediaAsset(
+            project_id=project_id,
+            asset_type=asset_type,
+            sha256=staged.sha256,
+            lineage_key=lineage,
+            storage_key=staged.storage_key,
+            local_path=staged.local_path,
+            public_url=staged.public_url,
+            mime_type=staged.mime_type,
+            size_bytes=staged.size_bytes,
+            width=staged.width,
+            height=staged.height,
+            duration=staged.duration,
+            shot_id=shot_id,
+            generation_candidate_id=generation_candidate_id,
+            provider=provider,
+            provider_media_id=provider_media_id,
+            metadata_json={
+                "source": "provider_output",
+                "provider": provider,
+                **source_detail,
+                **(metadata or {}),
+            },
+        )
+        session.add(asset)
+        session.flush([asset])
+        return asset, False
+
+    async def _download_provider_media(self, content: BinaryIO, url: str, *, provider: str) -> str:
+        """Stream one provider artefact into ``content`` behind the SSRF boundary.
+
+        Returns the response's declared MIME type. Every hop of a redirect
+        chain is re-validated against the provider's allowlisted hosts, and the
+        byte count is bounded while streaming rather than trusted from a
+        header.
+        """
+
+        current_url = url
+        mime_type = "application/octet-stream"
+        async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
+            for redirect_count in range(6):
+                await self._validate_remote_url(current_url, provider=provider)
+                async with client.stream("GET", current_url) as response:
+                    self._validate_connected_peer(response)
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location or redirect_count == 5:
+                            raise RemoteMediaSecurityError(
+                                "provider media redirect is missing or exceeds the redirect limit"
+                            )
+                        current_url = urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    mime_type = response.headers.get("content-type", "application/octet-stream").split(
+                        ";", 1
+                    )[0]
+                    declared_size = response.headers.get("content-length")
+                    if declared_size:
+                        try:
+                            parsed_size = int(declared_size)
+                        except ValueError as exc:
+                            raise RemoteMediaSecurityError(
+                                "provider media returned an invalid Content-Length"
+                            ) from exc
+                        if parsed_size > self.max_download_bytes:
+                            raise StorageLimitExceeded(self.max_download_bytes)
+                    downloaded = 0
+                    async for chunk in response.aiter_bytes():
+                        downloaded += len(chunk)
+                        if downloaded > self.max_download_bytes:
+                            raise StorageLimitExceeded(self.max_download_bytes)
+                        content.write(chunk)
+                    break
+            else:  # pragma: no cover - loop exits via redirect limit branch.
+                raise RemoteMediaSecurityError("provider media redirect limit exceeded")
+        return mime_type
+
+    async def download_provider_output_to_staging(
+        self,
+        url: str,
+        *,
+        key_prefix: str,
+        index: int,
+        filename: str,
+        provider: str,
+        asset_type: str,
+    ) -> StagedProviderOutput:
+        """Fetch one provider artefact and stage it; no database row is written.
+
+        The download crosses the same SSRF boundary and content validation as
+        ``download_and_register``, but lands on the deterministic staging key
+        instead of in the media plane — adoption belongs to the completion
+        transaction, so a crash after this call leaves only a recyclable
+        staging object.
+        """
+
+        source_parts = urlsplit(url)
+        source_url = urlunsplit((source_parts.scheme, source_parts.netloc, source_parts.path, "", ""))
+        with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as content:
+            binary_content = cast(BinaryIO, content)
+            mime_type = await self._download_provider_media(binary_content, url, provider=provider)
+            binary_content.seek(0)
+            return self._validate_and_stage(
+                binary_content,
+                key_prefix=key_prefix,
+                index=index,
+                filename=filename,
+                declared_mime=mime_type,
+                asset_type=asset_type,
+                source_url=source_url,
+            )
 
     async def download_and_register(
         self,
@@ -1223,47 +1404,10 @@ class MediaRegistry:
         current_url = url
         source_parts = urlsplit(url)
         source_url = urlunsplit((source_parts.scheme, source_parts.netloc, source_parts.path, "", ""))
-        mime_type = "application/octet-stream"
         with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as content:
-            async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
-                for redirect_count in range(6):
-                    await self._validate_remote_url(current_url, provider=provider)
-                    async with client.stream("GET", current_url) as response:
-                        self._validate_connected_peer(response)
-                        if response.status_code in {301, 302, 303, 307, 308}:
-                            location = response.headers.get("location")
-                            if not location or redirect_count == 5:
-                                raise RemoteMediaSecurityError(
-                                    "provider media redirect is missing or exceeds the redirect limit"
-                                )
-                            current_url = urljoin(current_url, location)
-                            continue
-                        response.raise_for_status()
-                        mime_type = response.headers.get("content-type", "application/octet-stream").split(
-                            ";", 1
-                        )[0]
-                        declared_size = response.headers.get("content-length")
-                        if declared_size:
-                            try:
-                                parsed_size = int(declared_size)
-                            except ValueError as exc:
-                                raise RemoteMediaSecurityError(
-                                    "provider media returned an invalid Content-Length"
-                                ) from exc
-                            if parsed_size > self.max_download_bytes:
-                                raise StorageLimitExceeded(self.max_download_bytes)
-                        downloaded = 0
-                        async for chunk in response.aiter_bytes():
-                            downloaded += len(chunk)
-                            if downloaded > self.max_download_bytes:
-                                raise StorageLimitExceeded(self.max_download_bytes)
-                            content.write(chunk)
-                        break
-                else:  # pragma: no cover - loop exits via redirect limit branch.
-                    raise RemoteMediaSecurityError("provider media redirect limit exceeded")
-
-            content.seek(0)
             binary_content = cast(BinaryIO, content)
+            mime_type = await self._download_provider_media(binary_content, current_url, provider=provider)
+            binary_content.seek(0)
             try:
                 validated = validate_user_media_upload(
                     binary_content,

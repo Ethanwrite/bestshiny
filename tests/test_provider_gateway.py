@@ -624,6 +624,7 @@ async def test_concurrent_completion_is_downloaded_finalized_and_released_once(
     container,
     project,
     register_bytes,
+    stage_stub_output,
     monkeypatch,
 ):
     provider = BlockingCompletionProvider()
@@ -645,12 +646,12 @@ async def test_concurrent_completion_is_downloaded_finalized_and_released_once(
     output = register_bytes(container, project.id, "VIDEO", b"completed-video")
     download_count = 0
 
-    async def download_once(*_args, **_kwargs):
+    async def download_once(url, **kwargs):
         nonlocal download_count
         download_count += 1
-        return output
+        return stage_stub_output(container, kwargs["key_prefix"], b"completed-video")
 
-    monkeypatch.setattr(container.media, "download_and_register", download_once)
+    monkeypatch.setattr(container.media, "download_provider_output_to_staging", download_once)
     owner_task = asyncio.create_task(container.gateway.process(job.id))
     await asyncio.wait_for(provider.poll_entered.wait(), timeout=2)
     non_owner_result = await container.gateway.process(job.id)
@@ -690,7 +691,7 @@ async def test_concurrent_completion_is_downloaded_finalized_and_released_once(
 async def test_mock_provider_reported_cost_cannot_create_verified_billing_evidence(
     container,
     project,
-    register_bytes,
+    stage_stub_output,
     monkeypatch,
 ):
     provider = BlockingCompletionProvider(raw={"usage": {"cost": "0.42", "credits_used": "3"}})
@@ -710,12 +711,10 @@ async def test_mock_provider_reported_cost_cannot_create_verified_billing_eviden
     assert submitted.status == JobStatus.SUBMITTED.value
     with container.database.session() as session:
         session.get(GenerationJob, job.id).next_retry_at = utcnow() - timedelta(seconds=1)
-    output = register_bytes(container, project.id, "VIDEO", b"billed-video")
+    async def download_once(url, **kwargs):
+        return stage_stub_output(container, kwargs["key_prefix"], b"billed-video")
 
-    async def download_once(*_args, **_kwargs):
-        return output
-
-    monkeypatch.setattr(container.media, "download_and_register", download_once)
+    monkeypatch.setattr(container.media, "download_provider_output_to_staging", download_once)
     provider.release_poll.set()
     completed = await container.gateway.process(job.id)
     assert completed.status == JobStatus.COMPLETED.value

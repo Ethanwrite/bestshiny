@@ -738,6 +738,7 @@ async def test_three_shot_fixture_generation_qa_commit_e2e(
     project,
     account_worker,
     register_bytes,
+    stage_stub_output,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -770,38 +771,11 @@ async def test_three_shot_fixture_generation_qa_commit_e2e(
         capture_output=True,
     )
 
-    async def download_fixture_output(
-        project_id: str,
-        asset_type: str,
-        url: str,
-        *,
-        filename: str,
-        provider: str,
-        provider_media_id: str,
-        shot_id: str | None = None,
-        generation_candidate_id: str | None = None,
-    ) -> MediaAsset:
+    async def download_fixture_output(url: str, **kwargs):  # type: ignore[no-untyped-def]
         del url
-        with fixture_video.open("rb") as stream:
-            asset, _ = container.media.register(
-                project_id,
-                asset_type,
-                stream,
-                filename=filename,
-                mime_type="video/mp4",
-                shot_id=shot_id,
-                generation_candidate_id=generation_candidate_id,
-                metadata={"source": "offline-completed-provider-fixture"},
-            )
-        with container.database.session() as session:
-            stored = session.get(MediaAsset, asset.id)
-            assert stored is not None
-            stored.provider = provider
-            stored.provider_media_id = provider_media_id
-            session.flush()
-            return stored
+        return stage_stub_output(container, kwargs["key_prefix"], fixture_video.read_bytes())
 
-    monkeypatch.setattr(container.media, "download_and_register", download_fixture_output)
+    monkeypatch.setattr(container.media, "download_provider_output_to_staging", download_fixture_output)
 
     _, compiled = _compile(
         container,

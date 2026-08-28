@@ -270,6 +270,12 @@ class CandidateStatus(StrEnum):
     USER_REVIEW_REQUIRED = "USER_REVIEW_REQUIRED"
     COMMITTED = "COMMITTED"
     REJECTED = "REJECTED"
+    # Terminal state for a row that was pre-allocated as an empty batch-sibling
+    # slot by the retired pre-creation scheme and never received media. Only the
+    # one-time audit (`scripts/retire_empty_candidates.py`) writes it; the
+    # current pipeline creates candidates inside the completion transaction and
+    # can no longer leave such rows behind.
+    RETIRED = "RETIRED"
 
 
 class QADecision(StrEnum):

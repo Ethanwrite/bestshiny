@@ -95,21 +95,30 @@ class AgentOrchestrator:
             if shot is None or episode is None or episode.project_id != project_id:
                 raise LookupError("shot does not belong to the continuity project")
         decision = self.continuity.decide(risk, project_id=project_id, shot_id=shot_id)
-        with self.candidates.database.session() as session:
-            shot = session.get(Shot, shot_id)
-            if shot is None:
-                raise LookupError("shot disappeared during continuity planning")
-            shot.continuity_mode = decision.mode
-            if decision.require_new_keyframe:
-                shot.start_frame_asset_id = None
-            elif decision.mode == ContinuityMode.HARD_CONTINUITY.value and shot.previous_shot_id:
-                previous = session.get(Shot, shot.previous_shot_id)
-                if previous and previous.end_frame_asset_id:
-                    shot.start_frame_asset_id = previous.end_frame_asset_id
-            elif decision.mode == ContinuityMode.HYBRID.value:
-                # HYBRID may use the previous end frame as soft reference
-                # context, but it must never inherit it as a strong first frame.
-                shot.start_frame_asset_id = None
+        if self.frame_anchors is not None:
+            # A manual decision is a plan, not a bypass: registering it means
+            # the generation preflight reuses it instead of overriding an
+            # operator's judgement with a data-blind automatic one. The
+            # planner's `_apply` performs the same shot writes the inline
+            # branch below performs for planner-less deployments.
+            self.frame_anchors.record_manual_decision(shot_id, decision)
+        else:
+            with self.candidates.database.session() as session:
+                shot = session.get(Shot, shot_id)
+                if shot is None:
+                    raise LookupError("shot disappeared during continuity planning")
+                shot.continuity_mode = decision.mode
+                if decision.require_new_keyframe:
+                    shot.start_frame_asset_id = None
+                elif decision.mode == ContinuityMode.HARD_CONTINUITY.value and shot.previous_shot_id:
+                    previous = session.get(Shot, shot.previous_shot_id)
+                    if previous and previous.end_frame_asset_id:
+                        shot.start_frame_asset_id = previous.end_frame_asset_id
+                elif decision.mode == ContinuityMode.HYBRID.value:
+                    # HYBRID may use the previous end frame as soft reference
+                    # context, but it must never inherit it as a strong first
+                    # frame.
+                    shot.start_frame_asset_id = None
         return OrchestrationResult(
             "CONTINUITY_DECIDED",
             shot_id,

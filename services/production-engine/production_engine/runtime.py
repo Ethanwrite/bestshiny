@@ -60,6 +60,7 @@ from production_domain.models import (
     ProductionTrace,
     Project,
     Shot,
+    ShotStatus,
     TimelineState,
     new_id,
     utcnow,
@@ -315,6 +316,7 @@ class VisualProductionRuntime:
         reference_asset_ids: list[str] | None = None,
         estimated_cost: float = 0.0,
         allowed_providers: list[str] | None = None,
+        frame_anchor_plan: dict[str, Any] | None = None,
     ) -> PreparedAutopilotGeneration:
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
@@ -338,26 +340,16 @@ class VisualProductionRuntime:
         # shot goes to review rather than silently degrading to
         # similarity-only context.
         dependency_contexts = self._resolve_dependencies(shot_id)
-        dependency_segments = [
-            DependencySegment(
-                key=item.dependency_id,
-                source_reason=ContextSegmentSource.EXPLICIT_DEPENDENCY,
-                text=item.summary,
-                dependency_type=item.dependency_type,
-                source_shot_id=item.source_shot_id,
-                fact_key=item.fact_key,
-                obligation_key=item.obligation_key,
-                payload=item.payload,
-            )
-            for item in dependency_contexts
-        ]
         holder_keys = [
             str(binding["character_id"])
             for binding in (character_bindings or [])
             if binding.get("character_id")
         ]
-        dependency_segments.extend(
-            self._obligation_segments(project_id, episode=episode_number, holder_keys=holder_keys)
+        dependency_segments = self._stage_one_segments(
+            dependency_contexts,
+            project_id=project_id,
+            episode_number=episode_number,
+            holder_keys=holder_keys,
         )
 
         canonical_assets, canonical_media_ids = self._canonical_assets(project_id)
@@ -401,7 +393,7 @@ class VisualProductionRuntime:
             raise ShotDependencyUnresolved(shot_id, [f"DEPENDENCY_CONTEXT_BUDGET:{exc}"]) from exc
         extra_references = list(dict.fromkeys(reference_asset_ids or []))
         style_references = list(style_control.reference_media_ids) if style_control else []
-        generation_context.reference_images = list(
+        merged_references = list(
             dict.fromkeys(
                 [
                     *style_references,
@@ -410,7 +402,62 @@ class VisualProductionRuntime:
                     *generation_context.reference_images,
                 ]
             )
-        )[: self.context.budget.max_images]
+        )
+        # The frame anchor plan chose *which* scene plate and *which*
+        # characters anchor this shot. The canonical merge may not
+        # reintroduce material the planner decided against: every other
+        # canonical SCENE plate is excluded, and a canonical CHARACTER asset
+        # attributable to a character outside the anchor set is excluded too
+        # (by its recorded `character_id` or by name). Caller-supplied
+        # references — which include the bindings' own assets — are always
+        # exempt, so an explicit choice still wins.
+        excluded_media: set[str] = set()
+        plan_scene_asset_id = (frame_anchor_plan or {}).get("scene_asset_id")
+        if plan_scene_asset_id:
+            excluded_media.update(
+                str(media)
+                for asset in canonical_assets
+                if asset.get("type") == "SCENE" and asset.get("id") != plan_scene_asset_id
+                for media in [*asset.get("image_urls", []), *asset.get("video_urls", [])]
+            )
+        anchor_subject_rows = (frame_anchor_plan or {}).get("anchor_subjects") or []
+        if anchor_subject_rows:
+            subject_ids = {
+                str(subject.get("character_id"))
+                for subject in anchor_subject_rows
+                if subject.get("character_id")
+            }
+            subject_names = {
+                str(subject.get("name")).casefold()
+                for subject in anchor_subject_rows
+                if subject.get("name")
+            }
+            for asset in canonical_assets:
+                if asset.get("type") != "CHARACTER":
+                    continue
+                recorded_character = str(
+                    (asset.get("canonical_metadata") or {}).get("character_id") or ""
+                )
+                asset_name = str(asset.get("name") or "").casefold()
+                anchored = (recorded_character and recorded_character in subject_ids) or (
+                    asset_name and asset_name in subject_names
+                )
+                if not anchored:
+                    excluded_media.update(
+                        str(media)
+                        for media in [*asset.get("image_urls", []), *asset.get("video_urls", [])]
+                    )
+        if excluded_media:
+            explicit = set(extra_references)
+            merged_references = [
+                media for media in merged_references if media not in excluded_media or media in explicit
+            ]
+            generation_context.reference_videos = [
+                video
+                for video in generation_context.reference_videos
+                if video not in excluded_media or video in explicit
+            ]
+        generation_context.reference_images = merged_references[: self.context.budget.max_images]
         compiled = self.compiler.compile(
             shot_id,
             character_bindings=character_bindings,
@@ -447,6 +494,7 @@ class VisualProductionRuntime:
                 "end_frame": end_frame_asset_id,
                 "reference_images": generation_context.reference_images,
                 "style_control": style_control.provider_view() if style_control else None,
+                **({"frame_anchor": frame_anchor_plan} if frame_anchor_plan else {}),
             }
         )
         model_request = self.adapters.get(selected.adapter).compile(
@@ -480,6 +528,14 @@ class VisualProductionRuntime:
                 # Why each context segment is present — EXPLICIT_DEPENDENCY and
                 # OPEN_OBLIGATION are forced; SIMILARITY merely supplements.
                 "context_provenance": generation_context.segment_provenance,
+                # The complete adapter context of the original attempt. A retry
+                # may switch provider or model — never the retrieval outcome —
+                # so it recompiles against exactly this context rather than
+                # retrieving a different one.
+                "retrieval_context": adapter_context,
+                # The frame strategy that governed this request; a retry keeps
+                # it, and reference strengthening draws from its anchors.
+                **({"frame_anchor": frame_anchor_plan} if frame_anchor_plan else {}),
                 # Recorded at decision time rather than re-derived at evaluation
                 # time. The shot spec can be edited between the two, and an
                 # observation filed under the scene the shot *became* would be
@@ -842,9 +898,27 @@ class VisualProductionRuntime:
         # payload embeds them and a payload built from the previous attempt's
         # references would contradict the request the Gateway resolves.
         reference_asset_ids = list(request.get("reference_asset_ids") or [])
+        anchor_plan = metadata.get("frame_anchor") if isinstance(metadata.get("frame_anchor"), dict) else {}
         if plan.inject_stronger_references:
-            _canonical_assets, canonical_reference_ids = self._canonical_assets(str(request["project_id"]))
-            reference_asset_ids = list(dict.fromkeys([*reference_asset_ids, *canonical_reference_ids]))[:20]
+            # Strengthening may only reinforce the anchors this request was
+            # planned with. When a frame anchor plan named its subjects, their
+            # identity masters are the strengthening set; the everything-
+            # canonical fallback survives only for requests planned before
+            # anchors existed.
+            anchor_asset_ids = [
+                subject.get("master_asset_id")
+                for subject in (anchor_plan.get("anchor_subjects") or [])
+                if subject.get("master_asset_id")
+            ]
+            if anchor_asset_ids:
+                reference_asset_ids = list(dict.fromkeys([*reference_asset_ids, *anchor_asset_ids]))[:20]
+            else:
+                _canonical_assets, canonical_reference_ids = self._canonical_assets(
+                    str(request["project_id"])
+                )
+                reference_asset_ids = list(
+                    dict.fromkeys([*reference_asset_ids, *canonical_reference_ids])
+                )[:20]
         target_changed = next_model != request["model"] or next_provider != request["provider"]
         references_changed = reference_asset_ids != list(request.get("reference_asset_ids") or [])
         provider_payload = dict(request.get("provider_payload") or {})
@@ -857,13 +931,38 @@ class VisualProductionRuntime:
             provider_payload = {}
             profile = self.router.registry.get(next_model, next_provider) if spec_data else None
             if profile:
+                # A retry switches the provider- or model-facing representation
+                # and nothing else. The original attempt's retrieval context —
+                # assembled_text with its forced EXPLICIT_DEPENDENCY and
+                # OPEN_OBLIGATION segments, canonical assets, provenance — is
+                # reused verbatim; only the transport-facing fields below may
+                # differ from it. Retrieving a different context here is
+                # exactly the fallback drift this metadata exists to prevent.
+                stored_context = metadata.get("retrieval_context")
+                if not isinstance(stored_context, dict):
+                    # A job planned before retrieval context was stored: stage
+                    # one is deterministic, so rebuild it rather than retrying
+                    # with transport fields alone. A rebuild that cannot
+                    # resolve the shot's owed material forces the shot into
+                    # review — the retry is refused, never degraded.
+                    try:
+                        stored_context = self._rebuild_retrieval_context(request)
+                    except ShotDependencyUnresolved as exc:
+                        self._record_retry_dependency_review(
+                            str(request.get("shot_id") or ""), exc.reason_codes
+                        )
+                        raise
                 context = {
+                    **(stored_context if isinstance(stored_context, dict) else {}),
                     "reference_images": list(reference_asset_ids),
-                    "canonical_asset_ids": list(reference_asset_ids),
                     "start_frame": request.get("start_frame_asset_id"),
                     "end_frame": request.get("end_frame_asset_id"),
                     "style_control": metadata.get("style_control") or metadata.get("style_lock"),
                 }
+                if not isinstance(stored_context, dict):
+                    # No shot to derive from (a passenger-style request): the
+                    # transport fields are all the context there ever was.
+                    context["canonical_asset_ids"] = list(reference_asset_ids)
                 adapted = self.adapters.get(profile.adapter).compile(
                     next_model,
                     AdapterInput(shot=CanonicalShotSpec.model_validate(spec_data), context=context),
@@ -956,6 +1055,113 @@ class VisualProductionRuntime:
         if self.dependencies is None:
             return []
         return self.dependencies.resolve_for_generation(shot_id)
+
+    def _stage_one_segments(
+        self,
+        dependency_contexts: list[DependencyContext],
+        *,
+        project_id: str,
+        episode_number: int,
+        holder_keys: list[str],
+    ) -> list[DependencySegment]:
+        """The forced context segments: resolved dependencies, then obligations."""
+
+        segments = [
+            DependencySegment(
+                key=item.dependency_id,
+                source_reason=ContextSegmentSource.EXPLICIT_DEPENDENCY,
+                text=item.summary,
+                dependency_type=item.dependency_type,
+                source_shot_id=item.source_shot_id,
+                fact_key=item.fact_key,
+                obligation_key=item.obligation_key,
+                payload=item.payload,
+            )
+            for item in dependency_contexts
+        ]
+        segments.extend(
+            self._obligation_segments(project_id, episode=episode_number, holder_keys=holder_keys)
+        )
+        return segments
+
+    def _rebuild_retrieval_context(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        """Reconstruct stage-one context for a job planned before it was stored.
+
+        A retry must reuse the retrieval outcome of the attempt it retries.
+        Jobs created before ``metadata["retrieval_context"]`` existed have no
+        stored copy — but stage one is deterministic over database state, so
+        the forced material (explicit dependencies, open obligations,
+        canonical truth, temporal state) is re-derived exactly. Similarity is
+        advisory and deliberately not re-run: a fallback may not retrieve a
+        *different* supplementary set. Returns ``None`` when the request has
+        no shot to derive from; a dependency that no longer resolves raises,
+        because retrying without owed material is the degradation this
+        prevents.
+        """
+
+        shot_id = request.get("shot_id")
+        if not shot_id:
+            return None
+        with self.database.session() as session:
+            shot = session.get(Shot, str(shot_id))
+            if shot is None:
+                return None
+            project_id = shot.scene.episode.project_id
+            episode_number = shot.scene.episode.episode_number
+            state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
+            temporal_state = dict(state.state_json) if state else {}
+            shot_action = shot.user_prompt or shot.prompt
+        dependency_contexts = self._resolve_dependencies(str(shot_id))
+        segments = self._stage_one_segments(
+            dependency_contexts,
+            project_id=project_id,
+            episode_number=episode_number,
+            holder_keys=[],
+        )
+        canonical_assets, _canonical_media_ids = self._canonical_assets(project_id)
+        rebuilt = self.context.assemble(
+            canonical_assets=canonical_assets,
+            temporal_state=temporal_state,
+            shot_requirement={"action": shot_action, "shot_id": str(shot_id)},
+            memories=[],
+            world_rules=self._world_rules(canonical_assets),
+            previous_final_frame_asset_id=request.get("start_frame_asset_id"),
+            dependency_segments=segments,
+        )
+        return rebuilt.model_dump(mode="json")
+
+    def _record_retry_dependency_review(
+        self, shot_id: str, reason_codes: tuple[str, ...]
+    ) -> None:
+        """A retry whose owed material no longer resolves forces review.
+
+        Same record and same shot state as the create-time dependency gate,
+        so 'why did this retry refuse' reads from the same place as 'why did
+        this generation refuse'.
+        """
+
+        if not shot_id:
+            return
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if shot is None:
+                return
+            project_id = shot.scene.episode.project_id
+            if shot.status != ShotStatus.COMMITTED.value:
+                shot.status = ShotStatus.USER_REVIEW_REQUIRED.value
+            session.add(
+                DecisionRecord(
+                    project_id=project_id,
+                    shot_id=shot_id,
+                    decision_type="SHOT_DEPENDENCY_RESOLUTION",
+                    input_features={"reason_codes": list(reason_codes), "stage": "RETRY"},
+                    selected_action="REVIEW_REQUIRED",
+                    reason_codes=list(reason_codes),
+                    model_version="shot-dependency-gate-v1",
+                    policy_version="dependency-gate-v1",
+                )
+            )
+            session.flush()
 
     def _obligation_segments(
         self, project_id: str, *, episode: int, holder_keys: list[str]

@@ -428,6 +428,19 @@ into `PromptCompilerInput.continuity_context.facts` (tagged `EXPLICIT_DEPENDENCY
 contract admits nothing into assertions that was not supplied there, so an undisclosed fact still
 cannot reach a prompt by accident.
 
+**Facts reach the model, not just the metadata.** The same dependency, series and obligation facts
+are rendered once into `CanonicalShotSpec.continuity["facts"]`, and the spec is what every prompt
+surface serializes: the neutral/positive prompt, the legacy `compiled_prompt`, and every video
+adapter's `Continuity:` line. `continuity_assertions` keeps the structured entries for QC; the spec
+carries the model-facing rendering, exactly once per fact.
+
+**Retry cannot shed the retrieval outcome.** The complete adapter context of the original attempt is
+persisted as `metadata["retrieval_context"]`; a fallback that switches provider or model recompiles
+against it verbatim, overriding only the transport-facing fields. Reference strengthening on retry
+draws from the frame anchor plan's subjects rather than everything canonical. A retry changes the
+provider/model representation only — never assembled text, continuity facts, subject anchors, scene
+anchors, or the established frame anchor plan.
+
 ## Shot Transition / Frame Anchor Planner
 
 Between every two adjacent shots there is exactly one frame-strategy decision, and it is now made
@@ -460,11 +473,25 @@ to the output state, and the actor is in frame), resolved to their locked
 `CharacterIdentityVersion` master assets, plus the canonical SCENE asset matching the shot's
 location when one exists. The plan is written three ways — `Shot.continuity_mode` (and the start
 frame wired or cleared), `TimelineTransition.metadata_json["frame_anchor_plan"]`, and a
-`FRAME_ANCHOR_PLAN` decision record. Committed shots are never re-planned.
-`AgentOrchestrator.compile_episode` runs the planner immediately after script compilation, so a
-compiled episode arrives with a frame strategy for every pair; `POST
-/v1/episodes/{id}/plan-frame-anchors` re-runs it without recompiling, and the caller-supplied-risk
-route (`POST /v1/shots/{id}/continuity`) survives as the manual override.
+`FRAME_ANCHOR_PLAN` decision record carrying the complete plan (first shots have no transition row
+to carry it). Committed shots are never re-planned.
+
+**The planner is a generation preflight, and its anchors govern the request.**
+`FrameAnchorPlanner.ensure_plan()` runs inside `CandidatePipeline.create_candidate` for every shot:
+a stored plan is reused only while still current (same planner version, same predecessor, continuity
+mode untouched); a manually created shot, a manually edited mode, or a re-chained pair is re-planned
+on the spot, and a shot with no predecessor gets explicit first-shot semantics — so no generatable
+shot can bypass the planner, whatever `continuity_mode` was saved on it. The plan's decisions then
+shape the actual generation request: character references narrow to the anchor subjects (identity
+masters added), the scene reference is the plate the planner chose — the runtime's canonical merge
+filters other scene plates out unless a caller supplied one explicitly — and
+`requires_keyframe_generation` is consumed: the plan travels on the request metadata and the
+candidate's generation plan, its reconstruction inputs are guaranteed present in the reference set,
+and a plan whose anchors no longer resolve refuses generation. `AgentOrchestrator.compile_episode`
+still runs the planner immediately after script compilation; `POST
+/v1/episodes/{id}/plan-frame-anchors` and the caller-supplied-risk route (`POST
+/v1/shots/{id}/continuity`) are inspect/re-plan surfaces — the preflight re-decides anything they
+left stale.
 
 ## External Evidence Registry
 

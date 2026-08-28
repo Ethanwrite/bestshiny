@@ -736,6 +736,8 @@ def build_container(settings: Settings | None = None) -> Container:
         generation_admission=generation_admission,
         character_states=character_states,
         styles=styles,
+        frame_anchors=frame_anchors,
+        characters=characters,
     )
     orchestrator = AgentOrchestrator(
         narrative,

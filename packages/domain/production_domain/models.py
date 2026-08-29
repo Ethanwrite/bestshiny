@@ -191,6 +191,27 @@ class ShotDependencyOrigin(StrEnum):
     MANUAL = "MANUAL"
 
 
+class ShotNarrativeEffectType(StrEnum):
+    """What committing a shot does to the narrative ledger.
+
+    Declared at compile/planning time, applied exactly once inside the
+    candidate-commit transaction — the moment the shot's content becomes canon.
+    Foreshadowing is an OPEN_OBLIGATION whose metadata records the category.
+    """
+
+    ESTABLISH_FACT = "ESTABLISH_FACT"
+    DISCLOSE_FACT = "DISCLOSE_FACT"
+    OPEN_OBLIGATION = "OPEN_OBLIGATION"
+    SETTLE_OBLIGATION = "SETTLE_OBLIGATION"
+
+
+class ShotNarrativeEffectOrigin(StrEnum):
+    SCRIPT_COMPILER = "SCRIPT_COMPILER"
+    MANUAL = "MANUAL"
+    CREATIVE_DIRECTOR = "CREATIVE_DIRECTOR"
+    EPISODE_CONTINUATION = "EPISODE_CONTINUATION"
+
+
 class CharacterStateProposalKind(StrEnum):
     INITIALIZE = "INITIALIZE"
     NARRATIVE = "NARRATIVE"
@@ -1024,6 +1045,15 @@ class NarrativeFact(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     fact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     established_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Scene/shot sequence complete the narrative position within the episode.
+    # 0 means "start of episode" — the pre-position, episode-granular legacy
+    # value; real shots are 1-based, so 0 sorts before every actual shot.
+    established_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    established_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     established_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1055,6 +1085,12 @@ class NarrativeDisclosure(Base, TimestampMixin):
     )
     holder_key: Mapped[str] = mapped_column(String(64), nullable=False)
     disclosed_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    disclosed_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    disclosed_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     disclosed_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1097,11 +1133,19 @@ class NarrativeObligation(Base, TimestampMixin):
     obligation_key: Mapped[str] = mapped_column(String(160), nullable=False)
     promise: Mapped[str] = mapped_column(Text, nullable=False)
     opened_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    opened_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     opened_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
     status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
     settled_episode: Mapped[int | None] = mapped_column(Integer)
+    settled_scene_sequence: Mapped[int | None] = mapped_column(Integer)
+    settled_shot_sequence: Mapped[int | None] = mapped_column(Integer)
     settled_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1187,6 +1231,90 @@ class ShotDependency(Base, TimestampMixin):
         return "|".join(
             [dependency_type, source_shot_id or "", fact_key or "", obligation_key or ""]
         )
+
+
+class ShotNarrativeEffect(Base, TimestampMixin):
+    """One declared ledger consequence of a shot, applied when the shot commits.
+
+    Declarations are written by script compilation (explicit directives),
+    manual editing, or upper-level planning; the *ledger* rows they imply are
+    written exactly once, inside the candidate-commit transaction, at the
+    shot's complete narrative position. ``applied_at``/``applied_candidate_id``
+    record that application; a commit replay verifies instead of re-writing.
+
+    The position columns denormalize the shot's (episode, scene, shot) order at
+    declaration time so pending effects are comparable to ledger positions
+    without joins. Recompiling an episode deletes its shots and these rows
+    cascade with them — safe, because effects only apply at commit and a
+    committed shot refuses recompilation.
+    """
+
+    __tablename__ = "shot_narrative_effects"
+    __table_args__ = (
+        UniqueConstraint("shot_id", "effect_key", name="uq_shot_narrative_effect_key"),
+        CheckConstraint(
+            "effect_type IN ('ESTABLISH_FACT', 'DISCLOSE_FACT', "
+            "'OPEN_OBLIGATION', 'SETTLE_OBLIGATION')",
+            name="ck_shot_narrative_effect_type",
+        ),
+        CheckConstraint(
+            "origin IN ('SCRIPT_COMPILER', 'MANUAL', 'CREATIVE_DIRECTOR', "
+            "'EPISODE_CONTINUATION')",
+            name="ck_shot_narrative_effect_origin",
+        ),
+        CheckConstraint(
+            "effect_type NOT IN ('ESTABLISH_FACT', 'DISCLOSE_FACT') OR fact_key IS NOT NULL",
+            name="ck_shot_narrative_effect_fact_referent",
+        ),
+        CheckConstraint(
+            "effect_type NOT IN ('OPEN_OBLIGATION', 'SETTLE_OBLIGATION') "
+            "OR obligation_key IS NOT NULL",
+            name="ck_shot_narrative_effect_obligation_referent",
+        ),
+        CheckConstraint(
+            "episode_number > 0 AND scene_sequence > 0 AND shot_sequence > 0",
+            name="ck_shot_narrative_effect_position",
+        ),
+        Index("ix_shot_narrative_effect_fact", "project_id", "fact_key"),
+        Index("ix_shot_narrative_effect_obligation", "project_id", "obligation_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    effect_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    episode_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    scene_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    fact_key: Mapped[str | None] = mapped_column(String(160))
+    obligation_key: Mapped[str | None] = mapped_column(String(160))
+    holder_key: Mapped[str | None] = mapped_column(String(64))
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    channel: Mapped[str] = mapped_column(String(40), default="ON_SCREEN", nullable=False)
+    disclose_to: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    subject_character_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(40), default=ShotNarrativeEffectOrigin.MANUAL.value, nullable=False
+    )
+    effect_key: Mapped[str] = mapped_column(String(420), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_candidate_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    @staticmethod
+    def natural_key(
+        effect_type: str,
+        *,
+        fact_key: str | None = None,
+        obligation_key: str | None = None,
+        holder_key: str | None = None,
+    ) -> str:
+        """One row per (type, referent, holder) on a shot — replay-idempotent."""
+
+        return "|".join([effect_type, fact_key or "", obligation_key or "", holder_key or ""])
 
 
 class CharacterStateVersion(Base, TimestampMixin):

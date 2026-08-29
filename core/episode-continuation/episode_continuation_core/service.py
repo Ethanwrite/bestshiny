@@ -66,7 +66,10 @@ class SeriesLedger(Protocol):
         obligation_key: str,
         promise: str,
         episode: int,
+        scene_sequence: int = 0,
+        shot_sequence: int = 0,
         shot_id: str | None = None,
+        category: str = "GENERIC",
     ) -> str: ...
 
 
@@ -589,17 +592,18 @@ class EpisodeContinuationService:
             return
         obligation_key = f"continuation:ep{episode_number}:cliffhanger"
         promise = str(cliffhanger.get("summary") or "resolve the episode cliffhanger")[:500]
-        try:
-            self.ledger.open_obligation(
-                project_id,
-                obligation_key=obligation_key,
-                promise=promise,
-                episode=episode_number,
-            )
-        except Exception:
-            # Unique on (project, obligation_key): a confirm replay collides
-            # here and the first write stands.
-            return
+        # `open_obligation` is idempotent on (project, obligation_key): a
+        # confirm replay with the same promise returns the existing row, and a
+        # replay carrying a *different* promise raises LedgerWriteConflict.
+        # Nothing is caught here — a blanket except would fake a successful
+        # replay for a write that actually conflicted.
+        self.ledger.open_obligation(
+            project_id,
+            obligation_key=obligation_key,
+            promise=promise,
+            episode=episode_number,
+            category="CLIFFHANGER",
+        )
 
     # ---------------------------------------------------------------- reads
     def get(self, continuation_id: str) -> dict[str, Any]:

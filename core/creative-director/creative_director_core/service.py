@@ -73,6 +73,8 @@ class SeriesLedger(Protocol):
         fact_key: str,
         summary: str,
         episode: int,
+        scene_sequence: int = 0,
+        shot_sequence: int = 0,
         shot_id: str | None = None,
         subject_character_ids: list[str] | None = None,
         disclose_to: list[str] | None = None,
@@ -85,7 +87,10 @@ class SeriesLedger(Protocol):
         obligation_key: str,
         promise: str,
         episode: int,
+        scene_sequence: int = 0,
+        shot_sequence: int = 0,
         shot_id: str | None = None,
+        category: str = "GENERIC",
     ) -> str: ...
 
 
@@ -876,26 +881,39 @@ class CreativeDirectorService:
             )
             if dialogue:
                 promise = f"resolve: {dialogue}"
+            # `open_obligation` is idempotent on the key: an identical confirm
+            # replay returns the existing row without raising. A ValueError
+            # here therefore means a *real* conflict — a revised plan changed
+            # the cliffhanger promise under the same key — and it is reported
+            # as one, never relabeled a replay.
             try:
                 obligation_id = self.ledger.open_obligation(
                     project_id,
                     obligation_key=obligation_key,
                     promise=promise,
                     episode=episode_number,
+                    category="CLIFFHANGER",
                 )
-                results.append({"kind": "OPEN_OBLIGATION", "id": obligation_id, "key": obligation_key})
-                with self.database.session() as session:
-                    row = self._session(session, session_id)
-                    self._emit_action(
-                        session,
-                        row,
-                        StructuredActionKind.OPEN_OBLIGATION,
-                        {"obligation_key": obligation_key, "promise": promise},
-                        idempotency_key=f"creative:{session_id}:obligation:r{plan_revision}",
-                    )
-            except ValueError:
-                # Already opened by an earlier confirm replay; idempotent.
-                results.append({"kind": "OPEN_OBLIGATION", "key": obligation_key, "replayed": True})
+            except ValueError as exc:
+                results.append(
+                    {
+                        "kind": "OPEN_OBLIGATION",
+                        "key": obligation_key,
+                        "conflict": True,
+                        "error": str(exc),
+                    }
+                )
+                return results
+            results.append({"kind": "OPEN_OBLIGATION", "id": obligation_id, "key": obligation_key})
+            with self.database.session() as session:
+                row = self._session(session, session_id)
+                self._emit_action(
+                    session,
+                    row,
+                    StructuredActionKind.OPEN_OBLIGATION,
+                    {"obligation_key": obligation_key, "promise": promise},
+                    idempotency_key=f"creative:{session_id}:obligation:r{plan_revision}",
+                )
         return results
 
     # ---------------------------------------------------------------- reads

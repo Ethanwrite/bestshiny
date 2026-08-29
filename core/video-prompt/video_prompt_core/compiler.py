@@ -77,7 +77,13 @@ class SeriesLedgerSource(Protocol):
     """
 
     def series_context(
-        self, project_id: str, *, episode: int, holder_keys: list[str] | None = None
+        self,
+        project_id: str,
+        *,
+        episode: int,
+        scene_sequence: int | None = None,
+        shot_sequence: int | None = None,
+        holder_keys: list[str] | None = None,
     ) -> SeriesContextResult: ...
 
 
@@ -394,6 +400,8 @@ class PromptCompilerService:
             project_id = project.id
             scene_id = shot.scene_id
             episode_number = shot.scene.episode.episode_number
+            scene_sequence = shot.scene.sequence
+            shot_sequence = shot.sequence
             shot_type = shot.shot_type
             raw_action = shot.user_prompt or shot.prompt
             duration = shot.duration
@@ -427,8 +435,15 @@ class PromptCompilerService:
                 for binding in character_bindings
                 if binding.get("character_id")
             ]
+            # The complete position, not the episode: continuity facts and
+            # open obligations from later shots of this same episode must not
+            # compile into an earlier shot's prompt.
             series = self.ledger.series_context(
-                project_id, episode=episode_number, holder_keys=holder_keys
+                project_id,
+                episode=episode_number,
+                scene_sequence=scene_sequence,
+                shot_sequence=shot_sequence,
+                holder_keys=holder_keys,
             )
             series_facts = [
                 {

@@ -23,7 +23,13 @@ from generation_policy_core import (
     GenerationPolicyEngine,
 )
 from narrative_core import AuthoritativeTimelineStateEngine
-from narrative_ledger_core import ShotDependencyUnresolved
+from narrative_ledger_core import (
+    LedgerWriteConflict,
+    NarrativeLedgerService,
+    NarrativePosition,
+    ShotDependencyService,
+    ShotDependencyUnresolved,
+)
 from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
     AuthoritativeTimelineFence,
@@ -100,6 +106,8 @@ class CandidatePipeline:
         styles: ProjectStyleService | None = None,
         frame_anchors: FrameAnchorPlanner | None = None,
         characters: CharacterIdentityService | None = None,
+        narrative_ledger: NarrativeLedgerService | None = None,
+        shot_dependencies: ShotDependencyService | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -114,6 +122,8 @@ class CandidatePipeline:
         self.styles = styles
         self.frame_anchors = frame_anchors
         self.characters = characters
+        self.narrative_ledger = narrative_ledger
+        self.shot_dependencies = shot_dependencies
         self.timeline = AuthoritativeTimelineStateEngine(database)
         self.policy = GenerationPolicyEngine(database)
 
@@ -333,6 +343,59 @@ class CandidatePipeline:
         ):
             raise CandidateNotCommittable(
                 "authoritative timeline changed after generation; regenerate the candidate"
+            )
+
+    def _assert_narrative_commitability(
+        self,
+        session,  # type: ignore[no-untyped-def]
+        candidate: GenerationCandidate,
+        shot: Shot,
+    ) -> None:
+        """Revalidate the narrative context this candidate was generated from.
+
+        Two checks, both inside the commit transaction. The declared
+        dependencies are resolved again — an obligation settled elsewhere or a
+        referent that stopped existing since generation refuses the commit.
+        And the ledger fence stored at candidate creation is recomputed — any
+        change to the visible ledger slice or to the shot's declared
+        dependency set means the candidate was generated from an expired
+        context and may not become canon. A candidate created before fences
+        existed carries no stored fence and skips only the digest comparison;
+        dependency revalidation still runs.
+        """
+
+        if self.shot_dependencies is not None:
+            try:
+                self.shot_dependencies.resolve_for_generation_in_session(session, shot.id)
+            except ShotDependencyUnresolved as exc:
+                raise CandidateNotCommittable(
+                    "explicit dependencies no longer resolve: "
+                    + ", ".join(exc.reason_codes)
+                ) from exc
+        if self.narrative_ledger is None:
+            return
+        stored = (candidate.metadata_json or {}).get("narrative_context_fence")
+        if not isinstance(stored, dict) or not stored.get("fence"):
+            return
+        position_data = stored.get("position") or {}
+        try:
+            position = NarrativePosition(
+                int(position_data["episode"]),
+                int(position_data["scene_sequence"]),
+                int(position_data["shot_sequence"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CandidateNotCommittable("candidate narrative fence is invalid") from exc
+        current = self.narrative_ledger.context_fence_in_session(
+            session,
+            shot.scene.episode.project_id,
+            position=position,
+            shot_id=shot.id,
+        )
+        if current != stored["fence"]:
+            raise CandidateNotCommittable(
+                "narrative context changed after generation (ledger or declared "
+                "dependencies moved); regenerate the candidate"
             )
 
     @staticmethod
@@ -568,6 +631,15 @@ class CandidatePipeline:
             if binding.get("narrative_state_version_id")
         ]
 
+        # What the ledger showed this generation, digested. Commit recomputes
+        # and refuses on mismatch, so a candidate generated before the story
+        # moved cannot be adopted against the story as it now stands.
+        narrative_context_fence = (
+            self.narrative_ledger.context_fence_for_shot(shot_id)
+            if self.narrative_ledger is not None
+            else None
+        )
+
         def initialize_character_state(
             session,  # type: ignore[no-untyped-def]
             candidate: GenerationCandidate,
@@ -578,6 +650,11 @@ class CandidatePipeline:
                 **(
                     {TIMELINE_FENCE_METADATA_KEY: candidate_timeline_fence}
                     if candidate_timeline_fence is not None
+                    else {}
+                ),
+                **(
+                    {"narrative_context_fence": narrative_context_fence}
+                    if narrative_context_fence is not None
                     else {}
                 ),
             }
@@ -1246,6 +1323,7 @@ class CandidatePipeline:
                 raise CandidateNotCommittable("only candidates with PASS validation can be committed")
             self._assert_candidate_timeline_fence(session, candidate, shot)
             self._assert_character_state_proposal_fence(session, candidate)
+            self._assert_narrative_commitability(session, candidate, shot)
             if self.styles is not None:
                 try:
                     self.styles.assert_candidate_committable_in_session(session, candidate)
@@ -1303,6 +1381,7 @@ class CandidatePipeline:
                 raise CandidateNotCommittable("candidate output changed before adoption")
             self._assert_candidate_timeline_fence(session, candidate, shot)
             self._assert_character_state_proposal_fence(session, candidate)
+            self._assert_narrative_commitability(session, candidate, shot)
             if self.styles is not None:
                 try:
                     self.styles.assert_candidate_committable_in_session(session, candidate)
@@ -1355,6 +1434,21 @@ class CandidatePipeline:
                 )
             except CharacterStateError as exc:
                 raise CandidateNotCommittable(str(exc)) from exc
+            # The narrative closed loop: the shot's declared ledger effects —
+            # fact establishment, disclosure, obligation opening and
+            # settlement — become canon in this same transaction, exactly
+            # once, at the shot's complete narrative position. State
+            # inheritance is written below by `timeline.propagate`. A ledger
+            # conflict (an obligation settled elsewhere meanwhile, a fact key
+            # colliding) refuses the commit rather than faking agreement.
+            applied_effect_keys: list[str] = []
+            if self.narrative_ledger is not None:
+                try:
+                    applied_effect_keys = self.narrative_ledger.apply_shot_effects_in_session(
+                        session, shot, candidate_id=candidate.id
+                    )
+                except (LedgerWriteConflict, LookupError) as exc:
+                    raise CandidateNotCommittable(str(exc)) from exc
             state_json = deepcopy(output_state.state_json if output_state else {})
             state_json["committed_candidate_id"] = candidate.id
             state_json["output_asset_id"] = asset.id
@@ -1438,10 +1532,18 @@ class CandidatePipeline:
                     project_id=shot.scene.episode.project_id,
                     shot_id=shot.id,
                     decision_type="CANDIDATE_COMMIT",
-                    input_features={"candidate_id": candidate_id, "qa": "PASS"},
+                    input_features={
+                        "candidate_id": candidate_id,
+                        "qa": "PASS",
+                        # The narrative writes this commit performed, so "what
+                        # did committing this shot make canon" reads from the
+                        # decision record rather than from diffing the ledger.
+                        "narrative_effects_applied": applied_effect_keys,
+                        "state_inheritance": "TIMELINE_PROPAGATED",
+                    },
                     selected_action="COMMIT",
                     reason_codes=["QA_PASS"],
-                    model_version="commit-pipeline-v2-cas",
+                    model_version="commit-pipeline-v3-narrative",
                 )
             )
             session.flush()

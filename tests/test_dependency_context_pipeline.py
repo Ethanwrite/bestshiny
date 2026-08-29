@@ -148,6 +148,9 @@ def test_prepare_autopilot_forces_dependency_and_obligation_context(  # type: ig
         dependency_type=ShotDependencyType.FORESHADOWING.value,
         source_shot_id=first,
         summary="the kitchen phone pays off in the hallway",
+        # The source shot never commits in this test; FORESHADOWING requires
+        # a committed source unless the author declares this audited override.
+        metadata={"allow_uncommitted_source": True},
     )
     ledger.open_obligation(
         project.id,

@@ -13,12 +13,17 @@ from production_domain.models import (
     Episode,
     Location,
     NarrativeEvent,
+    NarrativeFact,
+    NarrativeObligation,
     Prop,
     Scene,
     Shot,
     ShotDependency,
     ShotDependencyOrigin,
     ShotDependencyType,
+    ShotNarrativeEffect,
+    ShotNarrativeEffectOrigin,
+    ShotNarrativeEffectType,
     ShotStatus,
     TimelineState,
     TimelineTransition,
@@ -57,6 +62,21 @@ ACTION_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("停下", "stops", "stop"), "stop"),
 )
 
+#: Explicit narrative-effect directives. A rules compiler cannot *derive*
+#: story meaning, but it can carry meaning the author declared: these lines
+#: never become beats — each attaches to the next action/dialogue line's shot
+#: (or the previous shot when trailing) and compiles into declared ledger
+#: effects plus the explicit dependencies they imply.
+#:
+#:   [ESTABLISH fact_key: summary]              fact becomes true in this shot
+#:   [ESTABLISH fact_key: summary -> Mira]      ... and Mira witnesses it
+#:   [DISCLOSE fact_key -> Mira, AUDIENCE]      holders learn an earlier fact
+#:   [FORESHADOW obligation_key: promise]       opens an obligation (setup)
+#:   [PAYOFF obligation_key]                    settles it (payoff)
+#:   [PAYOFF obligation_key: reason]
+DIRECTIVE = re.compile(r"^\[(ESTABLISH|DISCLOSE|FORESHADOW|PAYOFF)\s+([^\]]+)\]$", re.IGNORECASE)
+DIRECTIVE_KEY = re.compile(r"^[A-Za-z0-9_.\-]{1,160}$")
+
 PROP_TERMS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("手机", "phone"), "phone"),
     (("门", "door"), "door"),
@@ -86,10 +106,85 @@ class NarrativeCompiler:
     graph on the episode is an inspectable compilation artifact.
     """
 
-    version = "narrative-rules-v2"
+    version = "narrative-rules-v3"
 
     def __init__(self, database: Database):
         self.database = database
+
+    @classmethod
+    def _parse_directive(cls, line: str) -> dict[str, Any] | None:
+        """One `[KEYWORD ...]` line, or ``None`` when the line is not one.
+
+        A line that *looks* like a directive but cannot be parsed raises: a
+        silently mis-parsed declaration would compile into a shot prompt, and
+        the author's narrative bookkeeping would vanish without a trace.
+        """
+
+        match = DIRECTIVE.match(line)
+        if not match:
+            return None
+        keyword = match.group(1).upper()
+        body = match.group(2).strip()
+
+        def _key(value: str) -> str:
+            value = value.strip()
+            if not DIRECTIVE_KEY.match(value):
+                raise ValueError(
+                    f"invalid {keyword} key {value!r}: keys are 1-160 chars of "
+                    "letters, digits, '_', '.', '-'"
+                )
+            return value
+
+        def _holders(value: str) -> list[str]:
+            names = [name.strip() for name in re.split(r"[,、]", value) if name.strip()]
+            if not names:
+                raise ValueError(f"{keyword} directive names no holder: {line!r}")
+            return names
+
+        if keyword == "ESTABLISH":
+            head, _, holder_part = body.partition("->")
+            key_part, sep, summary = head.partition(":")
+            if not sep and "：" in head:
+                key_part, _, summary = head.partition("：")
+            if not summary.strip():
+                raise ValueError(f"ESTABLISH requires 'key: summary': {line!r}")
+            return {
+                "keyword": keyword,
+                "fact_key": _key(key_part),
+                "summary": summary.strip(),
+                "holders": _holders(holder_part) if holder_part.strip() else [],
+                "source": line,
+            }
+        if keyword == "DISCLOSE":
+            key_part, sep, holder_part = body.partition("->")
+            if not sep or not holder_part.strip():
+                raise ValueError(f"DISCLOSE requires 'key -> holder[, holder]': {line!r}")
+            return {
+                "keyword": keyword,
+                "fact_key": _key(key_part),
+                "holders": _holders(holder_part),
+                "source": line,
+            }
+        if keyword == "FORESHADOW":
+            key_part, sep, promise = body.partition(":")
+            if not sep and "：" in body:
+                key_part, _, promise = body.partition("：")
+            if not promise.strip():
+                raise ValueError(f"FORESHADOW requires 'key: promise': {line!r}")
+            return {
+                "keyword": keyword,
+                "obligation_key": _key(key_part),
+                "promise": promise.strip(),
+                "source": line,
+            }
+        # PAYOFF
+        key_part, _, reason = body.partition(":")
+        return {
+            "keyword": keyword,
+            "obligation_key": _key(key_part),
+            "reason": reason.strip(),
+            "source": line,
+        }
 
     @staticmethod
     def _lines(script: str) -> list[str]:
@@ -286,6 +381,260 @@ class NarrativeCompiler:
     def _entity_row_map(rows: list[Any]) -> dict[str, Any]:
         return {str(row.name).casefold(): row for row in rows}
 
+    def _apply_shot_directives(
+        self,
+        session: Any,
+        *,
+        episode: Episode,
+        shot: Shot,
+        scene_sequence: int,
+        shot_sequence: int,
+        directives: list[dict[str, Any]],
+        characters: dict[str, Character],
+        registry: dict[str, dict[str, Shot]],
+    ) -> None:
+        """Compile the shot's declared directives into effects and dependencies.
+
+        Effects become ledger writes when the shot commits; DISCLOSE and PAYOFF
+        also declare the FACT_REVELATION / OBLIGATION_FULFILLMENT /
+        FORESHADOWING dependencies that force the earlier material into this
+        shot's generation context. All referent validation happens here, at
+        compile time, fail-closed.
+        """
+
+        project_id = episode.project_id
+        position = (episode.episode_number, scene_sequence, shot_sequence)
+
+        def _holder_keys(names: list[str]) -> list[str]:
+            keys: list[str] = []
+            for name in names:
+                if name.upper() == "AUDIENCE":
+                    keys.append("AUDIENCE")
+                    continue
+                row = characters.get(name.casefold())
+                if row is None:
+                    raise ValueError(f"directive holder is not a known character: {name!r}")
+                keys.append(row.id)
+            return list(dict.fromkeys(keys))
+
+        def _declare_effect(**kwargs: Any) -> None:
+            effect_key = ShotNarrativeEffect.natural_key(
+                kwargs["effect_type"],
+                fact_key=kwargs.get("fact_key"),
+                obligation_key=kwargs.get("obligation_key"),
+                holder_key=kwargs.get("holder_key"),
+            )
+            session.add(
+                ShotNarrativeEffect(
+                    project_id=project_id,
+                    shot_id=shot.id,
+                    episode_number=position[0],
+                    scene_sequence=position[1],
+                    shot_sequence=position[2],
+                    origin=ShotNarrativeEffectOrigin.SCRIPT_COMPILER.value,
+                    effect_key=effect_key,
+                    **kwargs,
+                )
+            )
+
+        def _declare_dependency(
+            dependency_type: str,
+            *,
+            source_shot_id: str | None = None,
+            fact_key: str | None = None,
+            obligation_key: str | None = None,
+            summary: str = "",
+        ) -> None:
+            dependency_key = ShotDependency.natural_key(
+                dependency_type,
+                source_shot_id=source_shot_id,
+                fact_key=fact_key,
+                obligation_key=obligation_key,
+            )
+            exists = session.scalar(
+                select(ShotDependency.id).where(
+                    ShotDependency.target_shot_id == shot.id,
+                    ShotDependency.dependency_key == dependency_key,
+                )
+            )
+            if exists is None:
+                session.add(
+                    ShotDependency(
+                        project_id=project_id,
+                        target_shot_id=shot.id,
+                        source_shot_id=source_shot_id,
+                        dependency_type=dependency_type,
+                        fact_key=fact_key,
+                        obligation_key=obligation_key,
+                        summary=summary,
+                        origin=ShotDependencyOrigin.SCRIPT_COMPILER.value,
+                        dependency_key=dependency_key,
+                    )
+                )
+
+        def _earlier_effect(effect_type: str, **filters: Any) -> ShotNarrativeEffect | None:
+            query = select(ShotNarrativeEffect).where(
+                ShotNarrativeEffect.project_id == project_id,
+                ShotNarrativeEffect.effect_type == effect_type,
+            )
+            for column, value in filters.items():
+                query = query.where(getattr(ShotNarrativeEffect, column) == value)
+            for row in session.scalars(query):
+                if (row.episode_number, row.scene_sequence, row.shot_sequence) < position:
+                    return row
+            return None
+
+        for item in directives:
+            keyword = item["keyword"]
+            if keyword == "ESTABLISH":
+                fact_key = item["fact_key"]
+                if fact_key in registry["established"]:
+                    raise ValueError(f"fact {fact_key!r} is established twice in this script")
+                ledger_fact = session.scalar(
+                    select(NarrativeFact).where(
+                        NarrativeFact.project_id == project_id,
+                        NarrativeFact.fact_key == fact_key,
+                    )
+                )
+                if ledger_fact is not None:
+                    raise ValueError(
+                        f"fact {fact_key!r} is already established on the ledger "
+                        f"(episode {ledger_fact.established_episode})"
+                    )
+                earlier = _earlier_effect("ESTABLISH_FACT", fact_key=fact_key)
+                if earlier is not None:
+                    raise ValueError(
+                        f"fact {fact_key!r} is already declared by an earlier shot "
+                        f"(episode {earlier.episode_number})"
+                    )
+                _declare_effect(
+                    effect_type=ShotNarrativeEffectType.ESTABLISH_FACT.value,
+                    fact_key=fact_key,
+                    summary=item["summary"],
+                    disclose_to=["AUDIENCE", *_holder_keys(item.get("holders", []))],
+                )
+                registry["established"][fact_key] = shot
+            elif keyword == "DISCLOSE":
+                fact_key = item["fact_key"]
+                establishing = registry["established"].get(fact_key)
+                if establishing is None:
+                    ledger_fact = session.scalar(
+                        select(NarrativeFact).where(
+                            NarrativeFact.project_id == project_id,
+                            NarrativeFact.fact_key == fact_key,
+                        )
+                    )
+                    pending = (
+                        _earlier_effect("ESTABLISH_FACT", fact_key=fact_key)
+                        if ledger_fact is None
+                        else None
+                    )
+                    if ledger_fact is None and pending is None:
+                        raise ValueError(
+                            f"cannot DISCLOSE {fact_key!r}: never established at an "
+                            "earlier position"
+                        )
+                    establishing_shot_id = (
+                        ledger_fact.established_shot_id if ledger_fact else pending.shot_id  # type: ignore[union-attr]
+                    )
+                else:
+                    establishing_shot_id = establishing.id
+                for holder in _holder_keys(item["holders"]):
+                    _declare_effect(
+                        effect_type=ShotNarrativeEffectType.DISCLOSE_FACT.value,
+                        fact_key=fact_key,
+                        holder_key=holder,
+                        summary=f"discloses {fact_key} to {holder}",
+                    )
+                if establishing_shot_id != shot.id:
+                    _declare_dependency(
+                        ShotDependencyType.FACT_REVELATION.value,
+                        fact_key=fact_key,
+                        summary=f"reveals the established fact {fact_key}",
+                    )
+            elif keyword == "FORESHADOW":
+                obligation_key = item["obligation_key"]
+                if obligation_key in registry["opened"]:
+                    raise ValueError(
+                        f"obligation {obligation_key!r} is opened twice in this script"
+                    )
+                ledger_obligation = session.scalar(
+                    select(NarrativeObligation).where(
+                        NarrativeObligation.project_id == project_id,
+                        NarrativeObligation.obligation_key == obligation_key,
+                    )
+                )
+                if ledger_obligation is not None:
+                    raise ValueError(
+                        f"obligation {obligation_key!r} is already opened on the ledger "
+                        f"(episode {ledger_obligation.opened_episode})"
+                    )
+                earlier = _earlier_effect("OPEN_OBLIGATION", obligation_key=obligation_key)
+                if earlier is not None:
+                    raise ValueError(
+                        f"obligation {obligation_key!r} is already declared by an earlier "
+                        f"shot (episode {earlier.episode_number})"
+                    )
+                _declare_effect(
+                    effect_type=ShotNarrativeEffectType.OPEN_OBLIGATION.value,
+                    obligation_key=obligation_key,
+                    summary=item["promise"],
+                    metadata_json={"category": "FORESHADOWING"},
+                )
+                registry["opened"][obligation_key] = shot
+            elif keyword == "PAYOFF":
+                obligation_key = item["obligation_key"]
+                if obligation_key in registry["settled"]:
+                    raise ValueError(
+                        f"obligation {obligation_key!r} is paid off twice in this script"
+                    )
+                opening_shot_id: str | None = None
+                opening = registry["opened"].get(obligation_key)
+                if opening is not None:
+                    opening_shot_id = opening.id
+                else:
+                    ledger_obligation = session.scalar(
+                        select(NarrativeObligation).where(
+                            NarrativeObligation.project_id == project_id,
+                            NarrativeObligation.obligation_key == obligation_key,
+                        )
+                    )
+                    if ledger_obligation is not None:
+                        if ledger_obligation.status != "OPEN":
+                            raise ValueError(
+                                f"cannot PAYOFF {obligation_key!r}: it is already "
+                                f"{ledger_obligation.status}"
+                            )
+                        opening_shot_id = ledger_obligation.opened_shot_id
+                    else:
+                        pending = _earlier_effect(
+                            "OPEN_OBLIGATION", obligation_key=obligation_key
+                        )
+                        if pending is None:
+                            raise ValueError(
+                                f"cannot PAYOFF {obligation_key!r}: never opened at an "
+                                "earlier position"
+                            )
+                        opening_shot_id = pending.shot_id
+                _declare_effect(
+                    effect_type=ShotNarrativeEffectType.SETTLE_OBLIGATION.value,
+                    obligation_key=obligation_key,
+                    summary=item.get("reason", ""),
+                )
+                registry["settled"][obligation_key] = shot
+                _declare_dependency(
+                    ShotDependencyType.OBLIGATION_FULFILLMENT.value,
+                    obligation_key=obligation_key,
+                    summary=f"pays off the obligation {obligation_key}",
+                )
+                if opening_shot_id and opening_shot_id != shot.id:
+                    _declare_dependency(
+                        ShotDependencyType.FORESHADOWING.value,
+                        source_shot_id=opening_shot_id,
+                        summary=f"pays off foreshadowing set up for {obligation_key}",
+                    )
+        session.flush()
+
     def compile_episode(self, episode_id: str) -> CompileResult:
         with self.database.session() as session:
             episode = session.get(Episode, episode_id)
@@ -314,18 +663,45 @@ class NarrativeCompiler:
                 raise RuntimeError("cannot recompile an episode containing committed shots")
 
             lines = self._lines(episode.script_source)
-            raw_groups: list[tuple[str, list[str]]] = []
+            raw_groups: list[tuple[str, list[dict[str, Any]]]] = []
             current_header = "Scene 1"
-            current_lines: list[str] = []
+            current_lines: list[dict[str, Any]] = []
+            pending_directives: list[dict[str, Any]] = []
+
+            def _drain_trailing() -> None:
+                # Directives after a scene's last beat annotate that beat.
+                if pending_directives and current_lines:
+                    current_lines[-1]["directives"].extend(pending_directives)
+                    pending_directives.clear()
+
             for line in lines:
+                directive = self._parse_directive(line)
+                if directive is not None:
+                    pending_directives.append(directive)
+                    continue
                 if self._is_scene_header(line):
+                    _drain_trailing()
                     if current_lines:
                         raw_groups.append((current_header, current_lines))
                     current_header, current_lines = line, []
                 else:
-                    current_lines.extend(self._split_primary_actions(line))
+                    for index, source in enumerate(self._split_primary_actions(line)):
+                        beat: dict[str, Any] = {"source": source, "directives": []}
+                        if index == 0 and pending_directives:
+                            beat["directives"] = list(pending_directives)
+                            pending_directives.clear()
+                        current_lines.append(beat)
+            _drain_trailing()
+            if pending_directives:
+                raise ValueError(
+                    "narrative directives with no shot to attach to: "
+                    + "; ".join(item["source"] for item in pending_directives)
+                )
             if current_lines or not raw_groups:
-                raw_groups.append((current_header, current_lines or ["Establish the scene."]))
+                current_lines = current_lines or [
+                    {"source": "Establish the scene.", "directives": []}
+                ]
+                raw_groups.append((current_header, current_lines))
 
             groups: list[dict[str, Any]] = []
             character_names: set[str] = set()
@@ -334,11 +710,18 @@ class NarrativeCompiler:
             for scene_sequence, (header, beat_sources) in enumerate(raw_groups, 1):
                 location_name, time_context = self._scene_parts(header, scene_sequence)
                 parsed_beats: list[dict[str, Any]] = []
-                for source in beat_sources:
+                for beat in beat_sources:
                     event_sequence += 1
-                    parsed = self._event(source, event_sequence)
+                    parsed = self._event(beat["source"], event_sequence)
+                    parsed["directives"] = beat["directives"]
                     parsed_beats.append(parsed)
                     character_names.update(value for value in (parsed["actor"], parsed["target"]) if value)
+                    for item in beat["directives"]:
+                        # Directive holders are characters too: a disclosure to
+                        # someone who never acts on screen still needs their row.
+                        for holder in item.get("holders", []):
+                            if holder.upper() != "AUDIENCE":
+                                character_names.add(holder)
                     if parsed["object"]:
                         prop_names.add(parsed["object"])
                 groups.append(
@@ -491,6 +874,14 @@ class NarrativeCompiler:
             event_ids: list[str] = []
             previous_shot: Shot | None = None
             previous_output: TimelineState | None = None
+            # What this compile has declared so far, so directives can
+            # reference material from earlier shots of the same script and
+            # duplicates fail at compile time rather than at commit.
+            directive_registry: dict[str, dict[str, Shot]] = {
+                "established": {},
+                "opened": {},
+                "settled": {},
+            }
             for scene_sequence, group in enumerate(groups, 1):
                 location = locations[group["location"].casefold()]
                 scene = Scene(
@@ -699,6 +1090,17 @@ class NarrativeCompiler:
                                     ),
                                 },
                             )
+                        )
+                    if parsed.get("directives"):
+                        self._apply_shot_directives(
+                            session,
+                            episode=episode,
+                            shot=shot,
+                            scene_sequence=scene_sequence,
+                            shot_sequence=shot_sequence,
+                            directives=parsed["directives"],
+                            characters=characters,
+                            registry=directive_registry,
                         )
                     shot_ids.append(shot.id)
                     event_ids.append(event.id)

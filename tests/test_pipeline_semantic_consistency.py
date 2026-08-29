@@ -114,6 +114,10 @@ def _narrative_material(container, project, third_shot_id: str, first_shot_id: s
         dependency_type=ShotDependencyType.FORESHADOWING.value,
         source_shot_id=first_shot_id,
         summary=DEP_SUMMARY,
+        # These pipeline tests never commit the source shot; FORESHADOWING
+        # requires a committed source unless the author declares this
+        # audited override.
+        metadata={"allow_uncommitted_source": True},
     )
 
 

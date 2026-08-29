@@ -210,6 +210,9 @@ def test_resolution_carries_payloads_with_explicit_provenance(  # type: ignore[n
         dependency_type=ShotDependencyType.FORESHADOWING.value,
         source_shot_id=first,
         summary="the kitchen phone pays off",
+        # FORESHADOWING quotes produced canon, so an uncommitted source is
+        # only usable through this declared, audited override.
+        metadata={"allow_uncommitted_source": True},
     )
     service.declare(
         project.id,
@@ -227,7 +230,10 @@ def test_resolution_carries_payloads_with_explicit_provenance(  # type: ignore[n
     contexts = service.resolve_for_generation(third)
     assert [item.source_reason for item in contexts] == ["EXPLICIT_DEPENDENCY"] * 3
     by_type = {item.dependency_type: item for item in contexts}
-    assert "picks up the phone" in by_type["FORESHADOWING"].payload["source_shot"]["prompt"]
+    foreshadow_source = by_type["FORESHADOWING"].payload["source_shot"]
+    assert "picks up the phone" in foreshadow_source["prompt"]
+    assert foreshadow_source["committed"] is False
+    assert foreshadow_source["uncommitted_source_allowed_by"] == "DEPENDENCY_METADATA"
     assert by_type["FACT_REVELATION"].payload["fact"]["summary"] == "The phone is bugged."
     assert by_type["OBLIGATION_FULFILLMENT"].payload["obligation"]["status"] == "OPEN"
 

@@ -325,6 +325,8 @@ class VisualProductionRuntime:
             project_id = shot.scene.episode.project_id
             episode_id = shot.scene.episode_id
             episode_number = shot.scene.episode.episode_number
+            scene_sequence = shot.scene.sequence
+            shot_sequence = shot.sequence
             scene_id = shot.scene_id
             state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             temporal_state = dict(state.state_json) if state else {}
@@ -349,6 +351,8 @@ class VisualProductionRuntime:
             dependency_contexts,
             project_id=project_id,
             episode_number=episode_number,
+            scene_sequence=scene_sequence,
+            shot_sequence=shot_sequence,
             holder_keys=holder_keys,
         )
 
@@ -1062,6 +1066,8 @@ class VisualProductionRuntime:
         *,
         project_id: str,
         episode_number: int,
+        scene_sequence: int | None = None,
+        shot_sequence: int | None = None,
         holder_keys: list[str],
     ) -> list[DependencySegment]:
         """The forced context segments: resolved dependencies, then obligations."""
@@ -1080,7 +1086,13 @@ class VisualProductionRuntime:
             for item in dependency_contexts
         ]
         segments.extend(
-            self._obligation_segments(project_id, episode=episode_number, holder_keys=holder_keys)
+            self._obligation_segments(
+                project_id,
+                episode=episode_number,
+                scene_sequence=scene_sequence,
+                shot_sequence=shot_sequence,
+                holder_keys=holder_keys,
+            )
         )
         return segments
 
@@ -1108,6 +1120,8 @@ class VisualProductionRuntime:
                 return None
             project_id = shot.scene.episode.project_id
             episode_number = shot.scene.episode.episode_number
+            scene_sequence = shot.scene.sequence
+            shot_sequence = shot.sequence
             state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             temporal_state = dict(state.state_json) if state else {}
             shot_action = shot.user_prompt or shot.prompt
@@ -1116,6 +1130,8 @@ class VisualProductionRuntime:
             dependency_contexts,
             project_id=project_id,
             episode_number=episode_number,
+            scene_sequence=scene_sequence,
+            shot_sequence=shot_sequence,
             holder_keys=[],
         )
         canonical_assets, _canonical_media_ids = self._canonical_assets(project_id)
@@ -1164,19 +1180,32 @@ class VisualProductionRuntime:
             session.flush()
 
     def _obligation_segments(
-        self, project_id: str, *, episode: int, holder_keys: list[str]
+        self,
+        project_id: str,
+        *,
+        episode: int,
+        scene_sequence: int | None = None,
+        shot_sequence: int | None = None,
+        holder_keys: list[str],
     ) -> list[DependencySegment]:
-        """Open obligations for the episode, as forced context segments.
+        """Open obligations at the shot's position, as forced context segments.
 
         An obligation is owed, not similar — episode 60's payoff shares no
         vocabulary with episode 7's promise — so it can never be left to the
-        similarity stage.
+        similarity stage. The complete position matters twice over: a promise
+        opened by a *later* shot of this episode is invisible here, and a
+        promise settled later stays visible — regenerating a historical shot
+        reads the ledger as it stood at that shot.
         """
 
         if self.narrative_ledger is None:
             return []
         series = self.narrative_ledger.series_context(
-            project_id, episode=episode, holder_keys=holder_keys
+            project_id,
+            episode=episode,
+            scene_sequence=scene_sequence,
+            shot_sequence=shot_sequence,
+            holder_keys=holder_keys,
         )
         return [
             DependencySegment(

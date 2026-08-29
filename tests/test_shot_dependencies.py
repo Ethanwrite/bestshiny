@@ -274,6 +274,44 @@ def test_unresolvable_dependencies_refuse_with_reason_codes(  # type: ignore[no-
     assert any(code.startswith("DEPENDENCY_OBLIGATION_ALREADY_SETTLED") for code in codes)
 
 
+def test_historical_regeneration_sees_a_later_settlement_as_still_open(  # type: ignore[no-untyped-def]
+    container, project, service, ledger
+):
+    _, result = _compile(container, project, SCRIPT)
+    _first, second, third = result.shot_ids
+    ledger.open_obligation(
+        project.id,
+        obligation_key="settled_later",
+        promise="A later payoff.",
+        episode=1,
+        scene_sequence=0,
+        shot_sequence=0,
+    )
+    service.declare(
+        project.id,
+        target_shot_id=second,
+        dependency_type=ShotDependencyType.OBLIGATION_FULFILLMENT.value,
+        obligation_key="settled_later",
+    )
+    ledger.settle_obligation(
+        project.id,
+        obligation_key="settled_later",
+        episode=1,
+        scene_sequence=2,
+        shot_sequence=1,
+        shot_id=third,
+    )
+
+    contexts = service.resolve_for_generation(second)
+    obligation = next(
+        context.payload["obligation"]
+        for context in contexts
+        if context.dependency_type == ShotDependencyType.OBLIGATION_FULFILLMENT.value
+    )
+    assert obligation["status"] == "OPEN"
+    assert obligation["canon"] is True
+
+
 def test_manual_removal_withdraws_a_dependency(container, project, service):  # type: ignore[no-untyped-def]
     _, result = _compile(container, project, SCRIPT)
     first, _, third = result.shot_ids

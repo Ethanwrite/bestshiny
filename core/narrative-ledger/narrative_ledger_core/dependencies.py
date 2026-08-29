@@ -538,9 +538,31 @@ class ShotDependencyService:
                         None,
                         shot_id,
                     }:
-                        reasons.append(
-                            f"DEPENDENCY_OBLIGATION_ALREADY_SETTLED:{row.obligation_key}"
+                        settled_order = (
+                            obligation.settled_episode,
+                            obligation.settled_scene_sequence,
+                            obligation.settled_shot_sequence,
                         )
+                        if _strictly_before(settled_order, target_order):
+                            reasons.append(
+                                f"DEPENDENCY_OBLIGATION_ALREADY_SETTLED:{row.obligation_key}"
+                            )
+                        else:
+                            # Historical regeneration sees the obligation as
+                            # it was at this shot, not its later present-day
+                            # settlement state.
+                            payload["obligation"] = {
+                                "obligation_key": obligation.obligation_key,
+                                "promise": _bounded(obligation.promise),
+                                "status": "OPEN",
+                                "canon": True,
+                                "opened_episode": obligation.opened_episode,
+                                "opened_position": {
+                                    "episode": obligation.opened_episode,
+                                    "scene_sequence": obligation.opened_scene_sequence,
+                                    "shot_sequence": obligation.opened_shot_sequence,
+                                },
+                            }
                     else:
                         payload["obligation"] = {
                             "obligation_key": obligation.obligation_key,

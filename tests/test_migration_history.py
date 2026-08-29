@@ -1523,6 +1523,39 @@ def test_the_required_schema_revision_is_the_alembic_head() -> None:
     assert REQUIRED_SCHEMA_REVISION == _script_head(config)
 
 
+def test_flow_remote_owner_index_reconciles_a_drifted_database(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A restored production volume may carry the pre-owner partial index."""
+
+    database_url = f"sqlite:///{tmp_path / 'flow-index-drift.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0059_timeline_branches")
+
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP INDEX uq_flow_remote_project_owner")
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX uq_flow_active_remote_project ON provider_projects "
+            "(provider, provider_project_id) WHERE provider = 'google_flow' "
+            "AND provider_project_id IS NOT NULL "
+            "AND status IN ('PROVISIONING', 'READY', 'DEGRADED', "
+            "'MIGRATION_REQUIRED', 'MIGRATING')"
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = sa.create_engine(database_url)
+    indexes = {str(index["name"]) for index in sa.inspect(engine).get_indexes("provider_projects")}
+    with engine.connect() as connection:
+        revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+    engine.dispose()
+    assert revision == "0060_flow_remote_owner_index"
+    assert "uq_flow_remote_project_owner" in indexes
+    assert "uq_flow_active_remote_project" not in indexes
+
+
 def test_production_refuses_a_non_postgresql_database(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Under pysqlite a savepoint does not roll back; seven call sites rely on it."""
 

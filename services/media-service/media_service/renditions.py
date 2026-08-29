@@ -82,7 +82,7 @@ def insert_or_revive_rendition(session: Session, rendition: MediaRendition) -> M
                 MediaRendition.media_asset_id == rendition.media_asset_id,
                 MediaRendition.kind == rendition.kind,
                 MediaRendition.constraint_key == rendition.constraint_key,
-            )
+            ).with_for_update()
         )
         if winner is None:  # pragma: no cover - the conflict implies a winner.
             raise
@@ -217,7 +217,7 @@ class RenditionResolver:
                 MediaRendition.media_asset_id == asset.id,
                 MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
                 MediaRendition.constraint_key == constraint_key,
-            )
+            ).with_for_update()
         )
         # Only a live row serves. A GC tombstone in the slot means the bytes
         # are gone: fall through to re-derive, and the insert revives the row.
@@ -379,7 +379,7 @@ class RenditionResolver:
                 MediaRendition.media_asset_id == asset.id,
                 MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
                 MediaRendition.constraint_key == constraint_key,
-            )
+            ).with_for_update()
         )
         if existing is not None and existing.lifecycle_status == "ACTIVE":
             # Revalidated when it was derived; the row exists only because it

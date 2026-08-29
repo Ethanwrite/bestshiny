@@ -1,13 +1,14 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-28
+Snapshot date: 2026-08-29
 Repository: `ai-director-platform`
-Branch: `claude/creative-director-episodes` (worktree `.worktrees/upper-capabilities`), rebased on
-`main` at `4f5dd11` (#10 batch atomicity and #11 video reference adaptation both merged); adds the
-creative director and episode continuation described in [`HANDOFF.md`](HANDOFF.md) §1h
+Branch: `claude/rc-predeploy-integration` — the release-candidate integration of `main` at
+`4f5dd11`, `claude/creative-director-episodes` `f5f68c6` (PR #9) and the 2026-08-28 Character
+Evidence working tree, plus the 2026-08-29 pre-deployment fixes summarized in the dated section
+at the end of this document and in [`HANDOFF.md`](HANDOFF.md)
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0054_episode_continuations`
+Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
@@ -1660,3 +1661,69 @@ or another retrieval provider as state authority.
 Credential values remain outside the repository. The operator explicitly decided that the current Provider keys
 do not require rotation. This decision removes rotation as a blocking action but does not authorize committing,
 logging, exposing or automatically using those keys.
+
+
+## 2026-08-29 — release-candidate pre-deployment changes (this branch)
+
+Everything below is offline-verified code with tests (fixture evidence); nothing here is a live
+or deployed-service verification.
+
+**Narrative ledger closed loop (migrations `0055`).** Every fact, disclosure and obligation
+carries its complete narrative position (episode, scene sequence, shot sequence);
+`may_know` / `series_context` / open-obligation retrieval are position-exact time slices, so
+later-shot material never leaks into an earlier shot of the same episode and regenerating a
+historical shot reads the ledger as it stood at that shot (settlement records *where* it
+happened rather than erasing the open interval). Shots declare their ledger consequences
+(`shot_narrative_effects`; script directives `[ESTABLISH]`, `[DISCLOSE]`, `[FORESHADOW]`,
+`[PAYOFF]` compiled by the rules compiler, which also auto-declares the implied
+FACT_REVELATION / OBLIGATION_FULFILLMENT / FORESHADOWING dependencies); the candidate-commit
+transaction applies them exactly once, idempotently, with conflicts raised — never a silent
+replay. Commit revalidates declared dependencies and a narrative-context fence captured at
+candidate creation; a candidate generated from an expired ledger context refuses to become
+canon. Source-shot COMMITTED requirements are an explicit per-type policy
+(`COMMITTED_SOURCE_POLICY`) with a declared, audited override.
+
+**Character Evidence submission lifecycle (migration `0056`).** One durable, shadow-only
+submission row per candidate; enqueue-on-registration, bounded dispatch, ACCEPTED-timeout
+reconciliation, operator resolution. Modal-side idempotent claim and callback outbox exist as
+code only — the deploy is still blocked externally (`docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md`).
+Voyage embeddings were evaluated and are **incompatible** as AppearanceEncoder evidence; the
+statement is in the same handoff.
+
+**Wan 2.7 reference bounds (no migration).** Declared from Alibaba Cloud Model Studio's own
+Wan2.7 API references — reference_video MP4/MOV, 1–30 s, 240–4,096 px/side, aspect 1:8–8:1,
+≤100 MB; images JPEG/PNG/BMP/WEBP, 20 MB, 8000×8000-pixel ceiling — with new documented-minimum
+and aspect-range checks in `VideoReferenceConstraints`. Pinned by a drift-gate test and driven
+through the real rendition chain offline. Alibaba OSS configuration now passes the real object-storage
+preflight; a platform-closed live canary and verified Ark/DashScope return-media hosts are still outstanding.
+
+**Rendition lifecycle and thumbnails (migration `0057`).** Derived renditions carry
+ACTIVE / GC_CLAIMED (leased) / DELETED (tombstone, revivable in place); the GC sweep collects
+only idle copies whose constraint profile no current provider declares, never originals, never
+shared objects. `ThumbnailService` derives a lazy 512px JPEG per asset and the Web UI's
+gallery reads it instead of 4K originals.
+
+**Direct-upload full verification (migration `0058`).** Adopted uploads are
+`PENDING_VERIFICATION` until the async verifier — SHA re-check, complete image decode, ffprobe
+plus whole-stream ffmpeg decode for video — promotes them to READY, or lands them in INVALID /
+QUARANTINED with the workspace's settled bytes released. Providers and reference URLs refuse
+anything not READY.
+
+**Timeline branches (migration `0059`).** `timeline_scope_key` branches are registered rows
+with kind, required parent, fork shot and a lifecycle (ACTIVE / MERGED with a declared
+write-back manifest, dream states refusing main by default / RETIRED / ABANDONED); closed
+branches refuse new state writes while history stays readable, orphans are swept closed, and
+physical purge is refused while audit history references the scope.
+
+**Flow ownership index reconciliation (migration `0060`).** A restored production volume exposed
+schema drift that a fresh migration did not: `provider_projects` carried the older
+`uq_flow_active_remote_project` predicate while revision `0025` and the ORM require permanent
+`uq_flow_remote_project_owner` uniqueness, including disabled bindings. `0060` preflights duplicate
+owners, removes the drifted index and restores the declared invariant. A backup-restored PostgreSQL
+database passed `0052 → 0060 → 0052 → 0060` and `alembic check` after both upgrades.
+
+**Style drift monitoring (no migration).** `StyleDriftMonitor` aggregates committed
+candidates' style evaluations per episode and reports drift from the baseline episode —
+monitoring only, no gate changes. `GET /internal/models/live-status` reports `live_enabled`,
+`lifecycle_status` and `live_canary_status` as the three separate facts they are; with zero
+`VERIFIED_LIVE` rows it reports zero models live-verified.

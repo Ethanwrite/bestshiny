@@ -1494,6 +1494,16 @@ class PersistentCharacterStateService:
         for delta in deltas:
             latest.setdefault(delta.character_id, delta)
         committed: list[CharacterStateVersion] = []
+        for project_id, scope_key in sorted(
+            {(delta.project_id, delta.timeline_scope_key) for delta in latest.values()}
+        ):
+            # Serialize the head mutation with merge/retire/abandon.  Whichever
+            # operation owns the branch row first determines the result: a
+            # commit finishes before the merge snapshot, or observes the
+            # closed branch and refuses the write.
+            assert_branch_writable_in_session(
+                session, project_id=project_id, scope_key=scope_key
+            )
         if latest:
             locked_input = session.scalar(
                 select(TimelineState)

@@ -7,9 +7,14 @@ A working platform for AI short-drama and commercial visual production. Two entr
 
 Before taking over development, read [the documentation index](docs/README.md)、[the current handoff](HANDOFF.md)、[the open-issues list](docs/OPEN_ISSUES.md)、[the architecture](CURRENT_ARCHITECTURE.md)、[the production evidence report](docs/PRODUCTION_EVIDENCE.md)、[the readiness checklist](docs/PRODUCTION_READINESS_CHECKLIST.md) and [the requirements ledger](docs/PRODUCT_REQUIREMENTS_LEDGER.md). Source and Skill audits are in [docs/source-audit.md](docs/source-audit.md) and [docs/skill-research.md](docs/skill-research.md).
 
-> **The Phase III offline checkpoint is still not releasable.** The offline algorithm core is frozen at commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`; Phase III was implemented at `99f9c60` with evidence snapshot tag `v0.3.0-production-evidence-core-offline`. The Phase III whole-repository gate was `406 passed, 57 warnings in 71.58s`, and PostgreSQL 17.10 + pgvector 0.8.6 plus a Docker Compose production-like smoke passed on real machines. No live Provider canary may be inferred from code: real Provider calls this round were **0**, known development-caused Provider spend is **USD 0**, and the single-video canary is **NOT EXECUTED**.
+> **Current RC truth (2026-08-29):** branch `claude/rc-predeploy-integration`, migration head
+> `0060_flow_remote_owner_index`. The current database has 22 `live_enabled` models and 0
+> `VERIFIED_LIVE`; Alibaba OSS passes preflight, but no current platform-closed canary proves submission,
+> result download, media registration and billing reconciliation. Character Evidence remains SHADOW with
+> 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
+> callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 
-The current 2026-08-23 development checkpoint (commit `ea9d042`, no remote) adds migrations `0028_persistent_character_state` through
+The historical 2026-08-23 development checkpoint (commit `ea9d042`) added migrations `0028_persistent_character_state` through
 `0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the
 series narrative ledger, and adds the first working image-generation path — `openai/gpt-image-2` through the
 OpenRouter Image API, bound as the `IMAGE_GENERATION` role. No video Provider was added and none was called.
@@ -19,11 +24,9 @@ similarity only supplements), the Narrative Ledger's `series_context()` feeds th
 unresolvable dependency moves the shot to `USER_REVIEW_REQUIRED` instead of degrading, and a Frame Anchor
 Planner decides inherit-vs-reconstruct between every two adjacent shots — see
 [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) and [`HANDOFF.md`](HANDOFF.md).
-The `406 passed` figure above is historical evidence from the previously tagged checkpoint. The current
-working-tree gate measures **`612 passed, 2 skipped, 61 warnings`** — the two skipped are opt-in live image
-tests — with Ruff check, Mypy (133 source files), the Web production build and npm audit all green. This is
-still not an endorsement of real visual-review accuracy, of on-chain payment operations, or of a production
-launch.
+Historical test counts below remain checkpoint evidence only. The RC gate and deployment evidence are recorded
+in [`HANDOFF.md`](HANDOFF.md); no offline count is an endorsement of real visual-review accuracy, on-chain
+payment operations, Provider accuracy, or public production reachability.
 
 ## What is implemented
 
@@ -83,14 +86,18 @@ docker compose up --build
 - API 文档：<http://localhost:8080/docs>
 - MinIO 控制台：<http://localhost:9001>
 
-Compose 包含 Web、FastAPI、后台 worker、PostgreSQL + pgvector、MinIO 及自动建桶任务。首次启动或升级旧数据库前，应先备份数据库并确认迁移：
+Compose 包含 Web、FastAPI、后台 worker、PostgreSQL + pgvector；生产媒体面使用 `.env` 中配置的
+S3-compatible Alibaba OSS，`/data/media` 只是 API/worker 共用的临时处理缓存。首次启动或升级旧数据库前，应先备份数据库并确认迁移：
 
 ```bash
 uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0052_shot_dependencies`（`0034` 之后的链见 `migrations/versions/`；`0052` 增加显式镜头依赖表）。`0030` 增加 Alchemy Delivery、Base USDC 付款事实与追加式购买积分 Ledger；`0031` 增加通用链上 PaymentIntent；`0032` 增加 DePay checkout session 与不可改写的签名回调收据；`0033` 把 DePay checkout 绑定到独立 PaymentIntent，并将 FREE→PRO 与 3,000 Credits 入账收口到同一事务。PostgreSQL 实机证据仍只到 `0032`，上线前必须在临时 PostgreSQL 验证 `0033`；历史 Compose 证据仍只背书到 `0027`。
+当前迁移代码链为单 head `0060_flow_remote_owner_index`：`0053`–`0059` 增加 Creative Director、
+跨集延续、叙事位置、Character Evidence 持久化、rendition 生命周期、完整上传验证和 Timeline 分支；
+`0060` 修复从长期运行 PostgreSQL 卷发现的 Flow remote-project 唯一索引漂移。2026-08-29 已用真实
+`0052` 备份在独立 PostgreSQL 库完成 `0052→0060→0052→0060` 与 `alembic check`。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 

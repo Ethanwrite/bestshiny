@@ -155,14 +155,14 @@ def assert_branch_writable_in_session(
     """
 
     row = session.scalar(
-        select(TimelineBranch.status).where(
+        select(TimelineBranch).where(
             TimelineBranch.project_id == project_id,
             TimelineBranch.scope_key == scope_key,
-        )
+        ).with_for_update()
     )
-    if row is not None and row != "ACTIVE":
+    if row is not None and row.status != "ACTIVE":
         raise TimelineBranchError(
-            f"timeline branch {scope_key!r} is {row} and no longer accepts state writes"
+            f"timeline branch {scope_key!r} is {row.status} and no longer accepts state writes"
         )
 
 
@@ -234,7 +234,7 @@ class TimelineBranchService:
         if not merged_by.strip():
             raise TimelineBranchError("a merge requires the identity of who merged")
         with self.database.session() as session:
-            row = self._require(session, project_id, scope_key)
+            row = self._require(session, project_id, scope_key, lock=True)
             if row.branch_kind == "MAIN":
                 raise TimelineBranchError("the main timeline cannot be merged into anything")
             if row.branch_kind == "DREAM" and into_scope_key == MAIN_SCOPE and not allow_dream_states:
@@ -313,7 +313,7 @@ class TimelineBranchService:
         if not reason.strip():
             raise TimelineBranchError("closing a branch requires a reason")
         with self.database.session() as session:
-            row = self._require(session, project_id, scope_key)
+            row = self._require(session, project_id, scope_key, lock=True)
             if row.branch_kind == "MAIN":
                 raise TimelineBranchError("the main timeline cannot be retired or abandoned")
             if row.status == status:
@@ -470,13 +470,16 @@ class TimelineBranchService:
 
     # ---------------------------------------------------------------- helpers
     @staticmethod
-    def _require(session: Session, project_id: str, scope_key: str) -> TimelineBranch:
-        row = session.scalar(
-            select(TimelineBranch).where(
+    def _require(
+        session: Session, project_id: str, scope_key: str, *, lock: bool = False
+    ) -> TimelineBranch:
+        query = select(TimelineBranch).where(
                 TimelineBranch.project_id == project_id,
                 TimelineBranch.scope_key == scope_key,
             )
-        )
+        if lock:
+            query = query.with_for_update()
+        row = session.scalar(query)
         if row is None:
             raise LookupError(f"timeline branch not found: {scope_key}")
         return row

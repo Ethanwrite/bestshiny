@@ -1671,8 +1671,11 @@ def create_app(container: Container | None = None) -> FastAPI:
         the baseline episode, flags and the decline streak. Changes no gate.
         """
 
-        kwargs = {"drift_threshold": drift_threshold} if drift_threshold is not None else {}
-        return container.style_drift.series_report(project_id, **kwargs).as_dict()
+        if drift_threshold is None:
+            return container.style_drift.series_report(project_id).as_dict()
+        return container.style_drift.series_report(
+            project_id, drift_threshold=drift_threshold
+        ).as_dict()
 
     @app.post("/v1/episodes/{episode_id}/plan-frame-anchors")
     def plan_frame_anchors(

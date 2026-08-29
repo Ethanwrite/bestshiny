@@ -184,6 +184,57 @@ def test_merge_captures_a_manifest_of_only_the_allowed_paths(  # type: ignore[no
     assert "secret" not in str(manifest["values"])
 
 
+@pytest.mark.postgres_only
+def test_merge_waits_for_an_inflight_branch_state_write(container, project, branches) -> None:  # type: ignore[no-untyped-def]
+    result = _compile(container, project, episode_number=2)
+    second = result.shot_ids[1]
+    from narrative_core import AuthoritativeTimelineStateEngine
+    from production_domain.models import CharacterStateHead
+    from test_character_state_schema import _committed_initial_state
+
+    AuthoritativeTimelineStateEngine(container.database).set_transition(second, "FLASHBACK")
+    scope = f"flashback:{second}"
+    seeded = _committed_initial_state(
+        container,
+        project,
+        timeline_scope_key=scope,
+        narrative_state={"injuries": ["old"]},
+    )
+    outcome: dict[str, object] = {}
+
+    def merge_branch() -> None:
+        outcome.update(
+            branches.merge(
+                project.id,
+                scope,
+                allowed_state_paths=["injuries"],
+                merged_by="concurrency-test",
+            )
+        )
+
+    with container.database.session() as session:
+        assert_branch_writable_in_session(
+            session, project_id=project.id, scope_key=scope
+        )
+        thread = threading.Thread(target=merge_branch)
+        thread.start()
+        thread.join(timeout=0.2)
+        assert thread.is_alive(), "merge must wait while a state writer owns the branch row"
+        head = session.scalar(
+            select(CharacterStateHead).where(
+                CharacterStateHead.project_id == project.id,
+                CharacterStateHead.character_id == seeded["character_id"],
+                CharacterStateHead.timeline_scope_key == scope,
+            )
+        )
+        assert head is not None
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert outcome["merge_manifest"][seeded["character_id"]]["values"] == {
+        "injuries": ["old"]
+    }
+
+
 def test_concurrent_merges_produce_one_winner(container, project, branches) -> None:  # type: ignore[no-untyped-def]
     result = _compile(container, project)
     second = result.shot_ids[1]

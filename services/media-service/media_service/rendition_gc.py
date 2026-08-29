@@ -156,7 +156,15 @@ def sweep_rendition_gc(
     objects_kept_shared = 0
     for rendition_id in claimed_ids:
         with database.session() as session:
-            row = session.get(MediaRendition, rendition_id)
+            # The row lock is shared with every revival path.  It spans the
+            # external delete, so a resolver either revives first (and this
+            # claim is abandoned) or waits until deletion is complete and
+            # writes fresh bytes afterwards.
+            row = session.scalar(
+                select(MediaRendition)
+                .where(MediaRendition.id == rendition_id)
+                .with_for_update()
+            )
             if row is None or row.lifecycle_status != "GC_CLAIMED" or row.gc_claim_id != claim:
                 contended += 1
                 continue

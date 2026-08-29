@@ -64,7 +64,7 @@ class ThumbnailService:
                     MediaRendition.media_asset_id == asset_id,
                     MediaRendition.kind == MediaRenditionKind.THUMBNAIL.value,
                     MediaRendition.constraint_key == THUMBNAIL_CONSTRAINT_KEY,
-                )
+                ).with_for_update()
             )
             if existing is not None and existing.lifecycle_status == "ACTIVE":
                 touch_rendition_access(existing)

@@ -1,21 +1,15 @@
 # AI Director Platform — Documentation Index
 
-Snapshot: 2026-08-26 · branch `claude/production-readiness-postgres` · commit `64ee277`
+Snapshot: 2026-08-29 · branch `claude/rc-predeploy-integration`
 Release verdict: **NOT PRODUCTION-READY**
 
-Current work is the all-models pricing audit: every billable model now prices from
-a published provider rate with a source URL and a date, or is refused a paid route.
-Migration head `0049_live_canary_status`. Nine of twelve billable models are
-`VERIFIED_NO_SPEND`; none has yet completed a live canary. Read `HANDOFF.md` §1b
-first, and the "Model pricing" section of `CURRENT_ARCHITECTURE.md` for the shape.
-
-The Phase II offline algorithm core is frozen at commit `0a74d31`, tag
-`v0.2.0-algorithm-core-offline`. Phase III was implemented at `99f9c60` with the offline
-evidence snapshot tag `v0.3.0-production-evidence-core-offline`; that tag is not proof of a
-production release. The current unreleased working tree adds migrations
-`0028_persistent_character_state` through `0034_narrative_ledger`, a project-level style lock,
-the fixed 30 USDC DePay / Base Native USDC shared payment link, and the series narrative
-ledger. No new visual-generation Provider was added.
+Current migration head is `0060_flow_remote_owner_index`. The database records 22
+`live_enabled` models and 0 `VERIFIED_LIVE`; Alibaba OSS passes preflight, while Ark/DashScope
+return-media hosts and an end-to-end launch-model canary remain unverified. Character Evidence is
+SHADOW, Modal is not deployed, the authorized validation set is empty, and this deployment uses the
+explicit `CHARACTER_EVIDENCE_ENABLED=false` path. Payment and whole-episode export are not in scope.
+Read the current-truth section at the top of `HANDOFF.md` first. Older counts and migration states in
+the evidence documents are labeled historical checkpoint evidence, not current release truth.
 
 ## Read first
 
@@ -52,13 +46,13 @@ ledger. No new visual-generation Provider was added.
 - [Skill research and licensing record](skill-research.md)
 - [Source and dependency audit](source-audit.md)
 
-## Current verification summary
+## Verification history
 
 - Historical offline baseline: `348 passed, 39 warnings`, frozen at `0a74d31`.
 - Phase III tag, whole repository: `406 passed, 57 warnings in 71.58s`; Mypy over 121 source
   files, Ruff lint, Node syntax and `git diff --check` passed. Warnings are mostly known
   Alembic/SQLite/Starlette deprecations and the SQLAlchemy FK cycle.
-- **Current working tree (2026-08-22): `521 passed, 61 warnings`**; Ruff check, Mypy over 131
+- **Historical working tree (2026-08-22): `521 passed, 61 warnings`**; Ruff check, Mypy over 131
   source files, Web production build, npm audit, and a single Alembic head
   `0034_narrative_ledger`. The count rose from 473 to 521 with Provider payload/reference
   contracts, the Flow and Wan model-key mappings, the routing-integrity gate, the structural

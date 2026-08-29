@@ -139,6 +139,32 @@ def test_brief_approval_emits_and_executes_key_visual_actions(openrouter_contain
         with container.database.session() as session:
             assert len(list(session.scalars(select(GenerationJob)))) == len(executed)
 
+            # A failed action remains retryable.  Its idempotency key reuses
+            # the existing job instead of spending or inserting twice.
+            action = session.scalar(select(CreativeAction).order_by(CreativeAction.sequence))
+            action.status = "FAILED"
+            retry_anchor_key = action.payload_json["anchor_key"]
+            anchor = session.scalar(
+                select(CreativeVisualAnchor).where(
+                    CreativeVisualAnchor.anchor_key == retry_anchor_key
+                )
+            )
+            anchor.status = "FAILED"
+            anchor.failure_code = "TRANSIENT_TEST_FAILURE"
+        retried = client.post(f"/v1/creative/sessions/{session_id}/visuals/execute")
+        assert retried.status_code == 200
+        assert len(retried.json()["executions"]) == 1
+        assert retried.json()["executions"][0]["status"] == "EXECUTED"
+        with container.database.session() as session:
+            assert len(list(session.scalars(select(GenerationJob)))) == len(executed)
+            anchor = session.scalar(
+                select(CreativeVisualAnchor).where(
+                    CreativeVisualAnchor.anchor_key == retry_anchor_key
+                )
+            )
+            assert anchor.status == "GENERATING"
+            assert anchor.failure_code is None
+
 
 def test_bible_lock_is_versioned_and_immutable(container, project):
     with _client(container) as client:
@@ -242,6 +268,47 @@ def test_beats_approval_compiles_an_episode_through_the_existing_chain(container
                 len(list(session.scalars(select(Episode).where(Episode.project_id == project.id))))
                 == 1
             )
+
+
+def test_beats_compile_retry_reuses_the_persisted_episode(container, project, monkeypatch):
+    with _client(container) as client:
+        started = _start(client, project.id, RICH_IDEA)
+        session_id = started["session_id"]
+        client.post(
+            f"/v1/creative/sessions/{session_id}/brief/approve",
+            json={"revision": started["brief_revision"]},
+        )
+        bible = client.post(f"/v1/creative/sessions/{session_id}/bible/propose").json()
+        client.post(
+            f"/v1/creative/sessions/{session_id}/bible/approve",
+            json={"version": bible["version"]},
+        )
+        client.post(f"/v1/creative/sessions/{session_id}/beats/propose")
+
+    compiler = container.creative_director.orchestrator
+    original_compile = compiler.compile_episode
+
+    def fail_after_episode_persisted(_episode_id: str):
+        raise RuntimeError("transient compiler failure")
+
+    monkeypatch.setattr(compiler, "compile_episode", fail_after_episode_persisted)
+    with pytest.raises(RuntimeError, match="transient compiler failure"):
+        container.creative_director.approve_beats(
+            session_id, plan_revision=1, actor="test"
+        )
+    with container.database.session() as session:
+        row = session.get(CreativeSession, session_id)
+        persisted_episode_id = row.compiled_episode_id
+        assert persisted_episode_id is not None
+        assert len(list(session.scalars(select(Episode)))) == 1
+
+    monkeypatch.setattr(compiler, "compile_episode", original_compile)
+    result = container.creative_director.approve_beats(
+        session_id, plan_revision=1, actor="test"
+    )
+    assert result["episode_id"] == persisted_episode_id
+    with container.database.session() as session:
+        assert len(list(session.scalars(select(Episode)))) == 1
 
 
 def test_dialogue_is_closed_after_compile(container, project):

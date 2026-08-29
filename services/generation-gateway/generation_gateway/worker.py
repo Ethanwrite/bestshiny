@@ -168,8 +168,8 @@ def verify_media_once(container) -> int:  # type: ignore[no-untyped-def]
 
     Completion adopted the object from a header read; this decodes the whole
     file (and re-checks its SHA) before the asset may serve providers.
-    Failures release the workspace's settled bytes and land in INVALID or
-    QUARANTINED, never in a silent retry loop.
+    Failures remain charged while their retained evidence object lands in
+    INVALID or QUARANTINED, never in a silent retry loop.
     """
 
     from media_service import WorkspaceStorageQuota, verify_pending_assets

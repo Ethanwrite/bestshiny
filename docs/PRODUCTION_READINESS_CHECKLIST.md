@@ -1,5 +1,15 @@
 # Production Readiness Checklist
 
+## RC delta — 2026-08-29
+
+Current head is `0060_flow_remote_owner_index`. Alibaba OSS preflight and a real-database
+backup/restore/migration round trip pass. `live_enabled=22` is not live verification:
+`VERIFIED_LIVE=0`. Character Evidence is intentionally disabled for this deployment because Modal and
+public signed-callback reachability are not proven; payment and final-episode export are excluded. The
+unchecked live-evidence, public HTTPS, security and operations items below continue to block a public
+production claim. Final RC gates: SQLite `1189 passed / 12 skipped`, PostgreSQL
+`1194 passed / 7 skipped`, Ruff, Mypy (180 source files), `git diff --check`, Web build, and npm audit.
+
 Snapshot: 2026-08-22
 
 Current verdict: **NOT PRODUCTION-READY**
@@ -32,7 +42,10 @@ a live Provider result. The authoritative evidence narrative is
   validated with recorded evidence.
 - [x] Docker Desktop 29.5.3 Compose config/build/up/health passes for Web, API, worker, PostgreSQL and MinIO with no crash loop.
 - [x] Docker smoke used fake development credentials, supplied no Provider key, made no live call and was shut down without deleting volumes.
-- [ ] Backup/restore and rollback runbooks tested.
+- [x] Local production-shaped PostgreSQL backup/restore and `0052 → 0060 → 0052 → 0060` migration
+  round trip tested on 2026-08-29. The old `9a06dcf` API image also passed health against the restored
+  database after downgrade to `0052`, proving the application/database rollback pair. Managed
+  off-machine retention and disaster recovery remain unchecked.
 
 ## Production evidence core
 

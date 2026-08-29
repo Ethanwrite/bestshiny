@@ -215,7 +215,6 @@ def verify_pending_assets(
             storage_key = asset.storage_key
             declared_mime = asset.mime_type.lower()
             declared_sha = asset.sha256
-            declared_size = asset.size_bytes
 
         verdict = _verify_stored_object(
             storage,
@@ -241,10 +240,10 @@ def verify_pending_assets(
                     asset.duration = verdict.duration
                 ready += 1
             else:
-                if quota is not None and quota.release_settled_for_asset_in(
-                    session, asset_id=asset_id, size_bytes=declared_size
-                ):
-                    quota_released += 1
+                # INVALID and QUARANTINED objects are deliberately retained for
+                # audit/reconciliation.  Retained bytes still consume storage;
+                # releasing their settled quota would let repeated bad uploads
+                # grow the bucket without bound.
                 if verdict.status == "INVALID":
                     invalid += 1
                 else:

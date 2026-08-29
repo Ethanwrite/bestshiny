@@ -180,3 +180,69 @@ New task-owned paths:
 
 Do not discard or reset the working tree. Do not modify/delete `.worktrees/` while handling this
 handoff.
+
+---
+
+## Addendum — 2026-08-29, release-candidate integration branch
+
+This working tree was integrated into `claude/rc-predeploy-integration` and hardened there.
+Nothing below changes the deployment blocker: `api.bestshiny.com` HTTPS reachability is still
+unverified, and **no Modal deploy has run**.
+
+### What was added (BestShiny side — live code, tested offline)
+
+- `character_evidence_submissions` (migration `0056`): the durable lifecycle. One row per
+  candidate (unique — the same candidate can never start a second remote GPU job from this
+  side), shadow-only by check constraint, statuses
+  `PENDING → ACCEPTED → REPORTED / FAILED`, `SKIPPED` with a named reason, and
+  `RECONCILIATION_REQUIRED` when an acceptance goes silent past
+  `CHARACTER_EVIDENCE_CALLBACK_TIMEOUT_SECONDS`.
+- `CharacterEvidenceTracker` sweeps (worker loop + `POST /internal/maintenance/character-evidence`):
+  enqueue after candidate video output registration (explicit
+  `CHARACTER_EVIDENCE_SHADOW_ENQUEUED` / `_SUBMITTED` events on the generation job), dispatch
+  PENDING through the configured producer with a bounded attempt budget, scan ACCEPTED
+  timeouts. Operator surfaces: list submissions, reconcile (`RESUBMIT` / `MARK_FAILED`, note
+  required). The webhook now also records callbacks onto the submission row.
+- `CHARACTER_EVIDENCE_ENABLED=false` is the one sanctioned way to start production without
+  this service while the deploy stays blocked — an explicit configuration decision; with the
+  switch on (default), every fail-closed startup check is unchanged.
+
+### What was added (Modal side — code only, NOT deployed, NOT verified)
+
+- Atomic job claim (`modal.Dict.put(..., skip_if_exists=True)`, semantics confirmed against
+  modal.com's reference docs): a duplicate job_id answers 202 with `duplicate: true` and
+  spawns nothing.
+- Callback durability: bounded in-process retries, then the envelope spools to a Modal Queue
+  drained by a scheduled redelivery function every 5 minutes, with a `dead` partition after
+  the budget instead of silent loss.
+
+### Voyage multimodal embeddings as supplementary AppearanceEncoder evidence — evaluated, INCOMPATIBLE
+
+Requested evaluation, answered explicitly rather than force-fitted:
+
+1. **Vector semantics do not match.** The AppearanceEncoder compares DINOv2 features of
+   *aligned person crops from tracked boxes* against reference crops — a per-track visual
+   identity space with thresholds versioned in `thresholds-v1.json`. `voyage-multimodal-3.5`
+   (used by the memory engine) embeds whole images into a semantic retrieval space: two
+   different people in similar scenes embed close, the same person under changed lighting can
+   embed far. No calibration bridge exists between the two similarity scales, and inventing
+   one is exactly what the router-evidence isolation rule forbids elsewhere.
+2. **The provenance contract structurally rejects it.** Every evidence report must carry five
+   model-provenance entries with pinned artifact SHA-256 and source revision
+   (`report_from_payload` enforces this). A remote API model has no artifact digest to pin;
+   its reports would be rejected as invalid, correctly.
+3. **The boundary rule forbids it.** This service's contract is "no provider transport may
+   satisfy this boundary and there is no local production fallback" — routing per-sample
+   crops through a paid external embedding API would put a provider in the identity-evidence
+   path and the API in the media path.
+
+Conclusion: Voyage stays what it is (retrieval/memory ranking). Face identity (SFace) remains
+the primary identity evidence; DINOv2 appearance remains supplementary; hair/costume remain
+`UNAVAILABLE`.
+
+### Unchanged truths
+
+- Operating mode `SHADOW`; observation-only recording while the authorized validation set has
+  0 examples; ABSTAIN and the NoopVisualJudge evidence-incomplete path cannot auto-pass
+  anything; every offline test uses stub producers and says so — none of it is real-model or
+  deployed-service verification.

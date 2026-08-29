@@ -506,13 +506,22 @@ class CreativeDirectorService:
         session.flush()
         return _action_view(action)
 
-    def pending_actions(self, session_id: str, *, kind: str | None = None) -> list[dict[str, Any]]:
+    def pending_actions(
+        self,
+        session_id: str,
+        *,
+        kind: str | None = None,
+        include_failed: bool = False,
+    ) -> list[dict[str, Any]]:
         with self.database.session() as session:
+            statuses = [CreativeActionStatus.PROPOSED.value]
+            if include_failed:
+                statuses.append(CreativeActionStatus.FAILED.value)
             query = (
                 select(CreativeAction)
                 .where(
                     CreativeAction.session_id == session_id,
-                    CreativeAction.status == CreativeActionStatus.PROPOSED.value,
+                    CreativeAction.status.in_(statuses),
                 )
                 .order_by(CreativeAction.sequence)
             )
@@ -547,6 +556,7 @@ class CreativeDirectorService:
                     if status == CreativeActionStatus.EXECUTED.value:
                         anchor.status = CreativeAnchorStatus.GENERATING.value
                         anchor.generation_job_id = result.get("job_id")
+                        anchor.failure_code = None
                     else:
                         anchor.status = CreativeAnchorStatus.FAILED.value
                         anchor.failure_code = str(result.get("error") or "EXECUTION_FAILED")[:240]
@@ -775,34 +785,56 @@ class CreativeDirectorService:
 
         script, ordered_intents = render_script(beats_json)
         with self.database.session() as session:
-            row = self._session(session, session_id)
             from production_domain.models import Episode
 
-            next_number = (
-                session.scalar(
-                    select(func.coalesce(func.max(Episode.episode_number), 0)).where(
-                        Episode.project_id == project_id
+            row = session.scalar(
+                select(CreativeSession)
+                .where(CreativeSession.id == session_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
+            action_key = f"creative:{session_id}:episode:r{plan_revision}"
+            existing_action = session.scalar(
+                select(CreativeAction).where(CreativeAction.idempotency_key == action_key)
+            )
+            existing_episode_id = row.compiled_episode_id
+            if existing_episode_id is None and existing_action is not None:
+                existing_episode_id = existing_action.payload_json.get("episode_id")
+            episode = session.get(Episode, existing_episode_id) if existing_episode_id else None
+            if episode is None:
+                next_number = (
+                    session.scalar(
+                        select(func.coalesce(func.max(Episode.episode_number), 0)).where(
+                            Episode.project_id == project_id
+                        )
                     )
+                    + 1
                 )
-                + 1
-            )
-            episode = Episode(
-                project_id=project_id,
-                title=episode_title or (row.title[:200] or f"Episode {next_number}"),
-                episode_number=next_number,
-                script_source=script,
-            )
-            session.add(episode)
-            session.flush()
+                episode = Episode(
+                    project_id=project_id,
+                    title=episode_title or (row.title[:200] or f"Episode {next_number}"),
+                    episode_number=next_number,
+                    script_source=script,
+                )
+                session.add(episode)
+                session.flush()
+            elif episode.project_id != project_id:
+                raise CreativeSessionConflict("recorded episode belongs to another project")
             episode_id = episode.id
             episode_number = episode.episode_number
-            self._emit_action(
-                session,
-                row,
-                StructuredActionKind.CREATE_EPISODE,
-                {"episode_id": episode_id, "episode_number": episode_number},
-                idempotency_key=f"creative:{session_id}:episode:r{plan_revision}",
-            )
+            row.compiled_episode_id = episode_id
+            if existing_action is None:
+                self._emit_action(
+                    session,
+                    row,
+                    StructuredActionKind.CREATE_EPISODE,
+                    {"episode_id": episode_id, "episode_number": episode_number},
+                    idempotency_key=action_key,
+                )
+            elif existing_action.payload_json.get("episode_id") != episode_id:
+                raise CreativeSessionConflict("episode action disagrees with the recorded episode")
+            session.flush()
 
         result = self.orchestrator.compile_episode(episode_id)
         shot_ids = list(result.detail.get("shot_ids", []))

@@ -107,7 +107,9 @@ def register_creative_routes(
         """
 
         results: list[dict[str, Any]] = []
-        pending = creative.pending_actions(session_id, kind="GENERATE_KEY_VISUAL")
+        pending = creative.pending_actions(
+            session_id, kind="GENERATE_KEY_VISUAL", include_failed=True
+        )
         for action in pending:
             payload = action["payload"]
             try:

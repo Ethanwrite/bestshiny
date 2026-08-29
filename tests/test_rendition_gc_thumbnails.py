@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -198,6 +199,54 @@ def test_a_collected_rendition_revives_in_place_on_demand(container, project) ->
         assert len(rows) == 1, "the tombstone row was revived, not duplicated"
         assert rows[0].lifecycle_status == "ACTIVE"
         assert rows[0].metadata_json.get("revived_from") == "DELETED"
+
+
+@pytest.mark.postgres_only
+def test_gc_delete_and_revival_are_serialized(container, project, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    asset = _register_image(container, project.id, seed=16)
+    derived = _derive(container, asset.id, OLD_BOUNDS)
+    _age_rendition(container, derived.storage_key, days=30)
+    delete_entered = threading.Event()
+    allow_delete = threading.Event()
+    original_delete = container.storage.delete
+
+    def pausing_delete(key: str) -> bool:
+        delete_entered.set()
+        assert allow_delete.wait(timeout=5)
+        return original_delete(key)
+
+    monkeypatch.setattr(container.storage, "delete", pausing_delete)
+    gc_result: dict[str, object] = {}
+    revived: dict[str, object] = {}
+
+    def collect() -> None:
+        gc_result["result"] = sweep_rendition_gc(
+            database=container.database,
+            storage=container.storage,
+            active_constraint_profiles=frozenset(),
+            min_idle_seconds=60,
+            limit=10,
+        )
+
+    def resolve_again() -> None:
+        revived["result"] = _derive(container, asset.id, OLD_BOUNDS)
+
+    collector = threading.Thread(target=collect)
+    collector.start()
+    assert delete_entered.wait(timeout=5)
+    resolver = threading.Thread(target=resolve_again)
+    resolver.start()
+    resolver.join(timeout=0.2)
+    assert resolver.is_alive(), "revival must wait while GC owns the rendition row"
+    allow_delete.set()
+    collector.join(timeout=5)
+    resolver.join(timeout=5)
+    assert not collector.is_alive() and not resolver.is_alive()
+    revived_row = revived["result"]
+    assert container.storage.path_for(revived_row.storage_key).is_file()
+    with container.database.session() as session:
+        row = session.scalar(select(MediaRendition))
+        assert row.lifecycle_status == "ACTIVE"
 
 
 def test_image_thumbnail_is_derived_cached_and_bounded(container, project) -> None:  # type: ignore[no-untyped-def]

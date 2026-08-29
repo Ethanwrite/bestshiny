@@ -204,11 +204,13 @@ def test_rejection_releases_the_settled_storage_bytes(container, project) -> Non
     assert used_before == len(payload)
     result = _verify(container, quota=quota)
     assert result.invalid == 1
-    assert result.quota_released == 1
+    assert result.quota_released == 0
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
-        assert workspace.used_storage_bytes == 0
+        # The rejected object is retained for audit/reconciliation, so its
+        # bytes remain charged until a separate deletion path removes it.
+        assert workspace.used_storage_bytes == len(payload)
         from production_domain.models import StorageReservation
 
         row = session.scalar(select(StorageReservation))
-        assert row.status == "RELEASED_INVALID"
+        assert row.status == "SETTLED"

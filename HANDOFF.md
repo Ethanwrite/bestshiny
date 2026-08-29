@@ -3,8 +3,31 @@
 Date: 2026-08-29 · Branch `claude/rc-predeploy-integration` — the release-candidate
 integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference adaptation),
 `claude/creative-director-episodes` `f5f68c6` (open PR #9, migrations `0053`/`0054`), and the
-2026-08-28 Character Evidence working tree from the main checkout · database/Alembic head
-`0054_episode_continuations` · **NOT PRODUCTION-READY**
+2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
+`0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
+
+## Current RC truth — supersedes historical status statements below
+
+- The running Compose stack was still built from `main@9a06dcf` with its database at
+  `0052_shot_dependencies` when this RC deploy began. The RC contains migrations through `0059`, plus
+  `0060`, which repairs a real Flow ownership-index drift found by the backup/restore rehearsal.
+- Final predeploy gates passed: SQLite `1189 passed / 12 skipped`, PostgreSQL
+  `1194 passed / 7 skipped`, Ruff, Mypy (180 source files), `git diff --check`, Web production
+  build and npm audit. The pinned `9a06dcf` API image passed health against the restored database
+  after a rehearsal downgrade to `0052`; the rehearsal database was then returned to `0060`.
+- The database currently records `live_enabled=22` and `VERIFIED_LIVE=0`. Historical provider task IDs
+  in this handoff are useful protocol anecdotes, but they are **not** platform-closed canary evidence and
+  must not be presented as `VERIFIED_LIVE`.
+- Alibaba OSS now passes the storage preflight. Statements below that say `S3_*` is empty are obsolete.
+  Ark and DashScope return-media hosts remain outside the verified allowlist until a real completed
+  canary identifies them.
+- Character Evidence remains `SHADOW`, the authorized validation set has 0 samples, Modal is not
+  deployed, and public callback reachability is unproven. This deployment therefore explicitly sets
+  `CHARACTER_EVIDENCE_ENABLED=false`; it does not claim a Modal deployment.
+- Payment is excluded from this release: Alchemy signing key/id, treasury address and crediting are not
+  configured, DePay has no callback public key, and recurring grants/renewals/plan discounts do not exist.
+- Episode delivery is per-shot MP4 only. Assembly, audio mix, subtitles/titles and a final episode export
+  are not implemented and are not part of this release.
 
 The Character Evidence → Modal productionization is integrated here from the main checkout's
 previously uncommitted working tree (snapshot taken 2026-08-29; the main checkout itself was not
@@ -72,14 +95,13 @@ marked `postgres_only`). They need `--run-live-provider` *and* the three-part ga
 and the two new Wan I2V/R2V ones additionally need object storage, without which
 they skip rather than inventing a reference URL.
 
-**Wan 2.7 T2V is verified live** (2026-08-25). `PROVIDER_MODE=live` on the user's
-instruction; task `285f787d-c1fe-40c5-8893-6e1f89adbb70` submitted, polled and
-`COMPLETED` with a fetchable `video/mp4` artefact — auth, the DashScope async
-protocol and the poll parsing all confirmed against the real service. Known spend
-is **no longer USD 0**: one 5s 720P clip.
+**Historical Wan 2.7 T2V provider task report — not current `VERIFIED_LIVE` evidence.** On
+2026-08-25 task `285f787d-c1fe-40c5-8893-6e1f89adbb70` was reported submitted and completed with
+MP4 bytes. The current database contains no `VERIFIED_LIVE` model row or platform-closed canary usage
+for it, so this report cannot satisfy the release gate or prove current media registration and billing.
 
-**Wan 2.7 I2V and R2V are now verified live too** (2026-08-25), against the
-corrected protocol in §12d:
+**Historical Wan 2.7 I2V/R2V provider task reports — also not current `VERIFIED_LIVE` evidence.**
+The following raw provider tasks were recorded in the earlier handoff:
 
 ```text
 i2v  task fb7cf016-479d-4816-a066-8894525466d8   COMPLETED   413,652 B  ftyp/isom
@@ -96,7 +118,8 @@ no `parameters.audio` is accepted. The reference plate was fetched by Alibaba
 from a presigned OSS GET — the whole `FETCHABLE_URL` path working end to end for
 the first time.
 
-Known spend: three clips — one 5s T2V, one 2s I2V, one 2s R2V.
+They remain protocol evidence only. Current release evidence still requires the platform to record the
+submission, poll/callback, output download, media registration and reconciled cost in one canary chain.
 
 **One thing these runs do not establish.** They prove the corrected body is
 *accepted*. They do not prove the previous body would have been *rejected* —
@@ -2017,14 +2040,10 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 
 **Blocked on the user**
 
-- **`PROVIDER_MODE=live` is the only live gate still unset.** `ALLOW_LIVE_PROVIDER_CALLS` and
-  `LIVE_PROVIDER_CONFIRMATION` are already correct. The agent must not flip the last one: it is
-  the switch that makes every provider transport billable.
-- **Object storage is not configured.** `S3_*` are empty, so the storage backend cannot presign.
-  Two things depend on it: every reference-carrying shot (including every image *edit*) fails
-  closed, and `POST /v1/assets/uploads` answers `501`. The signed local route is enabled for
-  development only; it proxies through the API and must not be the production answer. Configure
-  S3/R2/MinIO and an HTTPS `PUBLIC_BASE_URL`.
+- The three-part live gate is open and Provider calls are billable; every canary still requires a
+  bounded `LiveCanaryPermit` and explicit spend confirmation.
+- Alibaba OSS configuration and checksum preflight pass. What remains unverified is the complete live
+  output path and the exact Ark/DashScope return-media hosts needed by the SSRF allowlist.
 - **Lock styles after `PROVIDER_MODE=live`, not before.** Layer 2 is enabled but cannot run in
   mock mode, and `ProjectStyleLock` is append-only — a style locked now keeps the single gate
   permanently.
@@ -2039,21 +2058,22 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 
 **Known defects, not yet fixed**
 
-- Retrieval is keyed on the current shot's prompt text, so narrative dependency is invisible
-  to it. The ledger covers obligations and retrieval now reaches across episodes, but *which*
-  earlier beat matters is still decided by similarity alone.
-- A synchronous provider's result is held in the Gateway process between confirmation and
-  poll. Losing it reconciles rather than refunds, but making it durable needs a migration.
-- `MediaRenditionKind.THUMBNAIL` exists in the schema and nothing generates one yet; the UI
-  still reads originals.
-- Derived renditions are never garbage-collected. They are content-addressed and small, but a
-  provider that changes limits repeatedly accumulates copies with no retirement policy.
+- Un-declared narrative callbacks still depend on similarity; declared dependencies and ledger obligations
+  are now forced into context and commit-fenced.
+- Ark and DashScope completed-result hosts are not yet verified or allowlisted, so a paid generation can
+  finish remotely and fail closed during output download.
 - `configure_runtime_model` only reconciles models created by this startup's default sync, so
   adding a credential later does not re-enable a model that was disabled for want of one.
-- Aggregate style drift across episodes is unmonitored (per-candidate only).
-- `timeline_scope_key` branch proliferation has no retirement policy.
+- Cross-episode style drift is queryable but has no background alert/gate, no season model, no production
+  evaluations and no calibrated threshold.
+- Timeline branch lifecycle is implemented; orphan scanning is still operator-triggered rather than scheduled.
+- `NoopVisualJudge` remains in use and `FEATURE_AUTO_EVALUATION=false`; no real `VLM_REVIEWER` adapter is deployed.
+- Episode assembly/export, payment closure, recurring subscription crediting and plan discounts are absent.
 
-## 17. Git state
+## 17. Historical Git state
+
+The following paragraph records the 2026-08-23 checkpoint only. It is not the current RC Git state; the
+current branch and head are stated at the top of this handoff.
 
 **Committed at `ea9d042`** on `main`, on 2026-08-23. Everything described in this document is
 in version control; the working tree is clean.

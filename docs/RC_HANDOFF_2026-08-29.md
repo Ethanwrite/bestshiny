@@ -10,19 +10,19 @@ Read this first, then [`../HANDOFF.md`](../HANDOFF.md) and
 | --- | --- |
 | Branch | `claude/rc-predeploy-integration` |
 | Worktree | `/Users/a1-6/Desktop/BestShiny/.worktrees/rc-integration` |
-| HEAD | `c13a60d` — working tree clean |
-| Base | `origin/main` `4f5dd11`; **14 commits ahead, none pushed** |
+| HEAD | see `git log -1` — working tree clean |
+| Base | `origin/main` `4f5dd11`; pushed, open as [#12](https://github.com/Ethanwrite/bestshiny/pull/12) (PR #9 closed as superseded) |
 | Migration head | `0060_flow_remote_owner_index` (single head) |
 | Dev database | already at `0060`; the running `api` container serves this branch's code |
 
 The branch integrates three previously separate workstreams — `origin/main` `4f5dd11`,
-`claude/creative-director-episodes` `f5f68c6` (PR #9), and the 2026-08-28 Character Evidence
+`claude/creative-director-episodes` `f5f68c6` (was PR #9, now closed as superseded), and the 2026-08-28 Character Evidence
 working tree that used to live uncommitted in the main checkout. **The main checkout was never
 modified**; its files were snapshotted read-only. Peer worktrees (`batch-atomicity`,
 `thumbnail-gc`, `video-ref-adaptation`, `upper-capabilities`) belong to other sessions — leave
 them alone.
 
-## 2. Gate state — measured at `c13a60d`, not claimed
+## 2. Gate state — measured, not claimed
 
 ```
 SQLite       1194 passed, 12 skipped    exit 0

@@ -39,12 +39,25 @@ Re-measure rather than trusting these if you change anything; the numbers in `HA
 `PRODUCTION_EVIDENCE.md` and `PRODUCTION_READINESS_CHECKLIST.md` were a commit stale once
 already and had to be corrected.
 
-## 3. The live canary is blocked, and money cannot unblock it
+## 3. The live canary was blocked; both blockers are now cleared
 
-The operator authorised **USD 10** for a full vendor sweep. **Nothing was spent (USD 0.00).**
-Two independent blockers make a sweep produce billed generations with no evidence.
+**Updated 2026-08-29, after the deployment to `bestshiny.com`.** Both blockers below are
+resolved — §3.1 by the environment, §3.2 by the operator's decision — and the sweep is now
+waiting on nothing but a workspace to run as. See §7. The original analysis is kept because
+it is the reasoning that decided the fix, and because §3.1 will read as a mystery again on
+any machine behind the same proxy.
 
-### 3.1 Artifacts cannot be downloaded from this machine
+The operator authorised **USD 10** for a full vendor sweep. **Nothing had been spent (USD 0.00)
+as of this document's original writing.**
+
+### 3.1 Artifacts cannot be downloaded from this machine — RESOLVED by deploying
+
+> **Resolved 2026-08-29.** This was never a code defect; it was the development machine's
+> network. On the production host every provider hostname resolves to a real global
+> address — `openrouter.ai` `104.18.3.115`, `dashscope.aliyuncs.com` `8.152.159.24`,
+> `ark.cn-beijing.volces.com` `101.126.13.31` — so the fence in `registry.py` passes on
+> the evidence it is actually asking for. The fence was not touched, which was the whole
+> point of the paragraph below.
 
 Every provider hostname resolves into the fake-IP proxy range, and connections terminate on a
 local listener:
@@ -71,14 +84,31 @@ the peer check.** The fence is correct; the environment is what is wrong. Making
 weakening an SSRF control is exactly the fake pass the standing rules forbid. The fix is
 operator-side: real DNS for provider hosts, or run the sweep from a network without the proxy.
 
-### 3.2 Nothing can record `VERIFIED_LIVE`
+### 3.2 Nothing can record `VERIFIED_LIVE` — RESOLVED, the operator chose the writer
 
-`live_canary_status` appears **only** in `migrations/` and
-`packages/domain/production_domain/models.py`. No code path writes it — not `scripts/live_canary.py`,
-not the API, not admin. Even a flawless closed loop on a clean network leaves all models at
+> **Answered 2026-08-29: the automatic writer.** It landed in
+> `core/model-registry/model_registry_core/live_canary.py`, and `scripts/live_canary.py`
+> calls it on both the success and failure paths.
+>
+> `record_canary_outcome` stamps `VERIFIED_LIVE` only when every link holds — reached the
+> provider, `COMPLETED`, an artifact registered *and* readable in the bucket with a non-zero
+> size, and a reservation settled for exactly what it reserved. The provider's own task id
+> goes into `live_canary_detail`, so the claim has a handle an auditor can take back to the
+> vendor's console, and `last_verified_at` moves only for a closed loop.
+>
+> Two rules the tests hold still. **Weather is not a verdict**: a rate limit, a provider
+> outage or a network fault records nothing rather than erasing what an earlier run proved.
+> **A durable answer is one**: `401` and `403`/`451` become `LIVE_BLOCKED_EXTERNAL`, and a
+> rejected request body becomes `CONTRACT_INVALID`. The failure drill is deliberately
+> silent — it is refused at our own live gate before a socket opens, so it says nothing
+> whatever about the provider.
+
+`live_canary_status` appeared **only** in `migrations/` and
+`packages/domain/production_domain/models.py`. No code path wrote it — not `scripts/live_canary.py`,
+not the API, not admin. Even a flawless closed loop on a clean network left all models at
 `NOT_RUN`.
 
-This is an open product decision, put to the operator and **not yet answered**:
+This was an open product decision, put to the operator and answered on 2026-08-29:
 
 - add a writer that stamps `VERIFIED_LIVE` only on a fully closed loop (submitted → completed →
   artifact registered → billing reconciled), recording the provider task id and timestamp; **or**
@@ -103,8 +133,13 @@ refuses `openai/gpt-image-2` before dispatch (clear it at openrouter.ai/settings
 
 ## 4. Unfinished work, in priority order
 
-1. **Live canary sweep** — blocked by §3.1 (operator) and §3.2 (decision). Everything else is ready.
-2. **`VERIFIED_LIVE` writer or manual runbook** — §3.2, awaiting the operator's choice.
+*Items 1 and 2 were rewritten on 2026-08-29; see §7 for what deploying changed.*
+
+1. **Live canary sweep** — no longer blocked by the network or by the missing writer. It now
+   needs one thing that is not a code problem: a real workspace on the production host. The
+   database has zero users, and `live_canary.py` refuses to invent the session it runs as.
+   See §7.
+2. **`VERIFIED_LIVE` writer** — **done**, §3.2.
 3. **Reconcile the two billed-but-unfetched jobs** from 2026-08-26/27 (`alibaba/wan-3.0`,
    `x-ai/grok-imagine-video`). Real vendor spend, credits held, needs an operator decision —
    `POST /v1/generations/{job_id}/reconcile`.
@@ -160,3 +195,31 @@ Four gaps were found and closed: a doc/code contradiction about released quota, 
 "deletion lifecycle" that did not exist (now `reclaim_rejected_assets`, which deletes the object
 **before** releasing the reservation), a test whose name asserted the opposite of its body, and
 gate numbers that were a commit stale.
+
+## 7. Deployed — 2026-08-29
+
+`bestshiny.com` is live on `153.75.95.10` from this branch. The runbook, the topology and
+the reasoning behind the storage layout are in [`DEPLOYMENT.md`](DEPLOYMENT.md); what
+matters here is what it changed about the work above.
+
+Resolved by the deployment itself, none of it by changing code:
+
+| Was blocked on | Now |
+| --- | --- |
+| §3.1 provider hostnames resolving into a fake-IP proxy | real global DNS on the host |
+| `OPEN_ISSUES` §1.3 object storage unset | Alibaba OSS `bestshiny-prod-assets-hk`, verified by `scripts/verify_object_storage.py`, CORS granted to both site origins |
+| Character Evidence needing `api.bestshiny.com` over HTTPS | reachable, valid certificate |
+
+`POST /internal/models/reconcile-live?apply=true` opened 19 models; 23 of 24 are now
+`live_enabled`, with `wan-3.0-official` still waiting on a DashScope invitation.
+
+**What the sweep still needs, and why an agent cannot supply it.** `_preflight` wants
+`CANARY_ACCESS_TOKEN` and `CANARY_PROJECT_ID` from a real workspace user. Production has no
+users at all, and both the script and the standing operator rule are explicit that the
+canary takes a session rather than creating one. So: register on `bestshiny.com`, make a
+project, and either export that session's bearer token or name the account to
+`scripts/canary_session.py --email`. The workspace also needs credits — the starter grant is
+50, and the ten sweep targets reserve well beyond that, so a credit adjustment through the
+Admin Console comes first.
+
+The sweep itself is unchanged and still costs at most USD 6.75 under its own USD 10 ceiling.

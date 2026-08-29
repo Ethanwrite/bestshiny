@@ -104,6 +104,7 @@
 
         <nav class="app-nav" aria-label="Workspace">
           <button class="app-nav-item active" data-mode="create" type="button">Create</button>
+          <button class="app-nav-item" data-mode="ai-director" type="button">Create with AI Director</button>
           <button class="app-nav-item" data-mode="director" type="button">Director</button>
           <button class="app-nav-item" data-mode="productions" type="button">Productions</button>
         </nav>
@@ -140,6 +141,14 @@
           </div>
           <span class="subbar-sep" aria-hidden="true"></span>
           <span id="modeDescription" class="subbar-hint">Describe the frame, pick a model, generate.</span>
+        </div>
+        <!-- Create with AI Director -->
+        <div class="subbar-pane" data-page="ai-director" hidden>
+          <span id="creativeStageCrumb" class="subbar-crumb">No session</span>
+          <span class="subbar-sep" aria-hidden="true"></span>
+          <span id="creativeStageChip" class="status-chip is-neutral">Idea</span>
+          <div class="subbar-spacer"></div>
+          <button id="creativeRefreshBtn" class="btn btn-tertiary" type="button">Refresh</button>
         </div>
         <!-- Director -->
         <div class="subbar-pane" data-page="director" hidden>
@@ -207,8 +216,37 @@
             </section>
           </div>
 
+          <!-- AI Director sidebar: sessions + the idea box -->
+          <div class="pane" data-page="ai-director" hidden>
+            <section class="pane-block">
+              <div class="pane-head">
+                <h2>New idea</h2>
+              </div>
+              <label class="field"><span class="field-label">What do you want to make?</span>
+                <textarea id="creativeIdeaInput" rows="5" placeholder="e.g. 一支30秒的悬疑短剧，主角是雨桐，在天台，竖屏 — or just a rough feeling. The director asks only for what is missing."></textarea>
+              </label>
+              <button id="creativeStartBtn" class="btn btn-primary btn-full" type="button">Start with the AI Director</button>
+              <p class="pane-note">Vague is fine. The director clarifies, drafts a brief, generates key visuals, locks a visual bible, then plans beats and shots.</p>
+            </section>
+            <section class="pane-block pane-block-grow">
+              <div class="pane-head">
+                <h2>Sessions</h2>
+                <span class="badge mono"><b id="creativeSessionCount">0</b></span>
+              </div>
+              <div id="creativeSessionList" class="shot-tree empty-state">No sessions yet for this project.</div>
+            </section>
+          </div>
+
           <!-- Director sidebar: script before compile, scene/shot tree after -->
           <div class="pane" data-page="director" hidden>
+            <section class="pane-block" id="episodesPanel">
+              <div class="pane-head">
+                <h2>Episodes</h2>
+                <span class="badge mono"><b id="episodeCount">0</b></span>
+              </div>
+              <div id="episodeStrip" class="episode-strip empty-state">No episodes yet.</div>
+              <button id="createNextEpisodeBtn" class="btn btn-secondary btn-full" type="button" disabled>+ Create next episode</button>
+            </section>
             <section class="pane-block pane-block-grow" id="scriptPanel">
               <div class="pane-head">
                 <h2>Script</h2>
@@ -272,6 +310,62 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <button class="btn btn-secondary" type="button" data-empty-action="upload">Upload an image</button>
                 </div>
               </div>
+            </div>
+          </section>
+
+          <!-- AI Director canvas: dialogue plus staged approvals -->
+          <section id="creativeWorkspace" class="pane canvas-pane" data-page="ai-director" hidden>
+            <div class="canvas-toolbar">
+              <h1 class="page-title">Create with AI Director</h1>
+              <div class="btn-row">
+                <button id="creativeGoDirectorBtn" class="btn btn-secondary" type="button" hidden>Open in Director</button>
+              </div>
+            </div>
+            <div id="creativeEmpty" class="empty-block">
+              <span class="empty-icon" aria-hidden="true">✦</span>
+              <strong>Tell the director what you want to make</strong>
+              <p>Type a vague idea on the left. You review and approve each stage: brief → key visuals → visual bible → beats → shots.</p>
+            </div>
+            <div id="creativeFlow" hidden>
+              <div id="creativeTurns" class="output-box creative-turns" aria-live="polite"></div>
+              <div class="btn-row" id="creativeReplyRow">
+                <input id="creativeReplyInput" placeholder="Answer the director, or ask for changes" autocomplete="off" style="flex:1" />
+                <button id="creativeReplyBtn" class="btn btn-secondary" type="button">Send</button>
+              </div>
+              <section class="pane-block" id="creativeBriefCard" hidden>
+                <div class="pane-head"><h2>Creative brief</h2><span id="creativeBriefStatus" class="badge">Proposed</span></div>
+                <div id="creativeBriefFields" class="kv-list"></div>
+                <div class="btn-row">
+                  <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief &amp; generate key visuals</button>
+                </div>
+                <p class="pane-note">Approving generates the key visuals below through the ordinary image pipeline — each one is priced and reserved like any generation.</p>
+              </section>
+              <section class="pane-block" id="creativeVisualsCard" hidden>
+                <div class="pane-head"><h2>Key visuals</h2><span id="creativeVisualsStatus" class="badge">Waiting</span></div>
+                <div id="creativeAnchorGrid" class="asset-grid"></div>
+                <div class="btn-row">
+                  <button id="creativeSyncVisualsBtn" class="btn btn-tertiary" type="button">Refresh visuals</button>
+                  <button id="creativeRetryVisualsBtn" class="btn btn-tertiary" type="button" hidden>Retry failed</button>
+                  <button id="creativeProposeBibleBtn" class="btn btn-secondary" type="button" disabled>Draft visual bible</button>
+                </div>
+              </section>
+              <section class="pane-block" id="creativeBibleCard" hidden>
+                <div class="pane-head"><h2>Visual bible</h2><span id="creativeBibleStatus" class="badge">Draft</span></div>
+                <div id="creativeBibleContent" class="kv-list"></div>
+                <div class="btn-row">
+                  <button id="creativeLockBibleBtn" class="btn btn-primary" type="button">Approve &amp; lock this version</button>
+                </div>
+                <p class="pane-note">Locking freezes this version permanently. Later changes create a new version that needs approval again.</p>
+              </section>
+              <section class="pane-block" id="creativeBeatsCard" hidden>
+                <div class="pane-head"><h2>Story beats &amp; shot plan</h2><span id="creativeBeatsStatus" class="badge">Proposed</span></div>
+                <div id="creativeBeatList" class="output-box"></div>
+                <div class="btn-row">
+                  <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats</button>
+                  <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; compile shots</button>
+                </div>
+                <p class="pane-note">Approval compiles the beats into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
+              </section>
             </div>
           </section>
 
@@ -404,6 +498,29 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <div class="kv"><span>Pricing</span><b id="advPricing" class="mono">—</b></div>
                 </div>
               </details>
+            </div>
+          </div>
+
+          <!-- AI Director inspector: where you are in the flow -->
+          <div class="pane" data-page="ai-director" hidden>
+            <div class="inspector-head">
+              <span class="eyebrow">Inspector</span>
+              <h2>Session</h2>
+            </div>
+            <div class="inspector-body">
+              <section class="group">
+                <h3 class="group-title">Stages</h3>
+                <div class="kv-list" id="creativeStageList">
+                  <div class="kv"><span>1 · Brief</span><b data-creative-stage="brief">—</b></div>
+                  <div class="kv"><span>2 · Key visuals</span><b data-creative-stage="visuals">—</b></div>
+                  <div class="kv"><span>3 · Visual bible</span><b data-creative-stage="bible">—</b></div>
+                  <div class="kv"><span>4 · Beats &amp; shots</span><b data-creative-stage="beats">—</b></div>
+                </div>
+              </section>
+              <section class="group">
+                <h3 class="group-title">How this works</h3>
+                <p class="field-note">The director only asks for what is missing and high-value. Every stage waits for your approval; nothing is generated without the same credit and routing checks as the Create page.</p>
+              </section>
             </div>
           </div>
 
@@ -548,6 +665,37 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <button id="confirmNewProjectBtn" class="btn btn-primary" type="submit">Create project</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="continuationDialog" class="sheet" aria-labelledby="continuationTitle">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="continuationTitle">Create next episode</h2>
+          <p id="continuationSubtitle">The next episode inherits the story, characters and the locked look. What it may not inherit depends on how it opens.</p>
+        </div>
+        <div class="segmented" role="tablist" aria-label="Continuation mode">
+          <button class="active" data-continuation-mode="CONTINUOUS" type="button" role="tab">Continue the scene</button>
+          <button data-continuation-mode="TIME_JUMP" type="button" role="tab">Time jump</button>
+          <button data-continuation-mode="LOCATION_CHANGE" type="button" role="tab">New location</button>
+        </div>
+        <p id="continuationModeNote" class="field-note">Picks up exactly where the last shot ended — same place, and the previous tail frame may carry into the first shot.</p>
+        <label class="field" id="continuationTimeGapField" hidden><span class="field-label">Time gap</span>
+          <input id="continuationTimeGap" placeholder="e.g. three days later / 三天后" autocomplete="off" />
+        </label>
+        <label class="field" id="continuationLocationField" hidden><span class="field-label">New location</span>
+          <input id="continuationLocation" placeholder="e.g. Tokyo / 东京" autocomplete="off" />
+        </label>
+        <label class="field"><span class="field-label">Direction for the episode (optional)</span>
+          <textarea id="continuationGuidance" rows="2" placeholder="What should this episode do?"></textarea>
+        </label>
+        <div id="continuationPreview" class="output-box" hidden></div>
+        <p id="continuationError" class="sheet-error" role="alert"></p>
+        <div class="sheet-actions">
+          <button id="cancelContinuationBtn" class="btn btn-tertiary" type="button">Cancel</button>
+          <button id="prepareContinuationBtn" class="btn btn-secondary" type="button">Propose the episode</button>
+          <button id="confirmContinuationBtn" class="btn btn-primary" type="button" hidden>Confirm &amp; compile</button>
+        </div>
+      </div>
     </dialog>
 
     <!-- ============================================================ -->

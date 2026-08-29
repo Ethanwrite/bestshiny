@@ -1,0 +1,52 @@
+{
+  "version": "character-evidence-acceptance-criteria-2026-08-27-v1",
+  "written_before_validation": true,
+  "current_stage": "SHADOW",
+  "validation_plan": {
+    "status": "PENDING_OWNER_APPROVAL",
+    "minimum_authorized_examples": null,
+    "minimum_examples_per_required_slice": null,
+    "note": "No sample-count requirement was specified. Promotion remains blocked until a versioned validation plan is approved before evaluation."
+  },
+  "promotion": {
+    "SHADOW_TO_ADVISORY": {
+      "person_detection_miss_rate_max": 0.05,
+      "face_detection_miss_rate_max": 0.08,
+      "face_false_positive_rate_max": 0.02,
+      "identity_false_match_rate_max": 0.005,
+      "identity_false_reject_rate_max": 0.08,
+      "tracking_id_switch_rate_max": 0.02,
+      "track_fragmentation_rate_max": 0.05,
+      "appearance_false_accept_rate_max": 0.03,
+      "appearance_false_reject_rate_max": 0.12,
+      "abstain_rate_max": 0.35
+    },
+    "ADVISORY_TO_SOFT_GATE": {
+      "requires_separate_review_and_version": true
+    },
+    "SOFT_GATE_TO_AUTOMATIC_GATE": {
+      "requires_separate_review_and_version": true
+    }
+  },
+  "global_average_alone_is_sufficient": false,
+  "required_slices": [
+    "front_face",
+    "profile_face",
+    "back_or_no_face",
+    "occlusion",
+    "long_shot",
+    "multiple_people",
+    "person_crossing",
+    "fast_motion",
+    "motion_blur",
+    "costume_change",
+    "similar_clothing",
+    "complex_background",
+    "strong_light",
+    "low_light",
+    "color_temperature_change",
+    "shot_change",
+    "ai_face_drift",
+    "ai_body_or_clothing_drift"
+  ]
+}

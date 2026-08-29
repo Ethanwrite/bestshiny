@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import mean, median
 from typing import Any, Protocol
@@ -18,6 +18,10 @@ TRACKED = "TRACKED"
 TRACKING_UNCERTAIN = "TRACKING_UNCERTAIN"
 VLM_REVIEW_REQUIRED = "VLM_REVIEW_REQUIRED"
 UNAVAILABLE = "UNAVAILABLE"
+PASS = "PASS"
+FAIL = "FAIL"
+ABSTAIN = "ABSTAIN"
+SHADOW = "SHADOW"
 
 FRONT = "FRONT"
 THREE_QUARTER_LEFT = "THREE_QUARTER_LEFT"
@@ -261,6 +265,12 @@ class CanonicalIdentityReference:
     face_box: BoundingBox | None = None
     appearance_box: BoundingBox | None = None
     reference_confidence: float = 1.0
+    # MediaAsset rows are immutable and content addressed, so callers that do
+    # not have a logical AssetVersion may use the media SHA-256 as this value.
+    reference_asset_version: str = "UNVERSIONED"
+    # Production inference consumes short-lived HTTPS object-storage URLs.
+    # Bytes remain on this contract for the deterministic local fixture stack.
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +293,19 @@ class CharacterEvidence:
     appearance_encoder_version: str
     hair_similarity: str = UNAVAILABLE
     costume_similarity: str = UNAVAILABLE
+    detector_model_name: str = "UNSPECIFIED"
+    detector_model_version: str = "UNSPECIFIED"
+    tracker_name: str = "UNSPECIFIED"
+    tracker_version: str = "UNSPECIFIED"
+    face_detector_model: str = "UNSPECIFIED"
+    face_detector_version: str = "UNSPECIFIED"
+    face_identity_model: str = "UNSPECIFIED"
+    face_identity_version: str = "UNSPECIFIED"
+    appearance_model: str = "UNSPECIFIED"
+    appearance_model_version: str = "UNSPECIFIED"
+    threshold_version: str = "UNSPECIFIED"
+    reference_asset_version: str = "UNVERSIONED"
+    pipeline_version: str = "UNSPECIFIED"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -421,6 +444,10 @@ class CharacterEvidenceReport:
     aggregate: CharacterEvidenceAggregate
     threshold_profile: QAThresholdProfile
     pipeline_versions: dict[str, str]
+    decision: str = ABSTAIN
+    operating_mode: str = SHADOW
+    model_manifest_version: str = "UNSPECIFIED"
+    model_provenance: dict[str, dict[str, Any]] | None = None
 
     @property
     def semantic_review_required(self) -> bool:
@@ -442,7 +469,36 @@ class CharacterEvidenceReport:
             "aggregate": self.aggregate.to_dict(),
             "threshold_profile": self.threshold_profile.to_dict(),
             "pipeline_versions": dict(self.pipeline_versions),
+            "decision": self.decision,
+            "operating_mode": self.operating_mode,
+            "model_manifest_version": self.model_manifest_version,
+            "model_provenance": dict(self.model_provenance or {}),
         }
+
+
+@dataclass(frozen=True)
+class CharacterEvidenceSubmission:
+    """Accepted asynchronous work; acceptance is never identity evidence."""
+
+    job_id: str
+    candidate_id: str
+    status: str
+    submitted_at: str
+
+
+class AsyncCharacterEvidenceProducer(Protocol):
+    version: str
+
+    def submit(
+        self,
+        video_path: Path,
+        *,
+        candidate_id: str,
+        character_id: str,
+        references: Sequence[CanonicalIdentityReference],
+        shot_type: str = "DIALOGUE",
+        sample_positions: tuple[float, ...] | None = None,
+    ) -> CharacterEvidenceSubmission: ...
 
 
 def normalize_reference_view(view: str) -> str:
@@ -777,6 +833,19 @@ class CharacterEvidenceProducer:
                     track_id=assignment.track_id,
                     face_encoder_version=self.face_encoder.version,
                     appearance_encoder_version=self.appearance_encoder.version,
+                    detector_model_name=self.detector.version,
+                    detector_model_version=self.detector.version,
+                    tracker_name=self.tracker.version,
+                    tracker_version=self.tracker.version,
+                    face_detector_model=self.detector.version,
+                    face_detector_version=self.detector.version,
+                    face_identity_model=self.face_encoder.version,
+                    face_identity_version=self.face_encoder.version,
+                    appearance_model=self.appearance_encoder.version,
+                    appearance_model_version=self.appearance_encoder.version,
+                    threshold_version="resolved-after-aggregation",
+                    reference_asset_version=reference.reference_asset_version,
+                    pipeline_version=self.version,
                 )
             )
 
@@ -788,6 +857,7 @@ class CharacterEvidenceProducer:
             face_view=preliminary_view,
             face_visibility=preliminary_visibility,
         )
+        evidence = [replace(item, threshold_version=threshold.version) for item in evidence]
         aggregate = aggregate_character_evidence(evidence, threshold)
         review_requirements: list[str] = []
         reason_codes = list(tracking.reason_codes)
@@ -798,6 +868,19 @@ class CharacterEvidenceProducer:
         if aggregate.usable_samples < threshold.minimum_required_samples:
             review_requirements.append(VLM_REVIEW_REQUIRED)
             reason_codes.append("INSUFFICIENT_CHARACTER_EVIDENCE")
+        if review_requirements or aggregate.average_identity is None:
+            decision = ABSTAIN
+        elif (
+            aggregate.minimum_identity is not None
+            and aggregate.minimum_identity < threshold.identity_hard_fail
+        ):
+            decision = FAIL
+        elif aggregate.average_identity >= threshold.identity_pass:
+            decision = PASS
+        else:
+            decision = ABSTAIN
+            review_requirements.append(VLM_REVIEW_REQUIRED)
+            reason_codes.append("IDENTITY_GRAY_ZONE")
         return CharacterEvidenceReport(
             producer_run_id=str(uuid.uuid4()),
             producer_version=self.version,
@@ -817,29 +900,36 @@ class CharacterEvidenceProducer:
                 "appearance_encoder": self.appearance_encoder.version,
                 "threshold_registry": self.threshold_registry.version,
             },
+            decision=decision,
         )
 
 
 __all__ = [
     "ANY_VIEW",
     "AppearanceEncoder",
+    "ABSTAIN",
+    "AsyncCharacterEvidenceProducer",
     "BoundingBox",
     "CanonicalIdentityReference",
     "CharacterEvidence",
     "CharacterEvidenceAggregate",
     "CharacterEvidenceProducer",
     "CharacterEvidenceReport",
+    "CharacterEvidenceSubmission",
     "CharacterTracker",
     "FFmpegFrameSampler",
     "FRONT",
+    "FAIL",
     "FaceIdentityEncoder",
     "FrameDetections",
     "FrameSampler",
     "LEFT_PROFILE",
     "PersonFaceDetector",
+    "PASS",
     "QAThresholdProfile",
     "QAThresholdRegistry",
     "RIGHT_PROFILE",
+    "SHADOW",
     "SampledFrame",
     "THREE_QUARTER_LEFT",
     "THREE_QUARTER_RIGHT",

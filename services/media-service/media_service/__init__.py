@@ -30,11 +30,19 @@ from .registry import (
     RemoteMediaSecurityError,
     lineage_key,
 )
+from .rendition_gc import (
+    DEFAULT_RENDITION_GC_LIMIT,
+    RenditionGcSweep,
+    active_reference_profiles,
+    sweep_rendition_gc,
+)
 from .renditions import (
     RenditionDerivationFailed,
     RenditionResolver,
     ResolvedRendition,
     VideoReferenceUnadaptable,
+    insert_or_revive_rendition,
+    touch_rendition_access,
 )
 from .staging import (
     DEFAULT_STAGING_SWEEP_LIMIT,
@@ -44,6 +52,18 @@ from .staging import (
     generation_staging_prefix,
     job_id_from_staging_key,
     sweep_generation_staging,
+)
+from .thumbnails import (
+    THUMBNAIL_CONSTRAINT_KEY,
+    ResolvedThumbnail,
+    ThumbnailService,
+    ThumbnailUnavailable,
+)
+from .verification import (
+    MediaVerificationSweep,
+    RejectedMediaReclamation,
+    reclaim_rejected_assets,
+    verify_pending_assets,
 )
 from .video_renditions import (
     VIDEO_TRANSCODER_VERSION,
@@ -65,6 +85,20 @@ __all__ = [
     "ExpiredUploadClaim",
     "ExpiredUploadSweep",
     "sweep_expired_uploads",
+    "DEFAULT_RENDITION_GC_LIMIT",
+    "RenditionGcSweep",
+    "active_reference_profiles",
+    "sweep_rendition_gc",
+    "insert_or_revive_rendition",
+    "touch_rendition_access",
+    "THUMBNAIL_CONSTRAINT_KEY",
+    "ResolvedThumbnail",
+    "ThumbnailService",
+    "ThumbnailUnavailable",
+    "MediaVerificationSweep",
+    "verify_pending_assets",
+    "RejectedMediaReclamation",
+    "reclaim_rejected_assets",
     "MediaRegistry",
     "ProviderMediaReconciliationConflict",
     "ProviderMediaReconciliationRequired",

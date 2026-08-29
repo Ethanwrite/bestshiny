@@ -134,15 +134,126 @@ def sweep_generation_staging_once(container) -> int:  # type: ignore[no-untyped-
     return len(result.deleted)
 
 
+def sweep_rendition_gc_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Collect idle derived renditions whose constraint profile no provider declares.
+
+    Originals are untouchable by construction; the claim/lease keeps a second
+    worker or the operator endpoint from double-deleting; DELETED rows remain
+    as reconcilable tombstones and revive in place if the constraints return.
+    """
+
+    from media_service import active_reference_profiles, sweep_rendition_gc
+
+    result = sweep_rendition_gc(
+        database=container.database,
+        storage=container.storage,
+        active_constraint_profiles=active_reference_profiles(container.providers._providers),
+        min_idle_seconds=container.settings.rendition_gc_min_idle_seconds,
+        lease_seconds=container.settings.rendition_gc_lease_seconds,
+        limit=max(1, container.settings.rendition_gc_limit),
+    )
+    if result.deleted_rows:
+        logger.info(
+            "rendition GC: %d row(s) tombstoned, %d object(s) deleted, "
+            "%d shared object(s) kept",
+            len(result.deleted_rows),
+            result.objects_deleted,
+            result.objects_kept_shared,
+        )
+    return len(result.deleted_rows)
+
+
+def verify_media_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Fully verify directly uploaded media. Never fatal to the worker.
+
+    Completion adopted the object from a header read; this decodes the whole
+    file (and re-checks its SHA) before the asset may serve providers.
+    Failures remain charged while their retained evidence object lands in
+    INVALID or QUARANTINED, never in a silent retry loop.
+    """
+
+    from media_service import verify_pending_assets
+
+    result = verify_pending_assets(
+        database=container.database,
+        storage=container.storage,
+        limit=max(1, container.settings.media_verification_limit),
+        lease_seconds=container.settings.media_verification_lease_seconds,
+    )
+    if result.invalid or result.quarantined:
+        logger.warning(
+            "media verification: %d ready, %d invalid, %d quarantined",
+            result.verified_ready,
+            result.invalid,
+            result.quarantined,
+        )
+    elif result.verified_ready:
+        logger.info("media verification: %d asset(s) promoted to READY", result.verified_ready)
+    return result.verified_ready
+
+
+def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Run the shadow Character Evidence lifecycle pass. Never fatal.
+
+    Enqueues candidates whose video output was registered, dispatches PENDING
+    submissions through the configured producer, and moves silent ACCEPTED
+    jobs to RECONCILIATION_REQUIRED. Shadow observation only — nothing here
+    can change a candidate's gate.
+    """
+
+    result = container.character_evidence_tracker.sweep(
+        limit=max(1, container.settings.character_evidence_sweep_limit)
+    )
+    if result.enqueued or result.dispatched or result.failed or result.timed_out:
+        logger.info(
+            "character evidence sweep: %d enqueued, %d dispatched, %d skipped, "
+            "%d retried, %d failed, %d timed out",
+            result.enqueued,
+            result.dispatched,
+            result.skipped,
+            result.retried,
+            result.failed,
+            result.timed_out,
+        )
+    if result.timed_out:
+        logger.warning(
+            "%d character evidence acceptance(s) went silent and now require "
+            "operator reconciliation",
+            result.timed_out,
+        )
+    return result.dispatched
+
+
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
+    evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
+    rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
+    verification_interval = max(0, int(container.settings.media_verification_interval_seconds))
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
     next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
+    next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
+    next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
+    next_verification = asyncio.get_running_loop().time() if verification_interval else None
     while True:
+        if next_verification is not None and asyncio.get_running_loop().time() >= next_verification:
+            try:
+                await asyncio.to_thread(verify_media_once, container)
+            except Exception:
+                logger.exception("media verification sweep failed")
+            next_verification = asyncio.get_running_loop().time() + verification_interval
+        if (
+            next_rendition_gc is not None
+            and asyncio.get_running_loop().time() >= next_rendition_gc
+        ):
+            try:
+                await asyncio.to_thread(sweep_rendition_gc_once, container)
+            except Exception:
+                logger.exception("rendition GC sweep failed")
+            next_rendition_gc = asyncio.get_running_loop().time() + rendition_gc_interval
         if next_upload_sweep is not None and asyncio.get_running_loop().time() >= next_upload_sweep:
             try:
                 await asyncio.to_thread(sweep_expired_uploads_once, container)
@@ -156,6 +267,15 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("generation staging sweep failed")
             next_staging_sweep = asyncio.get_running_loop().time() + staging_interval
+        if (
+            next_evidence_sweep is not None
+            and asyncio.get_running_loop().time() >= next_evidence_sweep
+        ):
+            try:
+                await asyncio.to_thread(sweep_character_evidence_once, container)
+            except Exception:
+                logger.exception("character evidence sweep failed")
+            next_evidence_sweep = asyncio.get_running_loop().time() + evidence_interval
         if not await process_next_job(container):
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

@@ -1,10 +1,47 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-28 · Branch `main` at `f477133` · **NOT PRODUCTION-READY** · everything below
-through §1f is merged; §1g (video reference adaptation) is this branch,
-`claude/video-reference-adaptation`, gate-passed and awaiting review
+Date: 2026-08-29 · Branch `claude/rc-predeploy-integration` — the release-candidate
+integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference adaptation),
+`claude/creative-director-episodes` `f5f68c6` (open PR #9, migrations `0053`/`0054`), and the
+2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
+`0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
-Eight PRs have landed on `main`, in this order:
+> **Next session: start with [`docs/RC_HANDOFF_2026-08-29.md`](docs/RC_HANDOFF_2026-08-29.md).**
+> It carries the branch/gate state, the unfinished-work list, and the one thing this document
+> does not: why the live canary sweep has not run, and why neither money nor a code change can
+> unblock it from this machine.
+
+## Current RC truth — supersedes historical status statements below
+
+- The running Compose stack was still built from `main@9a06dcf` with its database at
+  `0052_shot_dependencies` when this RC deploy began. The RC contains migrations through `0059`, plus
+  `0060`, which repairs a real Flow ownership-index drift found by the backup/restore rehearsal.
+- Final predeploy gates passed: SQLite `1194 passed / 12 skipped`, PostgreSQL
+  `1199 passed / 7 skipped`, Ruff, Mypy (189 source files), `git diff --check`, Web production
+  build and npm audit. The pinned `9a06dcf` API image passed health against the restored database
+  after a rehearsal downgrade to `0052`; the rehearsal database was then returned to `0060`.
+- The database currently records `live_enabled=22` and `VERIFIED_LIVE=0`. Historical provider task IDs
+  in this handoff are useful protocol anecdotes, but they are **not** platform-closed canary evidence and
+  must not be presented as `VERIFIED_LIVE`.
+- Alibaba OSS now passes the storage preflight. Statements below that say `S3_*` is empty are obsolete.
+  Ark and DashScope return-media hosts remain outside the verified allowlist until a real completed
+  canary identifies them.
+- Character Evidence remains `SHADOW`, the authorized validation set has 0 samples, Modal is not
+  deployed, and public callback reachability is unproven. This deployment therefore explicitly sets
+  `CHARACTER_EVIDENCE_ENABLED=false`; it does not claim a Modal deployment.
+- Payment is excluded from this release: Alchemy signing key/id, treasury address and crediting are not
+  configured, DePay has no callback public key, and recurring grants/renewals/plan discounts do not exist.
+- Episode delivery is per-shot MP4 only. Assembly, audio mix, subtitles/titles and a final episode export
+  are not implemented and are not part of this release.
+
+The Character Evidence → Modal productionization is integrated here from the main checkout's
+previously uncommitted working tree (snapshot taken 2026-08-29; the main checkout itself was not
+modified). Its focused handoff, exact blocker, verification evidence, dirty-file scope, and
+remaining commands are in
+[`docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md`](docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md).
+That work added no migration of its own.
+
+Nine PRs have landed on `main`, in this order:
 [#1](https://github.com/Ethanwrite/bestshiny/pull/1) production readiness on PostgreSQL and the
 pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evidence
 · [#5](https://github.com/Ethanwrite/bestshiny/pull/5) its architecture documentation
@@ -12,9 +49,12 @@ pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evi
 · [#6](https://github.com/Ethanwrite/bestshiny/pull/6) truth-document sync
 · [#7](https://github.com/Ethanwrite/bestshiny/pull/7) explicit shot dependencies and the Frame
 Anchor Planner · [#8](https://github.com/Ethanwrite/bestshiny/pull/8) pipeline semantic
-consistency · [#10](https://github.com/Ethanwrite/bestshiny/pull/10) batch candidate atomicity.
+consistency · [#10](https://github.com/Ethanwrite/bestshiny/pull/10) batch candidate atomicity
+· [#11](https://github.com/Ethanwrite/bestshiny/pull/11) automatic video reference adaptation.
 Open: [#9](https://github.com/Ethanwrite/bestshiny/pull/9) creative director and episode
-continuation (carries migrations `0053`/`0054`; the dev database moves only when it merges).
+continuation (carries migrations `0053`/`0054`; the dev database moves only when it merges) —
+integrated into this release candidate. The Character Evidence work has no commit or PR of its
+own outside this branch.
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted
@@ -23,16 +63,17 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 
 ## 1. Gate state (all green, offline only)
 
-As of 2026-08-28 on `claude/video-reference-adaptation` merged with `main` at `f477133`
-(#10, §1f) — the merged tree carrying both §1f and §1g:
+As of 2026-08-28 on `claude/creative-director-episodes` rebased onto `main` at `4f5dd11`
+(#10, §1f; #11, §1g) — the merged tree carrying §1f, §1g and §1h:
 
 ```
-.venv/bin/python -m pytest -q                      1108 passed, 9 skipped   (SQLite)
+.venv/bin/python -m pytest -q                      1123 passed, 9 skipped   (SQLite)
 POSTGRES_PASSWORD=... \
-  .venv/bin/python -m pytest -q --database=postgres  1110 passed, 7 skipped  (PostgreSQL)
+  .venv/bin/python -m pytest -q --database=postgres  1125 passed, 7 skipped  (PostgreSQL, detached)
 .venv/bin/ruff check .                             All checks passed
-.venv/bin/python -m mypy                           Success: 161 source files
-.venv/bin/python -m alembic heads                  0052_shot_dependencies (single head)
+.venv/bin/python -m mypy                           Success: 170 source files
+.venv/bin/python -m alembic heads                  0054_episode_continuations (single head)
+apps/web: node --check app.js + vite build         passed
 git diff --check                                   clean
 ```
 
@@ -59,14 +100,13 @@ marked `postgres_only`). They need `--run-live-provider` *and* the three-part ga
 and the two new Wan I2V/R2V ones additionally need object storage, without which
 they skip rather than inventing a reference URL.
 
-**Wan 2.7 T2V is verified live** (2026-08-25). `PROVIDER_MODE=live` on the user's
-instruction; task `285f787d-c1fe-40c5-8893-6e1f89adbb70` submitted, polled and
-`COMPLETED` with a fetchable `video/mp4` artefact — auth, the DashScope async
-protocol and the poll parsing all confirmed against the real service. Known spend
-is **no longer USD 0**: one 5s 720P clip.
+**Historical Wan 2.7 T2V provider task report — not current `VERIFIED_LIVE` evidence.** On
+2026-08-25 task `285f787d-c1fe-40c5-8893-6e1f89adbb70` was reported submitted and completed with
+MP4 bytes. The current database contains no `VERIFIED_LIVE` model row or platform-closed canary usage
+for it, so this report cannot satisfy the release gate or prove current media registration and billing.
 
-**Wan 2.7 I2V and R2V are now verified live too** (2026-08-25), against the
-corrected protocol in §12d:
+**Historical Wan 2.7 I2V/R2V provider task reports — also not current `VERIFIED_LIVE` evidence.**
+The following raw provider tasks were recorded in the earlier handoff:
 
 ```text
 i2v  task fb7cf016-479d-4816-a066-8894525466d8   COMPLETED   413,652 B  ftyp/isom
@@ -83,7 +123,8 @@ no `parameters.audio` is accepted. The reference plate was fetched by Alibaba
 from a presigned OSS GET — the whole `FETCHABLE_URL` path working end to end for
 the first time.
 
-Known spend: three clips — one 5s T2V, one 2s I2V, one 2s R2V.
+They remain protocol evidence only. Current release evidence still requires the platform to record the
+submission, poll/callback, output download, media registration and reconciled cost in one canary chain.
 
 **One thing these runs do not establish.** They prove the corrected body is
 *accepted*. They do not prove the previous body would have been *rejected* —
@@ -773,6 +814,131 @@ in this session died with 571 errors when the Docker Desktop Linux VM crashed mi
 environment, not code; the engine was restarted and the recorded run is the clean one.
 One HANDOFF note for archaeology: this section was numbered 1f until #10 merged first and
 took the number, per the recorded cross-session agreement.
+## 1h. 2026-08-28 — two upper-level capabilities: the creative director, and the next episode
+
+Branch `claude/creative-director-episodes` (worktree `.worktrees/upper-capabilities`), rebased on
+`main` at `4f5dd11` after #10 and #11 merged (this section was numbered 1f before those landed and took 1f/1g, per the recorded cross-session agreement). Migration head moves to **`0054_episode_continuations`** through
+`0053_creative_director`; `REQUIRED_SCHEMA_REVISION` matches it. Offline only; no provider touched;
+no new provider path exists.
+
+Gate state on the rebased tree (2026-08-28, `main` at `4f5dd11` + this change, all green — this is
+also the §1 block above):
+
+```
+.venv/bin/python -m pytest -q                        1123 passed,  9 skipped   (SQLite, 4m03s)
+POSTGRES_PASSWORD=... pytest -q --database=postgres  1125 passed,  7 skipped   (PostgreSQL, 9m27s, detached)
+.venv/bin/ruff check .                               All checks passed
+.venv/bin/python -m mypy                             Success: 170 source files
+apps/web: node --check app.js + vite build           passed (162.6 kB js, gzip 48.9 kB)
+git diff --check                                     clean
+```
+
+Pre-rebase, the same suite on `9a06dcf` + this change read 1092/9 and 1094/7 with mypy at 168
+files; the deltas are exactly #10 and #11's tests and modules.
+
+Migration evidence, run 2026-08-28 against the compose PostgreSQL 17 + pgvector server:
+
+```
+fresh database        base -> 0054 (full chain), verify 8 new tables,
+                      downgrade -> 0052, verify tables gone, re-upgrade -> 0054   OK, then dropped
+populated dev db      0052 -> 0054 (26 model_definitions rows intact)
+(video_platform)      0054 -> 0052 (rows intact)                                  OK
+```
+
+The dev database was deliberately left at `0052_shot_dependencies`: `main`'s
+`REQUIRED_SCHEMA_REVISION` is `0052`, and the running api/worker containers check it at startup, so
+the shared stamp only moves to `0054` when this branch merges (then `alembic upgrade head` +
+`docker compose build api worker`, per §2.34's built-image hazard).
+
+**Create with AI Director** (`core/creative-director/creative_director_core`, migration `0053`,
+seven tables). A stateful director takes a vague idea instead of a script:
+`idea → dialogue clarification → CreativeBrief → key visuals → VisualBible → BeatPlan → ShotPlan →
+the existing chain`. The parts that carry the design:
+
+- **Questions are computed from gaps, never a questionnaire.** Every brief field has a per-format
+  value weight (`BRIEF_FIELD_SPECS`); a turn asks at most three missing HIGH/CRITICAL fields, an
+  asked code is never re-asked, and a rich opening idea is asked nothing. Unanswered non-critical
+  gaps are defaulted at proposal time with the default recorded in the revision's completeness
+  report — an assumed value is visible, not indistinguishable from an answer.
+- **The brief is rows, not a prompt string.** Dialogue turns, brief revisions, the visual bible,
+  anchors and beats are structured, versioned and append-mostly. The script text handed to the
+  narrative compiler is *derived* from the beat rows at approval time, one primary action per line
+  in the compiler's own action vocabulary, so compiled shots map one-to-one onto `ShotIntent`s and
+  the intents' shot type and duration are applied to the real Shot rows afterwards.
+- **The director emits structured actions and cannot reach a provider.** `creative_actions` is the
+  only door: `GENERATE_KEY_VISUAL` rows are executed by the API layer through the *same*
+  `admit_passenger → visual_runtime.submit` path as `POST /v1/images/generations` — role-resolved
+  image model, credits reserved, router, gateway — with per-action idempotency keys, so approval
+  replays create nothing twice and one refused anchor (402, plan denial) is recorded on its own row
+  while the rest proceed. Model reasoning (brief extraction, beat enrichment) goes through
+  `ModelRoleRuntime.execute_chat(DIRECTOR)` and degrades to the deterministic rules engine with
+  `reasoner=DETERMINISTIC` and reason codes on the turn — recorded, never silent.
+- **The VisualBible is version-locked on approval.** LOCKED versions are immutable and cannot be
+  re-proposed over; superseding requires a new version and a new approval. Locking is
+  service-enforced with tests (not yet a database trigger — see OPEN_ISSUES §2.39).
+- **Approving beats compiles through the existing chain**: episode row → `NarrativeCompiler` →
+  scenes/shots/states/transitions/dependencies → `FrameAnchorPlanner`, then opens the cliffhanger
+  as a real `narrative_obligations` row — which is exactly what the next-episode flow inherits.
+
+**Series → Episodes → create the next episode** (`core/episode-continuation/episode_continuation_core`,
+migration `0054`, one table). The next episode is never a re-submitted previous script:
+
+- `POST /v1/episodes/{id}/continuations` computes an **EpisodeContinuationContext** snapshot from
+  the systems that already own each truth — ending shot + output `TimelineState`, tail frame asset,
+  character state heads, `series_context()` facts/disclosures/open obligations, props and costume
+  from the ending state, style lock, locked visual bible — and stamps a per-class verdict:
+  narrative/character/visual **INHERIT** always; scene/frame **INHERIT** only for `CONTINUOUS`,
+  **RESET** for `TIME_JUMP`/`LOCATION_CHANGE`. One row per (project, previous episode, next
+  number): preparation is idempotent, re-proposal bumps a recorded revision.
+- Confirmation renders the beats to a script, compiles through the same `NarrativeCompiler`, then
+  **links the boundary**: `previous_shot_id` across episodes, a `TimelineTransition` written
+  through the existing timeline engine, and — CONTINUOUS only — a `STATE_INHERITANCE`
+  `shot_dependencies` row plus committed-state propagation (`propagate_shot`; an uncommitted
+  ending propagates at its commit, because commit already walks `next_shot` links, which now cross
+  the boundary). A jump is **reconciled on the spot** through the engine's own
+  `reconcile_transition`, with the user's declared gap as the recorded reason — nothing is left
+  stale, and nothing of the old scene, lighting or tail frame crosses.
+- **The frame anchor planner decides the boundary pair like any other pair.** One extension: a
+  *declared* CONTINUOUS transition across two scene rows that share a `location_id` counts as
+  same-scene (`CROSS_SCENE_CONTINUOUS` in the plan's reasons) — scene rows are per-episode
+  containers and the compiler never emits CONTINUOUS across scenes itself, so only an explicit
+  continuation or operator declaration can activate it. CONTINUOUS therefore plans
+  `INHERIT_LAST_FRAME` and wires EP01's end frame as EP02's start frame; a time jump plans
+  `RECONSTRUCT_FIRST_FRAME` and clears it.
+- **The boundary is a contract.** The narrative compiler now refuses to recompile an episode that a
+  later episode chains from (`previous_shot_id` guard, mirror of the dependency guard) and refuses
+  a plain recompile of a linked continuation episode (the continuation's confirm unlinks, recompiles
+  and re-links). Both directions fail loudly instead of surfacing a foreign-key violation.
+- EP02's generation context needs no new machinery: `series_context(project, episode=2)` already
+  feeds the prompt compiler, so episode 1's facts and open obligations reach episode 2's prompts —
+  a test pins the obligation text in the compiled neutral prompt after a TIME_JUMP.
+
+**API surface** (`apps/api/video_platform_api/creative_routes.py`, registered from `create_app`):
+eleven `/v1/creative/...` routes (session create/list/get, messages, brief approve, visuals
+execute/sync, bible propose/approve, beats propose/approve) and four episode routes —
+`GET /v1/projects/{id}/episodes` (the strip: per-episode `display_status` derived COMPLETED when
+every shot is committed, shot rollups, attached continuation), `POST /v1/episodes/{id}/continuations`,
+`GET /v1/continuations/{id}`, `POST /v1/continuations/{id}/confirm`. Nothing existing changed shape.
+
+**Web** (`apps/web`): a fourth nav mode **Create with AI Director** — dialogue, brief card,
+key-visual grid, bible lock, beats, compile — and an **Episodes** strip in the Director sidebar
+(`EP01 Completed / EP02 Draft / + Create next episode`) with a continuation dialog that makes the
+three modes and their inheritance consequences explicit. Existing Create/Director/Productions are
+untouched; the Director script panel now follows the *selected* episode instead of always episode 1.
+
+**Tests:** 15 new across `tests/test_creative_director.py` (8) and
+`tests/test_episode_continuation.py` (7) — gap-driven questioning with no repeats, zero-question
+rich briefs, action execution through real admission with idempotent replay, gateway-completed key
+visuals binding to anchors, bible version-lock immutability, beat approval compiling real
+scenes/shots with intents applied and the obligation opened, context snapshot idempotency,
+CONTINUOUS tail-frame inheritance (plan, mode and wired start frame), TIME_JUMP frame/scene reset
+with narrative inheritance pinned in the compiled prompt, recompile refusal in both directions,
+number-conflict refusal, and the API round trip including the strip's display status.
+
+**Deliberate boundaries.** Assembly/export of an episode's shots into one video does not exist and
+is not attempted here — recorded as OPEN_ISSUES §3.7. The DIRECTOR-role model path is exercised
+only through its deterministic degradation in mock mode (§2.38); the bible lock is service-enforced
+(§2.39).
 
 ## 2. 2026-08-25 — one schema authority, and PostgreSQL as the only runtime
 
@@ -1879,14 +2045,10 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 
 **Blocked on the user**
 
-- **`PROVIDER_MODE=live` is the only live gate still unset.** `ALLOW_LIVE_PROVIDER_CALLS` and
-  `LIVE_PROVIDER_CONFIRMATION` are already correct. The agent must not flip the last one: it is
-  the switch that makes every provider transport billable.
-- **Object storage is not configured.** `S3_*` are empty, so the storage backend cannot presign.
-  Two things depend on it: every reference-carrying shot (including every image *edit*) fails
-  closed, and `POST /v1/assets/uploads` answers `501`. The signed local route is enabled for
-  development only; it proxies through the API and must not be the production answer. Configure
-  S3/R2/MinIO and an HTTPS `PUBLIC_BASE_URL`.
+- The three-part live gate is open and Provider calls are billable; every canary still requires a
+  bounded `LiveCanaryPermit` and explicit spend confirmation.
+- Alibaba OSS configuration and checksum preflight pass. What remains unverified is the complete live
+  output path and the exact Ark/DashScope return-media hosts needed by the SSRF allowlist.
 - **Lock styles after `PROVIDER_MODE=live`, not before.** Layer 2 is enabled but cannot run in
   mock mode, and `ProjectStyleLock` is append-only — a style locked now keeps the single gate
   permanently.
@@ -1901,21 +2063,22 @@ New roles: `CAMERA_MOVEMENT`, `CAMERA_OPERATOR`, `USER_QA`.
 
 **Known defects, not yet fixed**
 
-- Retrieval is keyed on the current shot's prompt text, so narrative dependency is invisible
-  to it. The ledger covers obligations and retrieval now reaches across episodes, but *which*
-  earlier beat matters is still decided by similarity alone.
-- A synchronous provider's result is held in the Gateway process between confirmation and
-  poll. Losing it reconciles rather than refunds, but making it durable needs a migration.
-- `MediaRenditionKind.THUMBNAIL` exists in the schema and nothing generates one yet; the UI
-  still reads originals.
-- Derived renditions are never garbage-collected. They are content-addressed and small, but a
-  provider that changes limits repeatedly accumulates copies with no retirement policy.
+- Un-declared narrative callbacks still depend on similarity; declared dependencies and ledger obligations
+  are now forced into context and commit-fenced.
+- Ark and DashScope completed-result hosts are not yet verified or allowlisted, so a paid generation can
+  finish remotely and fail closed during output download.
 - `configure_runtime_model` only reconciles models created by this startup's default sync, so
   adding a credential later does not re-enable a model that was disabled for want of one.
-- Aggregate style drift across episodes is unmonitored (per-candidate only).
-- `timeline_scope_key` branch proliferation has no retirement policy.
+- Cross-episode style drift is queryable but has no background alert/gate, no season model, no production
+  evaluations and no calibrated threshold.
+- Timeline branch lifecycle is implemented; orphan scanning is still operator-triggered rather than scheduled.
+- `NoopVisualJudge` remains in use and `FEATURE_AUTO_EVALUATION=false`; no real `VLM_REVIEWER` adapter is deployed.
+- Episode assembly/export, payment closure, recurring subscription crediting and plan discounts are absent.
 
-## 17. Git state
+## 17. Historical Git state
+
+The following paragraph records the 2026-08-23 checkpoint only. It is not the current RC Git state; the
+current branch and head are stated at the top of this handoff.
 
 **Committed at `ea9d042`** on `main`, on 2026-08-23. Everything described in this document is
 in version control; the working tree is clean.

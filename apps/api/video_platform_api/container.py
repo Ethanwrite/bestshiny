@@ -6,9 +6,16 @@ from dataclasses import dataclass
 from agent_runtime import AgentRuntime
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
-from character_core import CharacterIdentityService, PersistentCharacterStateService
+from character_core import (
+    CharacterIdentityService,
+    PersistentCharacterStateService,
+    TimelineBranchService,
+)
+from character_evidence.client import ModalCharacterEvidenceProducer
+from character_evidence.tracking import CharacterEvidenceTracker
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine
+from creative_director_core import CreativeDirectorService
 from deepseek_provider import DeepSeekProvider
 from director_production import AgentOrchestrator, CandidatePipeline
 from entitlement_core import (
@@ -18,6 +25,7 @@ from entitlement_core import (
     WorkspaceCreditService,
     WorkspaceModelResolver,
 )
+from episode_continuation_core import ContinuationContextBuilder, EpisodeContinuationService
 from evaluation_core import GenerationEvaluator, RetryEngine
 from generation_gateway import (
     DirectAPIResourceRegistry,
@@ -32,7 +40,7 @@ from google_flow_provider import GoogleFlowProvider
 from grok_provider import GrokProvider
 from image_prompt_core import ImagePromptCorrector
 from kling_provider import KlingProvider
-from media_service import DirectUploadService, MediaRegistry
+from media_service import DirectUploadService, MediaRegistry, ThumbnailService
 from memory_core import (
     ContextAssembler,
     ContextBudget,
@@ -78,7 +86,7 @@ from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
 from skill_core import PromptCompilerService, SkillRegistry
 from sqlalchemy.engine import make_url
-from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
+from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService, StyleDriftMonitor
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from wan_provider import WanProvider
@@ -102,6 +110,7 @@ class Container:
     database: Database
     storage: StorageProvider
     media: MediaRegistry
+    thumbnails: ThumbnailService
     direct_uploads: DirectUploadService
     runtime: BrowserRuntime
     providers: ProviderRouter
@@ -120,12 +129,14 @@ class Container:
     narrative_ledger: NarrativeLedgerService
     shot_dependencies: ShotDependencyService
     characters: CharacterIdentityService
+    timeline_branches: TimelineBranchService
     character_states: PersistentCharacterStateService
     continuity_decision: ContinuityDecisionEngine
     frame_anchors: FrameAnchorPlanner
     capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
     qa: QAPipeline
+    character_evidence_tracker: CharacterEvidenceTracker
     cost: CostEngine
     prompts: PromptCompilerService
     candidates: CandidatePipeline
@@ -145,6 +156,7 @@ class Container:
     image_prompts: ImagePromptCorrector
     asset_registry: AssetRegistry
     styles: ProjectStyleService
+    style_drift: StyleDriftMonitor
     feature_flags: FeatureFlagService
     memory: MultimodalMemoryEngine
     context: ContextAssembler
@@ -157,6 +169,8 @@ class Container:
     benchmarks: ModelBenchmarkSuite
     visual_runtime: VisualProductionRuntime
     credit_pricing: CreditPricingEngine
+    creative_director: CreativeDirectorService
+    episode_continuations: EpisodeContinuationService
 
     @property
     def video_prompt_compiler(self) -> PromptCompilerService:
@@ -196,6 +210,28 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.credential_encryption_key,
         allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
     )
+    if settings.deployment_environment == "production" and settings.character_evidence_enabled:
+        # CHARACTER_EVIDENCE_ENABLED=false is the one sanctioned way to start
+        # production without this service: an explicit, visible operator
+        # decision (the Modal deployment is blocked on external HTTPS
+        # reachability). With the switch on, everything below stays
+        # fail-closed exactly as before.
+        if not settings.character_evidence_base_url.startswith("https://"):
+            raise RuntimeError("CHARACTER_EVIDENCE_BASE_URL must be configured as HTTPS in production")
+        for name, value in (
+            ("CHARACTER_EVIDENCE_API_KEY", settings.character_evidence_api_key),
+            (
+                "CHARACTER_EVIDENCE_CALLBACK_SIGNING_KEY",
+                settings.character_evidence_callback_signing_key,
+            ),
+        ):
+            raw = value.encode("utf-8")
+            if len(raw) < 32 or len(set(raw)) < 16:
+                raise RuntimeError(f"{name} must be a high-entropy secret of at least 32 bytes in production")
+        if settings.character_evidence_operating_mode != "shadow":
+            raise RuntimeError(
+                "Character Evidence must remain in shadow mode until the versioned acceptance criteria pass"
+            )
     database = Database(settings.database_url)
     if settings.deployment_environment == "test":
         # A per-test throwaway database cannot replay every revision. This is
@@ -260,6 +296,7 @@ def build_container(settings: Settings | None = None) -> Container:
         max_image_pixels=settings.max_image_pixels,
         reference_url_ttl_seconds=settings.reference_url_ttl_seconds,
     )
+    thumbnails = ThumbnailService(database, storage)
     direct_uploads = DirectUploadService(
         database,
         storage,
@@ -622,12 +659,33 @@ def build_container(settings: Settings | None = None) -> Container:
     narrative_ledger = NarrativeLedgerService(database)
     shot_dependencies = ShotDependencyService(database)
     characters = CharacterIdentityService(database)
+    timeline_branches = TimelineBranchService(database)
     character_states = PersistentCharacterStateService(database)
     continuity_decision = ContinuityDecisionEngine(database)
     frame_anchors = FrameAnchorPlanner(database, continuity_decision)
     capabilities = model_registry
     capability_resolver = CapabilityResolver(database, model_registry)
-    qa = QAPipeline(database)
+    evidence_producer = (
+        ModalCharacterEvidenceProducer(
+            database,
+            media,
+            base_url=settings.character_evidence_base_url,
+            api_key=settings.character_evidence_api_key,
+            threshold_version=settings.character_evidence_threshold_version,
+            timeout_seconds=settings.character_evidence_http_timeout_seconds,
+        )
+        if settings.deployment_environment == "production" and settings.character_evidence_enabled
+        else None
+    )
+    qa = QAPipeline(database, evidence_producer=evidence_producer)
+    character_evidence_tracker = CharacterEvidenceTracker(
+        database,
+        qa,
+        threshold_version=settings.character_evidence_threshold_version,
+        callback_timeout_seconds=settings.character_evidence_callback_timeout_seconds,
+        max_submission_attempts=settings.character_evidence_max_submission_attempts,
+        backfill_hours=settings.character_evidence_backfill_hours,
+    )
     cost = CostEngine(database)
     # The compiler owns style-lock enforcement, so it must hold the
     # authoritative style service rather than trust a caller's context dict.
@@ -639,6 +697,7 @@ def build_container(settings: Settings | None = None) -> Container:
         ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
+    style_drift = StyleDriftMonitor(database)
     prompts = PromptCompilerService(
         database,
         skills,
@@ -738,6 +797,8 @@ def build_container(settings: Settings | None = None) -> Container:
         styles=styles,
         frame_anchors=frame_anchors,
         characters=characters,
+        narrative_ledger=narrative_ledger,
+        shot_dependencies=shot_dependencies,
     )
     orchestrator = AgentOrchestrator(
         narrative,
@@ -747,11 +808,32 @@ def build_container(settings: Settings | None = None) -> Container:
         candidates,
         frame_anchors=frame_anchors,
     )
+    # Both upper-level services reuse the chain below them: the creative
+    # director compiles through the orchestrator and writes the ledger, the
+    # continuation service compiles through the same narrative compiler and
+    # plans through the same frame anchor planner. Neither owns a provider
+    # path - paid work is emitted as structured actions the API executes
+    # through admission and the visual runtime.
+    creative_director = CreativeDirectorService(
+        database,
+        orchestrator=orchestrator,
+        ledger=narrative_ledger,
+        model_roles=model_roles,
+    )
+    episode_continuations = EpisodeContinuationService(
+        database,
+        context_builder=ContinuationContextBuilder(database, narrative_ledger),
+        narrative=narrative,
+        frame_anchors=frame_anchors,
+        ledger=narrative_ledger,
+        model_roles=model_roles,
+    )
     return Container(
         settings=settings,
         database=database,
         storage=storage,
         media=media,
+        thumbnails=thumbnails,
         direct_uploads=direct_uploads,
         runtime=runtime,
         providers=providers,
@@ -770,12 +852,14 @@ def build_container(settings: Settings | None = None) -> Container:
         narrative_ledger=narrative_ledger,
         shot_dependencies=shot_dependencies,
         characters=characters,
+        timeline_branches=timeline_branches,
         character_states=character_states,
         continuity_decision=continuity_decision,
         frame_anchors=frame_anchors,
         capabilities=capabilities,
         capability_resolver=capability_resolver,
         qa=qa,
+        character_evidence_tracker=character_evidence_tracker,
         cost=cost,
         prompts=prompts,
         candidates=candidates,
@@ -795,6 +879,7 @@ def build_container(settings: Settings | None = None) -> Container:
         image_prompts=image_prompts,
         asset_registry=asset_registry,
         styles=styles,
+        style_drift=style_drift,
         feature_flags=feature_flags,
         memory=memory,
         context=context,
@@ -805,4 +890,6 @@ def build_container(settings: Settings | None = None) -> Container:
         benchmarks=benchmarks,
         visual_runtime=visual_runtime,
         credit_pricing=credit_pricing,
+        creative_director=creative_director,
+        episode_continuations=episode_continuations,
     )

@@ -74,8 +74,18 @@ class VideoReferenceConstraints:
     accepted_codecs: frozenset[str] = frozenset({"h264"})
     preferred_codec: str = "h264"
     accepted_aspect_ratios: frozenset[str] | None = None
+    #: Documented aspect-ratio *range* (e.g. "1:8" to "8:1"), for providers
+    #: that bound the shape rather than enumerate framings. A shape outside
+    #: the range fails closed — automatic cropping is a semantic edit.
+    min_aspect_ratio: str | None = None
+    max_aspect_ratio: str | None = None
     max_width: int | None = None
     max_height: int | None = None
+    #: Documented minimums. A too-small or too-short reference fails closed:
+    #: upscaling invents pixels and padding invents time, both content edits.
+    min_width: int | None = None
+    min_height: int | None = None
+    min_duration_seconds: float | None = None
     max_bitrate_bps: int | None = None
     max_frame_rate: float | None = None
     max_duration_seconds: float | None = None
@@ -99,9 +109,19 @@ class VideoReferenceConstraints:
                 raise ValueError("accepted_aspect_ratios cannot be empty; use None for any")
             for ratio in self.accepted_aspect_ratios:
                 _parse_aspect_ratio(ratio)
+        if (self.min_aspect_ratio is None) != (self.max_aspect_ratio is None):
+            raise ValueError("an aspect-ratio range needs both min_aspect_ratio and max_aspect_ratio")
+        if self.min_aspect_ratio is not None and self.max_aspect_ratio is not None:
+            low = _parse_aspect_ratio(self.min_aspect_ratio)
+            high = _parse_aspect_ratio(self.max_aspect_ratio)
+            if low > high:
+                raise ValueError("min_aspect_ratio must not exceed max_aspect_ratio")
         for bound_name in (
             "max_width",
             "max_height",
+            "min_width",
+            "min_height",
+            "min_duration_seconds",
             "max_bitrate_bps",
             "max_frame_rate",
             "max_duration_seconds",
@@ -110,6 +130,15 @@ class VideoReferenceConstraints:
             bound = getattr(self, bound_name)
             if bound is not None and bound <= 0:
                 raise ValueError(f"{bound_name} must be positive when declared")
+        for minimum_name, maximum_name in (
+            ("min_width", "max_width"),
+            ("min_height", "max_height"),
+            ("min_duration_seconds", "max_duration_seconds"),
+        ):
+            minimum = getattr(self, minimum_name)
+            maximum = getattr(self, maximum_name)
+            if minimum is not None and maximum is not None and minimum > maximum:
+                raise ValueError(f"{minimum_name} must not exceed {maximum_name}")
 
     def aspect_ratio_accepted(self, width: int, height: int) -> bool:
         if self.accepted_aspect_ratios is None:
@@ -169,6 +198,63 @@ class VideoReferenceConstraints:
                         f"{width}x{height} does not match {accepted}; automatic cropping "
                         "changes what the video shows, so an explicit manual crop "
                         "selection is required"
+                    ),
+                    adaptable=False,
+                )
+            )
+        if (
+            self.min_aspect_ratio is not None
+            and self.max_aspect_ratio is not None
+            and width > 0
+            and height > 0
+        ):
+            observed = width / height
+            low = _parse_aspect_ratio(self.min_aspect_ratio)
+            high = _parse_aspect_ratio(self.max_aspect_ratio)
+            tolerance = self.ASPECT_RATIO_TOLERANCE
+            if observed < low * (1 - tolerance) or observed > high * (1 + tolerance):
+                found.append(
+                    VideoConstraintViolation(
+                        code="VIDEO_ASPECT_RATIO_OUT_OF_RANGE",
+                        detail=(
+                            f"{width}x{height} is outside the documented "
+                            f"{self.min_aspect_ratio}..{self.max_aspect_ratio} range; automatic "
+                            "cropping changes what the video shows, so an explicit manual "
+                            "crop selection is required"
+                        ),
+                        adaptable=False,
+                    )
+                )
+        if self.min_width is not None and 0 < width < self.min_width:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_WIDTH_BELOW_MINIMUM",
+                    detail=(
+                        f"{width}px wide is below the documented {self.min_width}px minimum; "
+                        "upscaling invents pixels, so a different source is required"
+                    ),
+                    adaptable=False,
+                )
+            )
+        if self.min_height is not None and 0 < height < self.min_height:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_HEIGHT_BELOW_MINIMUM",
+                    detail=(
+                        f"{height}px tall is below the documented {self.min_height}px minimum; "
+                        "upscaling invents pixels, so a different source is required"
+                    ),
+                    adaptable=False,
+                )
+            )
+        if self.min_duration_seconds is not None and 0 < duration_seconds < self.min_duration_seconds:
+            found.append(
+                VideoConstraintViolation(
+                    code="VIDEO_DURATION_BELOW_MINIMUM",
+                    detail=(
+                        f"{duration_seconds:g}s is below the documented "
+                        f"{self.min_duration_seconds:g}s minimum; padding invents time, "
+                        "so a different source is required"
                     ),
                     adaptable=False,
                 )
@@ -240,13 +326,27 @@ class VideoReferenceConstraints:
             if self.accepted_aspect_ratios is not None
             else "any"
         )
-        return (
+        base = (
             f"cont={containers};contpref={self.preferred_container};"
             f"cod={codecs};codpref={self.preferred_codec};ar={ratios};"
             f"w={self.max_width or 0};h={self.max_height or 0};"
             f"br={self.max_bitrate_bps or 0};fps={self.max_frame_rate or 0:g};"
             f"dur={self.max_duration_seconds or 0:g};bytes={self.max_bytes or 0}"
         )
+        # Appended only when declared, so every rendition cached before the
+        # minimum/range bounds existed keeps its key byte-for-byte.
+        extras: list[str] = []
+        if self.min_aspect_ratio is not None and self.max_aspect_ratio is not None:
+            extras.append(f"arr={self.min_aspect_ratio}..{self.max_aspect_ratio}")
+        if self.min_width is not None:
+            extras.append(f"minw={self.min_width}")
+        if self.min_height is not None:
+            extras.append(f"minh={self.min_height}")
+        if self.min_duration_seconds is not None:
+            extras.append(f"mindur={self.min_duration_seconds:g}")
+        if extras:
+            return base + ";" + ";".join(extras)
+        return base
 
 
 @dataclass(frozen=True)

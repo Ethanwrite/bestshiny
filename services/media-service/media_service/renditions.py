@@ -23,12 +23,13 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 
 from PIL import Image
 from PIL.Image import Resampling
 from platform_shared import StorageProvider
-from production_domain.models import MediaAsset, MediaRendition, MediaRenditionKind, new_id
+from production_domain.models import MediaAsset, MediaRendition, MediaRenditionKind, new_id, utcnow
 from provider_sdk import ProviderReferenceConstraints
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -43,6 +44,74 @@ from .video_renditions import (
 # Derivation floor. Below this a "reference" has stopped carrying the identity
 # information it exists to carry, so failing is more useful than sending it.
 MINIMUM_REFERENCE_PIXELS = 256 * 256
+
+#: How often a reused rendition's last_accessed_at is rewritten. The GC idle
+#: window is measured in days; sub-hour precision would only be write traffic.
+ACCESS_TOUCH_INTERVAL_SECONDS = 3600
+
+
+def touch_rendition_access(row: MediaRendition) -> None:
+    """Record that this rendition was served, throttled to one write an hour."""
+
+    now = utcnow()
+    last = row.last_accessed_at
+    if last is not None and last.tzinfo is None:
+        # SQLite hands timezone-declared columns back naive; they are UTC.
+        last = last.replace(tzinfo=UTC)
+    if last is None or (now - last).total_seconds() >= ACCESS_TOUCH_INTERVAL_SECONDS:
+        row.last_accessed_at = now
+
+
+def insert_or_revive_rendition(session: Session, rendition: MediaRendition) -> MediaRendition:
+    """Insert a freshly derived rendition, or revive the row holding its slot.
+
+    The unique (asset, kind, constraint_key) slot may be occupied by a live row
+    (a concurrent worker derived the same thing — either copy is correct) or by
+    a GC tombstone (the same constraints became needed again after collection —
+    the tombstone is updated in place with the new bytes and returns to
+    ACTIVE, which is what makes collection safe to begin with).
+    """
+
+    try:
+        with session.begin_nested():
+            session.add(rendition)
+            session.flush()
+    except IntegrityError:
+        winner = session.scalar(
+            select(MediaRendition).where(
+                MediaRendition.media_asset_id == rendition.media_asset_id,
+                MediaRendition.kind == rendition.kind,
+                MediaRendition.constraint_key == rendition.constraint_key,
+            ).with_for_update()
+        )
+        if winner is None:  # pragma: no cover - the conflict implies a winner.
+            raise
+        if winner.lifecycle_status == "ACTIVE":
+            touch_rendition_access(winner)
+            return winner
+        previous_status = winner.lifecycle_status
+        winner.storage_key = rendition.storage_key
+        winner.local_path = rendition.local_path
+        winner.mime_type = rendition.mime_type
+        winner.sha256 = rendition.sha256
+        winner.size_bytes = rendition.size_bytes
+        winner.width = rendition.width
+        winner.height = rendition.height
+        winner.metadata_json = {
+            **dict(rendition.metadata_json or {}),
+            "revived_from": previous_status,
+            "revived_at": utcnow().isoformat(),
+        }
+        winner.lifecycle_status = "ACTIVE"
+        winner.gc_claim_id = None
+        winner.gc_claimed_at = None
+        winner.deleted_at = None
+        winner.delete_reason = None
+        winner.last_accessed_at = utcnow()
+        session.flush()
+        return winner
+    touch_rendition_access(rendition)
+    return rendition
 
 
 class RenditionDerivationFailed(RuntimeError):
@@ -148,9 +217,12 @@ class RenditionResolver:
                 MediaRendition.media_asset_id == asset.id,
                 MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
                 MediaRendition.constraint_key == constraint_key,
-            )
+            ).with_for_update()
         )
-        if existing is not None:
+        # Only a live row serves. A GC tombstone in the slot means the bytes
+        # are gone: fall through to re-derive, and the insert revives the row.
+        if existing is not None and existing.lifecycle_status == "ACTIVE":
+            touch_rendition_access(existing)
             return ResolvedRendition(
                 storage_key=existing.storage_key,
                 mime_type=existing.mime_type,
@@ -233,24 +305,7 @@ class RenditionResolver:
         )
 
     def _insert_rendition(self, session: Session, rendition: MediaRendition) -> ResolvedRendition:
-        try:
-            with session.begin_nested():
-                session.add(rendition)
-                session.flush()
-        except IntegrityError:
-            # Another worker derived the same rendition concurrently. Both wrote
-            # identical bounds, so either is correct; keep the committed one.
-            winner = session.scalar(
-                select(MediaRendition).where(
-                    MediaRendition.media_asset_id == rendition.media_asset_id,
-                    MediaRendition.kind == rendition.kind,
-                    MediaRendition.constraint_key == rendition.constraint_key,
-                )
-            )
-            if winner is None:  # pragma: no cover - the conflict implies a winner.
-                raise
-            return self._derived_resolution(winner)
-        return self._derived_resolution(rendition)
+        return self._derived_resolution(insert_or_revive_rendition(session, rendition))
 
     # -- video ----------------------------------------------------------------
 
@@ -324,11 +379,13 @@ class RenditionResolver:
                 MediaRendition.media_asset_id == asset.id,
                 MediaRendition.kind == MediaRenditionKind.PROVIDER_REFERENCE.value,
                 MediaRendition.constraint_key == constraint_key,
-            )
+            ).with_for_update()
         )
-        if existing is not None:
+        if existing is not None and existing.lifecycle_status == "ACTIVE":
             # Revalidated when it was derived; the row exists only because it
-            # passed the same bounds this call would check.
+            # passed the same bounds this call would check. A tombstone in the
+            # slot falls through to re-derivation and in-place revival.
+            touch_rendition_access(existing)
             return self._derived_resolution(existing)
 
         try:

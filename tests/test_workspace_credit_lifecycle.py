@@ -8,6 +8,7 @@ import pytest
 from entitlement_core import InsufficientWorkspaceCredits, WorkspaceCreditConflict
 from fastapi.testclient import TestClient
 from generation_gateway.gateway import UnsafeRetry
+from media_service import RemoteMediaSecurityError
 from platform_contracts import GenerationRequest
 from production_domain.models import (
     BrowserWorker,
@@ -213,6 +214,29 @@ class _RunningPollProvider(_CancelledPollProvider):
     ) -> ProviderJob:
         self.poll_returned.set()
         return ProviderJob(provider_job_id, "RUNNING", progress=0.5)
+
+
+class _CompletedPollProvider(_CancelledPollProvider):
+    name = "completed_poll"
+
+    def __init__(self) -> None:
+        self.poll_count = 0
+
+    async def get_job(
+        self,
+        provider_job_id: str,
+        *,
+        account_id: str,
+        worker_id: str,
+        generation_type: str,
+    ) -> ProviderJob:
+        del account_id, worker_id, generation_type
+        self.poll_count += 1
+        return ProviderJob(
+            provider_job_id,
+            "COMPLETED",
+            output_url="https://unsafe-provider.invalid/output.mp4",
+        )
 
 
 def _free_projects(container, *titles: str) -> tuple[str, list[str]]:  # type: ignore[no-untyped-def]
@@ -725,6 +749,68 @@ def test_adapter_false_not_submitted_after_boundary_still_requires_reconciliatio
         assert boundary_events == 1
         assert reconciliation_events == 1
         assert cost is not None and cost.credits == 10
+
+
+def test_paid_media_security_rejection_is_terminal_reconciled_and_releases_capacity(
+    container,
+    monkeypatch,
+):  # type: ignore[no-untyped-def]
+    workspace_id, (project_id,) = _free_projects(container, "Paid unsafe provider output")
+    provider = _CompletedPollProvider()
+    account_id, worker_id = _register_submission_provider(
+        container,
+        provider,
+        model="completed-poll-model",
+    )
+    job = _reserve(
+        container,
+        project_id,
+        idempotency_key="paid-media-security-rejection",
+        provider=provider.name,
+        model="completed-poll-model",
+    )
+
+    submitted = asyncio.run(container.gateway.process(job.id))
+    assert submitted.status == JobStatus.SUBMITTED.value
+    assert submitted.provider_job_id == "cancelled-provider-job"
+    with container.database.session() as session:
+        session.get(GenerationJob, job.id).next_retry_at = None
+
+    async def reject_provider_output(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RemoteMediaSecurityError("provider media host resolved to a non-public address")
+
+    monkeypatch.setattr(container.gateway, "_stage_provider_outputs", reject_provider_output)
+    failed = asyncio.run(container.gateway.process(job.id))
+    replay = asyncio.run(container.gateway.process(job.id))
+
+    assert failed.status == JobStatus.FAILED.value
+    assert failed.error_code == "PROVIDER_MEDIA_SECURITY_ERROR"
+    assert failed.safe_to_retry is False
+    assert failed.next_retry_at is None
+    assert replay.status == JobStatus.FAILED.value
+    assert provider.poll_count == 1
+
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        account = session.get(ProviderAccount, account_id)
+        worker = session.get(BrowserWorker, worker_id)
+        entry = session.scalar(
+            select(WorkspaceCreditEntry).where(WorkspaceCreditEntry.generation_job_id == job.id)
+        )
+        refund_events = session.scalar(
+            select(func.count(WorkspaceCreditEvent.id)).where(
+                WorkspaceCreditEvent.generation_job_id == job.id,
+                WorkspaceCreditEvent.event_type.in_(["REFUNDED", "RECONCILED_REFUNDED"]),
+            )
+        )
+
+        assert workspace is not None and workspace.credit_balance == 40
+        assert account is not None and account.video_inflight == 0 and account.pending_jobs == 0
+        assert worker is not None and worker.current_jobs == 0
+        assert entry is not None and entry.status == "RECONCILIATION_REQUIRED"
+        assert entry.refunded_credits == 0
+        assert entry.reconciliation_reason == "PROVIDER_MEDIA_SECURITY_ERROR"
+        assert refund_events == 0
 
 
 def test_asset_upload_boundary_allows_same_claim_to_continue_to_generation(

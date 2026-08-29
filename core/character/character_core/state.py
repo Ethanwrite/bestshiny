@@ -37,6 +37,8 @@ from production_domain.models import (
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from .branches import assert_branch_writable_in_session
+
 _PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _MISSING = object()
 _PATCH_FORMAT = "JSON_PATCH_V1"
@@ -702,6 +704,9 @@ class PersistentCharacterStateService:
                 raise CharacterStatePolicyViolation(
                     "timeline scope does not match the source shot's authoritative branch"
                 )
+            assert_branch_writable_in_session(
+                session, project_id=project_id, scope_key=timeline_scope_key
+            )
             baseline_violations = _enforce_continuity_constraints(
                 state,
                 state,
@@ -925,6 +930,10 @@ class PersistentCharacterStateService:
         if not shot.input_state_id or not shot.output_state_id:
             raise CharacterStatePolicyViolation("candidate shot has incomplete timeline state")
         scope = self._scope_for_shot(session, shot, character.id)
+        # A merged, retired or abandoned branch keeps its history readable
+        # and accepts no new state; only ACTIVE (or lifecycle-unknown legacy)
+        # branches may take a proposal.
+        assert_branch_writable_in_session(session, project_id=project_id, scope_key=scope)
         existing = session.scalar(
             select(CharacterStateDelta).where(
                 CharacterStateDelta.project_id == project_id,
@@ -1485,6 +1494,16 @@ class PersistentCharacterStateService:
         for delta in deltas:
             latest.setdefault(delta.character_id, delta)
         committed: list[CharacterStateVersion] = []
+        for project_id, scope_key in sorted(
+            {(delta.project_id, delta.timeline_scope_key) for delta in latest.values()}
+        ):
+            # Serialize the head mutation with merge/retire/abandon.  Whichever
+            # operation owns the branch row first determines the result: a
+            # commit finishes before the merge snapshot, or observes the
+            # closed branch and refuses the write.
+            assert_branch_writable_in_session(
+                session, project_id=project_id, scope_key=scope_key
+            )
         if latest:
             locked_input = session.scalar(
                 select(TimelineState)

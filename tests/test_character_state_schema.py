@@ -29,6 +29,8 @@ def _committed_initial_state(
     visual_decision: str = "PASS",
     visual_validator: str = "VLM",
     include_human_override: bool = False,
+    timeline_scope_key: str = "main",
+    narrative_state: dict | None = None,
 ):  # type: ignore[no-untyped-def]
     master, _ = container.media.register(
         project.id,
@@ -124,7 +126,7 @@ def _committed_initial_state(
         delta = CharacterStateDelta(
             project_id=project.id,
             character_id=character.id,
-            timeline_scope_key="main",
+            timeline_scope_key=timeline_scope_key,
             shot_id=shot.id,
             candidate_id=candidate.id,
             base_state_version_id=None,
@@ -142,7 +144,8 @@ def _committed_initial_state(
                 }
             ],
             changed_paths_json=["/injuries/right_brow"],
-            proposed_state_json={
+            proposed_state_json=narrative_state
+            or {
                 "injuries": {"right_brow": {"status": "unhealed", "blood_state": "dried"}},
                 "wardrobe_state": {"field_jacket": {"left_sleeve": "torn"}},
                 "props": {"flare": {"state": "unlit", "location": "waist"}},
@@ -158,7 +161,7 @@ def _committed_initial_state(
         state_version = CharacterStateVersion(
             project_id=project.id,
             character_id=character.id,
-            timeline_scope_key="main",
+            timeline_scope_key=timeline_scope_key,
             version=1,
             identity_version_id=identity.id,
             source_shot_id=shot.id,
@@ -215,7 +218,7 @@ def _committed_initial_state(
         commit = CharacterStateCommit(
             project_id=project.id,
             character_id=character.id,
-            timeline_scope_key="main",
+            timeline_scope_key=timeline_scope_key,
             shot_id=shot.id,
             candidate_id=candidate.id,
             state_delta_id=delta.id,
@@ -233,7 +236,7 @@ def _committed_initial_state(
         head = CharacterStateHead(
             project_id=project.id,
             character_id=character.id,
-            timeline_scope_key="main",
+            timeline_scope_key=timeline_scope_key,
             state_version_id=state_version.id,
             lock_version=1,
         )

@@ -1,0 +1,8 @@
+{
+  "dataset_version": "character-evidence-validation-collection-pending-v1",
+  "status": "DATA_COLLECTION_REQUIRED",
+  "schema": "dataset.schema.json",
+  "acceptance_criteria": "../../../config/character-evidence/acceptance-criteria-v1.json",
+  "authorized_example_count": 0,
+  "examples": []
+}

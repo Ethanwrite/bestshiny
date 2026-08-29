@@ -1,6 +1,20 @@
 # AI Director Platform — Production Evidence
 
-Evidence date: 2026-08-22
+## RC addendum — 2026-08-29
+
+The report below is the 2026-08-22 Phase III snapshot and is retained as historical evidence. Current
+release truth is: migration head `0060_flow_remote_owner_index`; 22 models are `live_enabled`, 0 are
+`VERIFIED_LIVE`; Alibaba OSS passes the real preflight; Character Evidence remains SHADOW with 0
+authorized validation samples and is explicitly disabled because Modal/public HTTPS callback reachability
+is unproven; payment and whole-episode export are excluded. A custom-format backup of the real `0052`
+PostgreSQL database was restored to an independent database and passed
+`0052 → 0060 → 0052 → 0060` plus `alembic check`; the pinned old `9a06dcf` API image also
+started healthy against the rehearsal database at `0052` before it was returned to `0060`. Final
+RC gates passed with SQLite `1194 passed / 12 skipped`, PostgreSQL `1199 passed / 7 skipped`, Ruff,
+Mypy over 189 source files, `git diff --check`, Web production build, and `npm audit` with 0 findings.
+None of those facts is a Provider-accuracy claim.
+
+Historical evidence date: 2026-08-22
 
 Scope: Phase III tagged evidence plus current untagged offline development checkpoint
 

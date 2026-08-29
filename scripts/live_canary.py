@@ -69,7 +69,9 @@ from sqlalchemy import create_engine, text  # noqa: E402
 
 OK, FAIL, WARN = "ok  ", "FAIL", "WARN"
 
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}
+# The worker deliberately never processes this state again; it is terminal for
+# an unattended canary even though an operator may later reconcile it.
+TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REJECTED", "WORKER_NEEDS_USER_ACTION"}
 
 # Every permit this script has ever minted counts against this. One model at a
 # time is the rule, but a rule that is only in a runbook does not hold a budget:
@@ -128,8 +130,10 @@ TARGETS = {
         # leaking into the field that names an execution target.
         model="doubao-seedance-2-5-260628",
         max_requests=1,
-        # 4s at 720p is 0.8916 USD by Ark published rate; margin for rounding.
-        max_cost_usd="1.20",
+        # The live Ark endpoint rejected the model card's documented 4s floor
+        # on 2026-08-29. Five seconds is the next-smallest integer request and
+        # costs about USD 1.1145 at the published 720p estimate.
+        max_cost_usd="1.25",
         permit_hours=2,
         body={
             "media_type": "video",
@@ -138,12 +142,12 @@ TARGETS = {
             "prompt": "a paper lantern drifting upward over a wet street at night",
             "aspect_ratio": "9:16",
             "resolution": "720p",
-            # Ark's minimum for this model is 4s, and the Create canvas defaults
-            # there too. At the corrected 0.2229 USD/s this is ~107 credits, not
-            # the 44 the old 0.09 placeholder produced.
-            "duration": 4,
+            # Four seconds is still admitted by the registry so existing calls
+            # fail closed with Ark's own response, but the deployment canary
+            # uses the smallest duration this account has not rejected.
+            "duration": 5,
         },
-        quote={"media_type": "video", "duration": 4, "resolution": "720p", "reference_count": 0},
+        quote={"media_type": "video", "duration": 5, "resolution": "720p", "reference_count": 0},
     ),
 }
 
@@ -734,6 +738,31 @@ def _report_failure_path(  # type: ignore[no-untyped-def]
 
     report.stage("Error mapping and credit release")
     submission = str(job.get("submission_state") or "")
+    expected_drill = (
+        drill
+        and job.get("error_code") == "LIVE_CANARY_DENIED"
+        and submission == "NOT_SENT"
+    )
+    if drill:
+        report.say(
+            OK if expected_drill else FAIL,
+            "failure drill outcome",
+            (
+                "live gate refused before provider submission"
+                if expected_drill
+                else f"expected LIVE_CANARY_DENIED/NOT_SENT, got "
+                f"{job.get('error_code')}/{submission or '—'}"
+            ),
+        )
+    else:
+        # A safely mapped failure is useful evidence, but it is not a successful
+        # production canary. Without this explicit failure the report ended in
+        # "Closed loop verified" after an INVALID_REQUEST and no output asset.
+        report.say(
+            FAIL,
+            "canary outcome",
+            f"expected COMPLETED, got {job.get('status') or '—'}",
+        )
     report.say(
         OK if job.get("error_code") else FAIL,
         "mapped error_code",
@@ -772,7 +801,7 @@ def _report_failure_path(  # type: ignore[no-untyped-def]
         }
     _report_events(engine, job_id, report)
 
-    if drill and job.get("error_code") == "LIVE_CANARY_DENIED" and submission == "NOT_SENT":
+    if expected_drill:
         print(
             "\n  The drill did what it is for: priced, reserved, refused at the live gate\n"
             "  before a socket opened, and the reservation came back. No provider money.\n"

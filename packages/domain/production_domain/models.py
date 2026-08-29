@@ -191,6 +191,27 @@ class ShotDependencyOrigin(StrEnum):
     MANUAL = "MANUAL"
 
 
+class ShotNarrativeEffectType(StrEnum):
+    """What committing a shot does to the narrative ledger.
+
+    Declared at compile/planning time, applied exactly once inside the
+    candidate-commit transaction — the moment the shot's content becomes canon.
+    Foreshadowing is an OPEN_OBLIGATION whose metadata records the category.
+    """
+
+    ESTABLISH_FACT = "ESTABLISH_FACT"
+    DISCLOSE_FACT = "DISCLOSE_FACT"
+    OPEN_OBLIGATION = "OPEN_OBLIGATION"
+    SETTLE_OBLIGATION = "SETTLE_OBLIGATION"
+
+
+class ShotNarrativeEffectOrigin(StrEnum):
+    SCRIPT_COMPILER = "SCRIPT_COMPILER"
+    MANUAL = "MANUAL"
+    CREATIVE_DIRECTOR = "CREATIVE_DIRECTOR"
+    EPISODE_CONTINUATION = "EPISODE_CONTINUATION"
+
+
 class CharacterStateProposalKind(StrEnum):
     INITIALIZE = "INITIALIZE"
     NARRATIVE = "NARRATIVE"
@@ -1024,6 +1045,15 @@ class NarrativeFact(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     fact_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     established_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Scene/shot sequence complete the narrative position within the episode.
+    # 0 means "start of episode" — the pre-position, episode-granular legacy
+    # value; real shots are 1-based, so 0 sorts before every actual shot.
+    established_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    established_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     established_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1055,6 +1085,12 @@ class NarrativeDisclosure(Base, TimestampMixin):
     )
     holder_key: Mapped[str] = mapped_column(String(64), nullable=False)
     disclosed_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    disclosed_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    disclosed_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     disclosed_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1097,11 +1133,19 @@ class NarrativeObligation(Base, TimestampMixin):
     obligation_key: Mapped[str] = mapped_column(String(160), nullable=False)
     promise: Mapped[str] = mapped_column(Text, nullable=False)
     opened_episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_scene_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    opened_shot_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     opened_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
     status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
     settled_episode: Mapped[int | None] = mapped_column(Integer)
+    settled_scene_sequence: Mapped[int | None] = mapped_column(Integer)
+    settled_shot_sequence: Mapped[int | None] = mapped_column(Integer)
     settled_shot_id: Mapped[str | None] = mapped_column(
         ForeignKey("shots.id", ondelete="SET NULL"), index=True
     )
@@ -1187,6 +1231,198 @@ class ShotDependency(Base, TimestampMixin):
         return "|".join(
             [dependency_type, source_shot_id or "", fact_key or "", obligation_key or ""]
         )
+
+
+class ShotNarrativeEffect(Base, TimestampMixin):
+    """One declared ledger consequence of a shot, applied when the shot commits.
+
+    Declarations are written by script compilation (explicit directives),
+    manual editing, or upper-level planning; the *ledger* rows they imply are
+    written exactly once, inside the candidate-commit transaction, at the
+    shot's complete narrative position. ``applied_at``/``applied_candidate_id``
+    record that application; a commit replay verifies instead of re-writing.
+
+    The position columns denormalize the shot's (episode, scene, shot) order at
+    declaration time so pending effects are comparable to ledger positions
+    without joins. Recompiling an episode deletes its shots and these rows
+    cascade with them — safe, because effects only apply at commit and a
+    committed shot refuses recompilation.
+    """
+
+    __tablename__ = "shot_narrative_effects"
+    __table_args__ = (
+        UniqueConstraint("shot_id", "effect_key", name="uq_shot_narrative_effect_key"),
+        CheckConstraint(
+            "effect_type IN ('ESTABLISH_FACT', 'DISCLOSE_FACT', "
+            "'OPEN_OBLIGATION', 'SETTLE_OBLIGATION')",
+            name="ck_shot_narrative_effect_type",
+        ),
+        CheckConstraint(
+            "origin IN ('SCRIPT_COMPILER', 'MANUAL', 'CREATIVE_DIRECTOR', "
+            "'EPISODE_CONTINUATION')",
+            name="ck_shot_narrative_effect_origin",
+        ),
+        CheckConstraint(
+            "effect_type NOT IN ('ESTABLISH_FACT', 'DISCLOSE_FACT') OR fact_key IS NOT NULL",
+            name="ck_shot_narrative_effect_fact_referent",
+        ),
+        CheckConstraint(
+            "effect_type NOT IN ('OPEN_OBLIGATION', 'SETTLE_OBLIGATION') "
+            "OR obligation_key IS NOT NULL",
+            name="ck_shot_narrative_effect_obligation_referent",
+        ),
+        CheckConstraint(
+            "episode_number > 0 AND scene_sequence > 0 AND shot_sequence > 0",
+            name="ck_shot_narrative_effect_position",
+        ),
+        Index("ix_shot_narrative_effect_fact", "project_id", "fact_key"),
+        Index("ix_shot_narrative_effect_obligation", "project_id", "obligation_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    shot_id: Mapped[str] = mapped_column(
+        ForeignKey("shots.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    effect_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    episode_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    scene_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    fact_key: Mapped[str | None] = mapped_column(String(160))
+    obligation_key: Mapped[str | None] = mapped_column(String(160))
+    holder_key: Mapped[str | None] = mapped_column(String(64))
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    channel: Mapped[str] = mapped_column(String(40), default="ON_SCREEN", nullable=False)
+    disclose_to: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    subject_character_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(40), default=ShotNarrativeEffectOrigin.MANUAL.value, nullable=False
+    )
+    effect_key: Mapped[str] = mapped_column(String(420), nullable=False)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_candidate_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    @staticmethod
+    def natural_key(
+        effect_type: str,
+        *,
+        fact_key: str | None = None,
+        obligation_key: str | None = None,
+        holder_key: str | None = None,
+    ) -> str:
+        """One row per (type, referent, holder) on a shot — replay-idempotent."""
+
+        return "|".join([effect_type, fact_key or "", obligation_key or "", holder_key or ""])
+
+
+class TimelineBranch(Base, TimestampMixin):
+    """One narrative timeline branch (dream, flashback, alternate), with a lifecycle.
+
+    ``timeline_scope_key`` strings previously proliferated with no record of
+    what each branch was, where it forked, or whether it ever ended
+    (OPEN_ISSUES 2.3). This row is the branch's identity and lifecycle:
+    ACTIVE accepts state writes; MERGED recorded a declared write-back
+    manifest; RETIRED and ABANDONED refuse new writes but keep history
+    readable. Rows are never physically deleted while any
+    CharacterStateVersion, head, delta or transition still references the
+    scope — those rows are the audit trail the branch anchors.
+    """
+
+    __tablename__ = "timeline_branches"
+    __table_args__ = (
+        UniqueConstraint("project_id", "scope_key", name="uq_timeline_branch_scope"),
+        CheckConstraint(
+            "branch_kind IN ('MAIN', 'DREAM', 'FLASHBACK', 'FLASH_FORWARD', 'ALTERNATE')",
+            name="ck_timeline_branch_kind",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'MERGED', 'RETIRED', 'ABANDONED')",
+            name="ck_timeline_branch_status",
+        ),
+        CheckConstraint(
+            "branch_kind = 'MAIN' OR parent_scope_key IS NOT NULL",
+            name="ck_timeline_branch_parent_required",
+        ),
+        Index("ix_timeline_branch_status", "project_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    scope_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    branch_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    parent_scope_key: Mapped[str | None] = mapped_column(String(120))
+    fork_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_by: Mapped[str | None] = mapped_column(String(120))
+    merge_policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    merge_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retire_reason: Mapped[str | None] = mapped_column(String(500))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class CharacterEvidenceSubmission(Base, TimestampMixin):
+    """Durable lifecycle of one shadow Character Evidence job, one per candidate.
+
+    The unique candidate key is the idempotency guarantee: however many sweeps,
+    replays or process restarts occur, at most one remote GPU job is dispatched
+    per candidate. Status is explicit — a 202 acceptance is ACCEPTED, never
+    evidence; a signed callback moves it to REPORTED or FAILED; an acceptance
+    that never calls back past its deadline becomes RECONCILIATION_REQUIRED and
+    waits for an operator. Shadow-only by check constraint: this table cannot
+    express an operating mode that could gate a candidate.
+    """
+
+    __tablename__ = "character_evidence_submissions"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_character_evidence_submission_candidate"),
+        CheckConstraint(
+            "status IN ('PENDING', 'ACCEPTED', 'REPORTED', 'FAILED', 'SKIPPED', "
+            "'RECONCILIATION_REQUIRED')",
+            name="ck_character_evidence_submission_status",
+        ),
+        CheckConstraint(
+            "operating_mode = 'SHADOW'",
+            name="ck_character_evidence_submission_shadow_only",
+        ),
+        CheckConstraint(
+            "submission_count >= 0",
+            name="ck_character_evidence_submission_count",
+        ),
+        Index("ix_character_evidence_submission_status", "status", "updated_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), nullable=False
+    )
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"))
+    character_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", nullable=False)
+    operating_mode: Mapped[str] = mapped_column(String(20), default="SHADOW", nullable=False)
+    threshold_version: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    submission_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_callback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(120))
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    skip_reason: Mapped[str | None] = mapped_column(String(240))
+    reconciliation_note: Mapped[str | None] = mapped_column(Text)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciled_by: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class CharacterStateVersion(Base, TimestampMixin):
@@ -1659,7 +1895,13 @@ class MediaAsset(Base, TimestampMixin):
             "lineage_key",
             name="uq_media_asset_lineage_hash",
         ),
+        CheckConstraint(
+            "verification_status IN ('READY', 'PENDING_VERIFICATION', 'VERIFYING', "
+            "'INVALID', 'QUARANTINED')",
+            name="ck_media_asset_verification_status",
+        ),
         Index("ix_asset_provider_media", "provider", "provider_media_id"),
+        Index("ix_media_asset_verification", "verification_status", "verification_claimed_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
@@ -1683,6 +1925,20 @@ class MediaAsset(Base, TimestampMixin):
     generation_candidate_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_candidates.id"), index=True
     )
+    # Content verification. Paths that validate full bytes inline (multipart
+    # upload, downloaded provider output) register READY; a direct upload is
+    # adopted from a HEAD plus a 64 KB header and registers
+    # PENDING_VERIFICATION, is claimed to VERIFYING by the async verifier
+    # (leased, so a crashed worker's claim lapses and the row re-verifies),
+    # and only a full decode promotes it to READY. INVALID is a file that
+    # does not decode; QUARANTINED is one whose bytes contradict what was
+    # declared (forged MIME, SHA mismatch). Providers and build chains may
+    # only consume READY assets.
+    verification_status: Mapped[str] = mapped_column(
+        String(30), default="READY", server_default="READY", nullable=False
+    )
+    verification_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_error: Mapped[str | None] = mapped_column(String(500))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -1761,7 +2017,12 @@ class MediaRendition(Base, TimestampMixin):
             "constraint_key",
             name="uq_media_rendition_scope",
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('ACTIVE', 'GC_CLAIMED', 'DELETED')",
+            name="ck_media_rendition_lifecycle",
+        ),
         Index("ix_media_rendition_asset", "media_asset_id", "kind"),
+        Index("ix_media_rendition_gc", "lifecycle_status", "last_accessed_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     media_asset_id: Mapped[str] = mapped_column(
@@ -1778,6 +2039,20 @@ class MediaRendition(Base, TimestampMixin):
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    # Garbage-collection lifecycle. A derived copy is disposable cache; these
+    # columns make its disposal observable and safe: ACTIVE rows serve, a
+    # sweeper claims a row under a lease before touching storage (so two
+    # workers cannot double-delete), and DELETED rows remain as tombstones
+    # recording what was removed — reconcilable, and revivable in place when
+    # the same constraints are needed again. Originals are never collected.
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    gc_claim_id: Mapped[str | None] = mapped_column(String(36))
+    gc_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delete_reason: Mapped[str | None] = mapped_column(String(240))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -3701,6 +3976,338 @@ class AuthLoginThrottle(Base, TimestampMixin):
     failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class CreativeSessionStatus(StrEnum):
+    """Lifecycle of one AI-creative-director conversation.
+
+    Every transition is forward-only except ABANDONED; approvals move the
+    session, never edits. The stage names mirror the product flow:
+    idea -> clarify -> brief -> key visuals -> visual bible -> beats -> compile.
+    """
+
+    INTAKE = "INTAKE"
+    CLARIFYING = "CLARIFYING"
+    BRIEF_PROPOSED = "BRIEF_PROPOSED"
+    BRIEF_APPROVED = "BRIEF_APPROVED"
+    VISUALS_IN_PROGRESS = "VISUALS_IN_PROGRESS"
+    BIBLE_PROPOSED = "BIBLE_PROPOSED"
+    BIBLE_LOCKED = "BIBLE_LOCKED"
+    BEATS_PROPOSED = "BEATS_PROPOSED"
+    COMPILED = "COMPILED"
+    ABANDONED = "ABANDONED"
+
+
+class CreativeFormat(StrEnum):
+    SHORT_DRAMA = "SHORT_DRAMA"
+    ADVERTISEMENT = "ADVERTISEMENT"
+    PRODUCT_SHOWCASE = "PRODUCT_SHOWCASE"
+    SOCIAL_SHORT = "SOCIAL_SHORT"
+    MUSIC_VISUAL = "MUSIC_VISUAL"
+    FASHION_LOOKBOOK = "FASHION_LOOKBOOK"
+    BEAUTY_TUTORIAL = "BEAUTY_TUTORIAL"
+    CONCEPT_FILM = "CONCEPT_FILM"
+    UNSPECIFIED = "UNSPECIFIED"
+
+
+class CreativeAnchorStatus(StrEnum):
+    PENDING = "PENDING"
+    GENERATING = "GENERATING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class CreativeActionStatus(StrEnum):
+    PROPOSED = "PROPOSED"
+    EXECUTED = "EXECUTED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class CreativeSession(Base, TimestampMixin):
+    """One stateful creative-director engagement over a project."""
+
+    __tablename__ = "creative_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('INTAKE', 'CLARIFYING', 'BRIEF_PROPOSED', 'BRIEF_APPROVED', "
+            "'VISUALS_IN_PROGRESS', 'BIBLE_PROPOSED', 'BIBLE_LOCKED', 'BEATS_PROPOSED', "
+            "'COMPILED', 'ABANDONED')",
+            name="ck_creative_session_status",
+        ),
+        CheckConstraint(
+            "format IN ('SHORT_DRAMA', 'ADVERTISEMENT', 'PRODUCT_SHOWCASE', 'SOCIAL_SHORT', "
+            "'MUSIC_VISUAL', 'FASHION_LOOKBOOK', 'BEAUTY_TUTORIAL', 'CONCEPT_FILM', 'UNSPECIFIED')",
+            name="ck_creative_session_format",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeSessionStatus.INTAKE.value, nullable=False
+    )
+    format: Mapped[str] = mapped_column(
+        String(40), default=CreativeFormat.UNSPECIFIED.value, nullable=False
+    )
+    #: Head pointers into the append-only revision tables below. They are
+    #: projections, not truth: the revision rows are.
+    current_brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_bible_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_beat_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    compiled_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
+
+
+class CreativeTurn(Base, TimestampMixin):
+    """Append-only dialogue ledger: what was said, asked, and extracted."""
+
+    __tablename__ = "creative_turns"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_creative_turn_sequence"),
+        CheckConstraint("speaker IN ('USER', 'DIRECTOR')", name="ck_creative_turn_speaker"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    speaker: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: Questions the director chose to ask on this turn - each carries the gap
+    #: code it targets, so a question is never re-asked for an answered gap.
+    questions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: The structured brief patch this turn produced (empty for pure replies).
+    extracted_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: MODEL:<role> when a model reasoned about this turn, DETERMINISTIC when
+    #: the rules engine did, USER for user turns. Model outage degrades to the
+    #: rules engine loudly, never silently.
+    reasoner: Mapped[str] = mapped_column(String(60), default="USER", nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class CreativeBriefRevision(Base, TimestampMixin):
+    """Append-only CreativeBrief revisions; approval freezes one."""
+
+    __tablename__ = "creative_briefs"
+    __table_args__ = (
+        UniqueConstraint("session_id", "revision", name="uq_creative_brief_revision"),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'SUPERSEDED')",
+            name="ck_creative_brief_status",
+        ),
+        CheckConstraint("length(content_hash) = 64", name="ck_creative_brief_hash_length"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
+    fields_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The gap report computed for this revision: which fields are missing,
+    #: their value weight, and which already have an asked question.
+    completeness_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VisualBibleVersion(Base, TimestampMixin):
+    """Versioned visual bible; LOCKED versions are immutable by contract.
+
+    Locking is the version-lock the product promises after user approval: the
+    service refuses any further mutation of a LOCKED row, and later changes
+    append a new version that supersedes it.
+    """
+
+    __tablename__ = "visual_bibles"
+    __table_args__ = (
+        UniqueConstraint("session_id", "version", name="uq_visual_bible_version"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'LOCKED', 'SUPERSEDED')",
+            name="ck_visual_bible_status",
+        ),
+        CheckConstraint("version > 0", name="ck_visual_bible_version_positive"),
+        CheckConstraint(
+            "status != 'LOCKED' OR locked_at IS NOT NULL",
+            name="ck_visual_bible_locked_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
+    brief_id: Mapped[str] = mapped_column(ForeignKey("creative_briefs.id"), nullable=False)
+    content_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(120))
+
+
+class CreativeVisualAnchor(Base, TimestampMixin):
+    """One key visual the director wants generated and bound.
+
+    The anchor is the structured intent; the generation itself always goes
+    through the existing Passenger image path (admission, credits, router,
+    gateway) - never a direct provider call from creative code.
+    """
+
+    __tablename__ = "creative_visual_anchors"
+    __table_args__ = (
+        UniqueConstraint("session_id", "anchor_key", name="uq_creative_anchor_key"),
+        CheckConstraint(
+            "kind IN ('CHARACTER', 'SCENE', 'STYLE', 'PRODUCT', 'PROP', 'MOOD')",
+            name="ck_creative_anchor_kind",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'GENERATING', 'READY', 'FAILED')",
+            name="ck_creative_anchor_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    anchor_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    #: Structured prompt parts (subject / style / constraints), composed into a
+    #: provider prompt only at action-execution time.
+    prompt_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeAnchorStatus.PENDING.value, nullable=False
+    )
+    generation_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"))
+    media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id"))
+    failure_code: Mapped[str | None] = mapped_column(String(240))
+
+
+class CreativeAction(Base, TimestampMixin):
+    """Append-only structured actions - the director's only door to execution.
+
+    The creative director never calls a provider; it emits one of these rows
+    and the API layer executes it through the existing admission, credit,
+    router and gateway chain. The row is the audit that nothing else happened.
+    """
+
+    __tablename__ = "creative_actions"
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_creative_action_sequence"),
+        UniqueConstraint("idempotency_key", name="uq_creative_action_idempotency"),
+        CheckConstraint(
+            "kind IN ('GENERATE_KEY_VISUAL', 'CREATE_EPISODE', 'COMPILE_EPISODE', "
+            "'OPEN_OBLIGATION', 'ESTABLISH_FACT')",
+            name="ck_creative_action_kind",
+        ),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'EXECUTED', 'FAILED', 'SKIPPED')",
+            name="ck_creative_action_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(60), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(40), default=CreativeActionStatus.PROPOSED.value, nullable=False
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(250))
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CreativeBeat(Base, TimestampMixin):
+    """One beat of a proposed beat plan, with its structured shot intents."""
+
+    __tablename__ = "creative_beats"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "plan_revision", "sequence", name="uq_creative_beat_sequence"
+        ),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'SUPERSEDED')",
+            name="ck_creative_beat_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    plan_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
+    #: {intent, summary, location, time, characters, shots: [ShotIntent...]}
+    beat_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class EpisodeContinuation(Base, TimestampMixin):
+    """The bridge from a finished episode to the next one.
+
+    Holds the computed EpisodeContinuationContext snapshot (what the next
+    episode inherits and what it must not), the proposed brief and beats, and
+    the compiled result. One row per (project, previous episode, next number),
+    so preparation is idempotent and confirmation is replayable.
+    """
+
+    __tablename__ = "episode_continuations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "previous_episode_id",
+            "next_episode_number",
+            name="uq_episode_continuation_target",
+        ),
+        CheckConstraint(
+            "status IN ('BRIEF_PROPOSED', 'CONFIRMED', 'COMPILED', 'ABANDONED')",
+            name="ck_episode_continuation_status",
+        ),
+        CheckConstraint(
+            "continuation_mode IN ('CONTINUOUS', 'TIME_JUMP', 'LOCATION_CHANGE')",
+            name="ck_episode_continuation_mode",
+        ),
+        CheckConstraint("next_episode_number > 1", name="ck_episode_continuation_number"),
+        CheckConstraint("length(context_hash) = 64", name="ck_episode_continuation_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    previous_episode_id: Mapped[str] = mapped_column(
+        ForeignKey("episodes.id"), index=True, nullable=False
+    )
+    next_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), index=True)
+    next_episode_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="BRIEF_PROPOSED", nullable=False)
+    #: CONTINUOUS inherits the previous ending frame inside the same location;
+    #: TIME_JUMP / LOCATION_CHANGE inherit narrative and character state only.
+    continuation_mode: Mapped[str] = mapped_column(String(40), nullable=False)
+    time_gap: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    new_location: Mapped[str | None] = mapped_column(String(200))
+    #: The EpisodeContinuationContext snapshot this proposal reasoned from.
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    context_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    brief_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    beats_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    #: Prior proposal revisions, appended when a re-proposal replaces them.
+    revisions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    reasoner: Mapped[str] = mapped_column(String(60), default="DETERMINISTIC", nullable=False)
+    script_rendered: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_by: Mapped[str | None] = mapped_column(String(120))
 
 
 def _install_character_state_integrity_ddl() -> None:

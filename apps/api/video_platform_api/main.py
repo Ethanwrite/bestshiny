@@ -13,6 +13,14 @@ from asset_registry_core import VersionMediaInput
 from character_core import (
     CharacterStateConflict,
     CharacterStatePolicyViolation,
+    TimelineBranchConflict,
+    TimelineBranchError,
+)
+from character_evidence.client import (
+    CharacterEvidenceCallbackAuthenticationError,
+    CharacterEvidenceCallbackPayloadError,
+    report_from_payload,
+    verify_callback,
 )
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
@@ -52,6 +60,7 @@ from media_service import (
     ProviderMediaReconciliationConflict,
     ProviderMediaValidationFailed,
     StorageReservationConflict,
+    ThumbnailUnavailable,
     WorkspaceStorageQuota,
     WorkspaceStorageQuotaExceeded,
     lineage_key,
@@ -123,6 +132,7 @@ from sqlalchemy import select
 from .admin_routes import register_admin_routes
 from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
 from .container import Container, build_container
+from .creative_routes import register_creative_routes
 from .payment_routes import register_payment_routes
 from .request_limits import UploadSizeLimitMiddleware
 from .runtime_routes import register_runtime_routes
@@ -264,6 +274,28 @@ class HumanReviewApprove(BaseModel):
 
     reason: str = Field(min_length=1, max_length=2000)
     explicit_confirmation: bool = Field(default=False, strict=True)
+
+
+class CharacterEvidenceReconcile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["RESUBMIT", "MARK_FAILED"]
+    note: str = Field(min_length=1, max_length=2000)
+    resolved_by: str = Field(min_length=1, max_length=120)
+
+
+class TimelineBranchMerge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    into_scope_key: str = Field(default="main", min_length=1, max_length=120)
+    allowed_state_paths: list[str] = Field(min_length=1, max_length=100)
+    allow_dream_states: bool = Field(default=False, strict=True)
+
+
+class TimelineBranchClose(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class PromptRefine(BaseModel):
@@ -443,6 +475,72 @@ def create_app(container: Container | None = None) -> FastAPI:
         except DePayConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         return result.as_dict()
+
+    @app.post("/v1/webhooks/character-evidence")
+    async def receive_character_evidence_callback(request: Request):
+        raw_body = await request.body()
+        try:
+            callback = verify_callback(
+                raw_body,
+                timestamp=request.headers.get("x-character-evidence-timestamp"),
+                signature=request.headers.get("x-character-evidence-signature"),
+                signing_key=container.settings.character_evidence_callback_signing_key,
+            )
+            with container.database.session() as session:
+                candidate = session.get(GenerationCandidate, callback.job_id)
+                if candidate is None:
+                    raise LookupError("character evidence callback candidate was not found")
+                shot = session.get(Shot, candidate.shot_id)
+                output = (
+                    session.get(MediaAsset, candidate.output_asset_id)
+                    if candidate.output_asset_id
+                    else None
+                )
+                if shot is None or output is None:
+                    raise LookupError("character evidence callback candidate context is incomplete")
+                if shot.id != callback.shot_id or output.project_id != callback.project_id:
+                    raise ValueError("character evidence callback lineage does not match the candidate")
+                if candidate.metadata_json.get("character_evidence_job_id") != callback.job_id:
+                    raise ValueError("character evidence callback job was not submitted by this service")
+                completed_run_ids = set(
+                    candidate.metadata_json.get("character_evidence_run_ids", [])
+                )
+            if callback.status == "FAILED":
+                container.qa.record_character_evidence_failure(
+                    callback.job_id,
+                    job_id=callback.job_id,
+                    error_code=callback.error_code,
+                    error_message=callback.error_message,
+                )
+                container.character_evidence_tracker.record_callback(
+                    callback.job_id, status="FAILED", error_code=callback.error_code
+                )
+                return {"status": "RECORDED", "reports": 0}
+            reports = [report_from_payload(item) for item in callback.reports]
+            for report in reports:
+                if report.candidate_id != callback.job_id:
+                    raise ValueError("character evidence report belongs to a different candidate")
+                if report.operating_mode != "SHADOW":
+                    raise ValueError("character evidence callback attempted a non-shadow decision")
+                if report.producer_run_id in completed_run_ids:
+                    continue
+                container.qa.validate_candidate(
+                    callback.job_id,
+                    character_evidence=report,
+                    observation_only=True,
+                )
+            container.character_evidence_tracker.record_callback(
+                callback.job_id, status="SUCCEEDED"
+            )
+            return {"status": "RECORDED", "reports": len(reports)}
+        except CharacterEvidenceCallbackAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except CharacterEvidenceCallbackPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     def verify_api_key(authorization: str | None = Header(default=None)) -> None:
         expected = container.settings.platform_api_key
@@ -1441,6 +1539,144 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(404, str(exc)) from exc
         return {"removed": dependency_id}
 
+    @app.get("/v1/projects/{project_id}/timeline-branches")
+    def list_timeline_branches(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
+        return {"branches": container.timeline_branches.list_for_project(project_id)}
+
+    @app.post("/v1/projects/{project_id}/timeline-branches/{scope_key}/merge")
+    def merge_timeline_branch(
+        project_id: str,
+        scope_key: str,
+        body: TimelineBranchMerge,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        if principal.development_bypass:
+            raise HTTPException(403, "时间线分支合并必须由真实登录用户确认")
+        auth.require_project(principal, project_id, write=True)
+        try:
+            return container.timeline_branches.merge(
+                project_id,
+                scope_key,
+                into_scope_key=body.into_scope_key,
+                allowed_state_paths=body.allowed_state_paths,
+                merged_by=principal.user_id or "unknown",
+                allow_dream_states=body.allow_dream_states,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except TimelineBranchConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except TimelineBranchError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/projects/{project_id}/timeline-branches/{scope_key}/retire")
+    def retire_timeline_branch(
+        project_id: str,
+        scope_key: str,
+        body: TimelineBranchClose,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id, write=True)
+        try:
+            return container.timeline_branches.retire(project_id, scope_key, reason=body.reason)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except TimelineBranchConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except TimelineBranchError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post(
+        "/internal/maintenance/timeline-branches",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_timeline_branches_endpoint(project_id: str, limit: int = 50):
+        """Close orphaned branches (never referenced, idle) as ABANDONED."""
+
+        return container.timeline_branches.sweep_orphans(project_id, limit=limit).as_dict()
+
+    @app.get(
+        "/internal/models/live-status",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def model_live_status():
+        """The three live facts per model, kept deliberately separate.
+
+        ``live_enabled`` is configuration permission (a credential exists and
+        the operator opened the gate); ``lifecycle_status`` is registration
+        state; only ``live_canary_status = VERIFIED_LIVE`` — one real
+        generation completed and reconciled — is production validation. The
+        summary counts them apart so "enabled" can never read as "proven":
+        with zero VERIFIED_LIVE rows, this endpoint reports zero models as
+        live-verified no matter how many are enabled.
+        """
+
+        from production_domain.models import ModelDefinition
+
+        with container.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(ModelDefinition).order_by(
+                        ModelDefinition.provider, ModelDefinition.logical_name
+                    )
+                )
+            )
+            models = [
+                {
+                    "logical_name": row.logical_name,
+                    "provider": row.provider,
+                    "provider_model_id": row.provider_model_id,
+                    "modality": row.modality,
+                    "enabled": row.enabled,
+                    "live_enabled": row.live_enabled,
+                    "lifecycle_status": row.lifecycle_status,
+                    "live_canary_status": row.live_canary_status,
+                    "live_canary_detail": row.live_canary_detail,
+                    "last_live_test_at": (
+                        row.last_live_test_at.isoformat() if row.last_live_test_at else None
+                    ),
+                }
+                for row in rows
+            ]
+        verified = [item for item in models if item["live_canary_status"] == "VERIFIED_LIVE"]
+        return {
+            "models": models,
+            "summary": {
+                "total": len(models),
+                "live_enabled": sum(1 for item in models if item["live_enabled"]),
+                "verified_live": len(verified),
+                "verified_live_models": [item["logical_name"] for item in verified],
+                "note": (
+                    "live_enabled is configuration permission and lifecycle_status is "
+                    "registration state; neither is production validation. Only "
+                    "live_canary_status=VERIFIED_LIVE records a completed, reconciled "
+                    "real generation."
+                ),
+            },
+        }
+
+    @app.get(
+        "/internal/style-drift/{project_id}",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def style_drift_report(project_id: str, drift_threshold: float | None = None):
+        """Aggregate cross-episode style drift over committed candidates.
+
+        Monitoring only: reads the append-only candidate style evaluations the
+        commit gate already writes and reports per-episode means, drift from
+        the baseline episode, flags and the decline streak. Changes no gate.
+        """
+
+        if drift_threshold is None:
+            return container.style_drift.series_report(project_id).as_dict()
+        return container.style_drift.series_report(
+            project_id, drift_threshold=drift_threshold
+        ).as_dict()
+
     @app.post("/v1/episodes/{episode_id}/plan-frame-anchors")
     def plan_frame_anchors(
         episode_id: str,
@@ -1649,6 +1885,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             "asset_type": asset.asset_type,
             "storage_key": asset.storage_key,
             "public_url": asset.public_url,
+            # PENDING_VERIFICATION for a fresh direct upload: registered, not
+            # yet usable by providers until the full-content check passes.
+            "verification_status": asset.verification_status,
             "reused": reused,
         }
 
@@ -2193,6 +2432,134 @@ def create_app(container: Container | None = None) -> FastAPI:
             limit=max(1, limit or container.settings.generation_staging_sweep_limit),
         ).as_response()
 
+    @app.post(
+        "/internal/maintenance/media-verification",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def verify_media_endpoint(limit: int | None = None):
+        """The operator-triggered face of the sweep the worker runs on
+        `MEDIA_VERIFICATION_INTERVAL_SECONDS`: full decode plus SHA re-check
+        of every PENDING_VERIFICATION direct upload, crash-recoverable via
+        the VERIFYING lease.
+        """
+
+        from media_service import verify_pending_assets
+
+        return verify_pending_assets(
+            database=container.database,
+            storage=container.storage,
+            limit=max(1, limit or container.settings.media_verification_limit),
+            lease_seconds=container.settings.media_verification_lease_seconds,
+        ).as_response()
+
+    @app.post(
+        "/internal/maintenance/reclaim-rejected-media",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def reclaim_rejected_media_endpoint(
+        asset_id: str | None = None,
+        min_age_seconds: int | None = None,
+        limit: int | None = None,
+    ):
+        """Delete rejected upload bytes and hand their quota back, in that order.
+
+        Verification keeps an INVALID/QUARANTINED object charged because the
+        bytes are still stored as evidence. This is the other half: an
+        explicit operator action that removes the object and only then
+        releases the reservation, so a workspace is not charged forever for
+        files it can never use — and un-charging can never outrun deletion.
+        Objects shared with another asset or a live rendition are kept.
+        """
+
+        from media_service import reclaim_rejected_assets
+
+        return reclaim_rejected_assets(
+            database=container.database,
+            storage=container.storage,
+            quota=WorkspaceStorageQuota(container.database),
+            asset_ids=[asset_id] if asset_id else None,
+            min_age_seconds=(
+                min_age_seconds if min_age_seconds is not None else 7 * 24 * 3600
+            ),
+            limit=max(1, limit or 50),
+        ).as_response()
+
+    @app.post(
+        "/internal/maintenance/rendition-gc",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_rendition_gc_endpoint(limit: int | None = None):
+        """The operator-triggered face of the sweep the worker runs on
+        `RENDITION_GC_INTERVAL_SECONDS`. Claim/lease per row, so running it
+        beside the worker double-deletes nothing; originals are never
+        eligible; deleted rows stay as reconcilable tombstones.
+        """
+
+        from media_service import active_reference_profiles, sweep_rendition_gc
+
+        return sweep_rendition_gc(
+            database=container.database,
+            storage=container.storage,
+            active_constraint_profiles=active_reference_profiles(container.providers._providers),
+            min_idle_seconds=container.settings.rendition_gc_min_idle_seconds,
+            lease_seconds=container.settings.rendition_gc_lease_seconds,
+            limit=max(1, limit or container.settings.rendition_gc_limit),
+        ).as_response()
+
+    @app.post(
+        "/internal/maintenance/character-evidence",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_character_evidence_endpoint(limit: int | None = None):
+        """The operator-triggered face of the shadow Character Evidence sweep.
+
+        Same implementation the worker runs on
+        `CHARACTER_EVIDENCE_SWEEP_INTERVAL_SECONDS`: enqueue candidates with
+        registered video output, dispatch PENDING submissions, and move
+        silent acceptances to RECONCILIATION_REQUIRED. Shadow-only.
+        """
+
+        return container.character_evidence_tracker.sweep(
+            limit=max(1, limit or container.settings.character_evidence_sweep_limit)
+        ).as_dict()
+
+    @app.get(
+        "/internal/character-evidence/submissions",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def list_character_evidence_submissions(status: str | None = None, limit: int = 100):
+        return {
+            "submissions": container.character_evidence_tracker.list_submissions(
+                status=status, limit=limit
+            )
+        }
+
+    @app.post(
+        "/internal/character-evidence/submissions/{submission_id}/reconcile",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def reconcile_character_evidence_submission(
+        submission_id: str,
+        body: CharacterEvidenceReconcile,
+    ):
+        try:
+            resolved = container.character_evidence_tracker.resolve_reconciliation(
+                submission_id,
+                action=body.action,
+                note=body.note,
+                resolved_by=body.resolved_by,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "id": resolved.id,
+            "candidate_id": resolved.candidate_id,
+            "status": resolved.status,
+            "reconciled_by": resolved.reconciled_by,
+        }
+
     @app.post("/v1/assets")
     async def upload_asset(
         request: Request,
@@ -2377,6 +2744,41 @@ def create_app(container: Container | None = None) -> FastAPI:
             "provider_media_id": asset.provider_media_id,
             "public_url": asset.public_url,
         }
+
+    @app.get("/v1/assets/{asset_id}/thumbnail")
+    def get_asset_thumbnail(
+        asset_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """A small JPEG for galleries — derived lazily, cached as a rendition.
+
+        The Web UI reads this instead of the original, so a gallery of 4K
+        plates downloads thumbnails rather than 4K plates.
+        """
+
+        asset = container.media.get(asset_id)
+        if not asset:
+            raise HTTPException(404, "asset not found")
+        auth.require_project(principal, asset.project_id)
+        try:
+            thumbnail = container.thumbnails.ensure_thumbnail(asset_id)
+        except ThumbnailUnavailable as exc:
+            raise HTTPException(404, str(exc)) from exc
+        try:
+            path = container.storage.path_for(thumbnail.storage_key)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(404, "thumbnail object not found")
+        return FileResponse(
+            path,
+            media_type=thumbnail.mime_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cross-Origin-Resource-Policy": "same-origin",
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
 
     @app.get("/v1/media/reference/{storage_key:path}")
     def serve_signed_reference(storage_key: str, request: Request):
@@ -3035,6 +3437,13 @@ def create_app(container: Container | None = None) -> FastAPI:
     register_payment_routes(app, container, auth)
     register_runtime_routes(app, container, verify_api_key, auth)
     register_admin_routes(app, container, auth, verify_api_key)
+    register_creative_routes(
+        app,
+        container,
+        auth,
+        creative=container.creative_director,
+        continuations=container.episode_continuations,
+    )
     return app
 
 

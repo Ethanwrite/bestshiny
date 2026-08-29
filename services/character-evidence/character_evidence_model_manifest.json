@@ -1,0 +1,67 @@
+{
+  "manifest_version": "character-evidence-model-manifest-2026-08-27-v1",
+  "pipeline_version": "bestshiny-character-evidence-2026-08-27-v1",
+  "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+  "models": [
+    {
+      "role": "person_detection",
+      "model_name": "YOLOX-s",
+      "model_version": "0.1.1rc0",
+      "source_repository": "Megvii-BaseDetection/YOLOX",
+      "source_revision": "e1052df71842031413f6030723c3607b839c80ce",
+      "artifact": "yolox_s.pth",
+      "sha256": "f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30",
+      "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+      "license": "Apache-2.0",
+      "loaded_at_build": true
+    },
+    {
+      "role": "multi_object_tracking",
+      "model_name": "ByteTrack",
+      "model_version": "d1bf0191",
+      "source_repository": "FoundationVision/ByteTrack",
+      "source_revision": "d1bf0191adff59bc8fcfeaa0b33d3d1642552a99",
+      "artifact": "yolox/tracker/byte_tracker.py",
+      "sha256": "7cecdcdd7998103969a4ba1772f4c9fb5560fd5eef05ca03e0d2df28346ca50b",
+      "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+      "license": "MIT",
+      "loaded_at_build": true
+    },
+    {
+      "role": "face_detection",
+      "model_name": "YuNet",
+      "model_version": "2026may",
+      "source_repository": "opencv/opencv_zoo",
+      "source_revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+      "artifact": "face_detection_yunet_2026may.onnx",
+      "sha256": "ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0",
+      "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+      "license": "MIT",
+      "loaded_at_build": true
+    },
+    {
+      "role": "face_identity",
+      "model_name": "SFace",
+      "model_version": "2021dec",
+      "source_repository": "opencv/opencv_zoo",
+      "source_revision": "47534e27c9851bb1128ccc0102f1145e27f23f98",
+      "artifact": "face_recognition_sface_2021dec.onnx",
+      "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+      "license": "Apache-2.0",
+      "loaded_at_build": true
+    },
+    {
+      "role": "appearance_encoding",
+      "model_name": "DINOv2-base",
+      "model_version": "dinov2_vitb14",
+      "source_repository": "facebookresearch/dinov2",
+      "source_revision": "7764ea0f912e53c92e82eb78a2a1631e92725fc8",
+      "artifact": "dinov2_vitb14_pretrain.pth",
+      "sha256": "0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73",
+      "threshold_version": "character-evidence-thresholds-2026-08-27-v1",
+      "license": "Apache-2.0",
+      "loaded_at_build": true
+    }
+  ]
+}

@@ -210,6 +210,9 @@ def test_resolution_carries_payloads_with_explicit_provenance(  # type: ignore[n
         dependency_type=ShotDependencyType.FORESHADOWING.value,
         source_shot_id=first,
         summary="the kitchen phone pays off",
+        # FORESHADOWING quotes produced canon, so an uncommitted source is
+        # only usable through this declared, audited override.
+        metadata={"allow_uncommitted_source": True},
     )
     service.declare(
         project.id,
@@ -227,7 +230,10 @@ def test_resolution_carries_payloads_with_explicit_provenance(  # type: ignore[n
     contexts = service.resolve_for_generation(third)
     assert [item.source_reason for item in contexts] == ["EXPLICIT_DEPENDENCY"] * 3
     by_type = {item.dependency_type: item for item in contexts}
-    assert "picks up the phone" in by_type["FORESHADOWING"].payload["source_shot"]["prompt"]
+    foreshadow_source = by_type["FORESHADOWING"].payload["source_shot"]
+    assert "picks up the phone" in foreshadow_source["prompt"]
+    assert foreshadow_source["committed"] is False
+    assert foreshadow_source["uncommitted_source_allowed_by"] == "DEPENDENCY_METADATA"
     assert by_type["FACT_REVELATION"].payload["fact"]["summary"] == "The phone is bugged."
     assert by_type["OBLIGATION_FULFILLMENT"].payload["obligation"]["status"] == "OPEN"
 
@@ -266,6 +272,44 @@ def test_unresolvable_dependencies_refuse_with_reason_codes(  # type: ignore[no-
     codes = excinfo.value.reason_codes
     assert any(code.startswith("DEPENDENCY_FACT_FROM_FUTURE") for code in codes)
     assert any(code.startswith("DEPENDENCY_OBLIGATION_ALREADY_SETTLED") for code in codes)
+
+
+def test_historical_regeneration_sees_a_later_settlement_as_still_open(  # type: ignore[no-untyped-def]
+    container, project, service, ledger
+):
+    _, result = _compile(container, project, SCRIPT)
+    _first, second, third = result.shot_ids
+    ledger.open_obligation(
+        project.id,
+        obligation_key="settled_later",
+        promise="A later payoff.",
+        episode=1,
+        scene_sequence=0,
+        shot_sequence=0,
+    )
+    service.declare(
+        project.id,
+        target_shot_id=second,
+        dependency_type=ShotDependencyType.OBLIGATION_FULFILLMENT.value,
+        obligation_key="settled_later",
+    )
+    ledger.settle_obligation(
+        project.id,
+        obligation_key="settled_later",
+        episode=1,
+        scene_sequence=2,
+        shot_sequence=1,
+        shot_id=third,
+    )
+
+    contexts = service.resolve_for_generation(second)
+    obligation = next(
+        context.payload["obligation"]
+        for context in contexts
+        if context.dependency_type == ShotDependencyType.OBLIGATION_FULFILLMENT.value
+    )
+    assert obligation["status"] == "OPEN"
+    assert obligation["canon"] is True
 
 
 def test_manual_removal_withdraws_a_dependency(container, project, service):  # type: ignore[no-untyped-def]

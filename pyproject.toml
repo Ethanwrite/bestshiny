@@ -48,6 +48,7 @@ packages = [
   "services/production-engine/production_engine",
   "services/browser-runtime/browser_runtime",
   "services/media-service/media_service",
+  "services/character-evidence/character_evidence",
   "providers/google-flow/google_flow_provider",
   "agents/runtime/agent_runtime",
   "providers/seedance/seedance_provider",
@@ -84,6 +85,8 @@ packages = [
   "core/payments/payment_core",
   "core/external-evidence/external_evidence_core",
   "core/router-evidence/router_evidence_core",
+  "core/creative-director/creative_director_core",
+  "core/episode-continuation/episode_continuation_core",
 ]
 
 [tool.pytest.ini_options]
@@ -97,6 +100,7 @@ pythonpath = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
+  "services/character-evidence",
   "providers/google-flow", "providers/seedance", "providers/veo", "providers/grok", "providers/omni",
   "providers/kling", "providers/runway", "providers/openrouter", "providers/runapi", "providers/wan",
   "providers/deepseek", "core/narrative", "core/character", "core/continuity",
@@ -112,6 +116,8 @@ pythonpath = [
   "core/payments",
   "core/external-evidence",
   "core/router-evidence",
+  "core/creative-director",
+  "core/episode-continuation",
 ]
 
 [tool.ruff]
@@ -126,6 +132,7 @@ select = ["E", "F", "I", "B", "UP"]
 "apps/api/video_platform_api/auth.py" = ["B008"]
 "apps/api/video_platform_api/runtime_routes.py" = ["B008"]
 "apps/api/video_platform_api/admin_routes.py" = ["B008"]
+"apps/api/video_platform_api/creative_routes.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -137,6 +144,7 @@ files = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
+  "services/character-evidence/character_evidence",
   "providers/google-flow", "providers/seedance", "providers/openrouter", "providers/runapi",
   "providers/wan", "providers/deepseek",
   "agents/runtime",
@@ -152,4 +160,6 @@ files = [
   "core/payments",
   "core/external-evidence",
   "core/router-evidence",
+  "core/creative-director",
+  "core/episode-continuation",
 ]

@@ -7,9 +7,14 @@ A working platform for AI short-drama and commercial visual production. Two entr
 
 Before taking over development, read [the documentation index](docs/README.md)、[the current handoff](HANDOFF.md)、[the open-issues list](docs/OPEN_ISSUES.md)、[the architecture](CURRENT_ARCHITECTURE.md)、[the production evidence report](docs/PRODUCTION_EVIDENCE.md)、[the readiness checklist](docs/PRODUCTION_READINESS_CHECKLIST.md) and [the requirements ledger](docs/PRODUCT_REQUIREMENTS_LEDGER.md). Source and Skill audits are in [docs/source-audit.md](docs/source-audit.md) and [docs/skill-research.md](docs/skill-research.md).
 
-> **The Phase III offline checkpoint is still not releasable.** The offline algorithm core is frozen at commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`; Phase III was implemented at `99f9c60` with evidence snapshot tag `v0.3.0-production-evidence-core-offline`. The Phase III whole-repository gate was `406 passed, 57 warnings in 71.58s`, and PostgreSQL 17.10 + pgvector 0.8.6 plus a Docker Compose production-like smoke passed on real machines. No live Provider canary may be inferred from code: real Provider calls this round were **0**, known development-caused Provider spend is **USD 0**, and the single-video canary is **NOT EXECUTED**.
+> **Current RC truth (2026-08-29):** branch `claude/rc-predeploy-integration`, migration head
+> `0060_flow_remote_owner_index`. The current database has 22 `live_enabled` models and 0
+> `VERIFIED_LIVE`; Alibaba OSS passes preflight, but no current platform-closed canary proves submission,
+> result download, media registration and billing reconciliation. Character Evidence remains SHADOW with
+> 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
+> callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 
-The current 2026-08-23 development checkpoint (commit `ea9d042`, no remote) adds migrations `0028_persistent_character_state` through
+The historical 2026-08-23 development checkpoint (commit `ea9d042`) added migrations `0028_persistent_character_state` through
 `0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the
 series narrative ledger, and adds the first working image-generation path — `openai/gpt-image-2` through the
 OpenRouter Image API, bound as the `IMAGE_GENERATION` role. No video Provider was added and none was called.
@@ -19,11 +24,9 @@ similarity only supplements), the Narrative Ledger's `series_context()` feeds th
 unresolvable dependency moves the shot to `USER_REVIEW_REQUIRED` instead of degrading, and a Frame Anchor
 Planner decides inherit-vs-reconstruct between every two adjacent shots — see
 [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) and [`HANDOFF.md`](HANDOFF.md).
-The `406 passed` figure above is historical evidence from the previously tagged checkpoint. The current
-working-tree gate measures **`612 passed, 2 skipped, 61 warnings`** — the two skipped are opt-in live image
-tests — with Ruff check, Mypy (133 source files), the Web production build and npm audit all green. This is
-still not an endorsement of real visual-review accuracy, of on-chain payment operations, or of a production
-launch.
+Historical test counts below remain checkpoint evidence only. The RC gate and deployment evidence are recorded
+in [`HANDOFF.md`](HANDOFF.md); no offline count is an endorsement of real visual-review accuracy, on-chain
+payment operations, Provider accuracy, or public production reachability.
 
 ## What is implemented
 
@@ -56,13 +59,15 @@ launch.
 - 状态提议只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于 Candidate/Generation Job 分配事务内写入。全部提议的 proposal-set hash 同时绑定 Candidate 与 Generation Job，并在 validate/commit 再校验，阻断生成后偷换 delta。显式 `branch_key` 可从 input TimelineState 选定的不可变状态版本创建独立 scope v1/head，不推进 main head。
 - 输入/目标状态 JSON 在服务边界限制为最大 256 KiB、5,000 个节点、12 层深度和 200 条 continuity constraints。baseline initialize 只更新 authoritative TimelineState 中的有类型状态引用并传播，不额外写入第二个无类型 `ShotStateSnapshot`。
 - Timeline v3 + 三镜 Fixture：`TimelineTransition` 以九种显式类型控制传播、分支、空间重置与 reconciliation；修改前镜状态只会标记下游 `RECOMPUTE_REQUIRED`，规划重算不会改写已提交成片。离线回归已走过 3 Candidates/Jobs/MP4 outputs/QA/commits/end frames/snapshots/accepted costs，但不等于真实 Provider。
-- Character Evidence V1：本地 FFmpeg 抽帧、可注入检测/跟踪/人脸与外观 encoder、视角感知参考选择、可见度/清晰度/检测/跟踪置信加权、时序汇总和版本化阈值已接入 QA。当前证据来自自生成非用户 MP4 + 确定性推理替身；生产检测/跟踪/编码模型尚未部署，hair/costume 诚实为 `UNAVAILABLE`。
+- Character Evidence 生产边界：生产环境只通过 `ModalCharacterEvidenceProducer` 异步调用单一 Modal HTTPS 端点；Modal T4 worker 固定使用 YOLOX-s、ByteTrack、YuNet、五点对齐后的 SFace 与 DINOv2-base。回调签名、模型/阈值/参考资产版本和 shadow 隔离均已接入；真实授权验证集完成前 hair/costume 保持 `UNAVAILABLE`，任何结果都不能自动放行。
 - Production Evidence：`ProviderBillingEvidence` 分离 verified/estimated/manual/unknown，Provider 无可信金额时 `actual_cost = null`；accepted-shot cost 包含失败与 repair attempts，`DecisionOutcomeRecord` 串联镜头特征、决策、Provider/模型、QA、用户结果和成本来源。
 - Flow Affinity：首次自动分配、sticky account/project、本地 active 唯一、远端 ID 跨全部历史状态永久唯一、显式迁移计划与 local job/account/project/provider job 四元 poll 标识已实现；默认 provisioner fail closed，本轮未调用真实 Flow。
 - 不可洗白来源：Provider 参考素材上传只写独立 binding，不覆盖 `MediaAsset` 生成来源；角色 identity、canonical promotion 与 candidate commit 都在终点复核 Provider trust。
 - Media：内容字节按 SHA-256 共享，镜头/候选来源链保持独立；供应商媒体上传带并发 claim、租约和付费边界 fencing，本地与 S3/R2/MinIO 存储共用同一注册表。工作空间存储已按真实 `size_bytes` 执行原子 reserve/settle/release，不确定结果保留 hold 而不盲目释放。
 - 批量候选原子性（2026-08-28）：供应商产物先验证、再写入确定性 staging key（`staging/generation/{job}/{attempt}/{index}`），随后由**单个数据库事务**创建 sibling candidates、MediaAsset 与 job 绑定并完成结算；finalize 由完成栅栏保证幂等，重放不产生重复候选。事务失败只留下可回收的 staging 对象，由 TTL 清扫器（worker 定时 + `POST /internal/maintenance/generation-staging`）在「任务已终态且无 MediaAsset 引用」时回收；不再预创建空的 `CREATED` sibling 候选，历史遗留空行由 `scripts/retire_empty_candidates.py` 一次性审计并安全退役（状态置 `RETIRED`，非删除）。
 - Workbench：注册/登录遮罩、自主创作/智能导演双模式、中文画面描述优化、人物主参考 v1/v2 重新提交、场景/产品/道具通用版本上传及指定镜头重做入口；界面只显示通俗说法，内部合同和模型指令默认收起。
+- Create with AI Director：有状态创意导演（`creative_sessions` 等 7 张表）。用户只给模糊需求，导演按「缺口分析」只问真正缺失的高价值问题（无固定问卷、已问不重复），产出结构化 CreativeBrief（逐版本追加、批准后冻结）→ 关键视觉（`GENERATE_KEY_VISUAL` 结构化 action，由 API 层走与 `/v1/images/generations` 完全相同的 admission/积分/Router/Gateway 路径执行，幂等可重试）→ VisualBible（批准即版本锁定，LOCKED 版本不可变，改动只能新开版本再批准）→ BeatPlan/ShotIntent（结构化节拍与镜头意图，批准时派生成合规剧本行，交给现有 NarrativeCompiler 编译成真实场景/镜头，并把 cliffhanger 写成 `narrative_obligations`）。创意导演自身不持有任何 Provider 客户端；模型推理走 `ModelRoleRuntime(DIRECTOR)`，不可用时降级为确定性规则引擎并在 turn 上记录 `reasoner=DETERMINISTIC` 与原因码，绝不静默。
+- Series → Episodes → 下一集：`POST /v1/episodes/{id}/continuations` 先从既有系统汇出 **EpisodeContinuationContext** 快照（上集结尾镜头与输出状态、尾帧、角色状态 head、剧集账本 facts/披露/未了 obligations、道具/服装、画风锁、已锁 VisualBible），并按五类连续性逐类判定：narrative/character/visual 恒继承；scene/frame 仅 `CONTINUOUS` 继承，`TIME_JUMP`/`LOCATION_CHANGE`（如「三天后，东京」）一律 RESET。确认后经同一 NarrativeCompiler 编译，再把集间边界接上：跨集 `previous_shot_id` + 经时间线引擎写入的 `TimelineTransition`；CONTINUOUS 额外声明 `STATE_INHERITANCE` 依赖并传播已提交状态，Frame Anchor Planner 据此把上集尾帧接为下集首镜首帧（`CROSS_SCENE_CONTINUOUS` 同地点扩展）；跳跃则当场经 `reconcile_transition` 完成 reconciliation，不留 stale、不继承旧场景/灯光/尾帧。上集被续接后禁止整集重编译（双向 loudly 拒绝）。前端 Director 侧新增 Episodes 条：`EP01 Completed / EP02 Draft / + Create next episode`。
 
 ## One-command start (Docker)
 
@@ -81,14 +86,18 @@ docker compose up --build
 - API 文档：<http://localhost:8080/docs>
 - MinIO 控制台：<http://localhost:9001>
 
-Compose 包含 Web、FastAPI、后台 worker、PostgreSQL + pgvector、MinIO 及自动建桶任务。首次启动或升级旧数据库前，应先备份数据库并确认迁移：
+Compose 包含 Web、FastAPI、后台 worker、PostgreSQL + pgvector；生产媒体面使用 `.env` 中配置的
+S3-compatible Alibaba OSS，`/data/media` 只是 API/worker 共用的临时处理缓存。首次启动或升级旧数据库前，应先备份数据库并确认迁移：
 
 ```bash
 uv run alembic current
 uv run alembic upgrade head
 ```
 
-当前迁移代码链为单 head `0052_shot_dependencies`（`0034` 之后的链见 `migrations/versions/`；`0052` 增加显式镜头依赖表）。`0030` 增加 Alchemy Delivery、Base USDC 付款事实与追加式购买积分 Ledger；`0031` 增加通用链上 PaymentIntent；`0032` 增加 DePay checkout session 与不可改写的签名回调收据；`0033` 把 DePay checkout 绑定到独立 PaymentIntent，并将 FREE→PRO 与 3,000 Credits 入账收口到同一事务。PostgreSQL 实机证据仍只到 `0032`，上线前必须在临时 PostgreSQL 验证 `0033`；历史 Compose 证据仍只背书到 `0027`。
+当前迁移代码链为单 head `0060_flow_remote_owner_index`：`0053`–`0059` 增加 Creative Director、
+跨集延续、叙事位置、Character Evidence 持久化、rendition 生命周期、完整上传验证和 Timeline 分支；
+`0060` 修复从长期运行 PostgreSQL 卷发现的 Flow remote-project 唯一索引漂移。2026-08-29 已用真实
+`0052` 备份在独立 PostgreSQL 库完成 `0052→0060→0052→0060` 与 `alembic check`。
 
 默认本地 `data/platform.db` 的 Alembic stamp 仍为 `0020`，同时已有部分 `0021`–`0023` 新表，但 `workspaces` 缺少新列，属于混合 schema。必须先备份和审计，不要手工 stamp 或盲目升级。旧版 `local@ai-director.invalid` 工作空间保持隔离，普通注册不会自动认领；如需转移，必须调用下文说明的受保护内部接口。
 
@@ -213,6 +222,15 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/v1/workspaces/{workspace_id}/depay-checkouts` | 为已登录工作空间创建 DePay 充值会话与带上下文的共享链接 |
 | `GET` | `/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}` | 查询充值会话状态供 Web 轮询 |
 | `POST` | `/api/passenger/generate` | 乘客模式提交图片/视频任务 |
+| `POST/GET` | `/v1/creative/sessions`、`/v1/creative/sessions/{id}` | 创建/查看创意导演会话（模糊想法起步） |
+| `POST` | `/v1/creative/sessions/{id}/messages` | 与创意导演对话；只回问缺失的高价值问题 |
+| `POST` | `/v1/creative/sessions/{id}/brief/approve` | 冻结 CreativeBrief 并经现有图片链路生成关键视觉 |
+| `POST` | `/v1/creative/sessions/{id}/visuals/execute`、`/visuals/sync` | 重试失败的关键视觉 / 绑定已完成产物 |
+| `POST` | `/v1/creative/sessions/{id}/bible/propose`、`/bible/approve` | 起草 / 版本锁定 VisualBible |
+| `POST` | `/v1/creative/sessions/{id}/beats/propose`、`/beats/approve` | 起草节拍 / 批准并编译为真实场景与镜头 |
+| `GET` | `/v1/projects/{project_id}/episodes` | 剧集条：逐集 `display_status`、镜头进度与续集状态 |
+| `POST` | `/v1/episodes/{episode_id}/continuations` | 计算 EpisodeContinuationContext 并提案下一集 |
+| `GET/POST` | `/v1/continuations/{id}`、`/v1/continuations/{id}/confirm` | 查看 / 确认续集并接续集间连续性 |
 | `POST` | `/v1/shots/{shot_id}/generate` | 自动导演生成镜头候选 |
 | `GET` | `/v1/generations/{job_id}` | 查询生成任务 |
 | `POST` | `/api/generations/{job_id}/promote` | 把完成结果新增为资产版本，并可显式提升为 canonical |

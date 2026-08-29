@@ -1405,6 +1405,17 @@ async def test_the_worker_loop_sweeps_on_its_interval_and_survives_a_failure() -
         generation_staging_sweep_interval_seconds=3600,
         generation_staging_ttl_seconds=86_400,
         generation_staging_sweep_limit=500,
+        # The later maintenance loops are exercised by their own suites;
+        # disabled here so this test stays about the upload sweep.
+        character_evidence_sweep_interval_seconds=0,
+        character_evidence_sweep_limit=50,
+        rendition_gc_interval_seconds=0,
+        rendition_gc_limit=100,
+        rendition_gc_min_idle_seconds=604_800,
+        rendition_gc_lease_seconds=600,
+        media_verification_interval_seconds=0,
+        media_verification_limit=20,
+        media_verification_lease_seconds=900,
     )
     container = SimpleNamespace(
         settings=settings,

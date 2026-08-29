@@ -161,6 +161,10 @@ class _PairFacts:
     explicit_state_inheritance: bool = False
     same_scene: bool = True
     source_failed: bool = False
+    #: A declared CONTINUOUS transition across two scene rows that share one
+    #: location - the episode boundary case, where scene rows are per-episode
+    #: containers and the location is the actual scene identity.
+    cross_scene_continuous: bool = False
 
     def subject_state(self) -> dict[str, Any]:
         """Who the shot must carry: visible at open *or* acting within it.
@@ -231,6 +235,23 @@ class FrameAnchorPlanner:
         if source is None:
             return facts
         facts.same_scene = source.scene_id == target.scene_id
+        if not facts.same_scene and facts.transition_type == TimelineTransitionType.CONTINUOUS.value:
+            # A CONTINUOUS transition is never compiler-inferred across scenes
+            # (the compiler emits SCENE_CUT there), so one that crosses scene
+            # rows was declared - by episode continuation or an operator. When
+            # both scene rows name the same location, the action chain really
+            # is unbroken and only the per-episode container changed; the pair
+            # is planned as same-scene so the tail frame may be inherited.
+            source_scene = session.get(Scene, source.scene_id)
+            target_scene = session.get(Scene, target.scene_id)
+            if (
+                source_scene is not None
+                and target_scene is not None
+                and source_scene.location_id is not None
+                and source_scene.location_id == target_scene.location_id
+            ):
+                facts.same_scene = True
+                facts.cross_scene_continuous = True
         facts.source_failed = source.status == ShotStatus.FAILED.value
         source_output = (
             session.get(TimelineState, source.output_state_id) if source.output_state_id else None
@@ -293,6 +314,9 @@ class FrameAnchorPlanner:
             and source_camera.get("shot_size") != target_camera.get("shot_size")
             else 0.0
         )
+
+        if facts.cross_scene_continuous:
+            extra_reasons.append("CROSS_SCENE_CONTINUOUS")
 
         source_characters = _state_characters(facts.source_output_state)
         target_characters = _state_characters(facts.target_input_state)

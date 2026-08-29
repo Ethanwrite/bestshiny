@@ -22,6 +22,7 @@ from entitlement_core import (
 from media_service import (
     MediaRegistry,
     ProviderReferenceUrlUnavailable,
+    RemoteMediaSecurityError,
     StagedProviderOutput,
     generation_staging_prefix,
 )
@@ -3231,6 +3232,25 @@ class GenerationGateway:
                 submitted=True,
                 claim_token=claim_token,
                 release_reservation=release_reservation,
+                release_error=str(exc),
+                poll_identity=poll_identity,
+            )
+        except RemoteMediaSecurityError as exc:
+            # The provider has already completed (and may already have billed)
+            # the remote job. Retrying an allowlist, DNS-safety, redirect or
+            # content-type rejection cannot change that result, while treating
+            # it as a transient poll failure keeps the provider account slot
+            # occupied forever because submission attempts do not advance on
+            # polls. End the job, release capacity and retain the workspace
+            # charge for explicit provider-cost reconciliation.
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "PROVIDER_MEDIA_SECURITY_ERROR",
+                str(exc),
+                submitted=True,
+                claim_token=claim_token,
+                release_reservation=True,
                 release_error=str(exc),
                 poll_identity=poll_identity,
             )

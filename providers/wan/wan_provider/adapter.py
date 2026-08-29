@@ -12,9 +12,11 @@ from provider_sdk import (
     ProviderHealth,
     ProviderJob,
     ProviderPollIdentity,
+    ProviderReferenceConstraints,
     ProviderReferenceMode,
     ProviderSubmission,
     ProviderTrustLevel,
+    VideoReferenceConstraints,
 )
 from provider_sdk.capabilities import ChatCapability
 from provider_sdk.http import ProviderJsonClient, provider_health_metadata
@@ -586,6 +588,46 @@ class WanProvider(GenerationProvider, ChatCapability):
     # Wan requires fetchable URLs; DashScope never ingests an upload.
     reference_mode = ProviderReferenceMode.FETCHABLE_URL
     trust_level = ProviderTrustLevel.PRODUCTION
+    # Documented bounds from Alibaba Cloud Model Studio's own API references,
+    # read 2026-08-29 — never inferred from behaviour:
+    #
+    # - Reference images / first frame ("Wan2.7 image-to-video" and
+    #   "reference-to-video" pages): JPEG/JPG/PNG/BMP/WEBP, up to 20 MB.
+    #   (The pages bound each *side* at 240..8,000 px; the image schema here
+    #   expresses a total-pixel cap only, so 8000x8000 is declared as the
+    #   pixel ceiling and the per-side minimum remains unexpressed — an
+    #   undersized plate still fails at the provider. Recorded residual.)
+    # - Reference video ("Wan2.7 reference-to-video", type=reference_video):
+    #   MP4 or MOV, 1..30 s, each side 240..4,096 px, aspect ratio 1:8..8:1,
+    #   up to 100 MB. Codec and frame rate are NOT documented there: no codec
+    #   bound is invented — h264 is declared as *our* transcode target inside
+    #   the documented containers (DashScope's own outputs are h264 MP4), and
+    #   frame rate stays unchecked. "MB" is read as decimal — the stricter
+    #   reading, so a copy we pass can never exceed the documented cap under
+    #   either interpretation.
+    reference_constraints = ProviderReferenceConstraints(
+        max_pixels=8000 * 8000,
+        max_bytes=20_000_000,
+        accepted_mime_types=frozenset(
+            {"image/jpeg", "image/png", "image/bmp", "image/webp"}
+        ),
+        preferred_mime_type="image/jpeg",
+        video=VideoReferenceConstraints(
+            accepted_containers=frozenset({"video/mp4", "video/quicktime"}),
+            preferred_container="video/mp4",
+            accepted_codecs=frozenset({"h264"}),
+            preferred_codec="h264",
+            min_aspect_ratio="1:8",
+            max_aspect_ratio="8:1",
+            min_width=240,
+            min_height=240,
+            max_width=4096,
+            max_height=4096,
+            min_duration_seconds=1.0,
+            max_duration_seconds=30.0,
+            max_bytes=100_000_000,
+        ),
+    )
 
     def __init__(
         self,

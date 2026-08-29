@@ -1,12 +1,14 @@
 # AI Director Platform — Current Architecture
 
-Snapshot date: 2026-08-28
+Snapshot date: 2026-08-29
 Repository: `ai-director-platform`
-Branch: `claude/batch-candidate-atomicity` over `main` at `9a06dcf` (the former uncommitted
-§1d/§1e working-tree change has since landed as PRs #7 and #8)
+Branch: `claude/rc-predeploy-integration` — the release-candidate integration of `main` at
+`4f5dd11`, `claude/creative-director-episodes` `f5f68c6` (PR #9) and the 2026-08-28 Character
+Evidence working tree, plus the 2026-08-29 pre-deployment fixes summarized in the dated section
+at the end of this document and in [`HANDOFF.md`](HANDOFF.md)
 Offline algorithm baseline: commit `0a74d31`, tag `v0.2.0-algorithm-core-offline`
 Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evidence-core-offline`
-Migration head: `0052_shot_dependencies` (unchanged by this branch; no migration was needed)
+Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
@@ -122,6 +124,7 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Model infrastructure | `core/model-registry/`, `core/entitlements/`, `config/model-registry/` | Persistent single capability truth and role runtime |
 | Router evidence | `core/router-evidence/`, `config/router-evidence/`, `core/external-evidence/` | Four isolated evidence layers, offline hierarchical posterior, replay harness; LCB flag off, exploration has no call site, zero production observations |
 | Director/QA/cost | `core/character/`, `core/style/`, `core/narrative/`, `core/continuity/`, `core/generation-policy/`, `core/qa/`, `core/cost/`, `core/production/` | WIP implemented with offline evidence tests, including persistent state and locked-style generation/commit gates |
+| Upper-level creation | `core/creative-director/`, `core/episode-continuation/` | Stateful creative director (idea → brief → key visuals → visual bible → beats → existing chain) and series continuation (EpisodeContinuationContext → linked next episode); offline tests, structured-action boundary, no provider path of their own |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
 | Skills | `skills/`, `core/skills/` | Shared filesystem Registry and content-hash versions implemented; all twelve Skill bodies rewritten against the current contracts, none yet executed by a model |
@@ -492,6 +495,88 @@ still runs the planner immediately after script compilation; `POST
 /v1/episodes/{id}/plan-frame-anchors` and the caller-supplied-risk route (`POST
 /v1/shots/{id}/continuity`) are inspect/re-plan surfaces — the preflight re-decides anything they
 left stale.
+
+## Creative director: idea to shot plan without a script
+
+`core/creative-director/creative_director_core` (migration `0053_creative_director`, seven tables)
+is the stateful layer above the script surface:
+
+```text
+idea -> dialogue clarification -> CreativeBrief -> key visuals -> VisualBible
+     -> BeatPlan/ShotIntents -> derived script -> NarrativeCompiler -> existing chain
+```
+
+Three rules shape it:
+
+- **Questions are computed, never scripted.** `BRIEF_FIELD_SPECS` weights every brief field per
+  format (short drama, advertisement, product, social, music, fashion, beauty, concept). A turn
+  asks at most three missing HIGH/CRITICAL fields, never re-asks an answered or already-asked code,
+  and a complete opening idea produces a brief with zero questions. Unanswered non-critical gaps
+  are defaulted at proposal time and the applied defaults are recorded in the revision's
+  completeness report.
+- **Structure, not a prompt string.** Turns, brief revisions, the visual bible, anchors, beats and
+  actions are typed rows (`creative_turns`, `creative_briefs`, `visual_bibles`,
+  `creative_visual_anchors`, `creative_beats`, `creative_actions`). Script text is *derived* from
+  approved beats — one primary action per line in the narrative compiler's own vocabulary — so
+  compiled shots zip one-to-one with `ShotIntent`s and intent extras (shot type, duration) are
+  applied to the real Shot rows. The prompt compiler then reads the same structured truth it always
+  read; nothing concatenates a session into a mega-prompt.
+- **Structured actions are the only door to spending.** The service never holds a provider client.
+  `GENERATE_KEY_VISUAL` actions are executed by the API layer through the same
+  `admit_passenger -> visual_runtime.submit` path as `POST /v1/images/generations` (role-resolved
+  image model, credit reservation, router, gateway), keyed idempotently per anchor and revision;
+  failures (402, plan denial, target errors) are recorded per action and retryable without
+  duplicating the successes. Model reasoning goes through `ModelRoleRuntime.execute_chat(DIRECTOR)`
+  and degrades to the deterministic rules engine with the degradation recorded on the turn
+  (`reasoner`, reason codes) — never silently.
+
+The **VisualBible is version-locked on approval**: a LOCKED version is immutable and cannot be
+re-proposed over; changes append a new version that needs its own approval (service-enforced —
+OPEN_ISSUES §2.39 records the tier). Approving beats compiles a real episode through the existing
+compiler and frame anchor planner, and opens the plan's cliffhanger as a `narrative_obligations`
+row, which is exactly the thread the next episode picks up.
+
+## Series continuation: the next episode inherits state, not a script
+
+`core/episode-continuation/episode_continuation_core` (migration `0054_episode_continuations`)
+answers "EP01 is done — make EP02" without resubmitting EP01's script. Preparation computes an
+**EpisodeContinuationContext** snapshot from the systems that already own each truth — the ending
+shot and its output `TimelineState`, the tail frame asset, character state heads, the ledger's
+facts/disclosures/open obligations via `series_context()`, props and costume from the ending state,
+the style lock and the locked visual bible — and stamps one verdict per continuity class:
+
+| Continuity class | CONTINUOUS | TIME_JUMP / LOCATION_CHANGE |
+| --- | --- | --- |
+| Narrative (facts, obligations, disclosures) | INHERIT | INHERIT |
+| Character (state heads, identities) | INHERIT | INHERIT |
+| Visual (style lock, visual bible) | INHERIT | INHERIT |
+| Scene (location, spatial state, lighting) | INHERIT | **RESET** |
+| Frame (previous episode's tail frame) | INHERIT | **RESET** |
+
+Confirmation renders proposed beats to a script, compiles through the same `NarrativeCompiler`,
+then links the boundary: `previous_shot_id` across episodes and a `TimelineTransition` written
+through the existing timeline engine. CONTINUOUS additionally declares a `STATE_INHERITANCE`
+`shot_dependencies` row and propagates committed ending state (`propagate_shot`; an uncommitted
+ending propagates when it commits, since commit already walks the now-cross-episode `next_shot`
+chain). A jump is immediately reconciled through the engine's own `reconcile_transition` with the
+declared gap as the recorded reason — the shot is never left stale, and nothing of the old scene or
+tail frame crosses.
+
+The **frame anchor planner plans the boundary pair like any pair**, with one extension: a
+*declared* CONTINUOUS transition across two scene rows sharing a `location_id` counts as same-scene
+(`CROSS_SCENE_CONTINUOUS`), because scene rows are per-episode containers and the compiler never
+emits CONTINUOUS across scenes on its own. CONTINUOUS therefore plans `INHERIT_LAST_FRAME` and
+wires the previous end frame as the start frame; a jump plans `RECONSTRUCT_FIRST_FRAME` and clears
+it. The boundary is a contract in both directions: the compiler refuses to recompile an episode a
+later episode chains from, and refuses a plain recompile of a linked continuation (its confirm
+unlinks, recompiles, re-links).
+
+One `episode_continuations` row per (project, previous episode, next number) makes preparation
+idempotent and confirmation replayable; re-proposals bump a recorded revision with the prior
+proposal appended. EP02's prompts need no new machinery — `series_context(project, episode=N)`
+already feeds the compiler, so EP01's facts and open obligations reach EP02's prompts, pinned by
+test. `GET /v1/projects/{id}/episodes` is the UI strip: per-episode `display_status` (COMPLETED
+derived when every shot is committed), rollups, and the attached continuation.
 
 ## External Evidence Registry
 
@@ -1576,3 +1661,72 @@ or another retrieval provider as state authority.
 Credential values remain outside the repository. The operator explicitly decided that the current Provider keys
 do not require rotation. This decision removes rotation as a blocking action but does not authorize committing,
 logging, exposing or automatically using those keys.
+
+
+## 2026-08-29 — release-candidate pre-deployment changes (this branch)
+
+Everything below is offline-verified code with tests (fixture evidence); nothing here is a live
+or deployed-service verification.
+
+**Narrative ledger closed loop (migrations `0055`).** Every fact, disclosure and obligation
+carries its complete narrative position (episode, scene sequence, shot sequence);
+`may_know` / `series_context` / open-obligation retrieval are position-exact time slices, so
+later-shot material never leaks into an earlier shot of the same episode and regenerating a
+historical shot reads the ledger as it stood at that shot (settlement records *where* it
+happened rather than erasing the open interval). Shots declare their ledger consequences
+(`shot_narrative_effects`; script directives `[ESTABLISH]`, `[DISCLOSE]`, `[FORESHADOW]`,
+`[PAYOFF]` compiled by the rules compiler, which also auto-declares the implied
+FACT_REVELATION / OBLIGATION_FULFILLMENT / FORESHADOWING dependencies); the candidate-commit
+transaction applies them exactly once, idempotently, with conflicts raised — never a silent
+replay. Commit revalidates declared dependencies and a narrative-context fence captured at
+candidate creation; a candidate generated from an expired ledger context refuses to become
+canon. Source-shot COMMITTED requirements are an explicit per-type policy
+(`COMMITTED_SOURCE_POLICY`) with a declared, audited override.
+
+**Character Evidence submission lifecycle (migration `0056`).** One durable, shadow-only
+submission row per candidate; enqueue-on-registration, bounded dispatch, ACCEPTED-timeout
+reconciliation, operator resolution. Modal-side idempotent claim and callback outbox exist as
+code only — the deploy is still blocked externally (`docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md`).
+Voyage embeddings were evaluated and are **incompatible** as AppearanceEncoder evidence; the
+statement is in the same handoff.
+
+**Wan 2.7 reference bounds (no migration).** Declared from Alibaba Cloud Model Studio's own
+Wan2.7 API references — reference_video MP4/MOV, 1–30 s, 240–4,096 px/side, aspect 1:8–8:1,
+≤100 MB; images JPEG/PNG/BMP/WEBP, 20 MB, 8000×8000-pixel ceiling — with new documented-minimum
+and aspect-range checks in `VideoReferenceConstraints`. Pinned by a drift-gate test and driven
+through the real rendition chain offline. Alibaba OSS configuration now passes the real object-storage
+preflight; a platform-closed live canary and verified Ark/DashScope return-media hosts are still outstanding.
+
+**Rendition lifecycle and thumbnails (migration `0057`).** Derived renditions carry
+ACTIVE / GC_CLAIMED (leased) / DELETED (tombstone, revivable in place); the GC sweep collects
+only idle copies whose constraint profile no current provider declares, never originals, never
+shared objects. `ThumbnailService` derives a lazy 512px JPEG per asset and the Web UI's
+gallery reads it instead of 4K originals.
+
+**Direct-upload full verification (migration `0058`).** Adopted uploads are
+`PENDING_VERIFICATION` until the async verifier — SHA re-check, complete image decode, ffprobe
+plus whole-stream ffmpeg decode for video — promotes them to READY, or lands them in INVALID /
+QUARANTINED. Storage accounting for a rejection is two-phase: the object is retained as
+evidence and stays charged (un-charging retained bytes would let repeated bad uploads grow the
+bucket without bound), and capacity returns only through `reclaim_rejected_assets` /
+`POST /internal/maintenance/reclaim-rejected-media`, which deletes the object first and
+releases the reservation second. Providers and reference URLs refuse anything not READY.
+
+**Timeline branches (migration `0059`).** `timeline_scope_key` branches are registered rows
+with kind, required parent, fork shot and a lifecycle (ACTIVE / MERGED with a declared
+write-back manifest, dream states refusing main by default / RETIRED / ABANDONED); closed
+branches refuse new state writes while history stays readable, orphans are swept closed, and
+physical purge is refused while audit history references the scope.
+
+**Flow ownership index reconciliation (migration `0060`).** A restored production volume exposed
+schema drift that a fresh migration did not: `provider_projects` carried the older
+`uq_flow_active_remote_project` predicate while revision `0025` and the ORM require permanent
+`uq_flow_remote_project_owner` uniqueness, including disabled bindings. `0060` preflights duplicate
+owners, removes the drifted index and restores the declared invariant. A backup-restored PostgreSQL
+database passed `0052 → 0060 → 0052 → 0060` and `alembic check` after both upgrades.
+
+**Style drift monitoring (no migration).** `StyleDriftMonitor` aggregates committed
+candidates' style evaluations per episode and reports drift from the baseline episode —
+monitoring only, no gate changes. `GET /internal/models/live-status` reports `live_enabled`,
+`lifecycle_status` and `live_canary_status` as the three separate facts they are; with zero
+`VERIFIED_LIVE` rows it reports zero models live-verified.

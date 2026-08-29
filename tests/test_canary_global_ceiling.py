@@ -21,7 +21,10 @@ from decimal import Decimal
 
 from scripts.live_canary import (
     GLOBAL_CANARY_COST_CEILING_USD,
+    TERMINAL,
+    Report,
     _permit_exposure,
+    _report_failure_path,
 )
 
 
@@ -91,3 +94,40 @@ def test_the_three_pre_audit_permits_do_not_consume_the_budget_once_reconciled()
     committed = sum((_permit_exposure(item) for item in history), Decimal("0"))
     assert committed == Decimal("0")
     assert GLOBAL_CANARY_COST_CEILING_USD - committed == Decimal("10")
+
+
+def test_operator_action_is_terminal_for_the_unattended_canary() -> None:
+    assert "WORKER_NEEDS_USER_ACTION" in TERMINAL
+
+
+def test_a_mapped_billed_canary_failure_is_not_reported_as_verified(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "scripts.live_canary._credit_state",
+        lambda _engine, _job_id: {
+            "credits": 1,
+            "status": "RECONCILIATION_REQUIRED",
+            "settled_credits": 0,
+            "refunded_credits": 0,
+            "balance_after": 99,
+            "reconciliation_reason": "INVALID_REQUEST",
+        },
+    )
+    monkeypatch.setattr("scripts.live_canary._report_events", lambda *_args: None)
+    report = Report()
+
+    result = _report_failure_path(
+        object(),
+        {
+            "status": "WORKER_NEEDS_USER_ACTION",
+            "error_code": "INVALID_REQUEST",
+            "error_message": "provider rejected the request",
+            "submission_state": "SENT_UNCONFIRMED",
+            "safe_to_retry": False,
+        },
+        "job-1",
+        report,
+        drill=False,
+    )
+
+    assert result == 1
+    assert report.failures == 1

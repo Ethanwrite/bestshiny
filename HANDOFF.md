@@ -6,6 +6,11 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
 `0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
+> **Next session: start with [`docs/RC_HANDOFF_2026-08-29.md`](docs/RC_HANDOFF_2026-08-29.md).**
+> It carries the branch/gate state, the unfinished-work list, and the one thing this document
+> does not: why the live canary sweep has not run, and why neither money nor a code change can
+> unblock it from this machine.
+
 ## Current RC truth — supersedes historical status statements below
 
 - The running Compose stack was still built from `main@9a06dcf` with its database at

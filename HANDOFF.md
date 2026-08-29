@@ -61,6 +61,12 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
+> **2026-08-29 — deployed.** `bestshiny.com` is live on `153.75.95.10` from `main`,
+> Character Evidence is on Modal in shadow mode, and one model has earned
+> `VERIFIED_LIVE`. Read [`docs/DEPLOY_HANDOVER_2026-08-29.md`](docs/DEPLOY_HANDOVER_2026-08-29.md)
+> first: it carries the deployment state, five defects found by running the system,
+> what remains unaudited, and one standing gate that lapsed across four merged PRs.
+
 ## 1. Gate state (all green, offline only)
 
 As of 2026-08-28 on `claude/creative-director-episodes` rebased onto `main` at `4f5dd11`

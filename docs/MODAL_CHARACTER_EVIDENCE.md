@@ -125,6 +125,11 @@ Verified on 2026-08-29:
   key in `/opt/bestshiny/.env` and the Modal Secret are the same key.
 - BestShiny starts with `CHARACTER_EVIDENCE_ENABLED=true`, so the production fail-closed
   checks on endpoint, keys and mode all pass against the real values.
+- **All five models load on a real T4.** `@modal.enter()` runs to completion — YOLOX builds
+  its network and DINOv2 initialises — where before the fixes in §4 it raised `TypeError`
+  every time and no job ever reached a frame. The `xFormers is not available` and
+  `torch.meshgrid` lines in the log are benign: xFormers is an optional fused-kernel path
+  DINOv2 falls back from, and the meshgrid notice comes from YOLOX's own head.
 
 Not verified, and not to be claimed:
 

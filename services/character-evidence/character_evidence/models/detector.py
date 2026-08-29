@@ -23,8 +23,18 @@ class YOLOXPersonDetector:
 
         self.torch = torch
         self.postprocess = postprocess
-        self.preprocess = ValTransform(legacy=False)
-        self.exp = get_exp(exp_name="yolox-s")
+        # The pinned YOLOX (0.1.1rc0, e1052df7) predates both `legacy` here and
+        # `class_agnostic` in postprocess below; this code was written against a
+        # later release and had never been run against the revision the manifest
+        # actually pins. `ValTransform()` at this revision defaults to
+        # rgb_means=None/std=None, which is no normalisation -- exactly what
+        # `legacy=False` selects in the newer API, so preprocessing is unchanged.
+        self.preprocess = ValTransform()
+        # Same pin, third instance: `get_exp(exp_file, exp_name)` takes both
+        # positionally here and only grew defaults later, so the keyword-only
+        # call raised TypeError. Passing both positionally is correct against
+        # the pinned revision and still correct against newer ones.
+        self.exp = get_exp(None, "yolox-s")
         self.confidence = confidence
         self.nms = nms
         self.device = torch.device("cuda")
@@ -50,12 +60,17 @@ class YOLOXPersonDetector:
         tensor = torch.from_numpy(prepared).unsqueeze(0).float().to(self.device)
         with torch.inference_mode():
             output = self.model(tensor)
+            # No `class_agnostic` at this revision: postprocess always runs
+            # torchvision `batched_nms` keyed on the class column, i.e. per-class
+            # suppression. That is the safer of the two here anyway -- class-agnostic
+            # NMS can drop a real person box that overlaps a higher-scoring
+            # non-person detection, and this detector feeds a tracker that never
+            # recovers a person it was not given.
             predictions = self.postprocess(
                 output,
                 self.exp.num_classes,
                 self.confidence,
                 self.nms,
-                class_agnostic=True,
             )[0]
         if predictions is None:
             return []

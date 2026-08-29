@@ -155,7 +155,43 @@ something else happens to reload it — the renewal succeeds and the site still 
 - **Restart policy.** Every service is `restart: unless-stopped`, and docker and nginx
   are enabled units, so the stack returns after a reboot.
 
-## 7. What this deployment resolved, and what it did not
+## 7. The first administrator
+
+`platform_role` starts at `USER` for everyone, and every role change goes through
+SUPER_ADMIN RBAC — which leaves the first one unreachable. `POST
+/internal/admin/bootstrap-super-admin/{user_id}` is the way in: it takes the platform API
+key rather than a session, refuses with `409` once any SUPER_ADMIN exists, and writes a
+`SUPER_ADMIN_BOOTSTRAPPED` row to the admin audit log. Register through the site first —
+nothing here creates an account.
+
+```bash
+cd /opt/bestshiny
+K=$(grep -E '^PLATFORM_API_KEY=' .env | cut -d= -f2-)
+UID=$(docker compose -f docker-compose.prod.yml exec -T postgres psql -U video_platform \
+  -d video_platform -tAc "select id from users where email = 'you@example.com'" | tr -d '[:space:]')
+curl -sS -XPOST -H "Authorization: Bearer $K" \
+  "http://127.0.0.1:8080/internal/admin/bootstrap-super-admin/$UID"
+```
+
+Credits are then a SUPER_ADMIN action through the Console's own API, not a database edit,
+so the grant lands in `admin_credit_adjustments` with a reason and shows up in the audit
+trail like any other. `delta` is capped at 1,000,000 per adjustment and `Idempotency-Key`
+is required — replaying the same key returns the original adjustment rather than granting
+twice.
+
+```bash
+curl -sS -XPOST -H "Authorization: Bearer <your session token>" \
+  -H "Idempotency-Key: topup-$(date -u +%Y%m%d)-1" -H "Content-Type: application/json" \
+  -d '{"workspace_id":"<workspace>","delta":1000000,"reason":"Test budget for the full flow"}' \
+  https://api.bestshiny.com/api/admin/users/<user_id>/credit-adjustments
+```
+
+A session token comes from signing in, or from `scripts/canary_session.py --email <address>`,
+which mints a short-lived one through the application's own `AuthService` so nobody has to
+paste a password. The starter grant is 50 credits and a single 4-second video reserves about
+44, so the ten live-canary targets need a top-up before the sweep will run.
+
+## 8. What this deployment resolved, and what it did not
 
 Three blockers in the handover documents were environmental, and moving off the
 developer laptop cleared them:

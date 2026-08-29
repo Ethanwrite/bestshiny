@@ -58,6 +58,7 @@ from media_service import (
     ProviderMediaReconciliationConflict,
     ProviderMediaValidationFailed,
     StorageReservationConflict,
+    ThumbnailUnavailable,
     WorkspaceStorageQuota,
     WorkspaceStorageQuotaExceeded,
     lineage_key,
@@ -2275,6 +2276,28 @@ def create_app(container: Container | None = None) -> FastAPI:
         ).as_response()
 
     @app.post(
+        "/internal/maintenance/rendition-gc",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_rendition_gc_endpoint(limit: int | None = None):
+        """The operator-triggered face of the sweep the worker runs on
+        `RENDITION_GC_INTERVAL_SECONDS`. Claim/lease per row, so running it
+        beside the worker double-deletes nothing; originals are never
+        eligible; deleted rows stay as reconcilable tombstones.
+        """
+
+        from media_service import active_reference_profiles, sweep_rendition_gc
+
+        return sweep_rendition_gc(
+            database=container.database,
+            storage=container.storage,
+            active_constraint_profiles=active_reference_profiles(container.providers._providers),
+            min_idle_seconds=container.settings.rendition_gc_min_idle_seconds,
+            lease_seconds=container.settings.rendition_gc_lease_seconds,
+            limit=max(1, limit or container.settings.rendition_gc_limit),
+        ).as_response()
+
+    @app.post(
         "/internal/maintenance/character-evidence",
         dependencies=[Depends(verify_api_key)],
     )
@@ -2512,6 +2535,41 @@ def create_app(container: Container | None = None) -> FastAPI:
             "provider_media_id": asset.provider_media_id,
             "public_url": asset.public_url,
         }
+
+    @app.get("/v1/assets/{asset_id}/thumbnail")
+    def get_asset_thumbnail(
+        asset_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """A small JPEG for galleries — derived lazily, cached as a rendition.
+
+        The Web UI reads this instead of the original, so a gallery of 4K
+        plates downloads thumbnails rather than 4K plates.
+        """
+
+        asset = container.media.get(asset_id)
+        if not asset:
+            raise HTTPException(404, "asset not found")
+        auth.require_project(principal, asset.project_id)
+        try:
+            thumbnail = container.thumbnails.ensure_thumbnail(asset_id)
+        except ThumbnailUnavailable as exc:
+            raise HTTPException(404, str(exc)) from exc
+        try:
+            path = container.storage.path_for(thumbnail.storage_key)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(404, "thumbnail object not found")
+        return FileResponse(
+            path,
+            media_type=thumbnail.mime_type,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cross-Origin-Resource-Policy": "same-origin",
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
 
     @app.get("/v1/media/reference/{storage_key:path}")
     def serve_signed_reference(storage_key: str, request: Request):

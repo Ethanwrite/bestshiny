@@ -36,7 +36,7 @@ from google_flow_provider import GoogleFlowProvider
 from grok_provider import GrokProvider
 from image_prompt_core import ImagePromptCorrector
 from kling_provider import KlingProvider
-from media_service import DirectUploadService, MediaRegistry
+from media_service import DirectUploadService, MediaRegistry, ThumbnailService
 from memory_core import (
     ContextAssembler,
     ContextBudget,
@@ -106,6 +106,7 @@ class Container:
     database: Database
     storage: StorageProvider
     media: MediaRegistry
+    thumbnails: ThumbnailService
     direct_uploads: DirectUploadService
     runtime: BrowserRuntime
     providers: ProviderRouter
@@ -289,6 +290,7 @@ def build_container(settings: Settings | None = None) -> Container:
         max_image_pixels=settings.max_image_pixels,
         reference_url_ttl_seconds=settings.reference_url_ttl_seconds,
     )
+    thumbnails = ThumbnailService(database, storage)
     direct_uploads = DirectUploadService(
         database,
         storage,
@@ -823,6 +825,7 @@ def build_container(settings: Settings | None = None) -> Container:
         database=database,
         storage=storage,
         media=media,
+        thumbnails=thumbnails,
         direct_uploads=direct_uploads,
         runtime=runtime,
         providers=providers,

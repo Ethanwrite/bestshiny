@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     # How far back the enqueue scan looks for candidates with registered
     # video output and no submission row.
     character_evidence_backfill_hours: int = 72
+    # Derived-rendition garbage collection. Only idle copies whose constraint
+    # profile no current provider declares are eligible; originals never are.
+    # 0 disables the worker sweep (the internal endpoint still works).
+    rendition_gc_interval_seconds: int = 3600
+    rendition_gc_limit: int = 100
+    # A rendition served inside this window is never collected — it also keeps
+    # references handed to in-flight generations alive. Default seven days.
+    rendition_gc_min_idle_seconds: int = 7 * 24 * 3600
+    # How long one sweeper's claim on a row stays exclusive before a crashed
+    # sweep becomes re-claimable by another worker.
+    rendition_gc_lease_seconds: int = 600
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The project's image-generation model, served by POST /images.

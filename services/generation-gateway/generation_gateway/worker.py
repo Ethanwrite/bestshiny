@@ -134,6 +134,35 @@ def sweep_generation_staging_once(container) -> int:  # type: ignore[no-untyped-
     return len(result.deleted)
 
 
+def sweep_rendition_gc_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Collect idle derived renditions whose constraint profile no provider declares.
+
+    Originals are untouchable by construction; the claim/lease keeps a second
+    worker or the operator endpoint from double-deleting; DELETED rows remain
+    as reconcilable tombstones and revive in place if the constraints return.
+    """
+
+    from media_service import active_reference_profiles, sweep_rendition_gc
+
+    result = sweep_rendition_gc(
+        database=container.database,
+        storage=container.storage,
+        active_constraint_profiles=active_reference_profiles(container.providers._providers),
+        min_idle_seconds=container.settings.rendition_gc_min_idle_seconds,
+        lease_seconds=container.settings.rendition_gc_lease_seconds,
+        limit=max(1, container.settings.rendition_gc_limit),
+    )
+    if result.deleted_rows:
+        logger.info(
+            "rendition GC: %d row(s) tombstoned, %d object(s) deleted, "
+            "%d shared object(s) kept",
+            len(result.deleted_rows),
+            result.objects_deleted,
+            result.objects_kept_shared,
+        )
+    return len(result.deleted_rows)
+
+
 def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-def]
     """Run the shadow Character Evidence lifecycle pass. Never fatal.
 
@@ -171,12 +200,23 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
+    rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
     next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
     next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
+    next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
     while True:
+        if (
+            next_rendition_gc is not None
+            and asyncio.get_running_loop().time() >= next_rendition_gc
+        ):
+            try:
+                await asyncio.to_thread(sweep_rendition_gc_once, container)
+            except Exception:
+                logger.exception("rendition GC sweep failed")
+            next_rendition_gc = asyncio.get_running_loop().time() + rendition_gc_interval
         if next_upload_sweep is not None and asyncio.get_running_loop().time() >= next_upload_sweep:
             try:
                 await asyncio.to_thread(sweep_expired_uploads_once, container)

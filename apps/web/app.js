@@ -1046,6 +1046,20 @@ async function resolveAssetMedia(assetId) {
   return url ? { url, mime: asset.mime_type || "", revocable: false } : null;
 }
 
+async function resolveAssetThumbnail(assetId) {
+  // Galleries read the derived thumbnail, not the original: a grid of 4K
+  // plates must not download 4K plates. Falls back to the full asset only
+  // when no thumbnail can be derived (odd media types).
+  if (!assetId) return null;
+  try {
+    const response = await fetch(`${API}/v1/assets/${assetId}/thumbnail`, { credentials: "include" });
+    if (response.ok) {
+      return { url: URL.createObjectURL(await response.blob()), mime: "image/jpeg", revocable: true };
+    }
+  } catch (_error) { /* fall through to the original */ }
+  return resolveAssetMedia(assetId);
+}
+
 function resetProductionView() {
   state.episode = null; state.shot = null; state.candidates = [];
   $("scriptPanel").hidden = false;
@@ -2110,7 +2124,7 @@ function renderCreative() {
         </figcaption>
       </figure>`).join("");
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
-      const media = await resolveAssetMedia(anchor.media_asset_id).catch(() => null);
+      const media = await resolveAssetThumbnail(anchor.media_asset_id).catch(() => null);
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
       if (media && cell) {
         cell.classList.remove("empty-state");

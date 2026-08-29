@@ -1946,7 +1946,12 @@ class MediaRendition(Base, TimestampMixin):
             "constraint_key",
             name="uq_media_rendition_scope",
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('ACTIVE', 'GC_CLAIMED', 'DELETED')",
+            name="ck_media_rendition_lifecycle",
+        ),
         Index("ix_media_rendition_asset", "media_asset_id", "kind"),
+        Index("ix_media_rendition_gc", "lifecycle_status", "last_accessed_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     media_asset_id: Mapped[str] = mapped_column(
@@ -1963,6 +1968,20 @@ class MediaRendition(Base, TimestampMixin):
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    # Garbage-collection lifecycle. A derived copy is disposable cache; these
+    # columns make its disposal observable and safe: ACTIVE rows serve, a
+    # sweeper claims a row under a lease before touching storage (so two
+    # workers cannot double-delete), and DELETED rows remain as tombstones
+    # recording what was removed — reconcilable, and revivable in place when
+    # the same constraints are needed again. Originals are never collected.
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    gc_claim_id: Mapped[str | None] = mapped_column(String(36))
+    gc_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delete_reason: Mapped[str | None] = mapped_column(String(240))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 

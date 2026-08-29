@@ -2454,6 +2454,38 @@ def create_app(container: Container | None = None) -> FastAPI:
         ).as_response()
 
     @app.post(
+        "/internal/maintenance/reclaim-rejected-media",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def reclaim_rejected_media_endpoint(
+        asset_id: str | None = None,
+        min_age_seconds: int | None = None,
+        limit: int | None = None,
+    ):
+        """Delete rejected upload bytes and hand their quota back, in that order.
+
+        Verification keeps an INVALID/QUARANTINED object charged because the
+        bytes are still stored as evidence. This is the other half: an
+        explicit operator action that removes the object and only then
+        releases the reservation, so a workspace is not charged forever for
+        files it can never use — and un-charging can never outrun deletion.
+        Objects shared with another asset or a live rendition are kept.
+        """
+
+        from media_service import reclaim_rejected_assets
+
+        return reclaim_rejected_assets(
+            database=container.database,
+            storage=container.storage,
+            quota=WorkspaceStorageQuota(container.database),
+            asset_ids=[asset_id] if asset_id else None,
+            min_age_seconds=(
+                min_age_seconds if min_age_seconds is not None else 7 * 24 * 3600
+            ),
+            limit=max(1, limit or 50),
+        ).as_response()
+
+    @app.post(
         "/internal/maintenance/rendition-gc",
         dependencies=[Depends(verify_api_key)],
     )

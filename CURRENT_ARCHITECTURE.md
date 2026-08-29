@@ -1706,8 +1706,11 @@ gallery reads it instead of 4K originals.
 **Direct-upload full verification (migration `0058`).** Adopted uploads are
 `PENDING_VERIFICATION` until the async verifier — SHA re-check, complete image decode, ffprobe
 plus whole-stream ffmpeg decode for video — promotes them to READY, or lands them in INVALID /
-QUARANTINED with the workspace's settled bytes released. Providers and reference URLs refuse
-anything not READY.
+QUARANTINED. Storage accounting for a rejection is two-phase: the object is retained as
+evidence and stays charged (un-charging retained bytes would let repeated bad uploads grow the
+bucket without bound), and capacity returns only through `reclaim_rejected_assets` /
+`POST /internal/maintenance/reclaim-rejected-media`, which deletes the object first and
+releases the reservation second. Providers and reference URLs refuse anything not READY.
 
 **Timeline branches (migration `0059`).** `timeline_scope_key` branches are registered rows
 with kind, required parent, fork shot and a lifecycle (ACTIVE / MERGED with a declared

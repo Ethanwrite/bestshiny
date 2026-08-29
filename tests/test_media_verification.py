@@ -16,6 +16,7 @@ import pytest
 from media_service import (
     ProviderReferenceUrlUnavailable,
     WorkspaceStorageQuota,
+    reclaim_rejected_assets,
     verify_pending_assets,
 )
 from PIL import Image
@@ -172,7 +173,7 @@ def test_a_crashed_verifier_claim_lapses_and_the_asset_reverifies(container, pro
     assert status == "READY"
 
 
-def test_rejection_releases_the_settled_storage_bytes(container, project) -> None:  # type: ignore[no-untyped-def]
+def test_rejection_keeps_the_bytes_charged_while_the_object_is_retained(container, project) -> None:  # type: ignore[no-untyped-def]
     payload = _png_bytes(512)[:900]  # truncated: will be INVALID
     asset_id = _adopt(container, project, payload, mime_type="image/png")
     quota = WorkspaceStorageQuota(container.database)
@@ -214,3 +215,92 @@ def test_rejection_releases_the_settled_storage_bytes(container, project) -> Non
 
         row = session.scalar(select(StorageReservation))
         assert row.status == "SETTLED"
+
+
+def test_reclaiming_a_rejected_asset_deletes_bytes_then_returns_quota(container, project) -> None:  # type: ignore[no-untyped-def]
+    """The other half of the two-phase accounting: bytes go, then capacity."""
+
+    from production_domain.models import StorageReservation
+
+    payload = _png_bytes(512)[:900]  # truncated: verification will reject it
+    asset_id = _adopt(container, project, payload, mime_type="image/png")
+    quota = WorkspaceStorageQuota(container.database)
+    with container.database.session() as session:
+        user = User(email="reclaim@example.com", display_name="Reclaimer", password_hash="unused")
+        session.add(user)
+        session.flush([user])
+        workspace = Workspace(owner_user_id=user.id, name="Reclaim workspace")
+        session.add(workspace)
+        session.flush([workspace])
+        workspace_id = workspace.id
+    reservation = quota.reserve(
+        workspace_id=workspace_id,
+        project_id=project.id,
+        byte_count=len(payload),
+        idempotency_key="reclaim-quota-1",
+    )
+    with container.database.session() as session:
+        asset = session.get(MediaAsset, asset_id)
+        storage_key = asset.storage_key
+        quota.settle_in(
+            session,
+            reservation.id,
+            asset_id=asset_id,
+            storage_key=storage_key,
+            used_bytes=len(payload),
+        )
+    assert _verify(container, quota=quota).invalid == 1
+    # Still charged, bytes still present: that is the retention half.
+    with container.database.session() as session:
+        assert session.get(Workspace, workspace_id).used_storage_bytes == len(payload)
+    assert container.storage.path_for(storage_key).is_file()
+
+    # An age floor protects fresh evidence from being swept away.
+    untouched = reclaim_rejected_assets(
+        database=container.database, storage=container.storage, quota=quota
+    )
+    assert untouched.reclaimed == []
+
+    result = reclaim_rejected_assets(
+        database=container.database,
+        storage=container.storage,
+        quota=quota,
+        asset_ids=[asset_id],
+    )
+    assert result.objects_deleted == 1
+    assert result.quota_released == 1
+    assert not container.storage.path_for(storage_key).is_file(), "bytes are gone"
+    with container.database.session() as session:
+        assert session.get(Workspace, workspace_id).used_storage_bytes == 0
+        row = session.scalar(select(StorageReservation))
+        assert row.status == "RELEASED_INVALID"
+        asset = session.get(MediaAsset, asset_id)
+        assert asset.metadata_json["reclaimed_object_deleted"] is True
+
+
+def test_reclamation_never_deletes_an_object_another_asset_shares(container, project) -> None:  # type: ignore[no-untyped-def]
+    payload = _png_bytes(512)[:900]
+    asset_id = _adopt(container, project, payload, mime_type="image/png")
+    assert _verify(container).invalid == 1
+    with container.database.session() as session:
+        rejected = session.get(MediaAsset, asset_id)
+        storage_key = rejected.storage_key
+        # A second, healthy asset row addressing the same stored object.
+        session.add(
+            MediaAsset(
+                project_id=project.id,
+                asset_type="PLATE",
+                mime_type="image/png",
+                storage_key=storage_key,
+                sha256=rejected.sha256,
+                size_bytes=rejected.size_bytes,
+                lineage_key="other",
+            )
+        )
+        session.flush()
+    result = reclaim_rejected_assets(
+        database=container.database, storage=container.storage, asset_ids=[asset_id]
+    )
+    assert result.objects_kept_shared == 1
+    assert result.objects_deleted == 0
+    assert container.storage.path_for(storage_key).is_file(), "shared bytes survive"

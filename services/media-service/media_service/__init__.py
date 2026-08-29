@@ -61,6 +61,8 @@ from .thumbnails import (
 )
 from .verification import (
     MediaVerificationSweep,
+    RejectedMediaReclamation,
+    reclaim_rejected_assets,
     verify_pending_assets,
 )
 from .video_renditions import (
@@ -95,6 +97,8 @@ __all__ = [
     "ThumbnailUnavailable",
     "MediaVerificationSweep",
     "verify_pending_assets",
+    "RejectedMediaReclamation",
+    "reclaim_rejected_assets",
     "MediaRegistry",
     "ProviderMediaReconciliationConflict",
     "ProviderMediaReconciliationRequired",

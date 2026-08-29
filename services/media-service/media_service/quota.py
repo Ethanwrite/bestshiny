@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import StorageReservation, Workspace, utcnow
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -203,6 +203,48 @@ class WorkspaceStorageQuota:
         reservation.settled_at = utcnow()
         session.flush()
         return self._view(reservation)
+
+    def release_settled_for_asset_in(
+        self, session: Session, *, asset_id: str, size_bytes: int
+    ) -> bool:
+        """Give back the settled bytes of an asset whose object was deleted.
+
+        Called **only** after the bytes are actually gone from storage. That
+        ordering is the whole safety argument: releasing quota while the
+        object is retained would let repeated invalid uploads grow the bucket
+        without bound, so verification deliberately keeps a rejected asset
+        charged, and only the reclamation path — which deletes first — hands
+        capacity back. The settled reservation becomes ``RELEASED_INVALID``
+        (auditable, never deleted) and the workspace's used counter is
+        corrected by the recorded size, floored at zero. Returns False when
+        no settled reservation exists (a workspace-less project, or an upload
+        that predates quota accounting).
+        """
+
+        reservation = session.scalar(
+            select(StorageReservation)
+            .where(
+                StorageReservation.asset_id == asset_id,
+                StorageReservation.status == "SETTLED",
+            )
+            .with_for_update()
+        )
+        if reservation is None:
+            return False
+        release = min(max(int(size_bytes), 0), reservation.reserved_bytes)
+        session.execute(
+            update(Workspace)
+            .where(Workspace.id == reservation.workspace_id)
+            .values(
+                used_storage_bytes=case(
+                    (Workspace.used_storage_bytes >= release, Workspace.used_storage_bytes - release),
+                    else_=0,
+                )
+            )
+        )
+        reservation.status = "RELEASED_INVALID"
+        session.flush()
+        return True
 
     def record_deduplicated(
         self,

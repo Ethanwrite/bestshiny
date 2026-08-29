@@ -18,9 +18,16 @@ each under a lease and performs the *complete* check —
 Verdicts are explicit: ``READY`` serves; ``INVALID`` means the bytes do not
 decode; ``QUARANTINED`` means the bytes contradict the declaration (forged
 MIME, SHA mismatch) — a distinction operators need, because one is a broken
-export and the other is tampering. Either failure releases the workspace's
-settled storage bytes. The object itself is never deleted here: rejected
-bytes are evidence, and deleting user uploads is not a verifier's call.
+export and the other is tampering.
+
+Storage accounting for a rejection is deliberately two-phase. The object is
+**not** deleted here — rejected bytes are evidence, and deleting a user's
+upload is not a verifier's call — and because those bytes still occupy the
+bucket, the workspace stays charged for them; releasing quota for retained
+bytes would let repeated bad uploads grow storage without bound. Capacity
+comes back through ``reclaim_rejected_assets``, an explicit operator action
+that deletes the object first and releases the reservation second, so the
+charge ends exactly when the bytes do.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 from platform_database import Database
 from platform_shared import StorageProvider
-from production_domain.models import MediaAsset, utcnow
+from production_domain.models import MediaAsset, MediaRendition, utcnow
 from sqlalchemy import or_, select, update
 
 from .quota import WorkspaceStorageQuota
@@ -262,6 +269,131 @@ def verify_pending_assets(
     )
 
 
+@dataclass(frozen=True)
+class RejectedMediaReclamation:
+    reclaimed: list[dict[str, Any]] = field(default_factory=list)
+    objects_deleted: int = 0
+    objects_kept_shared: int = 0
+    quota_released: int = 0
+
+    def as_response(self) -> dict[str, Any]:
+        return {
+            "reclaimed": self.reclaimed,
+            "reclaimed_count": len(self.reclaimed),
+            "objects_deleted": self.objects_deleted,
+            "objects_kept_shared": self.objects_kept_shared,
+            "quota_released": self.quota_released,
+        }
+
+
+def reclaim_rejected_assets(
+    *,
+    database: Database,
+    storage: StorageProvider,
+    quota: WorkspaceStorageQuota | None = None,
+    asset_ids: list[str] | None = None,
+    min_age_seconds: int = 7 * 24 * 3600,
+    limit: int = 50,
+) -> RejectedMediaReclamation:
+    """Delete rejected upload bytes, then hand their quota back.
+
+    Verification keeps an INVALID or QUARANTINED object charged on purpose:
+    the bytes are still in the bucket as evidence, and un-charging retained
+    bytes would let repeated bad uploads grow storage without bound. That
+    leaves the workspace holding capacity it can never use, so this is the
+    other half — an explicit, operator-triggered reclamation that **deletes
+    the object first and only then releases the reservation**, in that order,
+    so capacity is returned exactly when the bytes stop existing.
+
+    Nothing here is automatic: rejected bytes are evidence until an operator
+    decides they are not, which is why the default is an age floor and an
+    explicit call. An object still referenced by another asset row or a live
+    rendition is never deleted, and its quota is not released either.
+    """
+
+    cutoff = utcnow() - timedelta(seconds=max(0, int(min_age_seconds)))
+    reclaimed: list[dict[str, Any]] = []
+    deleted = kept_shared = released = 0
+    with database.session() as session:
+        query = select(MediaAsset.id).where(
+            MediaAsset.verification_status.in_(("INVALID", "QUARANTINED"))
+        )
+        if asset_ids:
+            query = query.where(MediaAsset.id.in_(asset_ids))
+        else:
+            query = query.where(MediaAsset.updated_at <= cutoff)
+        candidate_ids = list(session.scalars(query.order_by(MediaAsset.updated_at).limit(max(1, limit))))
+
+    for asset_id in candidate_ids:
+        with database.session() as session:
+            asset = session.get(MediaAsset, asset_id)
+            if asset is None or asset.verification_status not in {"INVALID", "QUARANTINED"}:
+                continue
+            storage_key = asset.storage_key
+            size_bytes = asset.size_bytes
+            shared = (
+                session.scalar(
+                    select(MediaAsset.id)
+                    .where(MediaAsset.storage_key == storage_key, MediaAsset.id != asset_id)
+                    .limit(1)
+                )
+                is not None
+                or session.scalar(
+                    select(MediaRendition.id)
+                    .where(
+                        MediaRendition.storage_key == storage_key,
+                        MediaRendition.lifecycle_status != "DELETED",
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+            if shared:
+                # Content addressing can put valid material behind the same
+                # key. Deleting it would take a good asset's bytes with it.
+                kept_shared += 1
+                reclaimed.append(
+                    {"asset_id": asset_id, "object_deleted": False, "object_shared": True}
+                )
+                continue
+            object_deleted = bool(storage.delete(storage_key))
+            asset.verification_error = (
+                f"{asset.verification_error or asset.verification_status}; "
+                "object reclaimed by operator"
+            )
+            asset.metadata_json = {
+                **(asset.metadata_json or {}),
+                "reclaimed_at": utcnow().isoformat(),
+                "reclaimed_object_deleted": object_deleted,
+            }
+            quota_returned = False
+            if quota is not None:
+                # Strictly after the delete: capacity comes back only once the
+                # bytes are actually gone.
+                quota_returned = quota.release_settled_for_asset_in(
+                    session, asset_id=asset_id, size_bytes=size_bytes
+                )
+            session.flush()
+            if object_deleted:
+                deleted += 1
+            if quota_returned:
+                released += 1
+            reclaimed.append(
+                {
+                    "asset_id": asset_id,
+                    "object_deleted": object_deleted,
+                    "object_shared": False,
+                    "quota_released": quota_returned,
+                }
+            )
+    return RejectedMediaReclamation(
+        reclaimed=reclaimed,
+        objects_deleted=deleted,
+        objects_kept_shared=kept_shared,
+        quota_released=released,
+    )
+
+
 def _verify_stored_object(
     storage: StorageProvider,
     *,
@@ -319,4 +451,9 @@ def _verify_stored_object(
         return _Verdict("INVALID", error=f"OBJECT_UNREADABLE:{type(exc).__name__}")
 
 
-__all__ = ["MediaVerificationSweep", "verify_pending_assets"]
+__all__ = [
+    "MediaVerificationSweep",
+    "RejectedMediaReclamation",
+    "reclaim_rejected_assets",
+    "verify_pending_assets",
+]

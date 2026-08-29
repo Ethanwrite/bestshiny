@@ -545,11 +545,18 @@ class AdminOperationService:
             profile.updated_at = datetime.now(UTC)
 
             # A changed capability contract invalidates prior production proof.
+            # `live_canary_status` is part of that proof and was being left
+            # behind: a model whose contract changed kept reading VERIFIED_LIVE,
+            # which is a claim about a request shape that no longer exists.
             model.lifecycle_status = ModelLifecycleStatus.CONFIGURED.value
             model.live_enabled = False
             model.router_enabled = False
             model.last_verified_at = None
             model.last_live_test_at = None
+            model.live_canary_status = "NOT_RUN"
+            model.live_canary_detail = (
+                "reset: capability contract changed after the canary ran"
+            )
             after = self._capability_snapshot(profile)
             self._audit(
                 session,

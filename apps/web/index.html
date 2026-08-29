@@ -327,45 +327,52 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <p>Type a vague idea on the left. You review and approve each stage: brief → key visuals → visual bible → beats → shots.</p>
             </div>
             <div id="creativeFlow" hidden>
-              <div id="creativeTurns" class="output-box creative-turns" aria-live="polite"></div>
-              <div class="btn-row" id="creativeReplyRow">
-                <input id="creativeReplyInput" placeholder="Answer the director, or ask for changes" autocomplete="off" style="flex:1" />
-                <button id="creativeReplyBtn" class="btn btn-secondary" type="button">Send</button>
+              <!-- The conversation is a column of its own so it can use the full
+                   height of the canvas: the director asks and re-asks, and a 320px
+                   window made every answer after the third a scroll. -->
+              <div class="creative-dialogue">
+                <div id="creativeTurns" class="output-box creative-turns" aria-live="polite"></div>
+                <div class="btn-row" id="creativeReplyRow">
+                  <input id="creativeReplyInput" placeholder="Answer the director, or ask for changes" autocomplete="off" style="flex:1" />
+                  <button id="creativeReplyBtn" class="btn btn-secondary" type="button">Send</button>
+                </div>
               </div>
-              <section class="pane-block" id="creativeBriefCard" hidden>
-                <div class="pane-head"><h2>Creative brief</h2><span id="creativeBriefStatus" class="badge">Proposed</span></div>
-                <div id="creativeBriefFields" class="kv-list"></div>
-                <div class="btn-row">
-                  <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief &amp; generate key visuals</button>
-                </div>
-                <p class="pane-note">Approving generates the key visuals below through the ordinary image pipeline — each one is priced and reserved like any generation.</p>
-              </section>
-              <section class="pane-block" id="creativeVisualsCard" hidden>
-                <div class="pane-head"><h2>Key visuals</h2><span id="creativeVisualsStatus" class="badge">Waiting</span></div>
-                <div id="creativeAnchorGrid" class="asset-grid"></div>
-                <div class="btn-row">
-                  <button id="creativeSyncVisualsBtn" class="btn btn-tertiary" type="button">Refresh visuals</button>
-                  <button id="creativeRetryVisualsBtn" class="btn btn-tertiary" type="button" hidden>Retry failed</button>
-                  <button id="creativeProposeBibleBtn" class="btn btn-secondary" type="button" disabled>Draft visual bible</button>
-                </div>
-              </section>
-              <section class="pane-block" id="creativeBibleCard" hidden>
-                <div class="pane-head"><h2>Visual bible</h2><span id="creativeBibleStatus" class="badge">Draft</span></div>
-                <div id="creativeBibleContent" class="kv-list"></div>
-                <div class="btn-row">
-                  <button id="creativeLockBibleBtn" class="btn btn-primary" type="button">Approve &amp; lock this version</button>
-                </div>
-                <p class="pane-note">Locking freezes this version permanently. Later changes create a new version that needs approval again.</p>
-              </section>
-              <section class="pane-block" id="creativeBeatsCard" hidden>
-                <div class="pane-head"><h2>Story beats &amp; shot plan</h2><span id="creativeBeatsStatus" class="badge">Proposed</span></div>
-                <div id="creativeBeatList" class="output-box"></div>
-                <div class="btn-row">
-                  <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats</button>
-                  <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; compile shots</button>
-                </div>
-                <p class="pane-note">Approval compiles the beats into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
-              </section>
+              <div class="creative-stages">
+                <section class="pane-block" id="creativeBriefCard" hidden>
+                  <div class="pane-head"><h2>Creative brief</h2><span id="creativeBriefStatus" class="badge">Proposed</span></div>
+                  <div id="creativeBriefFields" class="kv-list"></div>
+                  <div class="btn-row">
+                    <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief &amp; generate key visuals</button>
+                  </div>
+                  <p class="pane-note">Approving generates the key visuals below through the ordinary image pipeline — each one is priced and reserved like any generation.</p>
+                </section>
+                <section class="pane-block" id="creativeVisualsCard" hidden>
+                  <div class="pane-head"><h2>Key visuals</h2><span id="creativeVisualsStatus" class="badge">Waiting</span></div>
+                  <div id="creativeAnchorGrid" class="asset-grid"></div>
+                  <div class="btn-row">
+                    <button id="creativeSyncVisualsBtn" class="btn btn-tertiary" type="button">Refresh visuals</button>
+                    <button id="creativeRetryVisualsBtn" class="btn btn-tertiary" type="button" hidden>Retry failed</button>
+                    <button id="creativeProposeBibleBtn" class="btn btn-secondary" type="button" disabled>Draft visual bible</button>
+                  </div>
+                </section>
+                <section class="pane-block" id="creativeBibleCard" hidden>
+                  <div class="pane-head"><h2>Visual bible</h2><span id="creativeBibleStatus" class="badge">Draft</span></div>
+                  <div id="creativeBibleContent" class="kv-list"></div>
+                  <div class="btn-row">
+                    <button id="creativeLockBibleBtn" class="btn btn-primary" type="button">Approve &amp; lock this version</button>
+                  </div>
+                  <p class="pane-note">Locking freezes this version permanently. Later changes create a new version that needs approval again.</p>
+                </section>
+                <section class="pane-block" id="creativeBeatsCard" hidden>
+                  <div class="pane-head"><h2>Story beats &amp; shot plan</h2><span id="creativeBeatsStatus" class="badge">Proposed</span></div>
+                  <div id="creativeBeatList" class="output-box"></div>
+                  <div class="btn-row">
+                    <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats</button>
+                    <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; compile shots</button>
+                  </div>
+                  <p class="pane-note">Approval compiles the beats into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
+                </section>
+              </div>
             </div>
           </section>
 

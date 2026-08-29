@@ -1,0 +1,89 @@
+# Production stack for bestshiny.com (153.75.95.10), deployed 2026-08-29.
+#
+# Differences from the repository docker-compose.yml, which is a local
+# production-shaped stack rather than this host:
+#   * PostgreSQL publishes no port. Host-side alembic/pytest are not run here;
+#     `docker compose exec` reaches it instead.
+#   * Application ports bind to 127.0.0.1 only. The host nginx terminates TLS
+#     and is the sole public listener.
+#   * The media plane is the operator Alibaba OSS bucket, which the repository
+#     compose file has always called the only durable one. A local MinIO filled
+#     this role for the first hours of 2026-08-29 and was retired once the OSS
+#     credentials existed; nothing had been stored in it.
+x-platform-runtime: &platform-runtime
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://video_platform:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/video_platform
+    STORAGE_ROOT: /data/media
+    STORAGE_BACKEND: s3
+    S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?Configure the object storage endpoint}
+    S3_REGION: ${S3_REGION:?Configure the object storage region}
+    S3_BUCKET: ${S3_BUCKET:?Configure the object storage bucket}
+    S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Configure the object storage access key}
+    S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Configure the object storage secret}
+    S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
+    S3_ENFORCE_UPLOAD_CHECKSUM: ${S3_ENFORCE_UPLOAD_CHECKSUM:-true}
+    S3_VERIFY_UPLOAD_SHA256_ON_COMPLETE: ${S3_VERIFY_UPLOAD_SHA256_ON_COMPLETE:-true}
+    LOCAL_REFERENCE_SIGNING_KEY: ""
+    DEPLOYMENT_ENVIRONMENT: production
+    AUTH_REQUIRED: "true"
+  volumes:
+    - media_cache:/data/media
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: video_platform
+      POSTGRES_USER: video_platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U video_platform -d video_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+
+  api:
+    <<: *platform-runtime
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && uvicorn video_platform_api.main:app --host 0.0.0.0 --port 8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  worker:
+    <<: *platform-runtime
+    build: .
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["video-platform-worker"]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  media_cache:

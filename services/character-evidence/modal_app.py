@@ -42,20 +42,54 @@ image = (
         "mkdir -p /models /opt",
         "git clone https://github.com/Megvii-BaseDetection/YOLOX.git /opt/YOLOX",
         "git -C /opt/YOLOX checkout e1052df71842031413f6030723c3607b839c80ce",
-        "python -m pip install --no-deps -e /opt/YOLOX",
         "git clone https://github.com/FoundationVision/ByteTrack.git /opt/ByteTrack",
         "git -C /opt/ByteTrack checkout d1bf0191adff59bc8fcfeaa0b33d3d1642552a99",
+        # Before the install, so the installed distribution contains the tracker
+        # rather than depending on the source tree being copied into afterwards.
         "cp -R /opt/ByteTrack/yolox/tracker /opt/YOLOX/yolox/tracker",
-        "gh release download 0.1.1rc0 -R Megvii-BaseDetection/YOLOX -p yolox_s.pth -D /models",
+        # YOLOX's setup.py imports torch at build time, and PEP 517 build
+        # isolation hides the torch installed above behind a fresh environment,
+        # so the build dies on ModuleNotFoundError before compiling anything.
+        #
+        # This is a plain install rather than `-e`, and that is the fix. pip's
+        # legacy editable path hands off to `setup.py develop`, which re-invokes
+        # `pip install -e . --use-pep517 --no-deps` in a *new* process that
+        # rebuilds an isolated environment; neither --no-build-isolation nor
+        # PIP_NO_BUILD_ISOLATION survives that hop, both of which were tried.
+        # A non-editable install calls the build backend in this environment,
+        # where the pinned torch already is. `PYTHONPATH` still puts
+        # /opt/YOLOX first, so imports resolve to the pinned source tree either
+        # way -- the install is here for the build, not for the import path.
+        "PIP_NO_BUILD_ISOLATION=1 python -m pip install --no-deps /opt/YOLOX",
+        # Fail loudly here rather than at the first inference request.
+        "python -c \"import torch, yolox; print('torch', torch.__version__, 'yolox ok')\"",
+        # Public release asset, fetched the same way DINOv2 is. `gh release
+        # download` needs GH_TOKEN even for a public repository and exited 4
+        # asking for `gh auth login`, which a build container cannot do. The
+        # pinned SHA-256 on the next line is what makes swapping the transport
+        # safe: a wrong URL fails the checksum rather than shipping quietly.
+        "curl --fail --location --output /models/yolox_s.pth "
+        "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
+        "0.1.1rc0/yolox_s.pth",
         "echo 'f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30  "
         "/models/yolox_s.pth' | sha256sum -c -",
-        "git clone https://github.com/opencv/opencv_zoo.git /opt/opencv_zoo",
-        "git -C /opt/opencv_zoo checkout 47534e27c9851bb1128ccc0102f1145e27f23f98",
-        "git -C /opt/opencv_zoo lfs pull --include='models/face_detection_yunet/"
-        "face_detection_yunet_2026may.onnx,models/face_recognition_sface/"
-        "face_recognition_sface_2021dec.onnx'",
-        "cp /opt/opencv_zoo/models/face_detection_yunet/face_detection_yunet_2026may.onnx /models/",
-        "cp /opt/opencv_zoo/models/face_recognition_sface/face_recognition_sface_2021dec.onnx /models/",
+        # opencv_zoo ships these two only through git LFS, and that repository's
+        # LFS budget is exhausted: both a full clone and a targeted `lfs pull`
+        # die with "This repository exceeded its LFS budget", which belongs to
+        # the upstream account and cannot be fixed from this build. GitHub's own
+        # media endpoint serves the same objects at the same pinned commit. The
+        # bytes were compared against the SHA-256 values below before this was
+        # changed and match exactly -- content-addressed artifacts are what makes
+        # a transport swap checkable rather than a leap of faith, and the
+        # sha256sum lines that follow re-check it on every build.
+        "curl --fail --location --output /models/face_detection_yunet_2026may.onnx "
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+        "47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_detection_yunet/"
+        "face_detection_yunet_2026may.onnx",
+        "curl --fail --location --output /models/face_recognition_sface_2021dec.onnx "
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+        "47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/"
+        "face_recognition_sface_2021dec.onnx",
         "echo 'ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0  "
         "/models/face_detection_yunet_2026may.onnx' | sha256sum -c -",
         "echo '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  "
@@ -70,16 +104,19 @@ image = (
         "echo '7cecdcdd7998103969a4ba1772f4c9fb5560fd5eef05ca03e0d2df28346ca50b  "
         "/opt/YOLOX/yolox/tracker/byte_tracker.py' | sha256sum -c -",
     )
-    .add_local_dir("services/character-evidence", remote_path="/opt/character_evidence")
-    .add_local_file(
-        "config/character-evidence/thresholds-v1.json",
-        remote_path="/opt/character_evidence/config/thresholds-v1.json",
-    )
+    # `.env()` counts as a build step, so it has to come before the
+    # `add_local_*` calls: Modal refuses an image that builds after adding local
+    # files, because those are mounted at container start rather than baked in.
     .env(
         {
             "PYTHONPATH": "/opt/character_evidence:/opt/YOLOX",
             "CHARACTER_EVIDENCE_THRESHOLDS_PATH": "/opt/character_evidence/config/thresholds-v1.json",
         }
+    )
+    .add_local_dir("services/character-evidence", remote_path="/opt/character_evidence")
+    .add_local_file(
+        "config/character-evidence/thresholds-v1.json",
+        remote_path="/opt/character_evidence/config/thresholds-v1.json",
     )
 )
 

@@ -160,7 +160,7 @@ function renderCredits(data) {
 }
 
 function renderModels(data) {
-  return table(["Model", "Provider", "Capability", "Lifecycle", "Configured / verified", "Router", "Pricing", "Last live test"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}"><td><strong>${esc(item.display_name)}</strong><br><span class="admin-mono admin-muted">${esc(item.internal_key)}</span></td><td>${esc(item.provider)}</td><td>${esc(item.capability)}<br><span class="admin-muted">${esc((item.generation_modes || []).join(", "))}</span></td><td>${status(item.lifecycle_status)}</td><td>${item.configured ? "Yes" : "No"} / ${item.verified ? "Yes" : "No"}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td class="admin-mono">${esc(item.cost_class)}</td><td>${date(item.last_live_test_at)}</td></tr>`));
+  return table(["Model", "Provider", "Capability", "Lifecycle", "Configured / verified", "Router", "Pricing", "Live canary", "Last live test"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}"><td><strong>${esc(item.display_name)}</strong><br><span class="admin-mono admin-muted">${esc(item.internal_key)}</span></td><td>${esc(item.provider)}</td><td>${esc(item.capability)}<br><span class="admin-muted">${esc((item.generation_modes || []).join(", "))}</span></td><td>${status(item.lifecycle_status)}</td><td>${item.configured ? "Yes" : "No"} / ${item.verified ? "Yes" : "No"}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td class="admin-mono">${esc(item.cost_class)}</td><td>${status(item.live_canary_status)}</td><td>${date(item.last_live_test_at)}</td></tr>`));
 }
 
 function renderProviders(data) {

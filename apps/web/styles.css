@@ -802,9 +802,26 @@ input[type="file"]::file-selector-button {
 /* ============================================================
    Create with AI Director
    ============================================================ */
+/* The dialogue column and the staged approvals sit side by side on a wide
+   canvas, so the conversation gets the full height instead of a 320px window
+   above a long scroll. Below 1100px they stack, dialogue first. */
+#creativeFlow:not([hidden]) {
+  display: grid; gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 auto; min-height: 0;
+}
+@media (min-width: 1100px) {
+  #creativeFlow:not([hidden]) { grid-template-columns: minmax(320px, 5fr) minmax(0, 6fr); }
+}
+.creative-dialogue { display: flex; flex-direction: column; min-height: 0; gap: 10px; }
+.creative-stages {
+  display: flex; flex-direction: column; gap: 14px;
+  min-height: 0; overflow-y: auto;
+}
+
 .creative-turns {
   display: flex; flex-direction: column; gap: 10px;
-  max-height: 320px; overflow-y: auto; margin-bottom: 10px;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
 }
 .creative-turn { border-left: 2px solid var(--line-strong); padding: 2px 0 2px 10px; }
 .creative-turn.is-director { border-left-color: var(--brand); }
@@ -812,8 +829,11 @@ input[type="file"]::file-selector-button {
 .creative-turn p { margin: 0; font-size: 13px; color: var(--fg-body); white-space: pre-wrap; }
 .creative-turn ul { margin: 6px 0 0; padding-left: 18px; font-size: 13px; color: var(--fg); }
 .creative-turn small { color: var(--fg-meta); font-size: 10px; }
-#creativeReplyRow { display: flex; gap: 8px; margin-bottom: 14px; }
-#creativeFlow > .pane-block { margin-top: 14px; }
+/* `:not([hidden])` is load-bearing: an id selector outranks the UA `[hidden]`
+   rule, so a bare `display: flex` here kept the reply row on screen after the
+   session was COMPILED or ABANDONED, which is exactly when app.js hides it. */
+#creativeReplyRow:not([hidden]) { display: flex; }
+#creativeReplyRow { gap: 8px; flex: 0 0 auto; }
 .creative-beat { padding: 8px 0; border-bottom: 1px solid var(--line-faint); }
 .creative-beat:last-child { border-bottom: 0; }
 .creative-beat b { font-size: 12px; }

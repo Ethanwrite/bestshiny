@@ -64,6 +64,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from model_registry_core.live_canary import (  # noqa: E402
+    CanaryLoop,
+    record_canary_outcome,
+)
+from platform_database import Database  # noqa: E402
 from platform_shared import S3CompatibleStorage, Settings  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
@@ -546,7 +551,7 @@ def _poll(
         time.sleep(args.poll_interval)
 
 
-def _check_storage(settings: Settings, asset: dict[str, Any], report: Report) -> None:
+def _check_storage(settings: Settings, asset: dict[str, Any], report: Report) -> bool:
     storage = S3CompatibleStorage(
         bucket=settings.s3_bucket,
         cache_root=settings.storage_root,
@@ -561,7 +566,7 @@ def _check_storage(settings: Settings, asset: dict[str, Any], report: Report) ->
     stat = storage.stat(asset["storage_key"])
     if stat is None:
         report.say(FAIL, "object in bucket", f"HEAD found nothing at {asset['storage_key']}")
-        return
+        return False
     same = int(stat.size) == int(asset["size_bytes"])
     report.say(
         OK if same else FAIL,
@@ -569,6 +574,7 @@ def _check_storage(settings: Settings, asset: dict[str, Any], report: Report) ->
         f"{settings.s3_bucket}/{asset['storage_key']} · {stat.size} bytes"
         + ("" if same else f" (row says {asset['size_bytes']})"),
     )
+    return same
 
 
 def run(args: argparse.Namespace) -> int:
@@ -681,7 +687,9 @@ def run(args: argparse.Namespace) -> int:
     report.say(OK, "terminal state", f"{state} in {elapsed:.1f}s · {job.get('attempt_count')} attempt(s)")
 
     if state != "COMPLETED":
-        return _report_failure_path(engine, job, job_id, report, drill=args.failure_drill)
+        return _report_failure_path(
+            engine, job, job_id, report, drill=args.failure_drill, settings=settings, target=target
+        )
 
     # ---- 4. OSS -------------------------------------------------------------
     report.stage("4. Object storage")
@@ -701,7 +709,7 @@ def run(args: argparse.Namespace) -> int:
         "mime_type": asset["mime_type"],
     }
     report.say(OK, "media asset", f"{asset['mime_type']} · {asset['size_bytes']} bytes")
-    _check_storage(settings, asset, report)
+    in_bucket = _check_storage(settings, asset, report)
 
     # ---- 5. FINALIZE + DEBIT ------------------------------------------------
     report.stage("5. Finalize and debit")
@@ -723,7 +731,54 @@ def run(args: argparse.Namespace) -> int:
             "status": settled["status"],
         }
     _report_events(engine, job_id, report)
+    _stamp(
+        settings,
+        report,
+        CanaryLoop(
+            provider=target.provider,
+            model=target.model,
+            job_id=job_id,
+            submission_state=str(job.get("submission_state") or ""),
+            terminal_status=state,
+            output_asset_id=asset_id,
+            artifact_bytes=int(asset["size_bytes"] or 0),
+            artifact_in_storage=in_bucket,
+            credit_status=str(settled["status"]) if settled else "",
+            credits_reserved=int(settled["credits"]) if settled else 0,
+            credits_settled=int(settled["settled_credits"]) if settled else 0,
+            provider_task_id=job.get("provider_job_id"),
+        ),
+    )
     return _finish(report)
+
+
+def _stamp(settings: Settings, report: Report, loop: CanaryLoop) -> None:
+    """Write what this run earned, and say so in the report.
+
+    A run that earns nothing says so out loud. Silence here used to be the whole
+    problem: the sweep ran, the loop closed, and every model still read NOT_RUN.
+    """
+
+    record = record_canary_outcome(Database(settings.database_url), loop)
+    if record is None:
+        report.say(
+            WARN,
+            "live_canary_status",
+            "unchanged — this run earned no verdict about the model",
+        )
+        return
+    report.say(
+        OK,
+        "live_canary_status",
+        f"{record.logical_name}: {record.previous_status} -> {record.status}",
+    )
+    report.evidence["live_canary_status"] = {
+        "logical_name": record.logical_name,
+        "previous": record.previous_status,
+        "status": record.status,
+        "detail": record.detail,
+        "observed_at": record.observed_at,
+    }
 
 
 def _report_failure_path(  # type: ignore[no-untyped-def]
@@ -733,6 +788,8 @@ def _report_failure_path(  # type: ignore[no-untyped-def]
     report: Report,
     *,
     drill: bool,
+    settings: Settings,
+    target: Target,
 ) -> int:
     """The half that matters when nothing works: mapped error, released credits."""
 
@@ -800,6 +857,23 @@ def _report_failure_path(  # type: ignore[no-untyped-def]
             "status": released["status"],
         }
     _report_events(engine, job_id, report)
+
+    _stamp(
+        settings,
+        report,
+        CanaryLoop(
+            provider=target.provider,
+            model=target.model,
+            job_id=job_id,
+            submission_state=submission,
+            terminal_status=str(job.get("status") or ""),
+            credit_status=str(released["status"]) if released else "",
+            credits_reserved=int(released["credits"]) if released else 0,
+            credits_settled=int(released["settled_credits"]) if released else 0,
+            error_code=job.get("error_code"),
+            provider_task_id=job.get("provider_job_id"),
+        ),
+    )
 
     if expected_drill:
         print(

@@ -49,6 +49,12 @@
 .admin-status[data-status="DEGRADED"], .admin-status[data-status="RUNNING"], .admin-status[data-status="TESTING"], .admin-status[data-status="RECONCILIATION_REQUIRED"] { color: var(--brand); background: var(--brand-wash); }
 .admin-status[data-status="DOWN"], .admin-status[data-status="FAILED"], .admin-status[data-status="BLOCKED"], .admin-status[data-status="SUSPENDED"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .admin-status[data-status="NOT_CONFIGURED"], .admin-status[data-status="UNKNOWN"], .admin-status[data-status="DISABLED"] { color: #86868f; background: #17171a; }
+/* Live canary verdicts. VERIFIED_LIVE is the only one that reads as a pass;
+   NOT_RUN stays grey rather than green so an unproven model never looks
+   proven, and both refusal states read as refusals. */
+.admin-status[data-status="VERIFIED_LIVE"] { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.admin-status[data-status="NOT_RUN"] { color: #86868f; background: #17171a; }
+.admin-status[data-status="LIVE_BLOCKED_EXTERNAL"], .admin-status[data-status="CONTRACT_INVALID"] { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .admin-card-grid { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 10px; }
 .admin-provider-card, .admin-health-row { padding: 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-1); }
 .admin-provider-card header, .admin-health-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }

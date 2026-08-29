@@ -227,6 +227,13 @@ def _model_view(model: ModelDefinition, profile: ModelCapabilityProfile | None) 
         "user_pricing": redact(dict(model.pricing_metadata)),
         "last_verified_at": model.last_verified_at,
         "last_live_test_at": model.last_live_test_at,
+        # Deliberately separate from `verified` above. That flag follows
+        # `last_verified_at`, which an admin moves by recording a manual
+        # verification; this is the canary's own verdict, written only by a
+        # closed live loop. Conflating them would let a reviewed model read as
+        # production-proven, which is the one thing this column exists to stop.
+        "live_canary_status": model.live_canary_status,
+        "live_canary_detail": model.live_canary_detail,
         "health": "UNKNOWN",
     }
 

@@ -180,6 +180,26 @@ def _provider_billing_facts(
     return actual, credits, actual_field, credits_field, raw_hash
 
 
+def _billing_request_facts(job: GenerationJob) -> dict[str, Any]:
+    """The request parameters that decide the bill, as actually dispatched.
+
+    Read from `provider_request_json` rather than the original request, because
+    that is the payload the provider was given -- a parameter dropped on the way
+    to the wire is exactly the failure this is here to make visible, and the
+    original request would hide it by still carrying the value.
+    """
+
+    sent = job.provider_request_json if isinstance(job.provider_request_json, dict) else {}
+    metadata = sent.get("metadata") if isinstance(sent.get("metadata"), dict) else {}
+    return {
+        "requested_duration_seconds": sent.get("duration"),
+        "requested_resolution": sent.get("resolution") or (metadata or {}).get("resolution"),
+        "requested_resolution_on_wire": sent.get("resolution") is not None,
+        "requested_generate_audio": sent.get("generate_audio"),
+        "requested_aspect_ratio": sent.get("aspect_ratio"),
+    }
+
+
 def _aware(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -782,6 +802,16 @@ class GenerationGateway:
                 "credits_field": credits_field,
                 "provider_response_sha256": raw_hash,
                 "provider_mode": self.provider_mode.value,
+                # What we asked for, recorded beside what we were charged.
+                # OpenRouter returns `usage: {cost, is_byok}` and nothing else --
+                # no billable duration, no resolution echo, no audio flag -- so
+                # the cost is authoritative and the reason for it is not
+                # recoverable from the provider at all. Without these, an
+                # estimate that misses can only be explained by arithmetic on
+                # two numbers, which is how a 2-second 480p clip charged at
+                # USD 0.2125 against a USD 0.101 estimate ended up with two
+                # rival explanations and no way to choose between them.
+                **_billing_request_facts(job),
                 "reported_actual_cost_ignored": (
                     reported_actual is not None and not trusted_provider_evidence
                 ),

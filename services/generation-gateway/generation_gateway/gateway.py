@@ -2477,6 +2477,20 @@ class GenerationGateway:
                 request_metadata = dict(request.get("metadata") or {})
                 request_metadata.pop(TIMELINE_FENCE_METADATA_KEY, None)
                 request["metadata"] = request_metadata
+                # State the resolution this job was priced at. It is carried in
+                # `metadata`, and every video adapter reads it from the top
+                # level -- openrouter filters on VIDEO_REQUEST_FIELDS, wan reads
+                # `request.get("resolution")`, seedance maps the same key -- so
+                # it reached none of them and each fell back to a provider
+                # default. That is a quote for one request and a bill for
+                # another: a 2s alibaba/wan-3.0 clip priced at 480p (USD 0.05/s)
+                # came back 1920x1080 with audio and cost USD 0.85, 8.5x the
+                # estimate. The standing rule is that a parameter which decides
+                # the bill is stated, never inherited.
+                if not request.get("resolution"):
+                    priced_resolution = str(request_metadata.get("resolution") or "").strip()
+                    if priced_resolution:
+                        request["resolution"] = priced_resolution
                 capability = job.generation_type
                 provider_name = job.provider
                 model = job.model

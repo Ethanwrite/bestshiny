@@ -10,8 +10,8 @@ is unproven; payment and whole-episode export are excluded. A custom-format back
 PostgreSQL database was restored to an independent database and passed
 `0052 → 0060 → 0052 → 0060` plus `alembic check`; the pinned old `9a06dcf` API image also
 started healthy against the rehearsal database at `0052` before it was returned to `0060`. Final
-RC gates passed with SQLite `1189 passed / 12 skipped`, PostgreSQL `1194 passed / 7 skipped`, Ruff,
-Mypy over 180 source files, `git diff --check`, Web production build, and `npm audit` with 0 findings.
+RC gates passed with SQLite `1194 passed / 12 skipped`, PostgreSQL `1199 passed / 7 skipped`, Ruff,
+Mypy over 189 source files, `git diff --check`, Web production build, and `npm audit` with 0 findings.
 None of those facts is a Provider-accuracy claim.
 
 Historical evidence date: 2026-08-22

@@ -11,8 +11,8 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 - The running Compose stack was still built from `main@9a06dcf` with its database at
   `0052_shot_dependencies` when this RC deploy began. The RC contains migrations through `0059`, plus
   `0060`, which repairs a real Flow ownership-index drift found by the backup/restore rehearsal.
-- Final predeploy gates passed: SQLite `1189 passed / 12 skipped`, PostgreSQL
-  `1194 passed / 7 skipped`, Ruff, Mypy (180 source files), `git diff --check`, Web production
+- Final predeploy gates passed: SQLite `1194 passed / 12 skipped`, PostgreSQL
+  `1199 passed / 7 skipped`, Ruff, Mypy (189 source files), `git diff --check`, Web production
   build and npm audit. The pinned `9a06dcf` API image passed health against the restored database
   after a rehearsal downgrade to `0052`; the rehearsal database was then returned to `0060`.
 - The database currently records `live_enabled=22` and `VERIFIED_LIVE=0`. Historical provider task IDs

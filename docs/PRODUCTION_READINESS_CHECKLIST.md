@@ -7,8 +7,8 @@ backup/restore/migration round trip pass. `live_enabled=22` is not live verifica
 `VERIFIED_LIVE=0`. Character Evidence is intentionally disabled for this deployment because Modal and
 public signed-callback reachability are not proven; payment and final-episode export are excluded. The
 unchecked live-evidence, public HTTPS, security and operations items below continue to block a public
-production claim. Final RC gates: SQLite `1189 passed / 12 skipped`, PostgreSQL
-`1194 passed / 7 skipped`, Ruff, Mypy (180 source files), `git diff --check`, Web build, and npm audit.
+production claim. Final RC gates: SQLite `1194 passed / 12 skipped`, PostgreSQL
+`1199 passed / 7 skipped`, Ruff, Mypy (189 source files), `git diff --check`, Web build, and npm audit.
 
 Snapshot: 2026-08-22
 

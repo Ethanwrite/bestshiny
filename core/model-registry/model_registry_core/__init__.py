@@ -6,6 +6,15 @@ from .infrastructure import (
     RuntimeModelState,
     load_model_infrastructure_config,
 )
+from .live_canary import (
+    CONTRACT_INVALID,
+    LIVE_BLOCKED_EXTERNAL,
+    NOT_RUN,
+    VERIFIED_LIVE,
+    CanaryLoop,
+    CanaryRecord,
+    record_canary_outcome,
+)
 from .registry import CapabilityObservationConflict, ModelCapabilityRegistry
 from .router import VideoModelRouter
 from .schemas import (
@@ -24,6 +33,13 @@ from .schemas import (
 )
 
 __all__ = [
+    "CONTRACT_INVALID",
+    "CanaryLoop",
+    "CanaryRecord",
+    "LIVE_BLOCKED_EXTERNAL",
+    "NOT_RUN",
+    "VERIFIED_LIVE",
+    "record_canary_outcome",
     "ModelBindingKind",
     "CapabilityObservationConflict",
     "ModelCandidate",

@@ -19,8 +19,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from model_registry_core import CONTRACT_INVALID, VERIFIED_LIVE
+
 from scripts.live_canary import (
     GLOBAL_CANARY_COST_CEILING_USD,
+    TARGETS,
     TERMINAL,
     Report,
     _permit_exposure,
@@ -113,6 +116,14 @@ def test_a_mapped_billed_canary_failure_is_not_reported_as_verified(monkeypatch)
         },
     )
     monkeypatch.setattr("scripts.live_canary._report_events", lambda *_args: None)
+    # The writer is stubbed so this stays the offline arithmetic test it says it
+    # is; what it would have been handed is asserted below, which is the whole
+    # point of the test's name now that a writer exists at all.
+    stamped: dict[str, object] = {}
+    monkeypatch.setattr(
+        "scripts.live_canary._stamp",
+        lambda _settings, _report, loop: stamped.__setitem__("loop", loop),
+    )
     report = Report()
 
     result = _report_failure_path(
@@ -127,7 +138,15 @@ def test_a_mapped_billed_canary_failure_is_not_reported_as_verified(monkeypatch)
         "job-1",
         report,
         drill=False,
+        settings=object(),  # type: ignore[arg-type]
+        target=TARGETS["video"],
     )
 
     assert result == 1
     assert report.failures == 1
+    # A billed request the provider rejected is durable evidence about the
+    # contract we build — and it is emphatically not a pass.
+    loop = stamped["loop"]
+    assert loop.closed is False
+    assert loop.verdict() == CONTRACT_INVALID
+    assert loop.verdict() != VERIFIED_LIVE

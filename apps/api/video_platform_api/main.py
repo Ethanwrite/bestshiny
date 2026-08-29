@@ -2448,7 +2448,6 @@ def create_app(container: Container | None = None) -> FastAPI:
         return verify_pending_assets(
             database=container.database,
             storage=container.storage,
-            quota=WorkspaceStorageQuota(container.database),
             limit=max(1, limit or container.settings.media_verification_limit),
             lease_seconds=container.settings.media_verification_lease_seconds,
         ).as_response()

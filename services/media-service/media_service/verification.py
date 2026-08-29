@@ -67,7 +67,6 @@ class MediaVerificationSweep:
     invalid: int = 0
     quarantined: int = 0
     contended: int = 0
-    quota_released: int = 0
     details: list[dict[str, Any]] = field(default_factory=list)
 
     def as_response(self) -> dict[str, Any]:
@@ -77,7 +76,6 @@ class MediaVerificationSweep:
             "invalid": self.invalid,
             "quarantined": self.quarantined,
             "contended": self.contended,
-            "quota_released": self.quota_released,
             "details": self.details,
         }
 
@@ -168,7 +166,6 @@ def verify_pending_assets(
     *,
     database: Database,
     storage: StorageProvider,
-    quota: WorkspaceStorageQuota | None = None,
     limit: int = 20,
     lease_seconds: int = 900,
 ) -> MediaVerificationSweep:
@@ -198,7 +195,7 @@ def verify_pending_assets(
             )
         )
     examined = len(candidate_ids)
-    ready = invalid = quarantined = contended = quota_released = 0
+    ready = invalid = quarantined = contended = 0
     details: list[dict[str, Any]] = []
 
     for asset_id in candidate_ids:
@@ -264,7 +261,6 @@ def verify_pending_assets(
         invalid=invalid,
         quarantined=quarantined,
         contended=contended,
-        quota_released=quota_released,
         details=details,
     )
 

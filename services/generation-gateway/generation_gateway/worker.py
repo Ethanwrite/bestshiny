@@ -172,22 +172,20 @@ def verify_media_once(container) -> int:  # type: ignore[no-untyped-def]
     INVALID or QUARANTINED, never in a silent retry loop.
     """
 
-    from media_service import WorkspaceStorageQuota, verify_pending_assets
+    from media_service import verify_pending_assets
 
     result = verify_pending_assets(
         database=container.database,
         storage=container.storage,
-        quota=WorkspaceStorageQuota(container.database),
         limit=max(1, container.settings.media_verification_limit),
         lease_seconds=container.settings.media_verification_lease_seconds,
     )
     if result.invalid or result.quarantined:
         logger.warning(
-            "media verification: %d ready, %d invalid, %d quarantined (%d quota releases)",
+            "media verification: %d ready, %d invalid, %d quarantined",
             result.verified_ready,
             result.invalid,
             result.quarantined,
-            result.quota_released,
         )
     elif result.verified_ready:
         logger.info("media verification: %d asset(s) promoted to READY", result.verified_ready)

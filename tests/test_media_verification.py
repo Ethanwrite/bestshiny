@@ -203,9 +203,8 @@ def test_rejection_keeps_the_bytes_charged_while_the_object_is_retained(containe
     with container.database.session() as session:
         used_before = session.get(Workspace, workspace_id).used_storage_bytes
     assert used_before == len(payload)
-    result = _verify(container, quota=quota)
+    result = _verify(container)
     assert result.invalid == 1
-    assert result.quota_released == 0
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         # The rejected object is retained for audit/reconciliation, so its
@@ -249,7 +248,7 @@ def test_reclaiming_a_rejected_asset_deletes_bytes_then_returns_quota(container,
             storage_key=storage_key,
             used_bytes=len(payload),
         )
-    assert _verify(container, quota=quota).invalid == 1
+    assert _verify(container).invalid == 1
     # Still charged, bytes still present: that is the retention half.
     with container.database.session() as session:
         assert session.get(Workspace, workspace_id).used_storage_bytes == len(payload)

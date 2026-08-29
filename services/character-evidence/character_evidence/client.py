@@ -156,20 +156,24 @@ class ModalCharacterEvidenceProducer:
                     }
                 )
             )
-        request = AnalyzeRequest(
-            # Stable idempotency identity and direct callback lookup. A repeated
-            # submission for one candidate replaces no evidence and cannot make
-            # a 202 response look like a completed result.
-            job_id=candidate_id,
-            project_id=project_id,
-            shot_id=shot_id,
-            video_url=video_url,
-            characters=[
-                CharacterInput(character_id=character_id, reference_assets=reference_assets)
-            ],
-            threshold_version=self.threshold_version,
-            shot_type=shot_type,
-            sample_positions=list(sample_positions) if sample_positions else None,
+        request = AnalyzeRequest.model_validate(
+            {
+                # Stable idempotency identity and direct callback lookup. A
+                # repeated submission for one candidate replaces no evidence and
+                # cannot make a 202 response look like a completed result.
+                "job_id": candidate_id,
+                "project_id": project_id,
+                "shot_id": shot_id,
+                "video_url": video_url,
+                "characters": [
+                    CharacterInput(
+                        character_id=character_id, reference_assets=reference_assets
+                    )
+                ],
+                "threshold_version": self.threshold_version,
+                "shot_type": shot_type,
+                "sample_positions": list(sample_positions) if sample_positions else None,
+            }
         )
         try:
             with httpx.Client(

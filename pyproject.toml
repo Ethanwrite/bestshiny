@@ -144,6 +144,7 @@ files = [
   "apps/api", "packages/domain", "packages/database", "packages/provider-sdk",
   "packages/shared", "packages/contracts", "services/generation-gateway",
   "services/production-engine", "services/browser-runtime", "services/media-service",
+  "services/character-evidence/character_evidence",
   "providers/google-flow", "providers/seedance", "providers/openrouter", "providers/runapi",
   "providers/wan", "providers/deepseek",
   "agents/runtime",

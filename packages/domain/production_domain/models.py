@@ -1317,6 +1317,63 @@ class ShotNarrativeEffect(Base, TimestampMixin):
         return "|".join([effect_type, fact_key or "", obligation_key or "", holder_key or ""])
 
 
+class CharacterEvidenceSubmission(Base, TimestampMixin):
+    """Durable lifecycle of one shadow Character Evidence job, one per candidate.
+
+    The unique candidate key is the idempotency guarantee: however many sweeps,
+    replays or process restarts occur, at most one remote GPU job is dispatched
+    per candidate. Status is explicit — a 202 acceptance is ACCEPTED, never
+    evidence; a signed callback moves it to REPORTED or FAILED; an acceptance
+    that never calls back past its deadline becomes RECONCILIATION_REQUIRED and
+    waits for an operator. Shadow-only by check constraint: this table cannot
+    express an operating mode that could gate a candidate.
+    """
+
+    __tablename__ = "character_evidence_submissions"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", name="uq_character_evidence_submission_candidate"),
+        CheckConstraint(
+            "status IN ('PENDING', 'ACCEPTED', 'REPORTED', 'FAILED', 'SKIPPED', "
+            "'RECONCILIATION_REQUIRED')",
+            name="ck_character_evidence_submission_status",
+        ),
+        CheckConstraint(
+            "operating_mode = 'SHADOW'",
+            name="ck_character_evidence_submission_shadow_only",
+        ),
+        CheckConstraint(
+            "submission_count >= 0",
+            name="ck_character_evidence_submission_count",
+        ),
+        Index("ix_character_evidence_submission_status", "status", "updated_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), nullable=False
+    )
+    shot_id: Mapped[str | None] = mapped_column(ForeignKey("shots.id", ondelete="SET NULL"))
+    character_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", nullable=False)
+    operating_mode: Mapped[str] = mapped_column(String(20), default="SHADOW", nullable=False)
+    threshold_version: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    submission_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_callback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(120))
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    skip_reason: Mapped[str | None] = mapped_column(String(240))
+    reconciliation_note: Mapped[str | None] = mapped_column(Text)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reconciled_by: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class CharacterStateVersion(Base, TimestampMixin):
     """Immutable, fully materialized narrative state for one timeline scope."""
 

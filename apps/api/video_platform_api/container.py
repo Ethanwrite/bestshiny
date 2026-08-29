@@ -8,6 +8,7 @@ from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
 from character_core import CharacterIdentityService, PersistentCharacterStateService
 from character_evidence.client import ModalCharacterEvidenceProducer
+from character_evidence.tracking import CharacterEvidenceTracker
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine
 from creative_director_core import CreativeDirectorService
@@ -129,6 +130,7 @@ class Container:
     capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
     qa: QAPipeline
+    character_evidence_tracker: CharacterEvidenceTracker
     cost: CostEngine
     prompts: PromptCompilerService
     candidates: CandidatePipeline
@@ -201,7 +203,12 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.credential_encryption_key,
         allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
     )
-    if settings.deployment_environment == "production":
+    if settings.deployment_environment == "production" and settings.character_evidence_enabled:
+        # CHARACTER_EVIDENCE_ENABLED=false is the one sanctioned way to start
+        # production without this service: an explicit, visible operator
+        # decision (the Modal deployment is blocked on external HTTPS
+        # reachability). With the switch on, everything below stays
+        # fail-closed exactly as before.
         if not settings.character_evidence_base_url.startswith("https://"):
             raise RuntimeError("CHARACTER_EVIDENCE_BASE_URL must be configured as HTTPS in production")
         for name, value in (
@@ -658,10 +665,18 @@ def build_container(settings: Settings | None = None) -> Container:
             threshold_version=settings.character_evidence_threshold_version,
             timeout_seconds=settings.character_evidence_http_timeout_seconds,
         )
-        if settings.deployment_environment == "production"
+        if settings.deployment_environment == "production" and settings.character_evidence_enabled
         else None
     )
     qa = QAPipeline(database, evidence_producer=evidence_producer)
+    character_evidence_tracker = CharacterEvidenceTracker(
+        database,
+        qa,
+        threshold_version=settings.character_evidence_threshold_version,
+        callback_timeout_seconds=settings.character_evidence_callback_timeout_seconds,
+        max_submission_attempts=settings.character_evidence_max_submission_attempts,
+        backfill_hours=settings.character_evidence_backfill_hours,
+    )
     cost = CostEngine(database)
     # The compiler owns style-lock enforcement, so it must hold the
     # authoritative style service rather than trust a caller's context dict.
@@ -832,6 +847,7 @@ def build_container(settings: Settings | None = None) -> Container:
         capabilities=capabilities,
         capability_resolver=capability_resolver,
         qa=qa,
+        character_evidence_tracker=character_evidence_tracker,
         cost=cost,
         prompts=prompts,
         candidates=candidates,

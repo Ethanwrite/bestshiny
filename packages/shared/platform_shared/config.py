@@ -120,6 +120,27 @@ class Settings(BaseSettings):
     character_evidence_operating_mode: Literal["shadow", "advisory", "soft_gate", "automatic_gate"] = (
         "shadow"
     )
+    # Explicit deployability switch. True keeps the fail-closed production
+    # startup checks (HTTPS base URL, key entropy, shadow mode) exactly as
+    # they are. False is a *declared operator decision* to run without the
+    # Modal service — the producer is not built, submissions stay PENDING and
+    # visible, and nothing fails open silently. It exists because the Modal
+    # deployment is blocked on external HTTPS reachability and a release must
+    # be able to state that fact in configuration rather than in a crash loop.
+    character_evidence_enabled: bool = True
+    # Maintenance loop cadence for the durable submission lifecycle
+    # (enqueue -> dispatch -> ACCEPTED-timeout scan). 0 disables the sweep.
+    character_evidence_sweep_interval_seconds: int = 300
+    character_evidence_sweep_limit: int = 50
+    # An ACCEPTED job whose signed callback has not arrived within this window
+    # becomes RECONCILIATION_REQUIRED and waits for an operator.
+    character_evidence_callback_timeout_seconds: int = 1800
+    # Dispatch attempts (each is one authenticated POST) before a submission
+    # is marked FAILED rather than retried.
+    character_evidence_max_submission_attempts: int = 5
+    # How far back the enqueue scan looks for candidates with registered
+    # video output and no submission row.
+    character_evidence_backfill_hours: int = 72
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The project's image-generation model, served by POST /images.

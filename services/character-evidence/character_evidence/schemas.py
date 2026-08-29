@@ -75,6 +75,9 @@ class AnalyzeAccepted(BaseModel):
 
     job_id: str
     status: Literal["ACCEPTED"] = "ACCEPTED"
+    # True when this job_id was already accepted earlier: the request is
+    # acknowledged without starting a second GPU job for the same candidate.
+    duplicate: bool = False
 
 
 class CallbackEnvelope(BaseModel):

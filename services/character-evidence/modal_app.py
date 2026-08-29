@@ -86,6 +86,33 @@ image = (
 app = modal.App(APP_NAME)
 secret = modal.Secret.from_name(SECRET_NAME)
 
+#: Accepted job identities, persisted server-side by Modal across containers.
+#: `Dict.put(..., skip_if_exists=True)` is the atomic claim: it returns False
+#: when the key already exists (modal.Dict reference), so a re-POSTed
+#: candidate_id is acknowledged without spawning a second GPU job.
+JOBS_DICT_NAME = "bestshiny-character-evidence-jobs"
+
+#: Callback envelopes whose delivery to BestShiny failed after the worker's
+#: in-process retries. Drained by the scheduled redelivery below, so a
+#: produced result survives BestShiny being briefly unreachable instead of
+#: dying with one POST. (Queue partitions expire on `partition_ttl`; the
+#: redelivery schedule runs far inside that window.)
+OUTBOX_QUEUE_NAME = "bestshiny-character-evidence-outbox"
+OUTBOX_PARTITION_TTL_SECONDS = 7 * 24 * 3600
+OUTBOX_MAX_REDELIVERY_ATTEMPTS = 60
+
+
+def _jobs_dict():  # type: ignore[no-untyped-def]
+    return modal.Dict.from_name(JOBS_DICT_NAME, create_if_missing=True)
+
+
+def _outbox_queue():  # type: ignore[no-untyped-def]
+    return modal.Queue.from_name(OUTBOX_QUEUE_NAME, create_if_missing=True)
+
+
+def _spool(item: dict) -> None:
+    _outbox_queue().put(item, partition_ttl=OUTBOX_PARTITION_TTL_SECONDS)
+
 
 @app.cls(
     image=image,
@@ -105,7 +132,7 @@ class CVWorker:
 
     @modal.method()
     def analyze(self, payload: dict) -> None:
-        from character_evidence.api import deliver_callback, failure_envelope
+        from character_evidence.api import deliver_or_spool, failure_envelope
         from character_evidence.schemas import AnalyzeRequest, CallbackEnvelope
 
         try:
@@ -120,7 +147,10 @@ class CVWorker:
             )
         except Exception as exc:
             callback = failure_envelope(payload, exc)
-        deliver_callback(callback)
+        # Delivery failure spools the envelope rather than losing it: the
+        # scheduled redelivery owns the long tail, and BestShiny's own
+        # ACCEPTED-timeout scan covers the case where even that fails.
+        deliver_or_spool(callback, _spool)
 
 
 @app.function(
@@ -132,6 +162,50 @@ class CVWorker:
 )
 @modal.asgi_app()
 def https_api():
+    import time
+
     from character_evidence.api import create_api
 
-    return create_api(lambda payload: CVWorker().analyze.spawn(payload))
+    jobs = _jobs_dict()
+
+    def claim_job(job_id: str) -> bool:
+        return bool(jobs.put(job_id, {"accepted_at": int(time.time())}, skip_if_exists=True))
+
+    return create_api(lambda payload: CVWorker().analyze.spawn(payload), claim_job=claim_job)
+
+
+@app.function(
+    image=image,
+    secrets=[secret],
+    schedule=modal.Period(minutes=5),
+    timeout=240,
+)
+def redeliver_callbacks() -> None:
+    """Drain the callback outbox until BestShiny acknowledges each envelope.
+
+    Non-blocking gets: an empty queue ends the run. An envelope that still
+    cannot be delivered goes back on the queue with its attempt count; one
+    that exhausts the budget moves to the 'dead' partition, where it stays
+    visible for operators for the partition TTL instead of vanishing.
+    """
+
+    from character_evidence.api import deliver_callback
+    from character_evidence.schemas import CallbackEnvelope
+
+    queue = _outbox_queue()
+    for _ in range(100):
+        item = queue.get(block=False)
+        if item is None:
+            return
+        envelope = CallbackEnvelope.model_validate(item["envelope"])
+        try:
+            deliver_callback(envelope)
+        except RuntimeError:
+            attempts = int(item.get("attempts", 0)) + 1
+            item["attempts"] = attempts
+            if attempts >= OUTBOX_MAX_REDELIVERY_ATTEMPTS:
+                queue.put(
+                    item, partition="dead", partition_ttl=OUTBOX_PARTITION_TTL_SECONDS
+                )
+            else:
+                queue.put(item, partition_ttl=OUTBOX_PARTITION_TTL_SECONDS)

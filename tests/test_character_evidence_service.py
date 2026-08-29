@@ -65,7 +65,7 @@ def test_modal_api_has_one_authenticated_public_route(monkeypatch) -> None:
             headers={"Authorization": f"Bearer {key}"},
         )
     assert response.status_code == 202
-    assert response.json() == {"job_id": "candidate-1", "status": "ACCEPTED"}
+    assert response.json() == {"job_id": "candidate-1", "status": "ACCEPTED", "duplicate": False}
     assert len(spawned) == 1
     assert spawned[0]["job_id"] == "candidate-1"
     assert spawned[0]["threshold_version"] == _request_payload()["threshold_version"]

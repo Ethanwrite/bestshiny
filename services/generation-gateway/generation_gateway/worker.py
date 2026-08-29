@@ -134,14 +134,48 @@ def sweep_generation_staging_once(container) -> int:  # type: ignore[no-untyped-
     return len(result.deleted)
 
 
+def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Run the shadow Character Evidence lifecycle pass. Never fatal.
+
+    Enqueues candidates whose video output was registered, dispatches PENDING
+    submissions through the configured producer, and moves silent ACCEPTED
+    jobs to RECONCILIATION_REQUIRED. Shadow observation only — nothing here
+    can change a candidate's gate.
+    """
+
+    result = container.character_evidence_tracker.sweep(
+        limit=max(1, container.settings.character_evidence_sweep_limit)
+    )
+    if result.enqueued or result.dispatched or result.failed or result.timed_out:
+        logger.info(
+            "character evidence sweep: %d enqueued, %d dispatched, %d skipped, "
+            "%d retried, %d failed, %d timed out",
+            result.enqueued,
+            result.dispatched,
+            result.skipped,
+            result.retried,
+            result.failed,
+            result.timed_out,
+        )
+    if result.timed_out:
+        logger.warning(
+            "%d character evidence acceptance(s) went silent and now require "
+            "operator reconciliation",
+            result.timed_out,
+        )
+    return result.dispatched
+
+
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
+    evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
     next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
+    next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
     while True:
         if next_upload_sweep is not None and asyncio.get_running_loop().time() >= next_upload_sweep:
             try:
@@ -156,6 +190,15 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("generation staging sweep failed")
             next_staging_sweep = asyncio.get_running_loop().time() + staging_interval
+        if (
+            next_evidence_sweep is not None
+            and asyncio.get_running_loop().time() >= next_evidence_sweep
+        ):
+            try:
+                await asyncio.to_thread(sweep_character_evidence_once, container)
+            except Exception:
+                logger.exception("character evidence sweep failed")
+            next_evidence_sweep = asyncio.get_running_loop().time() + evidence_interval
         if not await process_next_job(container):
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

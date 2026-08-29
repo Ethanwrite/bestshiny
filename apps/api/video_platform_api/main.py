@@ -273,6 +273,14 @@ class HumanReviewApprove(BaseModel):
     explicit_confirmation: bool = Field(default=False, strict=True)
 
 
+class CharacterEvidenceReconcile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["RESUBMIT", "MARK_FAILED"]
+    note: str = Field(min_length=1, max_length=2000)
+    resolved_by: str = Field(min_length=1, max_length=120)
+
+
 class PromptRefine(BaseModel):
     project_id: str
     prompt: str = Field(min_length=1, max_length=30_000)
@@ -487,6 +495,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                     error_code=callback.error_code,
                     error_message=callback.error_message,
                 )
+                container.character_evidence_tracker.record_callback(
+                    callback.job_id, status="FAILED", error_code=callback.error_code
+                )
                 return {"status": "RECORDED", "reports": 0}
             reports = [report_from_payload(item) for item in callback.reports]
             for report in reports:
@@ -501,6 +512,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                     character_evidence=report,
                     observation_only=True,
                 )
+            container.character_evidence_tracker.record_callback(
+                callback.job_id, status="SUCCEEDED"
+            )
             return {"status": "RECORDED", "reports": len(reports)}
         except CharacterEvidenceCallbackAuthenticationError as exc:
             raise HTTPException(401, str(exc)) from exc
@@ -2259,6 +2273,60 @@ def create_app(container: Container | None = None) -> FastAPI:
             ttl_seconds=container.settings.generation_staging_ttl_seconds,
             limit=max(1, limit or container.settings.generation_staging_sweep_limit),
         ).as_response()
+
+    @app.post(
+        "/internal/maintenance/character-evidence",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_character_evidence_endpoint(limit: int | None = None):
+        """The operator-triggered face of the shadow Character Evidence sweep.
+
+        Same implementation the worker runs on
+        `CHARACTER_EVIDENCE_SWEEP_INTERVAL_SECONDS`: enqueue candidates with
+        registered video output, dispatch PENDING submissions, and move
+        silent acceptances to RECONCILIATION_REQUIRED. Shadow-only.
+        """
+
+        return container.character_evidence_tracker.sweep(
+            limit=max(1, limit or container.settings.character_evidence_sweep_limit)
+        ).as_dict()
+
+    @app.get(
+        "/internal/character-evidence/submissions",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def list_character_evidence_submissions(status: str | None = None, limit: int = 100):
+        return {
+            "submissions": container.character_evidence_tracker.list_submissions(
+                status=status, limit=limit
+            )
+        }
+
+    @app.post(
+        "/internal/character-evidence/submissions/{submission_id}/reconcile",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def reconcile_character_evidence_submission(
+        submission_id: str,
+        body: CharacterEvidenceReconcile,
+    ):
+        try:
+            resolved = container.character_evidence_tracker.resolve_reconciliation(
+                submission_id,
+                action=body.action,
+                note=body.note,
+                resolved_by=body.resolved_by,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "id": resolved.id,
+            "candidate_id": resolved.candidate_id,
+            "status": resolved.status,
+            "reconciled_by": resolved.reconciled_by,
+        }
 
     @app.post("/v1/assets")
     async def upload_asset(

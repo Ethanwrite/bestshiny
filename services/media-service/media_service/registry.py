@@ -126,6 +126,7 @@ class MediaRegistry:
         storage: StorageProvider,
         *,
         provider_media_hosts: dict[str, tuple[str, ...]] | None = None,
+        provider_media_credentials: dict[str, str] | None = None,
         max_download_bytes: int = 100 * 1024 * 1024,
         max_image_pixels: int = 50_000_000,
         provider_upload_claim_seconds: float = 120.0,
@@ -138,6 +139,10 @@ class MediaRegistry:
         self.renditions = RenditionResolver(storage, max_derived_bytes=max_download_bytes)
         self.reference_url_ttl_seconds = max(60, reference_url_ttl_seconds)
         self.provider_media_hosts = provider_media_hosts or {}
+        # Bearer tokens for providers that serve their own artefacts from an
+        # authenticated endpoint rather than a signed CDN URL. Keyed by provider,
+        # so one provider's key can never be presented to another's host.
+        self.provider_media_credentials = provider_media_credentials or {}
         self.max_download_bytes = max(1, max_download_bytes)
         self.max_image_pixels = max(1, max_image_pixels)
         self.provider_upload_claim_seconds = max(1.0, provider_upload_claim_seconds)
@@ -1330,10 +1335,23 @@ class MediaRegistry:
 
         current_url = url
         mime_type = "application/octet-stream"
+        # The host the provider's own API named. A credential is presented only
+        # here: a redirect commonly lands on a signed CDN that needs no
+        # authorization, and forwarding a bearer token across hosts is how
+        # credentials leak. Same-host redirects keep it, cross-host drop it --
+        # the rule curl applies, made explicit because redirects are followed by
+        # hand here.
+        origin_host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        credential = self.provider_media_credentials.get(provider, "").strip()
         async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
             for redirect_count in range(6):
                 await self._validate_remote_url(current_url, provider=provider)
-                async with client.stream("GET", current_url) as response:
+                headers: dict[str, str] = {}
+                if credential:
+                    hop_host = (urlsplit(current_url).hostname or "").lower().rstrip(".")
+                    if hop_host == origin_host:
+                        headers["Authorization"] = f"Bearer {credential}"
+                async with client.stream("GET", current_url, headers=headers) as response:
                     self._validate_connected_peer(response)
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")

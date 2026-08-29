@@ -24,11 +24,15 @@ them alone.
 
 ## 2. Gate state — measured, not claimed
 
+Re-measured 2026-08-29 at `220891f`, after the `VERIFIED_LIVE` writer added 17 tests to
+each half. The alembic, web and `git diff --check` lines below were not re-run; nothing
+since `c13a60d` touched a migration, the frontend or whitespace.
+
 ```
-SQLite       1194 passed, 12 skipped    exit 0
-PostgreSQL   1199 passed,  7 skipped    exit 0
+SQLite       1211 passed, 12 skipped    exit 0
+PostgreSQL   1216 passed,  7 skipped    exit 0
 Ruff         all checks passed
-Mypy         189 source files
+Mypy         190 source files
 alembic      0052 → 0060 → 0052 → 0060 on a throwaway PostgreSQL database
              single head; `alembic check` → no new upgrade operations
 Web          vite build ok; npm audit 0 vulnerabilities

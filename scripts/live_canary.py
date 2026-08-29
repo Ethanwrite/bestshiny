@@ -252,10 +252,17 @@ TARGETS.update(
         # Already VERIFIED_LIVE on three clips; kept so the target set is the
         # whole registry and a re-verification after a contract change is one
         # command rather than a hand-built request.
+        # `wan-2.7` is the logical name; the registry holds the deployment id, and
+        # that is what every other target here passes and what /api/pricing/estimate
+        # resolves. With the logical name this target answered HTTP 400 "selected
+        # video model is not registered for this provider" at the quote, so it could
+        # never have reached a provider -- the one target in the sweep that had never
+        # been run. The standing rule cuts the same way: a logical name is not an API
+        # model id.
         "wan-2.7": _video_target(
             "wan-2.7",
             provider="wan",
-            model="wan-2.7",
+            model="wan2.7-t2v-2026-06-12",
             duration=2,
             resolution="720p",
             max_cost_usd="0.40",

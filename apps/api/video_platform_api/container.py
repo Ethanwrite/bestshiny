@@ -94,6 +94,21 @@ from wan_provider import WanProvider
 logger = logging.getLogger(__name__)
 
 
+def _provider_media_credentials(settings: Settings) -> dict[str, str]:
+    """Bearer tokens for providers that gate their own artefacts behind auth.
+
+    Most providers hand back a signed CDN URL that carries its own
+    authorization in the query string, and those must stay anonymous. OpenRouter
+    does not: `GET /api/v1/videos/{id}/content` answers 401 without the API key,
+    so a video generated there is billed and then unretrievable. Only providers
+    with that demonstrated behaviour belong here -- presenting a key to a host
+    that never asked for one is an exposure with nothing bought by it.
+    """
+
+    configured = {"openrouter": settings.openrouter_api_key}
+    return {provider: key for provider, key in configured.items() if key.strip()}
+
+
 def _parse_provider_media_hosts(value: str) -> dict[str, tuple[str, ...]]:
     result: dict[str, tuple[str, ...]] = {}
     for group in value.split(";"):
@@ -292,6 +307,7 @@ def build_container(settings: Settings | None = None) -> Container:
         database,
         storage,
         provider_media_hosts=_parse_provider_media_hosts(settings.provider_media_allowed_hosts),
+        provider_media_credentials=_provider_media_credentials(settings),
         max_download_bytes=min(settings.max_provider_download_bytes, settings.max_upload_bytes),
         max_image_pixels=settings.max_image_pixels,
         reference_url_ttl_seconds=settings.reference_url_ttl_seconds,

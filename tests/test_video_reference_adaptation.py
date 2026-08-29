@@ -417,3 +417,136 @@ def test_an_unadaptable_video_fails_the_reference_url_with_the_unmet_constraint(
             require_https=False,
             constraints=one_second,
         )
+
+
+# --- 6. The Wan declaration: documented bounds, wired into the real chain -----
+
+
+def test_wan_declares_exactly_the_documented_reference_video_bounds() -> None:
+    """Drift gate against Alibaba Cloud Model Studio's published limits.
+
+    MP4/MOV, 1..30 s, 240..4,096 px per side, aspect 1:8..8:1, up to 100 MB
+    (decimal — the stricter reading). Codec and frame rate are undocumented
+    there: h264 is our transcode target inside the documented containers, and
+    frame rate stays unchecked. Changing any number here must be justified by
+    a documentation change, never by observed provider behaviour.
+    """
+
+    from wan_provider.adapter import WanProvider
+
+    declared = WanProvider.reference_constraints
+    assert declared.max_bytes == 20_000_000
+    assert declared.max_pixels == 8000 * 8000
+    assert declared.accepted_mime_types == frozenset(
+        {"image/jpeg", "image/png", "image/bmp", "image/webp"}
+    )
+    video = declared.video
+    assert video is not None
+    assert video.accepted_containers == frozenset({"video/mp4", "video/quicktime"})
+    assert video.preferred_container == "video/mp4"
+    assert video.accepted_codecs == frozenset({"h264"})
+    assert (video.min_duration_seconds, video.max_duration_seconds) == (1.0, 30.0)
+    assert (video.min_width, video.min_height) == (240, 240)
+    assert (video.max_width, video.max_height) == (4096, 4096)
+    assert (video.min_aspect_ratio, video.max_aspect_ratio) == ("1:8", "8:1")
+    assert video.max_bytes == 100_000_000
+    assert video.max_frame_rate is None
+    assert video.max_bitrate_bps is None
+
+
+def test_documented_minimums_and_range_fail_closed_without_content_edits() -> None:
+    """Too short, too small, or out of shape: refused by name, never 'fixed'."""
+
+    from wan_provider.adapter import WanProvider
+
+    video = WanProvider.reference_constraints.video
+    assert video is not None
+
+    def codes(**probe):  # type: ignore[no-untyped-def]
+        observed = {
+            "container_mime_type": "video/mp4",
+            "codec": "h264",
+            "width": 1280,
+            "height": 720,
+            "frame_rate": 30.0,
+            "duration_seconds": 5.0,
+            "bit_rate_bps": 1_000_000,
+            "size_bytes": 1_000_000,
+            **probe,
+        }
+        return {(item.code, item.adaptable) for item in video.violations(**observed)}
+
+    assert codes() == set()
+    assert codes(duration_seconds=0.5) == {("VIDEO_DURATION_BELOW_MINIMUM", False)}
+    assert codes(width=100, height=100) == {
+        ("VIDEO_WIDTH_BELOW_MINIMUM", False),
+        ("VIDEO_HEIGHT_BELOW_MINIMUM", False),
+    }
+    assert codes(width=4000, height=400) == {("VIDEO_ASPECT_RATIO_OUT_OF_RANGE", False)}
+    assert codes(duration_seconds=31.0) == {("VIDEO_DURATION_EXCEEDS_LIMIT", False)}
+
+
+def test_wan_bounds_drive_the_real_rendition_chain(
+    container,  # type: ignore[no-untyped-def]
+    project,  # type: ignore[no-untyped-def]
+    video_fixtures: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """The production path: probe, validate, remux QuickTime, refuse undersized.
+
+    This is the same resolve() the gateway's reference resolution calls with
+    the provider's declared constraints — an offline exercise of the chain,
+    not a live canary.
+    """
+
+    from wan_provider.adapter import WanProvider
+
+    constraints = WanProvider.reference_constraints
+    resolver = RenditionResolver(container.storage)
+
+    # A conforming h264 MP4 inside every documented bound is sent as-is.
+    conforming = tmp_path / "wan-conforming.mp4"
+    _encode_fixture(conforming, size="320x240", rate=24, duration=2, codec="h264")
+    asset = _register_video(container, project.id, conforming, "video/mp4")
+    with container.database.session() as session:
+        resolved = resolver.resolve(session, session.get(MediaAsset, asset.id), constraints)
+        assert resolved.is_original, "an original inside every bound needs no copy"
+
+    # QuickTime is a *documented* container, so a conforming MOV is sent
+    # as-is — no copy is made for a bound the provider itself accepts.
+    quicktime = tmp_path / "wan-quicktime.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-i", str(conforming),
+            "-c", "copy", "-f", "mov",
+            str(quicktime),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    mov_asset = _register_video(container, project.id, quicktime, "video/quicktime")
+    with container.database.session() as session:
+        kept = resolver.resolve(session, session.get(MediaAsset, mov_asset.id), constraints)
+        assert kept.is_original
+        assert kept.mime_type == "video/quicktime"
+
+    # A VP9 WebM is outside both the documented containers and our transcode
+    # target: adapted into the preferred h264 MP4, revalidated, stored.
+    webm_asset = _register_video(
+        container, project.id, video_fixtures["oversized_webm"], "video/webm"
+    )
+    with container.database.session() as session:
+        adapted = resolver.resolve(session, session.get(MediaAsset, webm_asset.id), constraints)
+        assert adapted.derived is True
+        assert adapted.mime_type == "video/mp4"
+
+    # Below the documented 240px minimum: refused with the specific bound,
+    # never upscaled.
+    undersized = tmp_path / "wan-undersized.mp4"
+    _encode_fixture(undersized, size="160x120", rate=24, duration=2, codec="h264")
+    small_asset = _register_video(container, project.id, undersized, "video/mp4")
+    with container.database.session() as session, pytest.raises(
+        RenditionDerivationFailed, match="VIDEO_WIDTH_BELOW_MINIMUM"
+    ):
+        resolver.resolve(session, session.get(MediaAsset, small_asset.id), constraints)

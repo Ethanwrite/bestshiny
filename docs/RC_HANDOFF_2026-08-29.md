@@ -120,11 +120,13 @@ refuses `openai/gpt-image-2` before dispatch (clear it at openrouter.ai/settings
    declared from Alibaba's own API references and exercised offline through the real rendition
    chain; no live call has confirmed them. Status is "instrumentation complete, provider not
    connected" — not "resolved".
-6. **Cosmetic residual**: `verify_pending_assets` still accepts a `quota` argument it no longer
-   uses, so `quota_released` in that sweep result is always 0. Releases now happen only in
-   `reclaim_rejected_assets`. Left alone deliberately rather than invalidating a 16-minute matrix
-   run late in the session.
-7. **Nothing is pushed.** 14 commits exist only on this machine.
+6. ~~Cosmetic residual: `verify_pending_assets` takes a `quota` it never uses.~~ **Closed
+   2026-08-29 (`84d1e55`)** — the argument and the always-zero `quota_released` counter are gone
+   from the verification sweep; releases live only in `reclaim_rejected_assets`, which deletes
+   the bytes first and keeps its own count.
+7. **Pushed.** The branch is on `origin/claude/rc-predeploy-integration` and open as
+   [#12](https://github.com/Ethanwrite/bestshiny/pull/12); PR #9 was closed as superseded, since
+   this branch already contains its commits.
 
 ## 5. Traps that cost time in this session
 

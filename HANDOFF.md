@@ -1,10 +1,19 @@
 # AI Director Platform — Handoff
 
-Date: 2026-08-28 · Branch `main` at `f477133` · **NOT PRODUCTION-READY** · everything below
-through §1f is merged; §1g (video reference adaptation) is this branch,
-`claude/video-reference-adaptation`, gate-passed and awaiting review
+Date: 2026-08-29 · Branch `claude/rc-predeploy-integration` — the release-candidate
+integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference adaptation),
+`claude/creative-director-episodes` `f5f68c6` (open PR #9, migrations `0053`/`0054`), and the
+2026-08-28 Character Evidence working tree from the main checkout · database/Alembic head
+`0054_episode_continuations` · **NOT PRODUCTION-READY**
 
-Eight PRs have landed on `main`, in this order:
+The Character Evidence → Modal productionization is integrated here from the main checkout's
+previously uncommitted working tree (snapshot taken 2026-08-29; the main checkout itself was not
+modified). Its focused handoff, exact blocker, verification evidence, dirty-file scope, and
+remaining commands are in
+[`docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md`](docs/CHARACTER_EVIDENCE_HANDOFF_2026-08-28.md).
+That work added no migration of its own.
+
+Nine PRs have landed on `main`, in this order:
 [#1](https://github.com/Ethanwrite/bestshiny/pull/1) production readiness on PostgreSQL and the
 pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evidence
 · [#5](https://github.com/Ethanwrite/bestshiny/pull/5) its architecture documentation
@@ -12,9 +21,12 @@ pricing audit · [#4](https://github.com/Ethanwrite/bestshiny/pull/4) router evi
 · [#6](https://github.com/Ethanwrite/bestshiny/pull/6) truth-document sync
 · [#7](https://github.com/Ethanwrite/bestshiny/pull/7) explicit shot dependencies and the Frame
 Anchor Planner · [#8](https://github.com/Ethanwrite/bestshiny/pull/8) pipeline semantic
-consistency · [#10](https://github.com/Ethanwrite/bestshiny/pull/10) batch candidate atomicity.
+consistency · [#10](https://github.com/Ethanwrite/bestshiny/pull/10) batch candidate atomicity
+· [#11](https://github.com/Ethanwrite/bestshiny/pull/11) automatic video reference adaptation.
 Open: [#9](https://github.com/Ethanwrite/bestshiny/pull/9) creative director and episode
-continuation (carries migrations `0053`/`0054`; the dev database moves only when it merges).
+continuation (carries migrations `0053`/`0054`; the dev database moves only when it merges) —
+integrated into this release candidate. The Character Evidence work has no commit or PR of its
+own outside this branch.
 
 This is the single current entry point. It supersedes the 2026-08-20 and 2026-08-22
 development handoffs and the Visual Runtime implementation record, all three deleted

@@ -27,9 +27,11 @@ from sqlalchemy import update
 
 from .evidence import (
     VLM_REVIEW_REQUIRED,
+    AsyncCharacterEvidenceProducer,
     CanonicalIdentityReference,
     CharacterEvidenceProducer,
     CharacterEvidenceReport,
+    CharacterEvidenceSubmission,
 )
 
 TERMINAL_CANDIDATE_STATUSES = {
@@ -245,7 +247,7 @@ class QAPipeline:
         self,
         database: Database,
         identity_qa: DynamicIdentityQA | None = None,
-        evidence_producer: CharacterEvidenceProducer | None = None,
+        evidence_producer: CharacterEvidenceProducer | AsyncCharacterEvidenceProducer | None = None,
     ):
         self.database = database
         self.identity_qa = identity_qa or RuleBasedDynamicIdentityQA()
@@ -356,7 +358,8 @@ class QAPipeline:
     ) -> CharacterEvidenceReport:
         """Run the configured local evidence stack against a candidate video."""
 
-        if self.evidence_producer is None:
+        producer = getattr(self.evidence_producer, "produce", None)
+        if producer is None:
             raise RuntimeError("CharacterEvidenceProducer is not configured")
         with self.database.session() as session:
             candidate = session.get(GenerationCandidate, candidate_id)
@@ -366,7 +369,7 @@ class QAPipeline:
             if asset is None or not asset.local_path:
                 raise LookupError("candidate output has no local evidence file")
             video_path = Path(asset.local_path)
-        return self.evidence_producer.produce(
+        return producer(
             video_path,
             candidate_id=candidate_id,
             character_id=character_id,
@@ -374,6 +377,75 @@ class QAPipeline:
             shot_type=profile,
             sample_positions=sample_positions,
         )
+
+    def submit_character_evidence(
+        self,
+        candidate_id: str,
+        *,
+        character_id: str,
+        references: Sequence[CanonicalIdentityReference],
+        profile: str = "DIALOGUE",
+        sample_positions: tuple[float, ...] | None = None,
+    ) -> CharacterEvidenceSubmission:
+        """Submit production Modal work without treating HTTP acceptance as evidence."""
+
+        submit = getattr(self.evidence_producer, "submit", None)
+        if submit is None:
+            raise RuntimeError("asynchronous CharacterEvidenceProducer is not configured")
+        with self.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None or candidate.output_asset_id is None:
+                raise LookupError("candidate output is not available")
+            asset = session.get(MediaAsset, candidate.output_asset_id)
+            if asset is None:
+                raise LookupError("candidate output has no evidence asset")
+            video_path = Path(asset.local_path) if asset.local_path else Path(asset.storage_key)
+        submission = submit(
+            video_path,
+            candidate_id=candidate_id,
+            character_id=character_id,
+            references=references,
+            shot_type=profile,
+            sample_positions=sample_positions,
+        )
+        with self.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("candidate disappeared after Character Evidence submission")
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "character_evidence_job_id": submission.job_id,
+                "character_evidence_status": "ACCEPTED",
+                "character_evidence_mode": "SHADOW",
+                "character_evidence_submitted_at": submission.submitted_at,
+            }
+            session.flush()
+        return submission
+
+    def record_character_evidence_failure(
+        self,
+        candidate_id: str,
+        *,
+        job_id: str,
+        error_code: str | None,
+        error_message: str | None,
+    ) -> None:
+        """Persist a failed callback without fabricating a PASS or changing the gate."""
+
+        with self.database.session() as session:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError("character evidence callback candidate was not found")
+            if candidate.metadata_json.get("character_evidence_job_id") != job_id:
+                raise ValueError("character evidence callback job does not match the candidate")
+            candidate.metadata_json = {
+                **candidate.metadata_json,
+                "character_evidence_status": "FAILED",
+                "character_evidence_error_code": (error_code or "REMOTE_FAILURE")[:120],
+                "character_evidence_error_message": (error_message or "")[:500],
+                "character_evidence_mode": "SHADOW",
+            }
+            session.flush()
 
     def validate_candidate_with_character_evidence(
         self,
@@ -584,6 +656,7 @@ class QAPipeline:
         defer_pass: bool = False,
         character_evidence: CharacterEvidenceReport | None = None,
         style_evaluation: CandidateStyleEvaluation | None = None,
+        observation_only: bool = False,
     ) -> QAResult:
         evidence = dict(evidence or {})
         character_state_evidence = self._validated_character_state_evidence(evidence)
@@ -601,7 +674,7 @@ class QAPipeline:
             candidate = session.get(GenerationCandidate, candidate_id)
             if not candidate or not candidate.output_asset_id:
                 raise LookupError("candidate output is not available")
-            if candidate.status in TERMINAL_CANDIDATE_STATUSES:
+            if candidate.status in TERMINAL_CANDIDATE_STATUSES and not observation_only:
                 raise LookupError("committed or rejected candidates cannot be revalidated")
             asset = session.get(MediaAsset, candidate.output_asset_id)
             file_metrics, hard_failures = self._file_metrics(asset)
@@ -638,7 +711,11 @@ class QAPipeline:
                 else self.identity_qa.evaluate(evidence.get("identity_samples", []))
             )
             semantic_review_required = bool(
-                character_evidence is not None and character_evidence.semantic_review_required
+                character_evidence is not None
+                and (
+                    character_evidence.decision == "ABSTAIN"
+                    or character_evidence.semantic_review_required
+                )
             )
             if identity.invalid_samples:
                 hard_failures.append("INVALID_IDENTITY_EVIDENCE")
@@ -823,6 +900,29 @@ class QAPipeline:
                 ),
             )
             session.add(result)
+            if observation_only:
+                completed_run_ids = list(
+                    candidate.metadata_json.get("character_evidence_run_ids", [])
+                )
+                if (
+                    character_evidence is not None
+                    and character_evidence.producer_run_id not in completed_run_ids
+                ):
+                    completed_run_ids.append(character_evidence.producer_run_id)
+                candidate.metadata_json = {
+                    **candidate.metadata_json,
+                    "character_evidence_status": "SUCCEEDED",
+                    "character_evidence_mode": "SHADOW",
+                    "character_evidence_run_id": (
+                        character_evidence.producer_run_id if character_evidence is not None else None
+                    ),
+                    "character_evidence_run_ids": completed_run_ids,
+                    "character_evidence_decision": (
+                        character_evidence.decision if character_evidence is not None else "ABSTAIN"
+                    ),
+                }
+                session.flush()
+                return result
             next_status = (
                 CandidateStatus.VALIDATING.value
                 if defer_pass and decision == QADecision.PASS.value

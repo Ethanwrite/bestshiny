@@ -109,6 +109,17 @@ class Settings(BaseSettings):
     allow_live_provider_calls: bool = False
     live_provider_confirmation: str = ""
     provider_http_timeout_seconds: float = 120
+    # Character Evidence is an isolated Modal CV service. These settings are
+    # deliberately unrelated to provider routing: no OpenRouter/Ark transport
+    # may satisfy this boundary and there is no local production fallback.
+    character_evidence_base_url: str = ""
+    character_evidence_api_key: str = ""
+    character_evidence_callback_signing_key: str = ""
+    character_evidence_threshold_version: str = "character-evidence-thresholds-2026-08-27-v1"
+    character_evidence_http_timeout_seconds: float = 15.0
+    character_evidence_operating_mode: Literal["shadow", "advisory", "soft_gate", "automatic_gate"] = (
+        "shadow"
+    )
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The project's image-generation model, served by POST /images.

@@ -14,6 +14,12 @@ from character_core import (
     CharacterStateConflict,
     CharacterStatePolicyViolation,
 )
+from character_evidence.client import (
+    CharacterEvidenceCallbackAuthenticationError,
+    CharacterEvidenceCallbackPayloadError,
+    report_from_payload,
+    verify_callback,
+)
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
 from entitlement_core import (
@@ -444,6 +450,66 @@ def create_app(container: Container | None = None) -> FastAPI:
         except DePayConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         return result.as_dict()
+
+    @app.post("/v1/webhooks/character-evidence")
+    async def receive_character_evidence_callback(request: Request):
+        raw_body = await request.body()
+        try:
+            callback = verify_callback(
+                raw_body,
+                timestamp=request.headers.get("x-character-evidence-timestamp"),
+                signature=request.headers.get("x-character-evidence-signature"),
+                signing_key=container.settings.character_evidence_callback_signing_key,
+            )
+            with container.database.session() as session:
+                candidate = session.get(GenerationCandidate, callback.job_id)
+                if candidate is None:
+                    raise LookupError("character evidence callback candidate was not found")
+                shot = session.get(Shot, candidate.shot_id)
+                output = (
+                    session.get(MediaAsset, candidate.output_asset_id)
+                    if candidate.output_asset_id
+                    else None
+                )
+                if shot is None or output is None:
+                    raise LookupError("character evidence callback candidate context is incomplete")
+                if shot.id != callback.shot_id or output.project_id != callback.project_id:
+                    raise ValueError("character evidence callback lineage does not match the candidate")
+                if candidate.metadata_json.get("character_evidence_job_id") != callback.job_id:
+                    raise ValueError("character evidence callback job was not submitted by this service")
+                completed_run_ids = set(
+                    candidate.metadata_json.get("character_evidence_run_ids", [])
+                )
+            if callback.status == "FAILED":
+                container.qa.record_character_evidence_failure(
+                    callback.job_id,
+                    job_id=callback.job_id,
+                    error_code=callback.error_code,
+                    error_message=callback.error_message,
+                )
+                return {"status": "RECORDED", "reports": 0}
+            reports = [report_from_payload(item) for item in callback.reports]
+            for report in reports:
+                if report.candidate_id != callback.job_id:
+                    raise ValueError("character evidence report belongs to a different candidate")
+                if report.operating_mode != "SHADOW":
+                    raise ValueError("character evidence callback attempted a non-shadow decision")
+                if report.producer_run_id in completed_run_ids:
+                    continue
+                container.qa.validate_candidate(
+                    callback.job_id,
+                    character_evidence=report,
+                    observation_only=True,
+                )
+            return {"status": "RECORDED", "reports": len(reports)}
+        except CharacterEvidenceCallbackAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except CharacterEvidenceCallbackPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     def verify_api_key(authorization: str | None = Header(default=None)) -> None:
         expected = container.settings.platform_api_key

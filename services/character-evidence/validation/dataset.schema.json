@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bestshiny.example/schemas/character-evidence-validation-v1.json",
+  "title": "Authorized Character Evidence validation dataset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dataset_version", "authorization_record", "examples"],
+  "properties": {
+    "dataset_version": {"type": "string", "minLength": 1},
+    "authorization_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "approved_at", "purpose", "retention_policy"],
+      "properties": {
+        "owner": {"type": "string", "minLength": 1},
+        "approved_at": {"type": "string", "format": "date-time"},
+        "purpose": {"const": "CHARACTER_EVIDENCE_VALIDATION"},
+        "retention_policy": {"type": "string", "minLength": 1}
+      }
+    },
+    "examples": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/example"}
+    }
+  },
+  "$defs": {
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example_id", "media_asset_id", "media_sha256", "consent_record_id",
+        "annotator_record_id", "slices", "person_present", "person_detected",
+        "face_present", "face_detected", "identity_same", "identity_decision",
+        "tracking_opportunities", "id_switches", "ground_truth_tracks",
+        "predicted_fragments", "appearance_same", "appearance_decision", "decision"
+      ],
+      "properties": {
+        "example_id": {"type": "string", "minLength": 1},
+        "media_asset_id": {"type": "string", "minLength": 1},
+        "media_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "consent_record_id": {"type": "string", "minLength": 1},
+        "annotator_record_id": {"type": "string", "minLength": 1},
+        "slices": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "person_present": {"type": "boolean"},
+        "person_detected": {"type": "boolean"},
+        "face_present": {"type": "boolean"},
+        "face_detected": {"type": "boolean"},
+        "identity_same": {"type": ["boolean", "null"]},
+        "identity_decision": {"enum": ["MATCH", "NON_MATCH", "ABSTAIN", "NOT_APPLICABLE"]},
+        "tracking_opportunities": {"type": "integer", "minimum": 0},
+        "id_switches": {"type": "integer", "minimum": 0},
+        "ground_truth_tracks": {"type": "integer", "minimum": 0},
+        "predicted_fragments": {"type": "integer", "minimum": 0},
+        "appearance_same": {"type": ["boolean", "null"]},
+        "appearance_decision": {"enum": ["MATCH", "NON_MATCH", "ABSTAIN", "NOT_APPLICABLE"]},
+        "decision": {"enum": ["PASS", "FAIL", "ABSTAIN"]}
+      }
+    }
+  }
+}

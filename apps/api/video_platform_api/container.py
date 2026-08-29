@@ -7,6 +7,7 @@ from agent_runtime import AgentRuntime
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
 from character_core import CharacterIdentityService, PersistentCharacterStateService
+from character_evidence.client import ModalCharacterEvidenceProducer
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine
 from creative_director_core import CreativeDirectorService
@@ -200,6 +201,23 @@ def build_container(settings: Settings | None = None) -> Container:
         settings.credential_encryption_key,
         allow_ephemeral_key=settings.deployment_environment in {"development", "test"},
     )
+    if settings.deployment_environment == "production":
+        if not settings.character_evidence_base_url.startswith("https://"):
+            raise RuntimeError("CHARACTER_EVIDENCE_BASE_URL must be configured as HTTPS in production")
+        for name, value in (
+            ("CHARACTER_EVIDENCE_API_KEY", settings.character_evidence_api_key),
+            (
+                "CHARACTER_EVIDENCE_CALLBACK_SIGNING_KEY",
+                settings.character_evidence_callback_signing_key,
+            ),
+        ):
+            raw = value.encode("utf-8")
+            if len(raw) < 32 or len(set(raw)) < 16:
+                raise RuntimeError(f"{name} must be a high-entropy secret of at least 32 bytes in production")
+        if settings.character_evidence_operating_mode != "shadow":
+            raise RuntimeError(
+                "Character Evidence must remain in shadow mode until the versioned acceptance criteria pass"
+            )
     database = Database(settings.database_url)
     if settings.deployment_environment == "test":
         # A per-test throwaway database cannot replay every revision. This is
@@ -631,7 +649,19 @@ def build_container(settings: Settings | None = None) -> Container:
     frame_anchors = FrameAnchorPlanner(database, continuity_decision)
     capabilities = model_registry
     capability_resolver = CapabilityResolver(database, model_registry)
-    qa = QAPipeline(database)
+    evidence_producer = (
+        ModalCharacterEvidenceProducer(
+            database,
+            media,
+            base_url=settings.character_evidence_base_url,
+            api_key=settings.character_evidence_api_key,
+            threshold_version=settings.character_evidence_threshold_version,
+            timeout_seconds=settings.character_evidence_http_timeout_seconds,
+        )
+        if settings.deployment_environment == "production"
+        else None
+    )
+    qa = QAPipeline(database, evidence_producer=evidence_producer)
     cost = CostEngine(database)
     # The compiler owns style-lock enforcement, so it must hold the
     # authoritative style service rather than trust a caller's context dict.

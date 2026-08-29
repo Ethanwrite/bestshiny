@@ -56,7 +56,7 @@ launch.
 - 状态提议只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于 Candidate/Generation Job 分配事务内写入。全部提议的 proposal-set hash 同时绑定 Candidate 与 Generation Job，并在 validate/commit 再校验，阻断生成后偷换 delta。显式 `branch_key` 可从 input TimelineState 选定的不可变状态版本创建独立 scope v1/head，不推进 main head。
 - 输入/目标状态 JSON 在服务边界限制为最大 256 KiB、5,000 个节点、12 层深度和 200 条 continuity constraints。baseline initialize 只更新 authoritative TimelineState 中的有类型状态引用并传播，不额外写入第二个无类型 `ShotStateSnapshot`。
 - Timeline v3 + 三镜 Fixture：`TimelineTransition` 以九种显式类型控制传播、分支、空间重置与 reconciliation；修改前镜状态只会标记下游 `RECOMPUTE_REQUIRED`，规划重算不会改写已提交成片。离线回归已走过 3 Candidates/Jobs/MP4 outputs/QA/commits/end frames/snapshots/accepted costs，但不等于真实 Provider。
-- Character Evidence V1：本地 FFmpeg 抽帧、可注入检测/跟踪/人脸与外观 encoder、视角感知参考选择、可见度/清晰度/检测/跟踪置信加权、时序汇总和版本化阈值已接入 QA。当前证据来自自生成非用户 MP4 + 确定性推理替身；生产检测/跟踪/编码模型尚未部署，hair/costume 诚实为 `UNAVAILABLE`。
+- Character Evidence 生产边界：生产环境只通过 `ModalCharacterEvidenceProducer` 异步调用单一 Modal HTTPS 端点；Modal T4 worker 固定使用 YOLOX-s、ByteTrack、YuNet、五点对齐后的 SFace 与 DINOv2-base。回调签名、模型/阈值/参考资产版本和 shadow 隔离均已接入；真实授权验证集完成前 hair/costume 保持 `UNAVAILABLE`，任何结果都不能自动放行。
 - Production Evidence：`ProviderBillingEvidence` 分离 verified/estimated/manual/unknown，Provider 无可信金额时 `actual_cost = null`；accepted-shot cost 包含失败与 repair attempts，`DecisionOutcomeRecord` 串联镜头特征、决策、Provider/模型、QA、用户结果和成本来源。
 - Flow Affinity：首次自动分配、sticky account/project、本地 active 唯一、远端 ID 跨全部历史状态永久唯一、显式迁移计划与 local job/account/project/provider job 四元 poll 标识已实现；默认 provisioner fail closed，本轮未调用真实 Flow。
 - 不可洗白来源：Provider 参考素材上传只写独立 binding，不覆盖 `MediaAsset` 生成来源；角色 identity、canonical promotion 与 candidate commit 都在终点复核 Provider trust。

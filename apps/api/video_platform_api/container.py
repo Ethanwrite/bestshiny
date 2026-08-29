@@ -86,7 +86,7 @@ from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
 from skill_core import PromptCompilerService, SkillRegistry
 from sqlalchemy.engine import make_url
-from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService
+from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService, StyleDriftMonitor
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from wan_provider import WanProvider
@@ -156,6 +156,7 @@ class Container:
     image_prompts: ImagePromptCorrector
     asset_registry: AssetRegistry
     styles: ProjectStyleService
+    style_drift: StyleDriftMonitor
     feature_flags: FeatureFlagService
     memory: MultimodalMemoryEngine
     context: ContextAssembler
@@ -696,6 +697,7 @@ def build_container(settings: Settings | None = None) -> Container:
         ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
     )
     styles = ProjectStyleService(database, storage, semantic=semantic_style)
+    style_drift = StyleDriftMonitor(database)
     prompts = PromptCompilerService(
         database,
         skills,
@@ -877,6 +879,7 @@ def build_container(settings: Settings | None = None) -> Container:
         image_prompts=image_prompts,
         asset_registry=asset_registry,
         styles=styles,
+        style_drift=style_drift,
         feature_flags=feature_flags,
         memory=memory,
         context=context,

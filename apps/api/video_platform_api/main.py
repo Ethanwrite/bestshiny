@@ -1599,6 +1599,81 @@ def create_app(container: Container | None = None) -> FastAPI:
 
         return container.timeline_branches.sweep_orphans(project_id, limit=limit).as_dict()
 
+    @app.get(
+        "/internal/models/live-status",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def model_live_status():
+        """The three live facts per model, kept deliberately separate.
+
+        ``live_enabled`` is configuration permission (a credential exists and
+        the operator opened the gate); ``lifecycle_status`` is registration
+        state; only ``live_canary_status = VERIFIED_LIVE`` — one real
+        generation completed and reconciled — is production validation. The
+        summary counts them apart so "enabled" can never read as "proven":
+        with zero VERIFIED_LIVE rows, this endpoint reports zero models as
+        live-verified no matter how many are enabled.
+        """
+
+        from production_domain.models import ModelDefinition
+
+        with container.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(ModelDefinition).order_by(
+                        ModelDefinition.provider, ModelDefinition.logical_name
+                    )
+                )
+            )
+            models = [
+                {
+                    "logical_name": row.logical_name,
+                    "provider": row.provider,
+                    "provider_model_id": row.provider_model_id,
+                    "modality": row.modality,
+                    "enabled": row.enabled,
+                    "live_enabled": row.live_enabled,
+                    "lifecycle_status": row.lifecycle_status,
+                    "live_canary_status": row.live_canary_status,
+                    "live_canary_detail": row.live_canary_detail,
+                    "last_live_test_at": (
+                        row.last_live_test_at.isoformat() if row.last_live_test_at else None
+                    ),
+                }
+                for row in rows
+            ]
+        verified = [item for item in models if item["live_canary_status"] == "VERIFIED_LIVE"]
+        return {
+            "models": models,
+            "summary": {
+                "total": len(models),
+                "live_enabled": sum(1 for item in models if item["live_enabled"]),
+                "verified_live": len(verified),
+                "verified_live_models": [item["logical_name"] for item in verified],
+                "note": (
+                    "live_enabled is configuration permission and lifecycle_status is "
+                    "registration state; neither is production validation. Only "
+                    "live_canary_status=VERIFIED_LIVE records a completed, reconciled "
+                    "real generation."
+                ),
+            },
+        }
+
+    @app.get(
+        "/internal/style-drift/{project_id}",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def style_drift_report(project_id: str, drift_threshold: float | None = None):
+        """Aggregate cross-episode style drift over committed candidates.
+
+        Monitoring only: reads the append-only candidate style evaluations the
+        commit gate already writes and reports per-episode means, drift from
+        the baseline episode, flags and the decline streak. Changes no gate.
+        """
+
+        kwargs = {"drift_threshold": drift_threshold} if drift_threshold is not None else {}
+        return container.style_drift.series_report(project_id, **kwargs).as_dict()
+
     @app.post("/v1/episodes/{episode_id}/plan-frame-anchors")
     def plan_frame_anchors(
         episode_id: str,

@@ -1,3 +1,4 @@
+from .drift import SeriesStyleDriftReport, StyleDriftMonitor
 from .semantic import (
     ModelRoleSemanticStyleEmbedder,
     SemanticStyleEmbedder,
@@ -16,6 +17,8 @@ from .space import EmbeddingSpaceIdentity
 
 __all__ = [
     "EmbeddingSpaceIdentity",
+    "SeriesStyleDriftReport",
+    "StyleDriftMonitor",
     "LocalStyleDescriptor",
     "ModelRoleSemanticStyleEmbedder",
     "ProjectStyleService",

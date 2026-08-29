@@ -1551,7 +1551,12 @@ def test_flow_remote_owner_index_reconciles_a_drifted_database(tmp_path, monkeyp
     with engine.connect() as connection:
         revision = connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
     engine.dispose()
-    assert revision == "0060_flow_remote_owner_index"
+    # Against the constant rather than a literal: this assertion means "the
+    # upgrade reached head", and head moves with every migration. A pinned
+    # literal here fails on the next one for a reason that has nothing to do
+    # with what this test is checking. `REQUIRED_SCHEMA_REVISION` is already
+    # proven equal to head above.
+    assert revision == REQUIRED_SCHEMA_REVISION
     assert "uq_flow_remote_project_owner" in indexes
     assert "uq_flow_active_remote_project" not in indexes
 

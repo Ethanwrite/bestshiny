@@ -108,6 +108,7 @@ from production_domain.models import (
     MediaProviderBinding,
     MediaRendition,
     ModelDefinition,
+    ModelPricingProfile,
     Project,
     PromptCompilation,
     PromptRevision,
@@ -2338,6 +2339,21 @@ def create_app(container: Container | None = None) -> FastAPI:
             and container.settings.allow_live_provider_calls is True
             and container.settings.live_provider_confirmation == LIVE_PROVIDER_CONFIRMATION
         )
+        # Every (provider, provider_model_id) that carries a published rate. A
+        # model with no row is refused in live mode rather than estimated, so
+        # opening one is a promise the platform cannot keep: the router would
+        # offer it and every generation would fail on PricingUnverified. Credit
+        # for the transport is not credit for the price.
+        with container.database.session() as session:
+            priced_models = {
+                (row.provider, row.provider_model_id)
+                for row in session.execute(
+                    select(
+                        ModelPricingProfile.provider, ModelPricingProfile.provider_model_id
+                    ).distinct()
+                )
+            }
+
         rows: list[dict[str, Any]] = []
         changed = 0
         for state in container.model_infrastructure.all_runtime_models():
@@ -2361,7 +2377,10 @@ def create_app(container: Container | None = None) -> FastAPI:
                 else:
                     transport = bool(getattr(provider, "configured", True))
                     reason = "" if transport else "provider credential or model ID is not configured"
-            target = bool(state.enabled and transport and live_gate_ready)
+            priced = (state.provider, state.provider_model_id) in priced_models
+            if transport and not priced:
+                reason = "no pricing profile; live mode refuses an unpriced model"
+            target = bool(state.enabled and transport and priced and live_gate_ready)
             if not target and not reason:
                 reason = "" if state.enabled else "model is disabled"
                 if live_gate_ready is False:

@@ -586,6 +586,13 @@ def test_wan_is_priced_for_the_region_this_deployment_actually_calls(
     endpoint, so Beijing rates apply: 0.6 CNY/s at 720P and 1.0 at 1080P.
     Singapore's catalogue rates differ and are deliberately absent — a rate for a
     region we do not call is a number waiting to be believed.
+
+    Asserted against the deployment ids the registry actually holds. Until 0061
+    this read `wan-2.7`, the logical name that 0048 seeded, which meant the
+    regional invariant was being proven on a row the cost engine never resolves —
+    it looks up provider_model_id, and no model is registered under that name.
+    The rates are identical either way; what changed is that the check now
+    covers the rows a quote would really use.
     """
 
     database_path = tmp_path / "wan-pricing.db"
@@ -599,13 +606,16 @@ def test_wan_is_priced_for_the_region_this_deployment_actually_calls(
         rows = connection.execute(
             sa.text(
                 "select resolution, unit_price, billing_unit from model_pricing_profiles "
-                "where provider_model_id = 'wan-2.7'"
+                "where provider_model_id in "
+                "('wan2.7-t2v-2026-06-12', 'wan2.7-i2v-2026-04-25')"
             )
         ).mappings().all()
     engine.dispose()
 
     seeded = {row["resolution"]: float(row["unit_price"]) for row in rows}
     assert seeded == {"720p": pytest.approx(0.6), "1080p": pytest.approx(1.0)}
+    # Both deployments, not one of them priced and the other silently missing.
+    assert len(rows) == 4
     assert {row["billing_unit"] for row in rows} == {"second"}
     # Singapore is 0.733924 / 1.100886 and must not have been seeded.
     assert all(value not in (pytest.approx(0.733924), pytest.approx(1.100886)) for value in seeded.values())

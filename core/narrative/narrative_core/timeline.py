@@ -183,6 +183,57 @@ class AuthoritativeTimelineStateEngine:
         except ValueError as exc:
             raise TimelinePropagationError(f"unknown timeline transition: {value}") from exc
 
+    @staticmethod
+    def _register_branch(
+        session: Session,
+        *,
+        project_id: str,
+        branch_key: str | None,
+        transition_type: TimelineTransitionType,
+        source_shot: Shot,
+        target_shot: Shot,
+    ) -> None:
+        """Give a freshly named branch its lifecycle row, in the same transaction.
+
+        The parent scope is the branch the *source* shot lives on (the branch
+        forks from wherever its fork shot stands), and the fork shot is
+        recorded — a dream or flashback with no parent is invalid by
+        construction. Function-level import: character_core depends on this
+        package, so the module edge cannot point back at import time.
+        """
+
+        if not branch_key:
+            return
+        from character_core.branches import ensure_branch_in_session
+
+        parent_transition = session.scalar(
+            select(TimelineTransition).where(
+                TimelineTransition.target_shot_id == source_shot.id
+            )
+        )
+        parent_scope = (
+            str(parent_transition.branch_key)
+            if parent_transition is not None and parent_transition.branch_key
+            else "main"
+        )
+        kind = {
+            TimelineTransitionType.DREAM: "DREAM",
+            TimelineTransitionType.FLASHBACK: "FLASHBACK",
+            TimelineTransitionType.FLASH_FORWARD: "FLASH_FORWARD",
+        }.get(transition_type, "ALTERNATE")
+        ensure_branch_in_session(
+            session,
+            project_id=project_id,
+            scope_key=branch_key,
+            branch_kind=kind,
+            parent_scope_key=parent_scope,
+            fork_shot_id=source_shot.id,
+            metadata={
+                "first_branch_shot_id": target_shot.id,
+                "transition_type": transition_type.value,
+            },
+        )
+
     def _resolve_transition(
         self,
         session: Session,
@@ -231,6 +282,14 @@ class AuthoritativeTimelineStateEngine:
             metadata_json=metadata,
         )
         session.add(transition)
+        self._register_branch(
+            session,
+            project_id=project_id,
+            branch_key=transition.branch_key,
+            transition_type=transition_type,
+            source_shot=source_shot,
+            target_shot=target_shot,
+        )
         if transition.reconciliation_required:
             target_shot.downstream_state_stale = True
             target_shot.stale_reason = "RECOMPUTE_REQUIRED"
@@ -284,6 +343,14 @@ class AuthoritativeTimelineStateEngine:
                 **self._transition_metadata(normalized),
                 **(metadata or {}),
             }
+            self._register_branch(
+                session,
+                project_id=project_id,
+                branch_key=row.branch_key,
+                transition_type=normalized,
+                source_shot=source,
+                target_shot=target,
+            )
             if row.reconciliation_required:
                 target.downstream_state_stale = True
                 target.stale_reason = "RECOMPUTE_REQUIRED"

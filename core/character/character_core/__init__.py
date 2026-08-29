@@ -1,3 +1,14 @@
+from .branches import (
+    MAIN_SCOPE,
+    BranchSweepResult,
+    TimelineBranchConflict,
+    TimelineBranchError,
+    TimelineBranchReferenced,
+    TimelineBranchService,
+    assert_branch_writable_in_session,
+    ensure_branch_in_session,
+    kind_for_scope_key,
+)
 from .service import CharacterIdentityService, IdentityLocked
 from .state import (
     CharacterStateConflict,
@@ -15,6 +26,8 @@ from .state import (
 )
 
 __all__ = [
+    "MAIN_SCOPE",
+    "BranchSweepResult",
     "CharacterIdentityService",
     "CharacterStateConflict",
     "CharacterStateError",
@@ -24,7 +37,14 @@ __all__ = [
     "CharacterStateValidationSummary",
     "IdentityLocked",
     "PersistentCharacterStateService",
+    "TimelineBranchConflict",
+    "TimelineBranchError",
+    "TimelineBranchReferenced",
+    "TimelineBranchService",
+    "assert_branch_writable_in_session",
     "canonical_json_hash",
+    "ensure_branch_in_session",
+    "kind_for_scope_key",
     "normalize_and_apply_patch",
     "normalize_initial_state",
     "preview_character_state_transition",

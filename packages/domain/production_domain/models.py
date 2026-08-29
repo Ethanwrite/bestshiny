@@ -1317,6 +1317,57 @@ class ShotNarrativeEffect(Base, TimestampMixin):
         return "|".join([effect_type, fact_key or "", obligation_key or "", holder_key or ""])
 
 
+class TimelineBranch(Base, TimestampMixin):
+    """One narrative timeline branch (dream, flashback, alternate), with a lifecycle.
+
+    ``timeline_scope_key`` strings previously proliferated with no record of
+    what each branch was, where it forked, or whether it ever ended
+    (OPEN_ISSUES 2.3). This row is the branch's identity and lifecycle:
+    ACTIVE accepts state writes; MERGED recorded a declared write-back
+    manifest; RETIRED and ABANDONED refuse new writes but keep history
+    readable. Rows are never physically deleted while any
+    CharacterStateVersion, head, delta or transition still references the
+    scope — those rows are the audit trail the branch anchors.
+    """
+
+    __tablename__ = "timeline_branches"
+    __table_args__ = (
+        UniqueConstraint("project_id", "scope_key", name="uq_timeline_branch_scope"),
+        CheckConstraint(
+            "branch_kind IN ('MAIN', 'DREAM', 'FLASHBACK', 'FLASH_FORWARD', 'ALTERNATE')",
+            name="ck_timeline_branch_kind",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'MERGED', 'RETIRED', 'ABANDONED')",
+            name="ck_timeline_branch_status",
+        ),
+        CheckConstraint(
+            "branch_kind = 'MAIN' OR parent_scope_key IS NOT NULL",
+            name="ck_timeline_branch_parent_required",
+        ),
+        Index("ix_timeline_branch_status", "project_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    scope_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    branch_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE", nullable=False)
+    parent_scope_key: Mapped[str | None] = mapped_column(String(120))
+    fork_shot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shots.id", ondelete="SET NULL"), index=True
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_by: Mapped[str | None] = mapped_column(String(120))
+    merge_policy_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    merge_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retire_reason: Mapped[str | None] = mapped_column(String(500))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class CharacterEvidenceSubmission(Base, TimestampMixin):
     """Durable lifecycle of one shadow Character Evidence job, one per candidate.
 

@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from agent_runtime import AgentRuntime
 from asset_registry_core import AssetRegistry
 from browser_runtime import BrowserRuntime
-from character_core import CharacterIdentityService, PersistentCharacterStateService
+from character_core import (
+    CharacterIdentityService,
+    PersistentCharacterStateService,
+    TimelineBranchService,
+)
 from character_evidence.client import ModalCharacterEvidenceProducer
 from character_evidence.tracking import CharacterEvidenceTracker
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
@@ -125,6 +129,7 @@ class Container:
     narrative_ledger: NarrativeLedgerService
     shot_dependencies: ShotDependencyService
     characters: CharacterIdentityService
+    timeline_branches: TimelineBranchService
     character_states: PersistentCharacterStateService
     continuity_decision: ContinuityDecisionEngine
     frame_anchors: FrameAnchorPlanner
@@ -653,6 +658,7 @@ def build_container(settings: Settings | None = None) -> Container:
     narrative_ledger = NarrativeLedgerService(database)
     shot_dependencies = ShotDependencyService(database)
     characters = CharacterIdentityService(database)
+    timeline_branches = TimelineBranchService(database)
     character_states = PersistentCharacterStateService(database)
     continuity_decision = ContinuityDecisionEngine(database)
     frame_anchors = FrameAnchorPlanner(database, continuity_decision)
@@ -844,6 +850,7 @@ def build_container(settings: Settings | None = None) -> Container:
         narrative_ledger=narrative_ledger,
         shot_dependencies=shot_dependencies,
         characters=characters,
+        timeline_branches=timeline_branches,
         character_states=character_states,
         continuity_decision=continuity_decision,
         frame_anchors=frame_anchors,

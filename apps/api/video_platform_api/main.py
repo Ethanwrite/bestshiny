@@ -13,6 +13,8 @@ from asset_registry_core import VersionMediaInput
 from character_core import (
     CharacterStateConflict,
     CharacterStatePolicyViolation,
+    TimelineBranchConflict,
+    TimelineBranchError,
 )
 from character_evidence.client import (
     CharacterEvidenceCallbackAuthenticationError,
@@ -280,6 +282,20 @@ class CharacterEvidenceReconcile(BaseModel):
     action: Literal["RESUBMIT", "MARK_FAILED"]
     note: str = Field(min_length=1, max_length=2000)
     resolved_by: str = Field(min_length=1, max_length=120)
+
+
+class TimelineBranchMerge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    into_scope_key: str = Field(default="main", min_length=1, max_length=120)
+    allowed_state_paths: list[str] = Field(min_length=1, max_length=100)
+    allow_dream_states: bool = Field(default=False, strict=True)
+
+
+class TimelineBranchClose(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class PromptRefine(BaseModel):
@@ -1522,6 +1538,66 @@ def create_app(container: Container | None = None) -> FastAPI:
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         return {"removed": dependency_id}
+
+    @app.get("/v1/projects/{project_id}/timeline-branches")
+    def list_timeline_branches(
+        project_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id)
+        return {"branches": container.timeline_branches.list_for_project(project_id)}
+
+    @app.post("/v1/projects/{project_id}/timeline-branches/{scope_key}/merge")
+    def merge_timeline_branch(
+        project_id: str,
+        scope_key: str,
+        body: TimelineBranchMerge,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        if principal.development_bypass:
+            raise HTTPException(403, "时间线分支合并必须由真实登录用户确认")
+        auth.require_project(principal, project_id, write=True)
+        try:
+            return container.timeline_branches.merge(
+                project_id,
+                scope_key,
+                into_scope_key=body.into_scope_key,
+                allowed_state_paths=body.allowed_state_paths,
+                merged_by=principal.user_id or "unknown",
+                allow_dream_states=body.allow_dream_states,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except TimelineBranchConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except TimelineBranchError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/v1/projects/{project_id}/timeline-branches/{scope_key}/retire")
+    def retire_timeline_branch(
+        project_id: str,
+        scope_key: str,
+        body: TimelineBranchClose,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        auth.require_project(principal, project_id, write=True)
+        try:
+            return container.timeline_branches.retire(project_id, scope_key, reason=body.reason)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except TimelineBranchConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except TimelineBranchError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post(
+        "/internal/maintenance/timeline-branches",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_timeline_branches_endpoint(project_id: str, limit: int = 50):
+        """Close orphaned branches (never referenced, idle) as ABANDONED."""
+
+        return container.timeline_branches.sweep_orphans(project_id, limit=limit).as_dict()
 
     @app.post("/v1/episodes/{episode_id}/plan-frame-anchors")
     def plan_frame_anchors(

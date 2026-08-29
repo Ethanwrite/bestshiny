@@ -667,6 +667,15 @@ class MediaRegistry:
                 raise LookupError(f"media asset not found: {asset_id}")
             if asset.project_id != project_id:
                 raise LookupError("media asset does not belong to the generation project")
+            if asset.verification_status != "READY":
+                # A provider call is billed on submission; an unverified or
+                # rejected file must never reach one. Directly uploaded
+                # assets become READY only after the async full-content
+                # verification passes.
+                raise ProviderReferenceUrlUnavailable(
+                    f"media asset {asset_id} is not verified for provider use "
+                    f"(MEDIA_NOT_VERIFIED:{asset.verification_status})"
+                )
             try:
                 rendition = self.renditions.resolve(session, asset, bounds)
             except RenditionDerivationFailed as exc:
@@ -1133,6 +1142,11 @@ class MediaRegistry:
             width=width,
             height=height,
             duration=None,
+            # Adopted from a HEAD and a 64 KB header, not a full decode: the
+            # asset is registered but not READY until the asynchronous
+            # verification worker decodes the complete object. Providers and
+            # build chains refuse it meanwhile.
+            verification_status="PENDING_VERIFICATION",
             shot_id=shot_id,
             character_id=character_id,
             metadata_json={"source": "direct_upload", **(metadata or {})},

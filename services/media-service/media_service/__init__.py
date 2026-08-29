@@ -59,6 +59,10 @@ from .thumbnails import (
     ThumbnailService,
     ThumbnailUnavailable,
 )
+from .verification import (
+    MediaVerificationSweep,
+    verify_pending_assets,
+)
 from .video_renditions import (
     VIDEO_TRANSCODER_VERSION,
     VideoAdaptationFailed,
@@ -89,6 +93,8 @@ __all__ = [
     "ResolvedThumbnail",
     "ThumbnailService",
     "ThumbnailUnavailable",
+    "MediaVerificationSweep",
+    "verify_pending_assets",
     "MediaRegistry",
     "ProviderMediaReconciliationConflict",
     "ProviderMediaReconciliationRequired",

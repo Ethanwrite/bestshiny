@@ -1731,6 +1731,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             "asset_type": asset.asset_type,
             "storage_key": asset.storage_key,
             "public_url": asset.public_url,
+            # PENDING_VERIFICATION for a fresh direct upload: registered, not
+            # yet usable by providers until the full-content check passes.
+            "verification_status": asset.verification_status,
             "reused": reused,
         }
 
@@ -2273,6 +2276,27 @@ def create_app(container: Container | None = None) -> FastAPI:
             storage=container.media.storage,
             ttl_seconds=container.settings.generation_staging_ttl_seconds,
             limit=max(1, limit or container.settings.generation_staging_sweep_limit),
+        ).as_response()
+
+    @app.post(
+        "/internal/maintenance/media-verification",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def verify_media_endpoint(limit: int | None = None):
+        """The operator-triggered face of the sweep the worker runs on
+        `MEDIA_VERIFICATION_INTERVAL_SECONDS`: full decode plus SHA re-check
+        of every PENDING_VERIFICATION direct upload, crash-recoverable via
+        the VERIFYING lease.
+        """
+
+        from media_service import verify_pending_assets
+
+        return verify_pending_assets(
+            database=container.database,
+            storage=container.storage,
+            quota=WorkspaceStorageQuota(container.database),
+            limit=max(1, limit or container.settings.media_verification_limit),
+            lease_seconds=container.settings.media_verification_lease_seconds,
         ).as_response()
 
     @app.post(

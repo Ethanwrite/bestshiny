@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import StorageReservation, Workspace, utcnow
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -203,6 +203,45 @@ class WorkspaceStorageQuota:
         reservation.settled_at = utcnow()
         session.flush()
         return self._view(reservation)
+
+    def release_settled_for_asset_in(
+        self, session: Session, *, asset_id: str, size_bytes: int
+    ) -> bool:
+        """Give back the settled bytes of an asset verification rejected.
+
+        A direct upload settles its hold when it completes; if full-content
+        verification then finds the file invalid, the workspace is holding
+        paid capacity for bytes it can never use. The settled reservation is
+        marked RELEASED_INVALID (auditable — never deleted) and the
+        workspace's used counter is corrected by the asset's recorded size,
+        floored at zero. Returns False when no settled reservation exists
+        for the asset (a workspace-less project, or a pre-quota upload).
+        """
+
+        reservation = session.scalar(
+            select(StorageReservation)
+            .where(
+                StorageReservation.asset_id == asset_id,
+                StorageReservation.status == "SETTLED",
+            )
+            .with_for_update()
+        )
+        if reservation is None:
+            return False
+        release = min(max(int(size_bytes), 0), reservation.reserved_bytes)
+        session.execute(
+            update(Workspace)
+            .where(Workspace.id == reservation.workspace_id)
+            .values(
+                used_storage_bytes=case(
+                    (Workspace.used_storage_bytes >= release, Workspace.used_storage_bytes - release),
+                    else_=0,
+                )
+            )
+        )
+        reservation.status = "RELEASED_INVALID"
+        session.flush()
+        return True
 
     def record_deduplicated(
         self,

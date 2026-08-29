@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     # How long one sweeper's claim on a row stays exclusive before a crashed
     # sweep becomes re-claimable by another worker.
     rendition_gc_lease_seconds: int = 600
+    # Asynchronous full-content verification of directly uploaded media.
+    # 0 disables the worker sweep (the internal endpoint still works).
+    media_verification_interval_seconds: int = 60
+    media_verification_limit: int = 20
+    # A VERIFYING claim older than this lapses and the asset re-verifies —
+    # a worker that crashed mid-decode cannot strand an upload.
+    media_verification_lease_seconds: int = 900
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The project's image-generation model, served by POST /images.

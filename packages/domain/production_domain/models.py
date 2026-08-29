@@ -1844,7 +1844,13 @@ class MediaAsset(Base, TimestampMixin):
             "lineage_key",
             name="uq_media_asset_lineage_hash",
         ),
+        CheckConstraint(
+            "verification_status IN ('READY', 'PENDING_VERIFICATION', 'VERIFYING', "
+            "'INVALID', 'QUARANTINED')",
+            name="ck_media_asset_verification_status",
+        ),
         Index("ix_asset_provider_media", "provider", "provider_media_id"),
+        Index("ix_media_asset_verification", "verification_status", "verification_claimed_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
@@ -1868,6 +1874,20 @@ class MediaAsset(Base, TimestampMixin):
     generation_candidate_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_candidates.id"), index=True
     )
+    # Content verification. Paths that validate full bytes inline (multipart
+    # upload, downloaded provider output) register READY; a direct upload is
+    # adopted from a HEAD plus a 64 KB header and registers
+    # PENDING_VERIFICATION, is claimed to VERIFYING by the async verifier
+    # (leased, so a crashed worker's claim lapses and the row re-verifies),
+    # and only a full decode promotes it to READY. INVALID is a file that
+    # does not decode; QUARANTINED is one whose bytes contradict what was
+    # declared (forged MIME, SHA mismatch). Providers and build chains may
+    # only consume READY assets.
+    verification_status: Mapped[str] = mapped_column(
+        String(30), default="READY", server_default="READY", nullable=False
+    )
+    verification_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_error: Mapped[str | None] = mapped_column(String(500))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 

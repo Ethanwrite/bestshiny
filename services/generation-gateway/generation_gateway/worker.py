@@ -163,6 +163,37 @@ def sweep_rendition_gc_once(container) -> int:  # type: ignore[no-untyped-def]
     return len(result.deleted_rows)
 
 
+def verify_media_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Fully verify directly uploaded media. Never fatal to the worker.
+
+    Completion adopted the object from a header read; this decodes the whole
+    file (and re-checks its SHA) before the asset may serve providers.
+    Failures release the workspace's settled bytes and land in INVALID or
+    QUARANTINED, never in a silent retry loop.
+    """
+
+    from media_service import WorkspaceStorageQuota, verify_pending_assets
+
+    result = verify_pending_assets(
+        database=container.database,
+        storage=container.storage,
+        quota=WorkspaceStorageQuota(container.database),
+        limit=max(1, container.settings.media_verification_limit),
+        lease_seconds=container.settings.media_verification_lease_seconds,
+    )
+    if result.invalid or result.quarantined:
+        logger.warning(
+            "media verification: %d ready, %d invalid, %d quarantined (%d quota releases)",
+            result.verified_ready,
+            result.invalid,
+            result.quarantined,
+            result.quota_released,
+        )
+    elif result.verified_ready:
+        logger.info("media verification: %d asset(s) promoted to READY", result.verified_ready)
+    return result.verified_ready
+
+
 def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-def]
     """Run the shadow Character Evidence lifecycle pass. Never fatal.
 
@@ -201,13 +232,21 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
     rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
+    verification_interval = max(0, int(container.settings.media_verification_interval_seconds))
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
     next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
     next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
     next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
+    next_verification = asyncio.get_running_loop().time() if verification_interval else None
     while True:
+        if next_verification is not None and asyncio.get_running_loop().time() >= next_verification:
+            try:
+                await asyncio.to_thread(verify_media_once, container)
+            except Exception:
+                logger.exception("media verification sweep failed")
+            next_verification = asyncio.get_running_loop().time() + verification_interval
         if (
             next_rendition_gc is not None
             and asyncio.get_running_loop().time() >= next_rendition_gc

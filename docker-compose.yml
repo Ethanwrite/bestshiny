@@ -1,5 +1,14 @@
 # Production-oriented local stack. Alibaba OSS is the only durable media plane;
 # /data/media is a disposable processing cache shared by API and worker.
+
+# Pinned so the project name never follows the checkout directory. It was
+# directory-derived until 2026-08-30, when moving the repository up one level
+# left the running stack bound to a compose file that no longer existed: it
+# stayed invisible to `docker compose ps` in the new tree, and a fresh `up`
+# would have built a differently-named project on empty volumes rather than
+# the dev database in ai-director-platform_postgres_data.
+name: ai-director-platform
+
 x-platform-runtime: &platform-runtime
   env_file:
     - .env

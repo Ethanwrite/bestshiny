@@ -17,11 +17,16 @@ Worse than useless: the reservation is taken before the adapter's policy check,
 so each blocked attempt consumed a live-canary request and left an `UNCERTAIN`
 usage holding budget that never settles.
 
-`openrouter / openai/gpt-5.6-sol` is already the bound `PROMPT_REFINER_FALLBACK`
-for the same scope, is `CONFIGURED`, and was verified end to end from the
-production container — a real completion settled at $0.00016. Binding the
-primary to it makes the paid tiers refine through a path that works, without
-changing the RunAPI policy flag. FREE keeps Seedance and is untouched.
+`openrouter / anthropic/claude-sonnet-5` takes the primary. OpenRouter itself
+was verified end to end from the production container — a real completion on
+`openai/gpt-5.6-sol` settled at $0.00016 — so the transport is known good, and
+Claude Sonnet 5 is a stronger first pass than the Seedance model FREE uses.
+
+The obvious choice, `openai/gpt-5.6-sol`, is deliberately *not* used: it is
+already the bound `PROMPT_REFINER_FALLBACK` for this scope, and pointing the
+primary at it too would collapse both legs onto one model. A fact-lock rejection
+would then retry the identical model instead of getting the second opinion the
+two-tier design exists for. FREE keeps Seedance and is untouched.
 
 The update is guarded on the binding still pointing at the RunAPI model, so an
 administrator's later change is left alone rather than overwritten, and it is a
@@ -48,7 +53,7 @@ depends_on = None
 ROLE = "PROMPT_REFINER_LOW_COST"
 PLAN_TIER = "ALL"
 RUNAPI = ("runapi", "gpt-5.6-luna")
-OPENROUTER = ("openrouter", "openai/gpt-5.6-sol")
+CLAUDE_SONNET = ("openrouter", "anthropic/claude-sonnet-5")
 
 _REBIND = """
     update model_role_bindings
@@ -95,8 +100,8 @@ def _rebind(source: tuple[str, str], target: tuple[str, str]) -> None:
 
 
 def upgrade() -> None:
-    _rebind(RUNAPI, OPENROUTER)
+    _rebind(RUNAPI, CLAUDE_SONNET)
 
 
 def downgrade() -> None:
-    _rebind(OPENROUTER, RUNAPI)
+    _rebind(CLAUDE_SONNET, RUNAPI)

@@ -1515,8 +1515,8 @@ def test_prompt_refiner_rebind_moves_only_the_paid_tier_binding(tmp_path, monkey
         )
         connection.execute(
             definition.bindparams(
-                id="def-openrouter", logical="gpt-5.6-sol-openrouter", provider="openrouter",
-                model="openai/gpt-5.6-sol", trust="PRODUCTION", now=now,
+                id="def-openrouter", logical="claude-sonnet-5-openrouter", provider="openrouter",
+                model="anthropic/claude-sonnet-5", trust="PRODUCTION", now=now,
             )
         )
         connection.execute(binding.bindparams(id="bind-all", tier="ALL", definition="def-runapi", now=now))

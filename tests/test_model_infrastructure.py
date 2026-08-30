@@ -304,7 +304,7 @@ def test_paid_tier_prompt_refiner_binds_to_a_provider_that_is_switched_on(contai
         asset_criticality=AssetCriticality.EDGE,
     )
     assert route.provider == "openrouter"
-    assert route.provider_model_id == "openai/gpt-5.6-sol"
+    assert route.provider_model_id == "anthropic/claude-sonnet-5"
 
 
 def test_live_reconciliation_reports_before_it_writes(container) -> None:  # type: ignore[no-untyped-def]

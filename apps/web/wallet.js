@@ -18,6 +18,7 @@ const paymentState = {
 };
 
 const element = (id) => document.getElementById(id);
+const humanStatus = (status = "") => String(status).replaceAll("_", " ").toLowerCase();
 
 function cookieValue(name) {
   const prefix = `${encodeURIComponent(name)}=`;
@@ -72,19 +73,19 @@ function render() {
   // number inside it, never the button's text content.
   const amount = element("creditsAmount");
   if (amount && paymentState.billing) {
-    amount.textContent = `${paymentState.billing.credit_balance.toLocaleString()} CR`;
+    amount.textContent = `${paymentState.billing.credit_balance.toLocaleString()} credits`;
   }
   element("walletBtn").title = isPro ? "Top up credits" : "Upgrade to Pro";
 
   element("walletCreditBalance").textContent = paymentState.billing
-    ? `${paymentState.billing.credit_balance.toLocaleString()} CR`
+    ? `${paymentState.billing.credit_balance.toLocaleString()} credits`
     : "—";
   element("walletNetwork").textContent = paymentState.config?.network === "BASE_MAINNET"
     ? "Base Mainnet"
     : "Base";
   element("walletCreditingStatus").textContent = paymentState.config?.depay_callback_configured
-    ? "Signed callback configured"
-    : "Not configured";
+    ? "Ready"
+    : "Not configured yet";
   element("walletTitle").textContent = isPro ? "Top up credits" : "Upgrade to Pro";
   element("walletDescription").textContent = isPro
     ? `Each payment of ${price} adds ${credits} more credits.`
@@ -156,7 +157,7 @@ async function pollCheckout(checkoutId) {
       return;
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
-      setMessage("", `Payment state is ${checkout.status}. Ask an admin to reconcile it.`);
+      setMessage("", `This payment did not complete (${humanStatus(checkout.status)}). An administrator can restore it.`);
       return;
     }
     paymentState.pollTimer = window.setTimeout(() => pollCheckout(checkoutId), 3000);
@@ -167,7 +168,7 @@ async function pollCheckout(checkoutId) {
 
 async function createCheckout() {
   setBusy(true);
-  setMessage("Creating a PaymentIntent…");
+  setMessage("Preparing your payment…");
   try {
     const checkout = await api(
       `/v1/workspaces/${paymentState.workspace.id}/depay-checkouts`,
@@ -182,7 +183,7 @@ async function createCheckout() {
       color: { dark: "#07131f", light: "#ffffff" },
     });
     element("depayCheckoutSummary").textContent =
-      `${checkout.expected_usdc} USDC · ${checkout.expected_credits.toLocaleString()} Credits · ${checkout.order_ref}`;
+      `${checkout.expected_usdc} USDC · ${checkout.expected_credits.toLocaleString()} credits`;
     setMessage("Scan the code or open DePay to confirm the Base USDC payment.");
     render();
     pollCheckout(checkout.id);

@@ -15,7 +15,7 @@ const workspaceShot = () => `
     <div class="pub-shot-bar">
       <div class="pub-shot-dots"><i></i><i></i><i></i></div>
       <div class="pub-shot-tabs"><span>Create</span><span class="on" data-shot-tab="director">Director</span><span data-shot-tab="productions">Productions</span></div>
-      <span class="pub-shot-credits">2,480 CR</span>
+      <span class="pub-shot-credits">2,480 credits</span>
     </div>
     <div class="pub-shot-body">
       <div class="pub-shot-rail">
@@ -44,7 +44,7 @@ const workspaceShot = () => `
       <div class="pub-shot-fact"><span>Duration</span><b id="pubShotDuration">4.0s</b></div>
       <div class="pub-shot-fact"><span>Model</span><b id="pubShotModel">Auto · Veo</b></div>
       <div class="pub-shot-fact"><span>Resolution</span><b>1080p</b></div>
-      <div class="pub-shot-fact"><span>Estimated</span><b>18 CR</b></div>
+      <div class="pub-shot-fact"><span>Estimated</span><b>18 credits</b></div>
       <span class="pub-shot-generate" id="pubShotCta">Generate shot</span>
     </div>
   </div>`;
@@ -107,7 +107,7 @@ function landing() {
         </article>
         <article class="pub-cap pub-cap-accent-2">
           <span class="pub-cap-no">02</span>
-          <h3>AI Director</h3>
+          <h3>BestShiny Director</h3>
           <p>A script becomes an ordered shot list that knows what state each shot opens and closes in.</p>
           <ul>
             <li>Scene and shot tree, with the original script one click away</li>
@@ -281,7 +281,7 @@ function productPage() {
 
   <section class="pub-section">
     <div class="pub-inner">
-      <span class="pub-eyebrow">Pipeline</span>
+      <span class="pub-eyebrow">Production flow</span>
       <h2 class="pub-h2">Six steps, and you approve every one.</h2>
       <div class="pub-flow">
         ${WORKFLOW.map(([no, name, copy]) => `
@@ -300,7 +300,7 @@ function productPage() {
           <tbody>
             <tr><td><strong>Your model choice stands</strong></td><td><span>A model you pick is never silently replaced by a cheaper one. If it cannot run, you are told why.</span></td></tr>
             <tr><td><strong>Originals are never re-encoded</strong></td><td><span>Provider size limits are met with derived renditions. Your master file stays byte-identical.</span></td></tr>
-            <tr><td><strong>One submission, one charge</strong></td><td><span>Retries reuse the same idempotency key. A dropped connection does not buy the same shot twice.</span></td></tr>
+            <tr><td><strong>One submission, one charge</strong></td><td><span>A dropped connection never buys the same shot twice — retries reuse the original submission.</span></td></tr>
             <tr><td><strong>Canonical is explicit</strong></td><td><span>A new version never becomes the project reference unless you tick the box that says so.</span></td></tr>
             <tr><td><strong>Approval is human</strong></td><td><span>When automated checks cannot decide, the shot waits for you and records the reason you gave.</span></td></tr>
           </tbody>
@@ -411,14 +411,14 @@ function pricingPage() {
         <table class="pub-table">
           <thead><tr><th>Operation</th><th>What you get</th><th>Typical</th></tr></thead>
           <tbody>
-            <tr><td><strong>Frame render</strong></td><td><span>One HD still, references bound</span></td><td><span class="mono">~8 CR</span></td></tr>
-            <tr><td><strong>Character identity lock</strong></td><td><span>Multi-angle reference extracted and version-locked</span></td><td><span class="mono">~6 CR</span></td></tr>
-            <tr><td><strong>Full shot breakdown</strong></td><td><span>Script compiled into an ordered shot list</span></td><td><span class="mono">~20 CR</span></td></tr>
+            <tr><td><strong>Frame render</strong></td><td><span>One HD still, references bound</span></td><td><span class="mono">~8 credits</span></td></tr>
+            <tr><td><strong>Character identity lock</strong></td><td><span>Multi-angle reference extracted and version-locked</span></td><td><span class="mono">~6 credits</span></td></tr>
+            <tr><td><strong>Full shot breakdown</strong></td><td><span>Script compiled into an ordered shot list</span></td><td><span class="mono">~20 credits</span></td></tr>
             <tr><td><strong>Video shot</strong></td><td><span>Depends on model, duration and resolution</span></td><td><span class="mono">quoted live</span></td></tr>
           </tbody>
         </table>
       </div>
-      <p class="pub-price-note">Payment settles in native USDC on Base through DePay. Credits post on webhook confirmation.</p>
+      <p class="pub-price-note">Payment settles in native USDC on Base through DePay. Credits are added the moment the payment is confirmed.</p>
     </div>
   </section>
 
@@ -432,7 +432,7 @@ function pricingPage() {
 const PAGES = { "/": landing, "/product": productPage, "/models": modelsPage, "/pricing": pricingPage };
 
 /* ---------------------------------------------------------------
-   Demo: walk the mock workspace through the six pipeline steps.
+   Demo: walk the mock workspace through the six production steps.
    No video, no fake footage — it animates the real state vocabulary.
    --------------------------------------------------------------- */
 let demoTimer = null;

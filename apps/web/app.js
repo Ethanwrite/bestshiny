@@ -124,6 +124,39 @@ const simpleLabel = (value) => ({
   kling: "Kling", runway: "Runway", omni: "Omni", wan: "Wan",
 }[value] || value || "—");
 
+/** Public names for the models the platform runs. Raw provider model IDs
+ *  and version hashes are backend facts; the UI only ever shows these. */
+const MODEL_LABELS = {
+  "doubao-seedream-5-0-260128": "Shiny",
+  "NARWHAL": "Shinier",
+  "openai/gpt-image-2": "Shiniest",
+  "doubao-seedance-2-5-260628": "Seedance Cinema",
+  "kwaivgi/kling-v3.0-std": "Kling Standard",
+  "kwaivgi/kling-v3.0-pro": "Kling Pro",
+  "x-ai/grok-imagine-video": "Grok Imagine",
+  "google/veo-3.1": "Veo Quality",
+  "google/veo-3.1-fast": "Veo Fast",
+  "google/veo-3.1-lite": "Veo Lite",
+  "alibaba/wan-3.0": "Wan 3.0",
+  "wan2.7-t2v-2026-06-12": "Wan Motion",
+  "wan-2.7": "Wan Motion",
+  "flow-veo-3.1": "Flow Cinema",
+};
+const friendlyModel = (modelId) => MODEL_LABELS[modelId] || (modelId ? "Studio model" : "—");
+
+/** The public image quality levels. The backend owns what each level runs on;
+ *  the browser only ever sends the level's name. */
+const IMAGE_TIERS = [
+  { value: "shiny", stars: "\u2728", name: "Shiny", plan: "Free", tagline: "Fast creation, stable image generation" },
+  { value: "shinier", stars: "\u2728\u2728", name: "Shinier", plan: "Pro", tagline: "Richer details and stronger visual expression" },
+  { value: "shiniest", stars: "\u2728\u2728\u2728", name: "Shiniest", plan: "Pro", tagline: "Highest quality and finest visual detail" },
+];
+
+const isFreeWorkspace = () =>
+  Boolean(state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE"));
+
+const humanizeCode = (code = "") => String(code).replaceAll("_", " ").toLowerCase();
+
 /** Status → the four-colour vocabulary. Never red for "not configured". */
 function statusTone(status) {
   if (["COMPLETED", "PASSED", "PASS", "COMMITTED", "READY"].includes(status)) return "is-ok";
@@ -341,7 +374,7 @@ async function health() {
     pill.innerHTML = "<i></i>Online";
   } catch (_error) {
     pill.className = "status-pill is-danger";
-    pill.innerHTML = "<i></i>API offline";
+    pill.innerHTML = "<i></i>Offline";
   }
 }
 
@@ -351,14 +384,14 @@ async function loadCredits() {
   const billing = await request(`/v1/workspaces/${workspace.id}/billing`).catch(() => null);
   if (!billing) return;
   state.credits = billing.credit_balance;
-  $("creditsAmount").textContent = `${Number(billing.credit_balance).toLocaleString()} CR`;
+  $("creditsAmount").textContent = `${Number(billing.credit_balance).toLocaleString()} credits`;
 }
 
 /* ============================================================
    Page switching
    ============================================================ */
 const PAGE_HINT = {
-  create: "Describe the frame, pick a model, generate.",
+  create: "Describe the frame, pick a quality level, generate.",
   "ai-director": "Bring a vague idea; approve the brief, visuals, bible and beats.",
   director: "Compile a script, then direct one shot at a time.",
   productions: "Every generation job, with progress, cost and recovery.",
@@ -395,8 +428,9 @@ function setPassengerMedia(media) {
     button.classList.toggle("active", button.dataset.media === media);
   });
   const video = media === "video";
-  // Image work is routed from creative intent; only video exposes a model.
+  // Image work picks a public quality level; only video exposes a route list.
   $("imageTaskGroup").hidden = video;
+  $("imageModelGroup").hidden = video;
   $("videoModelGroup").hidden = !video;
   $("passengerDurationField").classList.toggle("hidden", !video);
   $("barDurationFact").hidden = !video;
@@ -444,12 +478,40 @@ function renderPassengerModels() {
   const auto = '<option value="">Auto — Recommended</option>';
   $("passengerModel").innerHTML = auto + state.passengerModels
     .filter((model) => model.media === "video")
-    .map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(model.model_id)}</option>`)
+    .map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(friendlyModel(model.model_id))}</option>`)
     .join("");
   $("modelHint").textContent = freeVideo
     ? "Free plan video runs on Seedance. Upgrade to reach every route."
-    : "Auto lets the platform choose. Name a model and that exact model runs, or the request is refused.";
+    : "Auto lets the platform choose. Pick a route and exactly that route runs, or the request is refused.";
+  renderImageTierOptions();
   updatePassengerCost();
+}
+
+function renderImageTierOptions() {
+  const select = $("passengerImageTier");
+  if (!select) return;
+  const free = isFreeWorkspace();
+  const previous = select.value;
+  select.innerHTML = IMAGE_TIERS.map((tier) => {
+    const locked = free && tier.plan === "Pro";
+    return `<option value="${tier.value}" ${locked ? "disabled" : ""}>`
+      + `${tier.stars} ${tier.name}${locked ? " \u{1F512}" : ""} — ${tier.plan}</option>`;
+  }).join("");
+  const selectable = [...select.options].find((option) => option.value === previous && !option.disabled);
+  select.value = selectable ? previous : "shiny";
+  syncImageTierHint();
+}
+
+function selectedImageTier() {
+  return IMAGE_TIERS.find((tier) => tier.value === $("passengerImageTier")?.value) || IMAGE_TIERS[0];
+}
+
+function syncImageTierHint() {
+  const tier = selectedImageTier();
+  const free = isFreeWorkspace();
+  $("imageTierHint").textContent = free && tier.plan === "Pro"
+    ? `${tier.name} is part of the Pro plan.`
+    : tier.tagline;
 }
 
 function selectedPassengerModel() {
@@ -475,29 +537,31 @@ function updatePassengerCost() {
   $("barAspect").textContent = $("passengerAspect").value;
   $("barResolution").textContent = $("passengerResolution").value;
   $("barDuration").textContent = `${$("passengerDuration").value || 4}s`;
-  $("barModel").textContent = profile ? `${simpleLabel(profile.provider)} · ${profile.model_id}` : "None";
-  $("advProvider").textContent = profile ? simpleLabel(profile.provider) : "—";
-  $("advModelVersion").textContent = profile?.version || profile?.model_id || "—";
-  $("advPricing").textContent = profile?.cost
-    ? (state.passengerMedia === "image"
-      ? `$${Number(profile.cost.estimated_per_image || 0).toFixed(3)} / image`
-      : `$${Number(profile.cost.estimated_per_second || 0).toFixed(3)} / s`)
-    : "provider settled";
+  $("barModel").textContent = profile
+    ? `${simpleLabel(profile.provider)} · ${friendlyModel(profile.model_id)}`
+    : "None";
+  $("advModel").textContent = profile ? friendlyModel(profile.model_id) : "—";
+  $("advPricing").textContent = "Quoted before you generate";
+  syncImageTierHint();
 
   if (!profile) {
-    // Nothing is quoted until the router has resolved a target, so the figure the
-    // user sees can never belong to a model other than the one that runs.
+    // Nothing is quoted until the platform has resolved a target, so the figure
+    // the user sees can never belong to a model other than the one that runs.
     const routed = state.passengerMedia === "image" || isAutoModel();
-    $("passengerCost").textContent = routed ? "Quoted on submit" : "Pick a model";
-    $("barModel").textContent = state.passengerMedia === "image"
-      ? `Routed · ${$("passengerImageTask").selectedOptions[0]?.text.replace(/ —.*$/, "") || "Auto"}`
-      : (isAutoModel() ? "Auto" : "None");
+    $("passengerCost").textContent = routed ? "Quoted on submit" : "Pick a route";
+    if (state.passengerMedia === "image") {
+      const tier = selectedImageTier();
+      $("barModel").textContent = `${tier.stars} ${tier.name}`;
+      $("advModel").textContent = `${tier.stars} ${tier.name}`;
+    } else {
+      $("barModel").textContent = isAutoModel() ? "Auto" : "None";
+    }
     return;
   }
   const estimate = passengerEstimatedCost();
   $("passengerCost").textContent = estimate > 0
-    ? `${Math.max(1, Math.ceil(estimate / .01))} CR · $${estimate.toFixed(2)}`
-    : "Settled on the provider account";
+    ? `About ${Math.max(1, Math.ceil(estimate / .01))} credits`
+    : "Quoted on submit";
 }
 
 function passengerReferenceFingerprint(projectId, file) {
@@ -665,9 +729,8 @@ async function renderPassengerJob(job) {
     <div class="result-bar">
       <span class="status-chip ${tone}">${escapeHTML(displayedStatus)}</span>
       <div class="result-meta">
-        <div><span>Model</span><strong>${simpleLabel(job.provider)} · ${escapeHTML(job.model || "—")}</strong></div>
-        <div><span>Job</span><strong>${escapeHTML(job.id)}</strong></div>
-        <div><span>Output asset</span><strong>${escapeHTML(job.output_asset_id || "pending")}</strong></div>
+        <div><span>Model</span><strong>${escapeHTML(friendlyModel(job.model))}</strong></div>
+        <div><span>Creation ID</span><strong>${escapeHTML(job.id)}</strong></div>
       </div>
     </div>`;
   const confirmed = state.confirmedAssets.has(job.output_asset_id);
@@ -692,6 +755,7 @@ async function generatePassenger() {
   const duration = mediaType === "video" ? Number($("passengerDuration").value || 4) : null;
   const negativePrompt = $("passengerNegativePrompt").value.trim();
   const criticality = $("passengerCriticality").value;
+  const imageTier = isImage ? $("passengerImageTier").value : null;
   const estimatedCost = passengerEstimatedCost();
   const freeVideo = mediaType === "video"
     && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
@@ -701,6 +765,7 @@ async function generatePassenger() {
     provider: auto ? "" : selection.provider,
     model: auto ? "" : selection.model_id,
     imageTask: isImage ? imageTask : null,
+    imageTier,
     modelRole: !isImage && auto && freeVideo ? "VIDEO_SEEDANCE" : null,
     prompt, negativePrompt, criticality, aspectRatio, resolution, duration, estimatedCost,
     file: file ? [file.name, file.size, file.lastModified] : null,
@@ -724,7 +789,7 @@ async function generatePassenger() {
       // pairing it with a role would ask the server to route and obey at once.
       provider: auto ? "" : selection.provider,
       model: auto ? "" : selection.model_id,
-      ...(isImage ? { image_task: imageTask } : {}),
+      ...(isImage ? { image_task: imageTask, image_tier: imageTier } : {}),
       ...(!isImage && auto && freeVideo ? { model_role: "VIDEO_SEEDANCE" } : {}),
       prompt,
       ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
@@ -742,8 +807,8 @@ async function generatePassenger() {
     await loadCredits();
     succeeded = true;
     toast(auto
-      ? `Submitted. Routed to ${simpleLabel(job.provider)} · ${job.model} — ${job.estimated_credits} CR.`
-      : "Submitted. Your chosen model is the one that runs and the one you are billed for.");
+      ? `Submitted on ${friendlyModel(job.model)} — ${job.estimated_credits} credits.`
+      : "Submitted. The route you chose is the one that runs and the one you are billed for.");
   } finally {
     finishSubmission("passenger", idempotencyKey, succeeded);
     button.disabled = false;
@@ -847,9 +912,9 @@ function renderProjectStyleLock() {
   $("lockProjectStyleBtn").disabled = Boolean(state.styleLock?.locked) || !lockable;
   $("lockProjectStyleBtn").textContent = state.styleLock?.locked ? "Project style is locked" : "Lock as the project's style";
   $("projectStyleLockStatus").textContent = state.styleLock?.locked
-    ? `Locked to version ${state.styleLock.style_version_id.slice(0, 8)}. Later shots inherit it and are checked for drift.`
+    ? "Locked. Later shots inherit this look and are checked for drift."
     : (lockable
-      ? "Locking is permanent. A style embedding is extracted and applied as a gate on every later generation."
+      ? "Locking is permanent. The look is captured once and every later generation is checked against it."
       : "Promote a style version to canonical first, then a project member can lock it explicitly.");
 }
 
@@ -1317,7 +1382,7 @@ function renderCandidates(candidates) {
       </div>
       <div class="score-bars">${scores.map(([name, value]) => `
         <div class="score-row ${value >= 75 ? "is-strong" : ""}"><span>${name}</span><div class="bar"><i style="width:${value}%"></i></div><b>${value}</b></div>`).join("")}</div>
-      <div class="output-box">${escapeHTML(qa.summary || "Waiting for generation or checks")}<br>$${candidate.cost.toFixed(2)} · ${Math.max(1, Math.ceil(candidate.cost / .01))} CR</div>
+      <div class="output-box">${escapeHTML(humanizeCode(qa.summary) || "Waiting for generation or checks")}<br>${Math.max(1, Math.ceil(candidate.cost / .01))} credits</div>
       ${humanReview}
       <div class="variant-actions">${validateAction}${commitAction}</div>
     </article>`;
@@ -1554,7 +1619,7 @@ function renderProductions() {
   $("prodCountFailed").textContent = counts.failed;
   $("barJobCount").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
   const spend = jobs.reduce((total, job) => total + Number(job.cost || 0), 0);
-  $("barJobSpend").textContent = `${Math.ceil(spend / .01) || 0} CR`;
+  $("barJobSpend").textContent = `${Math.ceil(spend / .01) || 0} credits`;
 
   const visible = state.jobFilter === "all" ? jobs : jobs.filter((job) => bucketOf(job) === state.jobFilter);
   if (!visible.length) {
@@ -1577,7 +1642,7 @@ function renderProductions() {
   list.innerHTML = visible.map((job) => {
     const bucket = bucketOf(job);
     const tone = statusTone(job.status);
-    const credits = job.cost ? `${Math.max(1, Math.ceil(job.cost / .01))} CR` : "—";
+    const credits = job.cost ? `${Math.max(1, Math.ceil(job.cost / .01))} credits` : "—";
     return `<button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job="${escapeHTML(job.id)}">
       <span class="job-rail ${tone}"></span>
       <span class="job-main">
@@ -1724,8 +1789,8 @@ function renderGenerationControl(job) {
   $("generationControlStatus").className = "output-box";
   $("generationControlStatus").innerHTML = `
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
-    Provider ${escapeHTML(simpleLabel(job.provider))} · model ${escapeHTML(job.model || "—")}<br>
-    Submission ${escapeHTML(simpleLabel(job.submission_state))} · credits ${escapeHTML(simpleLabel(job.credit_status))}<br>
+    ${escapeHTML(simpleLabel(job.provider))} · ${escapeHTML(friendlyModel(job.model))}<br>
+    Stage ${escapeHTML(humanizeCode(simpleLabel(job.submission_state)))} · credits ${escapeHTML(humanizeCode(simpleLabel(job.credit_status)))}<br>
     Attempts ${Number(job.attempt_count || 0)}
     ${job.error_message ? `<br><span style="color:var(--danger)">${escapeHTML(job.error_message)}</span>` : ""}`;
   $("retryJobBtn").disabled = job.safe_to_retry !== true;
@@ -1992,7 +2057,7 @@ async function confirmPasswordReset(event) {
 }
 
 /* ============================================================
-   Create with AI Director page
+   Create with BestShiny Director page
    ============================================================ */
 const CREATIVE_STAGE_LABEL = {
   INTAKE: "Idea", CLARIFYING: "Clarifying", BRIEF_PROPOSED: "Brief proposed",
@@ -2194,7 +2259,7 @@ async function creativeApproveBrief() {
   });
   const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
   if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
-  else toast("Brief approved. Key visuals are generating through the ordinary pipeline.");
+  else toast("Brief approved. Your key visuals are being created now.");
   await openCreativeSession(view.session.id);
 }
 
@@ -2429,6 +2494,7 @@ on("undoImagePromptBtn", "click", undoPassengerPrompt);
 on("passengerGenerateBtn", "click", guard(generatePassenger));
 on("passengerRefreshBtn", "click", guard(refreshPassengerJob));
 on("passengerModel", "change", updatePassengerCost);
+on("passengerImageTier", "change", () => { syncImageTierHint(); updatePassengerCost(); });
 on("passengerImageTask", "change", updatePassengerCost);
 on("passengerAspect", "change", updatePassengerCost);
 on("passengerDuration", "input", updatePassengerCost);
@@ -2473,7 +2539,7 @@ on("manualExistingAsset", "change", guard(syncManualAssetSelection));
 on("manualAssetUploadBtn", "click", guard(uploadManualAssetVersion));
 on("lockProjectStyleBtn", "click", guard(lockSelectedProjectStyle));
 
-/* Create with AI Director */
+/* Create with BestShiny Director */
 on("creativeStartBtn", "click", guard(startCreativeSession));
 on("creativeReplyBtn", "click", guard(sendCreativeReply));
 on("creativeReplyInput", "keydown", (event) => {
@@ -2566,6 +2632,7 @@ window.addEventListener("ai-director:plan-changed", (event) => {
   if (!workspace || !event.detail?.planTier) return;
   workspace.plan_tier = event.detail.planTier;
   renderPassengerModels();
+  renderImageTierOptions();
   loadCredits().catch(() => null);
 });
 

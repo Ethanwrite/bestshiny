@@ -104,7 +104,7 @@
 
         <nav class="app-nav" aria-label="Workspace">
           <button class="app-nav-item active" data-mode="create" type="button">Create</button>
-          <button class="app-nav-item" data-mode="ai-director" type="button">Create with AI Director</button>
+          <button class="app-nav-item" data-mode="ai-director" type="button">BestShiny Director</button>
           <button class="app-nav-item" data-mode="director" type="button">Director</button>
           <button class="app-nav-item" data-mode="productions" type="button">Productions</button>
         </nav>
@@ -140,9 +140,9 @@
             <button data-media="video" type="button" role="tab">Video</button>
           </div>
           <span class="subbar-sep" aria-hidden="true"></span>
-          <span id="modeDescription" class="subbar-hint">Describe the frame, pick a model, generate.</span>
+          <span id="modeDescription" class="subbar-hint">Describe the frame, pick a quality level, generate.</span>
         </div>
-        <!-- Create with AI Director -->
+        <!-- Create with BestShiny Director -->
         <div class="subbar-pane" data-page="ai-director" hidden>
           <span id="creativeStageCrumb" class="subbar-crumb">No session</span>
           <span class="subbar-sep" aria-hidden="true"></span>
@@ -216,7 +216,7 @@
             </section>
           </div>
 
-          <!-- AI Director sidebar: sessions + the idea box -->
+          <!-- BestShiny Director sidebar: sessions + the idea box -->
           <div class="pane" data-page="ai-director" hidden>
             <section class="pane-block">
               <div class="pane-head">
@@ -225,7 +225,7 @@
               <label class="field"><span class="field-label">What do you want to make?</span>
                 <textarea id="creativeIdeaInput" rows="5" placeholder="e.g. 一支30秒的悬疑短剧，主角是雨桐，在天台，竖屏 — or just a rough feeling. The director asks only for what is missing."></textarea>
               </label>
-              <button id="creativeStartBtn" class="btn btn-primary btn-full" type="button">Start with the AI Director</button>
+              <button id="creativeStartBtn" class="btn btn-primary btn-full" type="button">Start with BestShiny Director</button>
               <p class="pane-note">Vague is fine. The director clarifies, drafts a brief, generates key visuals, locks a visual bible, then plans beats and shots.</p>
             </section>
             <section class="pane-block pane-block-grow">
@@ -313,10 +313,10 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
             </div>
           </section>
 
-          <!-- AI Director canvas: dialogue plus staged approvals -->
+          <!-- BestShiny Director canvas: dialogue plus staged approvals -->
           <section id="creativeWorkspace" class="pane canvas-pane" data-page="ai-director" hidden>
             <div class="canvas-toolbar">
-              <h1 class="page-title">Create with AI Director</h1>
+              <h1 class="page-title">Create with BestShiny Director</h1>
               <div class="btn-row">
                 <button id="creativeGoDirectorBtn" class="btn btn-secondary" type="button" hidden>Open in Director</button>
               </div>
@@ -459,6 +459,13 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <h2 id="inspectorTitle">Generation settings</h2>
             </div>
             <div class="inspector-body">
+              <section class="group" id="imageModelGroup">
+                <h3 class="group-title">Image model</h3>
+                <label class="field"><span class="field-label">Quality level</span>
+                  <select id="passengerImageTier"></select>
+                </label>
+                <p id="imageTierHint" class="field-note"></p>
+              </section>
               <section class="group" id="imageTaskGroup">
                 <h3 class="group-title">Creative task</h3>
                 <label class="field"><span class="field-label">What are you making?</span>
@@ -500,15 +507,14 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 </label>
                 <p class="field-note">Criticality raises the trust bar the platform requires of a provider before it accepts the result.</p>
                 <div class="kv-list">
-                  <div class="kv"><span>Provider</span><b id="advProvider" class="mono">—</b></div>
-                  <div class="kv"><span>Model version</span><b id="advModelVersion" class="mono">—</b></div>
-                  <div class="kv"><span>Pricing</span><b id="advPricing" class="mono">—</b></div>
+                  <div class="kv"><span>Visual model</span><b id="advModel">—</b></div>
+                  <div class="kv"><span>Billing</span><b id="advPricing">Quoted before you generate</b></div>
                 </div>
               </details>
             </div>
           </div>
 
-          <!-- AI Director inspector: where you are in the flow -->
+          <!-- BestShiny Director inspector: where you are in the flow -->
           <div class="pane" data-page="ai-director" hidden>
             <div class="inspector-head">
               <span class="eyebrow">Inspector</span>
@@ -646,7 +652,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <div class="pane actionbar-pane" data-page="productions" hidden>
           <div class="actionbar-facts">
             <div class="fact"><span>Tracked</span><b id="barJobCount" class="mono">0 jobs</b></div>
-            <div class="fact fact-cost"><span>Session spend</span><b id="barJobSpend" class="mono">0 CR</b></div>
+            <div class="fact fact-cost"><span>Session spend</span><b id="barJobSpend" class="mono">0 credits</b></div>
           </div>
           <button class="btn btn-primary btn-cta" type="button" data-empty-action="go-create">New generation</button>
         </div>
@@ -663,7 +669,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <p id="newProjectDescription">Give it a name your team will recognise. You are switched to it once created.</p>
         </div>
         <label class="field" for="newProjectName"><span class="field-label">Project name</span>
-          <input id="newProjectName" name="projectName" maxlength="200" required autocomplete="off" aria-describedby="newProjectError" aria-invalid="false" value="Vertical short drama" />
+          <input id="newProjectName" name="projectName" maxlength="200" required autocomplete="off" aria-describedby="newProjectError" aria-invalid="false" placeholder="e.g. Vertical short drama" />
         </label>
         <p id="newProjectStatus" class="sheet-status" role="status" aria-live="polite"></p>
         <p id="newProjectError" class="sheet-error" role="alert"></p>
@@ -856,7 +862,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <div class="sheet-head">
           <span class="eyebrow">DePay · Base USDC</span>
           <h2 id="walletTitle">Top up credits</h2>
-          <p id="walletDescription">One payment, credits land on webhook confirmation. No subscription, no auto-renewal.</p>
+          <p id="walletDescription">One payment — credits are added the moment it is confirmed. No subscription, no auto-renewal.</p>
         </div>
         <div class="wallet-balance">
           <span>Workspace balance</span>
@@ -866,7 +872,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <div class="kv"><span>Network</span><b id="walletNetwork">Base</b></div>
           <div class="kv"><span>Currency</span><b>Native USDC</b></div>
           <div class="kv"><span>Settlement</span><b>DePay</b></div>
-          <div class="kv"><span>Callback</span><b id="walletCreditingStatus">Checking</b></div>
+          <div class="kv"><span>Crediting</span><b id="walletCreditingStatus">Checking</b></div>
         </div>
         <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
         <p id="walletError" class="sheet-error" role="alert"></p>
@@ -877,7 +883,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           </div>
           <p id="walletOfferBenefits">✓ Unlock Pro<br>✓ Includes 3,000 credits</p>
           <button id="payUsdcBtn" class="btn btn-primary btn-full" type="button" disabled>Pay with USDC</button>
-          <small class="field-note">Every click mints a fresh PaymentIntent and order_ref against the same fixed offer.</small>
+          <small class="field-note">Each attempt starts a fresh order for the same fixed offer — you can never be charged twice for one click.</small>
         </div>
         <div id="depayCheckout" class="depay-checkout" hidden>
           <img id="depayQrCode" alt="DePay payment QR code" width="200" height="200"

@@ -2,6 +2,15 @@
 
 Snapshot: 2026-08-29 · release-candidate integration branch · live gate OPEN · router evidence landed, LCB off · migration head `0060_flow_remote_owner_index` · companion to [`../HANDOFF.md`](../HANDOFF.md)
 
+> **2026-08-30 update.** Migration head is now `0064_free_tier_defaults`. The FREE plan
+> gained real model targets (Doubao chat, Seedream images) and hard usage gates; the
+> three Character Evidence defects (id-switch enforcement, callback-dedup transaction,
+> promotion authorization validation) are closed in code — the Modal app must be
+> redeployed to pick up the pipeline change. §2.40's dict/queue hardening has since
+> been deployed (2026-08-29), and the async handler now uses `.aio` so the
+> sync-in-async warnings stop on the next `modal deploy`. Details in
+> [`FREE_TIER_QA_HANDOVER_2026-08-30.md`](FREE_TIER_QA_HANDOVER_2026-08-30.md).
+
 Every item this session raised and did **not** finish, in one place. Section 1 needs you.
 Sections 2–4 are engineering work and need no decision from you.
 

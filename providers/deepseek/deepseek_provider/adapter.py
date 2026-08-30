@@ -5,7 +5,7 @@ from typing import Any
 from production_domain.models import RetryCategory
 from provider_sdk import ProviderError, ProviderHealth
 from provider_sdk.capabilities import ChatCapability
-from provider_sdk.http import ProviderJsonClient, provider_health_metadata
+from provider_sdk.http import ProviderJsonClient, provider_health_metadata, wire_parameters
 from provider_sdk.transport import LiveProviderSettings, ProviderTransport, create_provider_transport
 
 
@@ -53,7 +53,7 @@ class DeepSeekProvider(ChatCapability):
         return await self.client.request(
             "POST",
             "/chat/completions",
-            json_body={"model": selected, "messages": messages, **(parameters or {})},
+            json_body={"model": selected, "messages": messages, **wire_parameters(parameters)},
             submitted=True,
         )
 

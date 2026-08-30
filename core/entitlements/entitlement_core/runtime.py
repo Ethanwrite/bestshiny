@@ -181,19 +181,10 @@ class ModelRoleRuntime:
                     evidence_reference=f"model-execution-boundary:{request_hash}",
                 )
                 canary_boundary_crossed = True
-            # Underscore-prefixed keys are platform control fields (the edge
-            # task handle, cost hints) and must never reach a provider wire:
-            # Ark's chat adapter splats parameters into the request body, and
-            # a live call died on `EdgeTask is not JSON serializable` exactly
-            # there (production, 2026-08-30). Mock transports never serialize,
-            # which is why no offline test ever saw it.
-            provider_parameters = {
-                key: value for key, value in (parameters or {}).items() if not key.startswith("_")
-            }
             response = await implementation.chat(
                 model=selected.provider_model_id,
                 messages=messages,
-                parameters=provider_parameters or None,
+                parameters=parameters,
             )
             self._settle_live_canary(canary, response=response, request_hash=request_hash)
         except Exception as exc:

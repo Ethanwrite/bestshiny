@@ -18,7 +18,7 @@ from provider_sdk import (
     ProviderTrustLevel,
 )
 from provider_sdk.capabilities import ChatCapability
-from provider_sdk.http import ProviderJsonClient, provider_health_metadata
+from provider_sdk.http import ProviderJsonClient, provider_health_metadata, wire_parameters
 from provider_sdk.transport import LiveProviderSettings, ProviderTransport, create_provider_transport
 
 # Only these fields may reach the Ark image API. Tenancy, routing, accounting,
@@ -89,7 +89,10 @@ class ArkProvider(GenerationProvider, ChatCapability):
         return await self.client.request(
             "POST",
             "/chat/completions",
-            json_body={"model": selected, "messages": messages, **(parameters or {})},
+            # `wire_parameters` drops platform control fields; the live
+            # EdgeTask-serialization failure this guards against hit exactly
+            # this request on 2026-08-30.
+            json_body={"model": selected, "messages": messages, **wire_parameters(parameters)},
             submitted=True,
         )
 

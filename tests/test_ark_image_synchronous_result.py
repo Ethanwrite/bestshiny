@@ -65,6 +65,34 @@ async def test_b64_form_response_carries_inline_bytes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_strips_platform_control_fields_from_the_wire() -> None:
+    """The edge-task handle must never be serialized into an Ark request.
+
+    A live refine died on `EdgeTask is not JSON serializable` when the
+    low-cost refiner role was bound to Doubao (production, 2026-08-30);
+    mock transports never serialize, so only this explicit pin sees it.
+    """
+
+    transport = MockProviderTransport(
+        {("POST", "/chat/completions"): ProviderHttpResponse(200, {"choices": []})}
+    )
+    provider = ArkProvider(doubao_model_id="doubao-seed-2-0-lite-260428", transport=transport)
+
+    await provider.chat(
+        model="doubao-seed-2-0-lite-260428",
+        messages=[{"role": "user", "content": "hi"}],
+        parameters={"_edge_task": object(), "response_format": {"type": "json_object"}},
+    )
+
+    body = transport.requests[0].json_body
+    assert "_edge_task" not in body
+    assert body["response_format"] == {"type": "json_object"}
+    import json as json_module
+
+    json_module.dumps(body)  # the whole body must be wire-serializable
+
+
+@pytest.mark.asyncio
 async def test_response_without_url_or_bytes_is_refused() -> None:
     provider = _provider({"data": [{"id": "img-1"}]})
 

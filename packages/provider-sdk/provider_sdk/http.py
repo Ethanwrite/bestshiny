@@ -114,6 +114,21 @@ class ProviderJsonClient:
         )
 
 
+def wire_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop platform control fields before parameters reach a provider wire.
+
+    Underscore-prefixed keys (the RunAPI edge-task handle rides chat
+    parameters so that adapter can enforce its server-issued-task policy) are
+    platform-internal. An adapter that splats parameters into a JSON body must
+    filter them: a live refine died on `EdgeTask is not JSON serializable`
+    inside httpx when the low-cost refiner role was bound to a non-edge
+    provider (production, 2026-08-30). Mock transports never serialize, which
+    is why no offline test ever saw it.
+    """
+
+    return {key: value for key, value in (parameters or {}).items() if not key.startswith("_")}
+
+
 def _safe_error_message(body: dict[str, Any]) -> str:
     error = body.get("error")
     if isinstance(error, dict):
@@ -133,4 +148,4 @@ def provider_health_metadata(client: ProviderJsonClient) -> tuple[bool, str, dic
     return True, status, {"status": status, "mode": client.transport.mode.value}
 
 
-__all__ = ["ProviderJsonClient", "provider_health_metadata"]
+__all__ = ["ProviderJsonClient", "provider_health_metadata", "wire_parameters"]

@@ -251,6 +251,16 @@ def test_unconfigured_free_seedance_binding_fails_closed(container) -> None:
 
 
 def test_edge_role_binding_can_only_resolve_low_criticality(container) -> None:
+    """An EDGE-trust binding stays confined to EDGE work.
+
+    The shipped catalogue no longer points any role at an EDGE-trust model:
+    `0065` moved `PROMPT_REFINER_LOW_COST` to `openai/gpt-5.6-sol` because
+    RunAPI edge calls are refused while `ALLOW_RUNAPI_EDGE_CALLS=false`, and
+    that model is PRODUCTION trust — the same posture FREE has always had. The
+    floor is what this guards, so the binding is made here rather than borrowed
+    from a default that is free to change.
+    """
+
     service: ModelInfrastructureService = container.model_infrastructure
     with container.database.session() as session:
         edge = session.scalar(
@@ -258,6 +268,14 @@ def test_edge_role_binding_can_only_resolve_low_criticality(container) -> None:
         )
         assert edge is not None
         edge.enabled = True
+        binding = session.scalar(
+            select(ModelRoleBinding).where(
+                ModelRoleBinding.role == ModelRole.PROMPT_REFINER_LOW_COST.value,
+                ModelRoleBinding.plan_tier == "ALL",
+            )
+        )
+        assert binding is not None
+        binding.model_definition_id = edge.id
 
     route = service.resolve_role(
         ModelRole.PROMPT_REFINER_LOW_COST,
@@ -270,6 +288,23 @@ def test_edge_role_binding_can_only_resolve_low_criticality(container) -> None:
                 ModelRole.PROMPT_REFINER_LOW_COST,
                 asset_criticality=criticality,
             )
+
+
+def test_paid_tier_prompt_refiner_binds_to_a_provider_that_is_switched_on(container) -> None:
+    """`ALL` must not route the refiner through policy-disabled RunAPI.
+
+    Production runs `ALLOW_RUNAPI_EDGE_CALLS=false`, so the RunAPI adapter
+    refuses every edge call and `/v1/prompts/refine` degraded to the corrector's
+    own output for every paid workspace.
+    """
+
+    service: ModelInfrastructureService = container.model_infrastructure
+    route = service.resolve_role(
+        ModelRole.PROMPT_REFINER_LOW_COST,
+        asset_criticality=AssetCriticality.EDGE,
+    )
+    assert route.provider == "openrouter"
+    assert route.provider_model_id == "openai/gpt-5.6-sol"
 
 
 def test_live_reconciliation_reports_before_it_writes(container) -> None:  # type: ignore[no-untyped-def]

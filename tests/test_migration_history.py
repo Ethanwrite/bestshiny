@@ -1474,6 +1474,74 @@ def test_model_capability_downgrade_only_drops_deterministic_backfill(
     assert physics_prior == pytest.approx(0.123)
 
 
+def test_prompt_refiner_rebind_moves_only_the_paid_tier_binding(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`0065` repoints the ALL-tier refiner, leaves FREE alone, and round-trips.
+
+    The binding is moved by its current target rather than by id, so a database
+    an administrator has already repointed is left as it is.
+    """
+
+    database_url = f"sqlite:///{tmp_path / 'refiner-rebind.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0064_free_tier_defaults")
+
+    now = datetime.now(UTC)
+    definition = sa.text(
+        "insert into model_definitions ("
+        " id, logical_name, provider, provider_model_id, modality, capabilities,"
+        " quality_tier, cost_class, provider_trust_level, criticality_allowed, enabled,"
+        " live_enabled, supported_aspect_ratios, metadata_json, created_at, updated_at"
+        ") values ("
+        " :id, :logical, :provider, :model, 'text', '[]',"
+        " 'STANDARD', 'LOW', :trust, '[]', 1,"
+        " 1, '[]', '{}', :now, :now)"
+    )
+    binding = sa.text(
+        "insert into model_role_bindings ("
+        " id, role, plan_tier, model_definition_id, binding_kind, priority, enabled,"
+        " metadata_json, created_at, updated_at"
+        ") values (:id, 'PROMPT_REFINER_LOW_COST', :tier, :definition, 'PRIMARY', 0, 1,"
+        " '{}', :now, :now)"
+    )
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            definition.bindparams(
+                id="def-runapi", logical="runapi-prompt-refiner-edge", provider="runapi",
+                model="gpt-5.6-luna", trust="EDGE", now=now,
+            )
+        )
+        connection.execute(
+            definition.bindparams(
+                id="def-openrouter", logical="gpt-5.6-sol-openrouter", provider="openrouter",
+                model="openai/gpt-5.6-sol", trust="PRODUCTION", now=now,
+            )
+        )
+        connection.execute(binding.bindparams(id="bind-all", tier="ALL", definition="def-runapi", now=now))
+        connection.execute(binding.bindparams(id="bind-free", tier="FREE", definition="def-runapi", now=now))
+
+    def _targets() -> dict[str, str]:
+        with engine.connect() as connection:
+            return dict(
+                connection.execute(
+                    sa.text("select id, model_definition_id from model_role_bindings")
+                ).all()
+            )
+
+    command.upgrade(config, "head")
+    after = _targets()
+    assert after["bind-all"] == "def-openrouter"
+    assert after["bind-free"] == "def-runapi", "FREE keeps its own binding"
+
+    command.downgrade(config, "0064_free_tier_defaults")
+    restored = _targets()
+    engine.dispose()
+    assert restored["bind-all"] == "def-runapi"
+    assert restored["bind-free"] == "def-runapi"
+
+
 def test_every_postgres_trigger_declares_its_sqlstate() -> None:
     """A guard with no ERRCODE raises P0001, which is not an IntegrityError.
 

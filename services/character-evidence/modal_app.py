@@ -219,6 +219,13 @@ def https_api():
     return create_api(spawn_job, claim_job=claim_job)
 
 
+#: The drain returns this long before its own function timeout. A run that
+#: Modal kills mid-item loses the envelope it was holding between `get` and
+#: `put` — observed 2026-08-29, when three consecutive runs each blocked past
+#: 240s on an unreachable receiver and the stuck envelopes vanished.
+OUTBOX_DRAIN_BUDGET_SECONDS = 150
+
+
 @app.function(
     image=image,
     secrets=[secret],
@@ -228,26 +235,37 @@ def https_api():
 def redeliver_callbacks() -> None:
     """Drain the callback outbox until BestShiny acknowledges each envelope.
 
-    Non-blocking gets: an empty queue ends the run. An envelope that still
-    cannot be delivered goes back on the queue with its attempt count; one
-    that exhausts the budget moves to the 'dead' partition, where it stays
-    visible for operators for the partition TTL instead of vanishing.
+    Non-blocking gets: an empty queue ends the run. One bounded delivery
+    attempt per item per run — retry pacing across runs belongs to the
+    schedule, not to in-process sleeps that can push the run past its own
+    timeout and lose the in-flight envelope. A transient failure re-queues
+    the item with its attempt count; a 4xx rejection or an exhausted budget
+    moves it to the 'dead' partition, where it stays visible to operators
+    for the partition TTL instead of vanishing.
     """
 
-    from character_evidence.api import deliver_callback
+    import time
+
+    from character_evidence.api import CallbackRejected, deliver_callback_once
     from character_evidence.schemas import CallbackEnvelope
 
     queue = _outbox_queue()
+    deadline = time.monotonic() + OUTBOX_DRAIN_BUDGET_SECONDS
     for _ in range(100):
+        if time.monotonic() >= deadline:
+            return
         item = queue.get(block=False)
         if item is None:
             return
         envelope = CallbackEnvelope.model_validate(item["envelope"])
+        attempts = int(item.get("attempts", 0)) + 1
+        item["attempts"] = attempts
         try:
-            deliver_callback(envelope)
+            deliver_callback_once(envelope)
+        except CallbackRejected as exc:
+            item["rejected_with"] = str(exc)[:200]
+            queue.put(item, partition="dead", partition_ttl=OUTBOX_PARTITION_TTL_SECONDS)
         except RuntimeError:
-            attempts = int(item.get("attempts", 0)) + 1
-            item["attempts"] = attempts
             if attempts >= OUTBOX_MAX_REDELIVERY_ATTEMPTS:
                 queue.put(
                     item, partition="dead", partition_ttl=OUTBOX_PARTITION_TTL_SECONDS

@@ -22,12 +22,18 @@ class Settings(BaseSettings):
     # at the fetch with "provider media host is not allowlisted".
     #
     # `openrouter.ai` is the host OpenRouter's own `/v1/videos/{id}` response
-    # returns for a finished clip, read from a real completed job. Ark and
-    # DashScope stay unlisted until a canary shows what theirs are: a guessed
+    # returns for a finished clip, read from a real completed job. DashScope
+    # stays unlisted until a canary shows what its return host is: a guessed
     # host is either a hole in an SSRF fence or another silent failure.
+    #
+    # `*.tos-cn-beijing.volces.com` is the host Ark's images API returned for a
+    # real completed, billed generation on 2026-08-30
+    # (`ark-acg-cn-beijing.tos-cn-beijing.volces.com`, job e2d97342 on
+    # production) — observed, not guessed, which is the bar this list demands.
     provider_media_allowed_hosts: str = (
         "google_flow=labs.google,*.googleusercontent.com,*.googleapis.com,*.googlevideo.com;"
-        "openrouter=openrouter.ai,*.openrouter.ai"
+        "openrouter=openrouter.ai,*.openrouter.ai;"
+        "seedance=*.tos-cn-beijing.volces.com"
     )
     s3_endpoint_url: str = ""
     s3_region: str = "us-east-1"

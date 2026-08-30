@@ -167,6 +167,7 @@ class CreativeDirectorService:
         deterministic = self.briefs.extract(text, fields)
         if self.model_roles is None:
             return deterministic, "DETERMINISTIC", ["MODEL_RUNTIME_NOT_CONFIGURED"]
+        from entitlement_core.canary import LiveCanaryConflict, LiveCanaryDenied
         from model_registry_core import ModelRole
         from provider_sdk import ProviderError, ProviderTrustViolation
 
@@ -196,7 +197,19 @@ class CreativeDirectorService:
                 parameters={"response_format": {"type": "json_object"}},
             )
             raw = _first_choice_json(execution.response)
-        except (LookupError, ProviderError, ProviderTrustViolation, TypeError, ValueError) as exc:
+        except (
+            LiveCanaryConflict,
+            # A refused live-canary reservation is a budget/permit refusal, not
+            # a platform fault: the turn degrades to the deterministic engine
+            # loudly instead of failing the user's whole request with a 500 —
+            # which is exactly what happened on production on 2026-08-30.
+            LiveCanaryDenied,
+            LookupError,
+            ProviderError,
+            ProviderTrustViolation,
+            TypeError,
+            ValueError,
+        ) as exc:
             return (
                 deterministic,
                 "DETERMINISTIC",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any
 from urllib.parse import quote
 
@@ -8,6 +10,7 @@ from provider_sdk import (
     GenerationProvider,
     ProviderError,
     ProviderHealth,
+    ProviderInlineOutput,
     ProviderJob,
     ProviderPollIdentity,
     ProviderReferenceMode,
@@ -109,7 +112,28 @@ class ArkProvider(GenerationProvider, ChatCapability):
         media_id = first.get("id") or first.get("url") or data.get("id")
         if not media_id:
             raise _missing_job("Ark returned no image result identifier")
-        return ProviderSubmission(str(media_id), data)
+        # Ark's images API is synchronous: the artefact is in this response and
+        # there is no task to poll (`get_job` rightly refuses non-video IDs —
+        # observed live on 2026-08-30 as `INVALID_REQUEST` after a confirmed,
+        # billed submission). Carrying the result on the submission lets the
+        # Gateway finish through its ordinary held-result completion path.
+        outputs = _ark_image_outputs(entries)
+        url = first.get("url") if isinstance(first.get("url"), str) and first.get("url") else None
+        if not outputs and not url:
+            raise _missing_job("Ark returned neither an image URL nor inline image bytes")
+        return ProviderSubmission(
+            str(media_id),
+            data,
+            result=ProviderJob(
+                str(media_id),
+                "COMPLETED",
+                progress=1.0,
+                output_url=None if outputs else url,
+                output_mime_type=outputs[0].mime_type if outputs else None,
+                outputs=outputs,
+                raw=data,
+            ),
+        )
 
     async def generate_video(
         self, request: dict[str, Any], *, account_id: str, worker_id: str
@@ -303,6 +327,41 @@ def _ark_job(provider_job_id: str, data: dict[str, Any]) -> ProviderJob:
         error=str(error) if error else None,
         raw=data,
     )
+
+
+#: Bound on an inline (b64_json) image accepted from Ark, matching the
+#: OpenRouter image path's ceiling.
+MAX_IMAGE_OUTPUT_BYTES = 32 * 1024 * 1024
+
+
+def _ark_image_outputs(entries: list[Any]) -> list[ProviderInlineOutput]:
+    """Decode inline b64_json image entries; URL-form responses return []."""
+
+    outputs: list[ProviderInlineOutput] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("b64_json")
+        if not isinstance(encoded, str) or not encoded:
+            continue
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ProviderError(
+                "Ark returned an image that is not valid base64",
+                RetryCategory.PERMANENT_ERROR,
+                code="INVALID_PROVIDER_IMAGE",
+                submitted=True,
+            ) from exc
+        if len(content) > MAX_IMAGE_OUTPUT_BYTES:
+            raise ProviderError(
+                "Ark returned an image larger than the accepted bound",
+                RetryCategory.PERMANENT_ERROR,
+                code="PROVIDER_IMAGE_TOO_LARGE",
+                submitted=True,
+            )
+        outputs.append(ProviderInlineOutput(mime_type="image/png", content=content))
+    return outputs
 
 
 def _invalid(message: str) -> ProviderError:

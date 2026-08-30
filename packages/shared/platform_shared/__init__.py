@@ -1,6 +1,7 @@
 from .config import Settings
 from .credentials import CredentialVault
 from .media_validation import (
+    EXTENSION_FOR_MIME,
     MEDIA_HEADER_BYTES,
     SAFE_INLINE_MEDIA_TYPES,
     UnsafeMediaUpload,
@@ -24,6 +25,7 @@ from .storage import (
 __all__ = [
     "Settings",
     "CredentialVault",
+    "EXTENSION_FOR_MIME",
     "MEDIA_HEADER_BYTES",
     "SAFE_INLINE_MEDIA_TYPES",
     "UnsafeMediaUpload",

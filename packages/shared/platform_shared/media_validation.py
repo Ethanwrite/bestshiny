@@ -33,6 +33,20 @@ _VIDEO_TYPES = {
     ".mov": "video/quicktime",
     ".webm": "video/webm",
 }
+#: Canonical extension for each accepted MIME type, for callers that name a
+#: file after a *downloaded* response rather than a user-chosen filename. A
+#: provider's artefact URL is not a meaningful filename: Ark serves JPEG from
+#: paths the platform had named `.png`, and the filename/MIME agreement check
+#: below rightly refused the pair (production, 2026-08-30).
+EXTENSION_FOR_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpeg",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+
 _IMAGE_ONLY_ASSET_TYPES = {
     "IMAGE",
     "CHARACTER_REFERENCE",

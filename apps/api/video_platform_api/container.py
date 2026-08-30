@@ -274,12 +274,11 @@ def build_container(settings: Settings | None = None) -> Container:
     depay_payments = DePayPaymentService(
         database,
         payment_link_url=settings.depay_payment_link_url,
-        link_id=settings.depay_link_id,
+        integration_id=settings.depay_integration_id,
+        legacy_link_id=settings.depay_link_id,
         callback_public_key=settings.depay_callback_public_key,
+        dynamic_config_private_key=settings.depay_dynamic_config_private_key,
         treasury_address=settings.alchemy_treasury_address,
-        offer_amount_usdc=settings.depay_offer_amount_usdc,
-        offer_credits=settings.depay_offer_credits,
-        upgrade_plan_tier=settings.depay_offer_upgrade_plan,
         checkout_ttl_minutes=settings.depay_checkout_ttl_minutes,
     )
     storage: StorageProvider

@@ -91,9 +91,12 @@ def _payment(settings: Settings) -> None:
     for label, ok in alchemy:
         print(_line(label, READY if ok else BLOCKED, ""))
     depay = [
-        ("DEPAY_PAYMENT_LINK_URL", bool(settings.depay_payment_link_url.strip())),
-        ("DEPAY_LINK_ID", bool(settings.depay_link_id.strip())),
+        ("DEPAY_INTEGRATION_ID", bool(settings.depay_integration_id.strip())),
         ("DEPAY_CALLBACK_PUBLIC_KEY", bool(settings.depay_callback_public_key.strip())),
+        (
+            "DEPAY_DYNAMIC_CONFIG_PRIVATE_KEY",
+            bool(settings.depay_dynamic_config_private_key.strip()),
+        ),
     ]
     for label, ok in depay:
         print(_line(label, READY if ok else BLOCKED, ""))

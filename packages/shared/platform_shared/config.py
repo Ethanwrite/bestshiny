@@ -223,13 +223,19 @@ class Settings(BaseSettings):
     legacy_wallet_payments_enabled: bool = False
     wallet_challenge_ttl_seconds: int = 300
     payment_intent_ttl_minutes: int = 30
+    # The DePay Managed Integration the widget pays through, and the object
+    # whose Dynamic Configuration calls back to us for a per-order amount.
+    depay_integration_id: str = ""
+    # The older fixed-offer payment link. Kept because callbacks for payments
+    # started against it are still in flight and identify themselves by it.
     depay_payment_link_url: str = ""
     depay_link_id: str = ""
     depay_callback_public_key: str = ""
+    # DePay verifies our Dynamic Configuration *response* with the public half
+    # of this key (RSA-PSS/SHA-256, salt length 64). Without it the widget
+    # cannot be priced per order, so checkout fails closed.
+    depay_dynamic_config_private_key: str = ""
     depay_checkout_ttl_minutes: int = 1_440
-    depay_offer_amount_usdc: Decimal = Decimal("30")
-    depay_offer_credits: int = 3_000
-    depay_offer_upgrade_plan: Literal["PRO"] = "PRO"
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     # Layer 2 of the style lock. Off by default: it is a paid embedding call per

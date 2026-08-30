@@ -7,6 +7,7 @@ from .alchemy import (
     AlchemyWebhookPayloadError,
     AlchemyWebhookResult,
 )
+from .catalog import PAYMENT_PACKAGES, PRICING_VERSION, PaymentPackage
 from .depay import (
     DePayAuthenticationError,
     DePayCheckoutResult,
@@ -28,6 +29,9 @@ from .wallets import (
 
 __all__ = [
     "BASE_NETWORKS",
+    "PAYMENT_PACKAGES",
+    "PRICING_VERSION",
+    "PaymentPackage",
     "AlchemyUSDCWebhookService",
     "AlchemyWebhookAuthenticationError",
     "AlchemyWebhookConfigurationError",

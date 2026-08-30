@@ -670,7 +670,14 @@ class WalletBindingChallenge(Base, TimestampMixin):
 
 
 class OnchainPaymentIntent(Base, TimestampMixin):
-    """Server-priced Base USDC purchase expected from one verified wallet."""
+    """Server-priced Base USDC purchase, frozen at creation.
+
+    The `sku`/`amount`/`currency`/`credits`/`pricing_version`/`provider` columns
+    are the immutable commercial snapshot: settlement validates the paid amount
+    against this row, never against the live catalogue, so republishing prices
+    cannot change what an order already sold. `PaymentOrder` is the name the
+    payment services use for exactly this table.
+    """
 
     __tablename__ = "onchain_payment_intents"
     __table_args__ = (
@@ -678,10 +685,12 @@ class OnchainPaymentIntent(Base, TimestampMixin):
         CheckConstraint("chain_id > 0", name="ck_payment_intent_chain_positive"),
         CheckConstraint("raw_amount_microunits > 0", name="ck_payment_intent_amount_positive"),
         CheckConstraint("credits > 0", name="ck_payment_intent_credits_positive"),
+        CheckConstraint("amount > 0", name="ck_payment_intent_snapshot_amount_positive"),
         CheckConstraint(
             "status IN ('PENDING', 'SUBMITTED', 'PAID', 'EXPIRED', 'CANCELLED', 'RECONCILIATION_REQUIRED')",
             name="ck_payment_intent_status",
         ),
+        Index("ix_onchain_payment_intents_provider", "provider"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
@@ -695,14 +704,33 @@ class OnchainPaymentIntent(Base, TimestampMixin):
     from_address: Mapped[str | None] = mapped_column(String(42), index=True)
     to_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
     token_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    sku: Mapped[str] = mapped_column(
+        String(80), default="legacy_direct", server_default="'legacy_direct'", nullable=False
+    )
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), default=Decimal("0.01"), server_default="0.01", nullable=False
+    )
+    currency: Mapped[str] = mapped_column(
+        String(20), default="USDC", server_default="'USDC'", nullable=False
+    )
     raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     credits: Mapped[int] = mapped_column(Integer, nullable=False)
+    pricing_version: Mapped[str] = mapped_column(
+        String(80), default="legacy", server_default="'legacy'", nullable=False
+    )
+    provider: Mapped[str] = mapped_column(
+        String(40), default="ALCHEMY", server_default="'ALCHEMY'", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
     transaction_hash: Mapped[str | None] = mapped_column(String(66), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+# The payment services speak in orders, not intents. Same table, same rows.
+PaymentOrder = OnchainPaymentIntent
 
 
 class OnchainPayment(Base, TimestampMixin):

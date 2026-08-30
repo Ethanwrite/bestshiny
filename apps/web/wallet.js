@@ -1,10 +1,9 @@
-import QRCode from "qrcode";
-
 const API = window.AI_DIRECTOR_API
   || (location.hostname === "127.0.0.1" && location.port === "18081"
     ? "http://127.0.0.1:18080"
     : "/api");
 const CSRF_COOKIE_NAME = "ai_director_csrf";
+const DEFAULT_SKU = "creator_50";
 
 const paymentState = {
   user: null,
@@ -12,13 +11,16 @@ const paymentState = {
   config: null,
   billing: null,
   checkout: null,
-  checkoutUrl: "",
+  selectedSku: DEFAULT_SKU,
   pollTimer: null,
   busy: false,
 };
 
 const element = (id) => document.getElementById(id);
 const humanStatus = (status = "") => String(status).replaceAll("_", " ").toLowerCase();
+const packages = () => paymentState.config?.payment_packages || [];
+const selectedPackage = () =>
+  packages().find((plan) => plan.sku === paymentState.selectedSku) || null;
 
 function cookieValue(name) {
   const prefix = `${encodeURIComponent(name)}=`;
@@ -62,12 +64,55 @@ function setBusy(value) {
   render();
 }
 
+function renderPlans() {
+  const host = element("walletPlans");
+  const available = packages();
+  if (!available.length) {
+    host.replaceChildren();
+    return;
+  }
+  if (!selectedPackage()) {
+    const fallback = available.find((plan) => plan.recommended) || available[0];
+    paymentState.selectedSku = fallback.sku;
+  }
+  host.replaceChildren(...available.map((plan) => {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "wallet-plan";
+    card.role = "radio";
+    card.dataset.sku = plan.sku;
+    const chosen = plan.sku === paymentState.selectedSku;
+    card.setAttribute("aria-checked", String(chosen));
+    if (chosen) card.classList.add("is-selected");
+    if (plan.recommended) card.classList.add("is-recommended");
+
+    const price = document.createElement("strong");
+    price.className = "wallet-plan-price";
+    price.textContent = `${Math.round(Number(plan.amount))} USDC`;
+    const credits = document.createElement("span");
+    credits.className = "wallet-plan-credits";
+    credits.textContent = `${Number(plan.credits).toLocaleString()} credits`;
+    card.append(price, credits);
+    if (plan.recommended) {
+      const badge = document.createElement("em");
+      badge.className = "wallet-plan-badge";
+      badge.textContent = "Recommended";
+      card.append(badge);
+    }
+    card.addEventListener("click", () => {
+      paymentState.selectedSku = plan.sku;
+      render();
+    });
+    return card;
+  }));
+}
+
 function render() {
-  const offer = paymentState.config?.depay_offer;
+  const plan = selectedPackage();
   const isPro = paymentState.billing?.plan_tier === "PRO"
     || paymentState.workspace?.plan_tier === "PRO";
-  const credits = Number(offer?.credits || 0).toLocaleString();
-  const price = `${offer?.amount_usdc || "30.00"} USDC`;
+  const credits = Number(plan?.credits || 0).toLocaleString();
+  const price = plan ? `${Math.round(Number(plan.amount))} USDC` : "—";
 
   // The top bar trigger is a credits pill with its own markup: update the
   // number inside it, never the button's text content.
@@ -83,25 +128,24 @@ function render() {
   element("walletNetwork").textContent = paymentState.config?.network === "BASE_MAINNET"
     ? "Base Mainnet"
     : "Base";
-  element("walletCreditingStatus").textContent = paymentState.config?.depay_callback_configured
+  element("walletCreditingStatus").textContent = paymentState.config?.depay_dynamic_configured
     ? "Ready"
     : "Not configured yet";
   element("walletTitle").textContent = isPro ? "Top up credits" : "Upgrade to Pro";
   element("walletDescription").textContent = isPro
-    ? `Each payment of ${price} adds ${credits} more credits.`
-    : `One payment of ${price} unlocks Pro permanently and includes ${credits} credits. No subscription, no auto-renewal.`;
-  element("walletOfferLabel").textContent = isPro ? "Top up credits" : "Upgrade to Pro";
-  element("walletOfferPrice").textContent = price;
-  element("walletOfferBenefits").innerHTML = isPro
-    ? `+${credits} credits`
-    : `✓ Unlock Pro<br>✓ Includes ${credits} credits`;
-  element("payUsdcBtn").textContent = isPro ? `Pay ${price}` : "Upgrade to Pro";
+    ? `Pick a package — credits are added the moment the payment is confirmed.`
+    : `Any package unlocks Pro permanently and adds its credits. No subscription, no auto-renewal.`;
+  renderPlans();
+  element("payUsdcBtn").textContent = plan
+    ? (isPro ? `Pay ${price}` : `Upgrade — ${price}`)
+    : "Pay with USDC";
   element("payUsdcBtn").disabled = paymentState.busy
     || !paymentState.workspace
-    || !paymentState.config?.depay_checkout_configured
-    || !paymentState.config?.depay_callback_configured
-    || !offer;
-  element("depayCheckout").hidden = !paymentState.checkoutUrl;
+    || !paymentState.config?.depay_dynamic_configured
+    || !plan;
+  if (plan && !paymentState.busy && !element("walletStatus").textContent) {
+    setMessage(`${price} · ${credits} credits`);
+  }
 }
 
 async function refreshBilling() {
@@ -117,7 +161,6 @@ async function initializeForUser(user) {
   paymentState.user = user;
   paymentState.workspace = chooseWorkspace(user);
   paymentState.checkout = null;
-  paymentState.checkoutUrl = "";
   if (!user || !paymentState.workspace) {
     paymentState.billing = null;
     render();
@@ -126,8 +169,8 @@ async function initializeForUser(user) {
   try {
     paymentState.config = await api("/v1/payments/config");
     await refreshBilling();
-    if (!paymentState.config.depay_checkout_configured) {
-      setMessage("The DePay checkout link is not configured yet.");
+    if (!paymentState.config.depay_dynamic_configured) {
+      setMessage("Card and wallet payments are not switched on yet.");
     }
   } catch (error) {
     setMessage("", error.message);
@@ -135,6 +178,8 @@ async function initializeForUser(user) {
   render();
 }
 
+// Success is whatever BestShiny's own settlement says it is. The widget
+// closing means the user paid, not that we were paid.
 async function pollCheckout(checkoutId) {
   window.clearTimeout(paymentState.pollTimer);
   try {
@@ -157,7 +202,7 @@ async function pollCheckout(checkoutId) {
       return;
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
-      setMessage("", `This payment did not complete (${humanStatus(checkout.status)}). An administrator can restore it.`);
+      setMessage("", `This payment did not complete (${humanStatus(checkout.status)}). Our team can restore it.`);
       return;
     }
     paymentState.pollTimer = window.setTimeout(() => pollCheckout(checkoutId), 3000);
@@ -167,26 +212,35 @@ async function pollCheckout(checkoutId) {
 }
 
 async function createCheckout() {
+  const plan = selectedPackage();
+  if (!plan) return;
   setBusy(true);
   setMessage("Preparing your payment…");
   try {
-    const checkout = await api(
-      `/v1/workspaces/${paymentState.workspace.id}/depay-checkouts`,
-      { method: "POST", body: "{}" },
-    );
-    paymentState.checkout = checkout;
-    paymentState.checkoutUrl = checkout.checkout_url;
-    element("depayQrCode").src = await QRCode.toDataURL(checkout.checkout_url, {
-      width: 440,
-      margin: 2,
-      errorCorrectionLevel: "M",
-      color: { dark: "#07131f", light: "#ffffff" },
+    // The browser sends a SKU. Amount, currency and credits are decided and
+    // frozen by the server, and DePay reads them back from /depay/config.
+    const checkout = await api("/v1/payments/checkout", {
+      method: "POST",
+      body: JSON.stringify({
+        workspace_id: paymentState.workspace.id,
+        sku: plan.sku,
+      }),
     });
-    element("depayCheckoutSummary").textContent =
-      `${checkout.expected_usdc} USDC · ${checkout.expected_credits.toLocaleString()} credits`;
-    setMessage("Scan the code or open DePay to confirm the Base USDC payment.");
-    render();
+    paymentState.checkout = checkout;
+    setMessage("Confirm the payment in the DePay window.");
     pollCheckout(checkout.id);
+    // Loaded on click, not on boot: the widget carries the whole wallet stack
+    // and would otherwise be ~3 MB of JavaScript on every page view.
+    const { default: DePayWidgets } = await import("@depay/widgets");
+    await DePayWidgets.Payment({
+      integration: checkout.integration_id,
+      payload: { checkout_token: checkout.checkout_token },
+      closed: () => {
+        if (!element("walletError").textContent) {
+          setMessage("Waiting for the payment to confirm on Base…");
+        }
+      },
+    });
   } catch (error) {
     setMessage("", error.message);
   } finally {
@@ -210,14 +264,6 @@ element("closeWalletBtn").addEventListener("click", () => {
   element("walletDialog").close();
 });
 element("payUsdcBtn").addEventListener("click", createCheckout);
-element("openDePayBtn").addEventListener("click", () => {
-  if (paymentState.checkoutUrl) window.open(paymentState.checkoutUrl, "_blank", "noopener,noreferrer");
-});
-element("copyDePayBtn").addEventListener("click", async () => {
-  if (!paymentState.checkoutUrl) return;
-  await navigator.clipboard.writeText(paymentState.checkoutUrl);
-  setMessage("Payment link copied.");
-});
 window.addEventListener("ai-director:auth", (event) => {
   initializeForUser(event.detail).catch((error) => setMessage("", error.message));
 });

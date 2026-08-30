@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from payment_core import (
+    DePayAuthenticationError,
     DePayConfigurationError,
     DePayPayloadError,
     WalletPaymentConflict,
@@ -42,6 +43,20 @@ class PaymentSubmitRequest(BaseModel):
     transaction_hash: str = Field(min_length=66, max_length=66)
 
 
+class CheckoutRequest(BaseModel):
+    """The whole of what a browser may choose: which package, for which workspace.
+
+    Amount, currency and credits are server-owned and never accepted here.
+    """
+
+    workspace_id: str = Field(min_length=1, max_length=36)
+    sku: str = Field(min_length=1, max_length=80)
+
+
+class DePayCheckoutRequest(BaseModel):
+    sku: str = Field(min_length=1, max_length=80)
+
+
 def _binding_view(binding: WorkspaceWalletBinding) -> dict[str, object]:
     return {
         "id": binding.id,
@@ -66,6 +81,10 @@ def _intent_view(intent: OnchainPaymentIntent) -> dict[str, object]:
         "token_address": intent.token_address,
         "raw_amount_microunits": intent.raw_amount_microunits,
         "amount_usdc": f"{Decimal(intent.raw_amount_microunits) / Decimal(1_000_000):f}",
+        "sku": intent.sku,
+        "currency": intent.currency,
+        "pricing_version": intent.pricing_version,
+        "provider": intent.provider,
         "credits": intent.credits,
         "status": intent.status,
         "transaction_hash": intent.transaction_hash,
@@ -100,7 +119,9 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             "checkout_provider": "DEPAY",
             "depay_checkout_configured": depay.checkout_configured,
             "depay_callback_configured": depay.callback_configured,
-            "depay_offer": depay.offer_view(),
+            "depay_dynamic_configured": depay.dynamic_configured,
+            "depay_integration_id": depay.integration_id,
+            "payment_packages": depay.package_views(),
         }
 
     @app.get("/v1/workspaces/{workspace_id}/billing")
@@ -128,11 +149,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 "wallet_bindings": [_binding_view(binding) for binding in bindings],
             }
 
-    @app.post("/v1/workspaces/{workspace_id}/depay-checkouts", status_code=201)
-    def create_depay_checkout(
-        workspace_id: str,
-        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
-    ):
+    def _open_checkout(workspace_id: str, sku: str, principal: AuthPrincipal):
         auth.require_workspace(principal, workspace_id)
         if principal.development_bypass:
             raise HTTPException(403, "DePay 充值需要真实登录账户")
@@ -140,21 +157,67 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             checkout = container.depay_payments.create_checkout(
                 workspace_id=workspace_id,
                 user_id=principal.user_id,
+                sku=sku,
             )
         except DePayConfigurationError as exc:
             raise HTTPException(503, str(exc)) from exc
         except DePayPayloadError as exc:
             raise HTTPException(422, str(exc)) from exc
+        # `checkout_token` is the bearer the widget hands back through Dynamic
+        # Configuration, so it goes to the buyer's own browser and nowhere
+        # else. Nothing here names the provider's internal settlement objects.
         return {
             "id": checkout.checkout_id,
-            "payment_intent_id": checkout.payment_intent_id,
-            "order_ref": checkout.payment_intent_id,
-            "checkout_url": checkout.checkout_url,
-            "expected_usdc": checkout.expected_usdc,
-            "expected_credits": checkout.expected_credits,
+            "integration_id": checkout.integration_id,
+            "checkout_token": checkout.checkout_token,
+            "sku": checkout.sku,
+            "amount_usdc": checkout.expected_usdc,
+            "currency": checkout.currency,
+            "credits": checkout.expected_credits,
             "purchase_kind": checkout.purchase_kind,
             "expires_at": checkout.expires_at,
         }
+
+    @app.post("/v1/payments/checkout", status_code=201)
+    def create_checkout(
+        body: CheckoutRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        return _open_checkout(body.workspace_id, body.sku, principal)
+
+    @app.post("/v1/payments/depay/config")
+    async def depay_dynamic_configuration(request: Request):
+        """Price one existing order for the DePay widget. Reads only.
+
+        No settlement, no order state change and no credits happen here — the
+        signed callback at `/v1/webhooks/depay` is the only path that posts to
+        the ledger.
+        """
+        raw_body = await request.body()
+        try:
+            body, signature = container.depay_payments.dynamic_configuration(
+                raw_body,
+                request.headers.get("x-signature"),
+            )
+        except DePayConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except DePayAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except DePayPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"x-signature": signature},
+        )
+
+    @app.post("/v1/workspaces/{workspace_id}/depay-checkouts", status_code=201)
+    def create_depay_checkout(
+        workspace_id: str,
+        body: DePayCheckoutRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        return _open_checkout(workspace_id, body.sku, principal)
 
     @app.get("/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}")
     def get_depay_checkout(
@@ -177,16 +240,19 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 if checkout.payment_intent_id
                 else None
             )
+            # The authoritative fulfillment state the browser polls. Deliberately
+            # free of order_ref, pricing_version, token addresses and settlement
+            # identifiers: an ordinary buyer needs the outcome, not the plumbing.
             return {
                 "id": checkout.id,
-                "payment_intent_id": checkout.payment_intent_id,
                 "status": checkout.status,
-                "expected_usdc": (
+                "sku": intent.sku if intent else None,
+                "amount_usdc": (
                     f"{Decimal(intent.raw_amount_microunits) / Decimal(1_000_000):.2f}"
                     if intent
                     else None
                 ),
-                "expected_credits": intent.credits if intent else None,
+                "credits": intent.credits if intent else None,
                 "purchase_kind": (intent.metadata_json or {}).get("purchase_kind") if intent else None,
                 "credits_granted": checkout.credits_granted,
                 "expires_at": checkout.expires_at,

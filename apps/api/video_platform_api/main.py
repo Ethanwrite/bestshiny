@@ -2378,7 +2378,11 @@ def create_app(container: Container | None = None) -> FastAPI:
                     transport = bool(getattr(provider, "configured", True))
                     reason = "" if transport else "provider credential or model ID is not configured"
             priced = (state.provider, state.provider_model_id) in priced_models
-            if transport and not priced:
+            # A model that is both disabled and unpriced is blocked by the
+            # operator's decision first: reporting the price sends the reader to
+            # fix the wrong thing. `live_enabled` computes identically either
+            # way, so this changes only what the report says.
+            if state.enabled and transport and not priced:
                 reason = "no pricing profile; live mode refuses an unpriced model"
             target = bool(state.enabled and transport and priced and live_gate_ready)
             if not target and not reason:

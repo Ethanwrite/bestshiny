@@ -1,9 +1,10 @@
 """Audit the recorded token prices, or bootstrap them into a scratch database.
 
-**Migration `0051_token_pricing` is the source of truth.** It owns the rows, it
-is what a real deployment runs, and it is self-contained so it replays the same
-way for ever. This script does not define a single price: it imports the rate
-table straight out of that migration, so the two cannot drift.
+**The migrations are the source of truth.** `0051_token_pricing` owns the rows
+and `0062_canonical_list_pricing` owns the corrections to them; both are what a
+real deployment runs, and both are self-contained so they replay the same way for
+ever. This script does not define a single price: it imports the rate tables
+straight out of those migrations and composes them, so the three cannot drift.
 
 What it is for:
 
@@ -41,32 +42,62 @@ from platform_shared import Settings  # noqa: E402
 from production_domain.models import ModelPricingProfile, new_id  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-_MIGRATION = (
-    Path(__file__).resolve().parents[1]
-    / "migrations"
-    / "versions"
-    / "0051_token_pricing_profiles.py"
-)
+_VERSIONS = Path(__file__).resolve().parents[1] / "migrations" / "versions"
+_MIGRATION = _VERSIONS / "0051_token_pricing_profiles.py"
+#: Later revisions may correct a rate 0051 wrote. The audit has to compare the
+#: database against what canonical pricing is *now*, not against a snapshot of
+#: what it was in August — otherwise every correction reads as drift for ever,
+#: and an audit that always complains is an audit nobody reads.
+_CORRECTIONS = _VERSIONS / "0062_canonical_list_pricing.py"
 
 
-def _migration() -> ModuleType:
-    """Load the migration as a module so its rate table is the only definition.
+def _load(path: Path, name: str) -> ModuleType:
+    """Load a migration as a module so its rate table is the only definition.
 
     Alembic revisions are not importable as a package, and copying the table
     here would create a second source of truth — the exact failure this audit
     keeps finding elsewhere.
     """
 
-    spec = importlib.util.spec_from_file_location("_pricing_0051", _MIGRATION)
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:  # pragma: no cover - packaging invariant.
-        raise RuntimeError(f"cannot load the pricing migration at {_MIGRATION}")
+        raise RuntimeError(f"cannot load the pricing migration at {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+def _migration() -> ModuleType:
+    return _load(_MIGRATION, "_pricing_0051")
+
+
+def _compose(base: list, corrections: ModuleType) -> list:
+    """0051's table with every later repricing applied, keyed by scope.
+
+    Only the price moves. Currency, billing unit and resolution belong to the
+    vendor's SKU and a correction that changed one of those would be a different
+    row, not a new price for this one.
+    """
+
+    reprice = {
+        (provider, model, direction, resolution): (price, note)
+        for provider, model, direction, resolution, price, note in corrections.REPRICED
+    }
+    composed = []
+    for rate in base:
+        key = (rate[0], rate[1], rate[2], rate[6])
+        if key in reprice:
+            price, note = reprice[key]
+            # The note travels with the price: it is where a correction explains
+            # itself, and a stale note beside a corrected figure is worse than no
+            # note at all.
+            rate = (*rate[:3], price, *rate[4:8], note)
+        composed.append(rate)
+    return composed
+
+
 _PRICING = _migration()
-RATES = _PRICING.RATES
+RATES = _compose(_PRICING.RATES, _load(_CORRECTIONS, "_pricing_0062"))
 CHECKED_AT: datetime = _PRICING.CHECKED_AT
 USD_PER_CNY = Decimal(str(_PRICING.USD_PER_CNY))
 CNY_FX_SOURCE: str = _PRICING.CNY_FX_SOURCE

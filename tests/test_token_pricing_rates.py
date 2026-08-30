@@ -5,9 +5,10 @@ from inside the repository. What can be verified is that none of them lost the
 properties that make a recorded price trustworthy: a source on that provider's
 own domain, a date, its own currency, and an FX rate that is not silently 1.
 
-The table is read out of the migration, not out of the script — `0051` is the
-source of truth and the script imports the same object, so a drift between them
-is impossible rather than merely tested for.
+The table is read out of the migrations, not out of the script — `0051` owns the
+rows, `0062` owns the corrections to them, and the script imports both and
+composes them, so a drift between the three is impossible rather than merely
+tested for.
 
 Pure data assertions. No database, no socket.
 """
@@ -136,17 +137,25 @@ def test_a_cached_input_rate_is_cheaper_than_an_uncached_one() -> None:
             assert prices["cached_input_tokens"] < prices["input_tokens"], model
 
 
-def test_wan_snapshots_carry_the_family_rate_and_r2v_stays_unpriced() -> None:
-    """r2v also bills input video, which a per-second estimate cannot model.
+def test_wan_snapshots_carry_one_family_rate_across_every_deployment() -> None:
+    """0048 established that the Wan 2.7 price does not vary by t2v/i2v/r2v.
 
-    0048 left it unpriced for that reason. Seeding the two snapshots a
-    deployment's settings actually move the registry row onto must not quietly
-    reverse that decision.
+    This is the half of the rule 0051 seeded: the two snapshots a deployment's
+    settings actually move the registry row onto, both at the Beijing family
+    rate. r2v is absent *here* on purpose — 0051 left it out because it also
+    bills min(input_seconds, 5) of input video, which a per-second output
+    estimate does not model.
+
+    0062 has since priced r2v anyway, at the same family rate, because unpriced
+    turned out to mean a Wan continuation was refused outright rather than
+    under-quoted; the shortfall is bounded at five seconds and the 1.20 service
+    reserve covers it. That decision lives in 0062 and is asserted there. What
+    this test still holds is that 0051's own table did not quietly acquire it,
+    and that every rate it does carry is the one family figure.
     """
 
     seconds = {rate[MODEL] for rate in RATES if rate[PROVIDER] == "wan" and rate[UNIT] == "second"}
     assert seconds == {"wan2.7-t2v-2026-06-12", "wan2.7-i2v-2026-04-25"}
-    assert not any("r2v" in model for model in seconds)
     for rate in RATES:
         if rate[PROVIDER] == "wan" and rate[UNIT] == "second":
             assert rate[RESOLUTION] in {"720p", "1080p"}

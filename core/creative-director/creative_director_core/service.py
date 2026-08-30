@@ -34,6 +34,7 @@ from production_domain.models import (
     JobStatus,
     Project,
     VisualBibleVersion,
+    Workspace,
 )
 from sqlalchemy import func, select
 
@@ -44,6 +45,15 @@ from .schemas import StructuredActionKind
 
 class CreativeSessionConflict(ValueError):
     """The request contradicts the session's recorded state."""
+
+
+class CreativeTurnLimitReached(CreativeSessionConflict):
+    """The FREE plan's per-session dialogue budget is spent.
+
+    A hard server-side gate: the browser can neither see past it nor widen it.
+    Upgrading the workspace plan lifts it; the session itself stays readable
+    and its approvals keep working.
+    """
 
 
 class ModelReasoner(Protocol):
@@ -133,11 +143,13 @@ class CreativeDirectorService:
         orchestrator: EpisodeCompiler | None = None,
         ledger: SeriesLedger | None = None,
         model_roles: ModelReasoner | None = None,
+        free_plan_turn_limit: int = 10,
     ):
         self.database = database
         self.orchestrator = orchestrator
         self.ledger = ledger
         self.model_roles = model_roles
+        self.free_plan_turn_limit = max(0, int(free_plan_turn_limit))
         self.briefs = BriefEngine()
         self.beats = BeatPlanner()
 
@@ -228,11 +240,31 @@ class CreativeDirectorService:
                 raise CreativeSessionConflict(f"session is {row.status}; the dialogue is closed")
         return await self._user_turn(session_id, content, format_hint=None)
 
+    def _assert_turn_budget(self, session, row) -> None:  # type: ignore[no-untyped-def]
+        """FREE workspaces get a bounded number of dialogue rounds per session."""
+
+        if not row.workspace_id:
+            return
+        workspace = session.get(Workspace, row.workspace_id)
+        if workspace is None or workspace.plan_tier != "FREE":
+            return
+        used = session.scalar(
+            select(func.count())
+            .select_from(CreativeTurn)
+            .where(CreativeTurn.session_id == row.id, CreativeTurn.speaker == "USER")
+        )
+        if int(used or 0) >= self.free_plan_turn_limit:
+            raise CreativeTurnLimitReached(
+                f"the Free plan includes {self.free_plan_turn_limit} director rounds per "
+                "session; upgrade to Pro to keep the conversation going"
+            )
+
     async def _user_turn(
         self, session_id: str, content: str, *, format_hint: str | None
     ) -> DirectorReply:
         with self.database.session() as session:
             row = self._session(session, session_id)
+            self._assert_turn_budget(session, row)
             project_id = row.project_id
             fields = self._current_fields(session, row)
             asked = self._asked_codes(session, session_id)

@@ -15,6 +15,7 @@ from typing import Any
 from creative_director_core import (
     CreativeDirectorService,
     CreativeSessionConflict,
+    CreativeTurnLimitReached,
 )
 from entitlement_core import (
     InsufficientWorkspaceCredits,
@@ -30,6 +31,7 @@ from production_domain.models import (
     CreativeSession,
     Episode,
     EpisodeContinuation,
+    Project,
     Scene,
     Shot,
     ShotStatus,
@@ -110,22 +112,35 @@ def register_creative_routes(
         pending = creative.pending_actions(
             session_id, kind="GENERATE_KEY_VISUAL", include_failed=True
         )
+        with container.database.session() as session:
+            project_workspace_id = session.get(Project, project_id).workspace_id
+        enforce_plan = not principal.development_bypass and project_workspace_id is not None
         for action in pending:
             payload = action["payload"]
             try:
-                try:
-                    resolved = container.model_infrastructure.resolve_role(
-                        ModelRole.IMAGE_GENERATION
-                    )
-                except LookupError as exc:
-                    raise GenerationTargetError(
-                        "IMAGE_ROLE_UNRESOLVED", f"no image model is available: {exc}"
-                    ) from exc
+                named_provider = ""
+                named_model = ""
+                if not enforce_plan:
+                    # Scoped workspaces let admission resolve the image target
+                    # through the plan catalogue — naming one here would be
+                    # refused, because image targets are router-owned. Legacy
+                    # and development-bypass projects predate that contract
+                    # and still need the explicit resolution.
+                    try:
+                        resolved = container.model_infrastructure.resolve_role(
+                            ModelRole.IMAGE_GENERATION
+                        )
+                    except LookupError as exc:
+                        raise GenerationTargetError(
+                            "IMAGE_ROLE_UNRESOLVED", f"no image model is available: {exc}"
+                        ) from exc
+                    named_provider = resolved.provider
+                    named_model = resolved.provider_model_id
                 generation = GenerationRequest(
                     project_id=project_id,
                     type="image",
-                    provider=resolved.provider,
-                    model=resolved.provider_model_id,
+                    provider=named_provider,
+                    model=named_model,
                     prompt=payload["prompt"],
                     aspect_ratio=payload.get("aspect_ratio", "1:1"),
                     image_count=int(payload.get("image_count", 1)),
@@ -133,7 +148,7 @@ def register_creative_routes(
                 )
                 admitted = container.generation_admission.admit_passenger(
                     generation,
-                    enforce_plan=not principal.development_bypass,
+                    enforce_plan=enforce_plan,
                 )
                 job, replayed = container.visual_runtime.submit(
                     admitted.request,
@@ -194,6 +209,8 @@ def register_creative_routes(
                 format_hint=body.format,
                 title=body.title,
             )
+        except CreativeTurnLimitReached as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {
@@ -240,6 +257,8 @@ def register_creative_routes(
         _require_session(principal, session_id, write=True)
         try:
             reply = await creative.post_message(session_id, body.content)
+        except CreativeTurnLimitReached as exc:
+            raise HTTPException(403, str(exc)) from exc
         except CreativeSessionConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except LookupError as exc:

@@ -403,6 +403,26 @@ class Workspace(Base, TimestampMixin):
     reserved_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
+class WorkspaceUsageCounter(Base, TimestampMixin):
+    """Server-owned counters behind the FREE plan's hard usage gates.
+
+    One row per workspace, created on first metered use. Increments happen
+    inside the transaction that admits the metered action (row-locked on
+    PostgreSQL), so the browser cannot spend past a limit by racing requests.
+    """
+
+    __tablename__ = "workspace_usage_counters"
+    __table_args__ = (
+        CheckConstraint(
+            "prompt_optimizations >= 0", name="ck_workspace_usage_prompt_optimizations"
+        ),
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    prompt_optimizations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class WorkspaceCreditEntry(Base, TimestampMixin):
     """Current state of one server-priced generation credit reservation."""
 

@@ -123,12 +123,14 @@ from production_domain.models import (
     User,
     WorkerStatus,
     Workspace,
+    WorkspaceUsageCounter,
     utcnow,
 )
 from provider_sdk import LIVE_PROVIDER_CONFIRMATION, FactLockSet, NotConfiguredProvider
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from .admin_routes import register_admin_routes
 from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
@@ -1335,6 +1337,59 @@ def create_app(container: Container | None = None) -> FastAPI:
             auth.require_project(principal, shot.scene.episode.project_id)
         return container.character_states.transition_view(candidate_id)
 
+    def _charge_free_prompt_optimization(workspace_id: str | None) -> bool:
+        """Take one unit of the FREE plan's deep-optimization budget, or refuse.
+
+        The counter row is locked for update, so parallel requests cannot
+        spend past the limit; returns True when a unit was actually taken so a
+        failed refine can hand it back.
+        """
+
+        if workspace_id is None:
+            return False
+        limit = container.settings.free_plan_max_prompt_optimizations
+        with container.database.session() as session:
+            workspace = session.get(Workspace, workspace_id)
+            if workspace is None or workspace.plan_tier != "FREE":
+                return False
+            counter = session.scalar(
+                select(WorkspaceUsageCounter)
+                .where(WorkspaceUsageCounter.workspace_id == workspace_id)
+                .with_for_update()
+            )
+            if counter is None:
+                try:
+                    with session.begin_nested():
+                        session.add(WorkspaceUsageCounter(workspace_id=workspace_id))
+                except IntegrityError:
+                    pass  # a concurrent first use created the row; lock it below
+                counter = session.scalar(
+                    select(WorkspaceUsageCounter)
+                    .where(WorkspaceUsageCounter.workspace_id == workspace_id)
+                    .with_for_update()
+                )
+            if counter.prompt_optimizations >= limit:
+                raise HTTPException(
+                    403,
+                    f"the Free plan includes {limit} deep prompt optimizations; "
+                    "upgrade to Pro to keep refining",
+                )
+            counter.prompt_optimizations += 1
+            session.flush()
+        return True
+
+    def _refund_free_prompt_optimization(workspace_id: str | None) -> None:
+        if workspace_id is None:
+            return
+        with container.database.session() as session:
+            counter = session.scalar(
+                select(WorkspaceUsageCounter)
+                .where(WorkspaceUsageCounter.workspace_id == workspace_id)
+                .with_for_update()
+            )
+            if counter is not None and counter.prompt_optimizations > 0:
+                counter.prompt_optimizations -= 1
+
     @app.post("/v1/prompts/refine")
     async def refine_prompt(
         body: PromptRefine,
@@ -1342,8 +1397,24 @@ def create_app(container: Container | None = None) -> FastAPI:
     ):
         auth.require_project(principal, body.project_id, write=True)
         with container.database.session() as session:
-            if not session.get(Project, body.project_id):
+            project = session.get(Project, body.project_id)
+            if not project:
                 raise HTTPException(404, "project not found")
+            project_workspace_id = project.workspace_id
+        charged = (
+            _charge_free_prompt_optimization(project_workspace_id)
+            if not principal.development_bypass
+            else False
+        )
+        try:
+            return await _refine_prompt_body(body)
+        except Exception:
+            # A refine that never happened must not burn the FREE budget.
+            if charged:
+                _refund_free_prompt_optimization(project_workspace_id)
+            raise
+
+    async def _refine_prompt_body(body: PromptRefine):
         result = container.image_prompts.correct(ImagePromptCorrectRequest(prompt=body.prompt))
         approved_prompt = result.corrected_prompt
         role_result = await container.model_roles.refine_prompt(

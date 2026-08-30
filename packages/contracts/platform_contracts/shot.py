@@ -95,6 +95,10 @@ class PassengerGenerationCommand(BaseModel):
     provider: str = ""
     model: str = ""
     image_task: Literal[IMAGE_CREATIVE_TASKS] = "auto"  # type: ignore[valid-type]
+    # A public image-quality level ("shiny" / "shinier" / "shiniest"), mapped
+    # to a concrete model server-side. Never a model ID: the browser cannot
+    # name one for images.
+    image_tier: str | None = Field(default=None, max_length=40)
     model_role: str | None = Field(default=None, max_length=80)
     asset_criticality: AssetCriticality = AssetCriticality.STANDARD
     prompt: str = Field(min_length=1, max_length=30_000)

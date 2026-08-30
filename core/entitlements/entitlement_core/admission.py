@@ -5,7 +5,14 @@ from dataclasses import dataclass
 from cost_core import CreditEstimate, CreditPricingEngine, PricingUnverified
 from model_registry_core import ModelRole
 from platform_contracts import GenerationRequest
+from production_domain.models import (
+    GenerationIdempotency,
+    GenerationJob,
+    JobStatus,
+    Project,
+)
 from provider_sdk import AssetCriticality
+from sqlalchemy import func, select
 
 from .runtime import ModelRoleRuntime
 from .service import (
@@ -14,6 +21,16 @@ from .service import (
     WorkspacePlanContext,
     WorkspacePlanTier,
 )
+
+# The public image-quality levels. The browser sends a tier name, never a
+# model ID; the server owns this mapping, so a quote and its execution can
+# only ever describe the same target. Plans are gates, not redirects: a tier
+# the plan does not include is refused, never quietly replaced.
+IMAGE_MODEL_TIERS: dict[str, tuple[str, frozenset[str]]] = {
+    "shiny": ("seedream-5.0-ark", frozenset({"FREE", "PRO", "ENTERPRISE", "ALL"})),
+    "shinier": ("flow-narwhal-image-internal", frozenset({"PRO", "ENTERPRISE", "ALL"})),
+    "shiniest": ("gpt-image-2-openrouter", frozenset({"PRO", "ENTERPRISE", "ALL"})),
+}
 
 
 class ExplicitModelUnavailable(ValueError):
@@ -43,10 +60,13 @@ class GenerationAdmissionService:
         workspace_models: WorkspaceModelResolver,
         model_roles: ModelRoleRuntime,
         pricing: CreditPricingEngine,
+        *,
+        free_plan_max_images: int = 3,
     ):
         self.workspace_models = workspace_models
         self.model_roles = model_roles
         self.pricing = pricing
+        self.free_plan_max_images = max(0, int(free_plan_max_images))
 
     def admit_passenger(
         self,
@@ -56,6 +76,7 @@ class GenerationAdmissionService:
         resolution: str = "720p",
         enforce_plan: bool = True,
         image_task: str = "auto",
+        image_tier: str | None = None,
     ) -> AdmittedGeneration:
         context = self.workspace_models.context_for_project(request.project_id)
         admitted = request.model_copy(deep=True)
@@ -71,6 +92,7 @@ class GenerationAdmissionService:
             admitted.metadata = {"mode": "PASSENGER_SEAT", "admission_version": self.version}
             if admitted.type == "image":
                 admitted.metadata["image_task"] = image_task
+                self._enforce_free_image_quota(context, admitted)
 
             named_provider = (request.provider or "").strip()
             named_model = (request.model or "").strip()
@@ -101,9 +123,21 @@ class GenerationAdmissionService:
                 admitted.model = named_model
                 admitted.metadata["model_selection"] = "MANUAL"
                 role_value = None
+            elif admitted.type == "image" and image_tier:
+                # Tier selection. The browser names a public quality level; the
+                # server maps it to the one model that tier means, gates it on
+                # the plan, and that exact model is quoted, billed and run.
+                tier_state = self._resolve_image_tier(context, image_tier)
+                admitted.provider = tier_state.provider
+                admitted.model = tier_state.provider_model_id
+                admitted.metadata["model_selection"] = "TIER"
+                admitted.metadata["image_model_tier"] = image_tier.strip().lower()
+                role_value = None
             else:
-                # Router-owned selection. For images this is the only path; for
-                # video it is what "Auto" means.
+                # Router-owned selection. For images this is the default path;
+                # for video it is what "Auto" means. Resolution runs through the
+                # workspace's plan-scoped catalogue, so a FREE workspace can only
+                # ever land on the model its FREE binding names.
                 admitted.metadata["model_selection"] = "ROUTER" if admitted.type == "image" else "AUTO"
                 if admitted.type == "video":
                     role = (
@@ -112,11 +146,6 @@ class GenerationAdmissionService:
                         else self.workspace_models.default_video_role(admitted.project_id)
                     )
                     modality = "video"
-                elif context.plan_tier is WorkspacePlanTier.FREE:
-                    raise PlanEntitlementDenied(
-                        "FREE image generation is unavailable until a server-configured "
-                        "image role is enabled"
-                    )
                 else:
                     role = ModelRole(requested_role) if requested_role else ModelRole.IMAGE_GENERATION
                     modality = "image"
@@ -195,6 +224,69 @@ class GenerationAdmissionService:
         if operation not in profile.supported_operations:
             raise ExplicitModelUnavailable(f"{provider} / {model} does not support {operation}")
 
+    def _resolve_image_tier(self, context: WorkspacePlanContext, image_tier: str):  # type: ignore[no-untyped-def]
+        """Map a public image-quality tier to its server-owned model, or refuse."""
+
+        tier = image_tier.strip().lower()
+        entry = IMAGE_MODEL_TIERS.get(tier)
+        if entry is None:
+            raise ValueError(f"unknown image quality level: {image_tier[:40]}")
+        logical_name, allowed_plans = entry
+        if context.plan_tier.value not in allowed_plans:
+            raise PlanEntitlementDenied(
+                "this image quality level is part of the Pro plan; upgrade to use it"
+            )
+        state = self.workspace_models.models.runtime_model(logical_name)
+        if not state.enabled:
+            raise ExplicitModelUnavailable(
+                "this image quality level is temporarily unavailable"
+            )
+        self._assert_named_model_usable(state.provider, state.provider_model_id, "image")
+        return state
+
+    def _enforce_free_image_quota(
+        self, context: WorkspacePlanContext, request: GenerationRequest
+    ) -> None:
+        """The FREE plan's hard image budget, counted from the jobs table.
+
+        A retry of an already-admitted submission (its idempotency key has a
+        job) is not new spend and passes; everything else counts every image
+        job of the workspace that was not refunded outright. Enforced
+        server-side — the browser payload cannot widen it.
+        """
+
+        if context.plan_tier is not WorkspacePlanTier.FREE or context.workspace_id is None:
+            return
+        if request.image_count > 1:
+            raise PlanEntitlementDenied("the Free plan generates one image per request")
+        with self.workspace_models.database.session() as session:
+            if request.idempotency_key:
+                replay = session.scalar(
+                    select(GenerationIdempotency.id).where(
+                        GenerationIdempotency.project_id == request.project_id,
+                        GenerationIdempotency.key == request.idempotency_key,
+                    )
+                )
+                if replay is not None:
+                    return
+            used = session.scalar(
+                select(func.count())
+                .select_from(GenerationJob)
+                .join(Project, Project.id == GenerationJob.project_id)
+                .where(
+                    Project.workspace_id == context.workspace_id,
+                    GenerationJob.generation_type == "image",
+                    GenerationJob.status.not_in(
+                        (JobStatus.FAILED.value, JobStatus.CANCELLED.value)
+                    ),
+                )
+            )
+        if int(used or 0) >= self.free_plan_max_images:
+            raise PlanEntitlementDenied(
+                f"the Free plan includes {self.free_plan_max_images} images; "
+                "upgrade to Pro to keep creating"
+            )
+
     def _assert_plan_allows_named_model(
         self,
         context: WorkspacePlanContext,
@@ -206,10 +298,6 @@ class GenerationAdmissionService:
 
         if context.plan_tier is not WorkspacePlanTier.FREE:
             return
-        if media_type == "image":
-            raise PlanEntitlementDenied(
-                "FREE image generation is unavailable until a server-configured image role is enabled"
-            )
         allowed, _capability, _implementation = self.model_roles.resolve(
             context.project_id,
             ModelRole.VIDEO_SEEDANCE,

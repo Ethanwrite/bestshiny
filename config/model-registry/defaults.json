@@ -1,5 +1,5 @@
 {
-  "version": "phase2-model-infrastructure-v6",
+  "version": "phase2-model-infrastructure-v7",
   "models": [
     {
       "logical_name": "gpt-5.6-sol-openrouter",
@@ -327,7 +327,7 @@
     {
       "logical_name": "doubao-free-reasoner",
       "provider": "seedance",
-      "provider_model_id": "CONFIGURE_DOUBAO_MODEL_ID",
+      "provider_model_id": "doubao-seed-2-0-lite-260428",
       "modality": "text_multimodal",
       "capabilities": [
         "director_reasoning",
@@ -351,11 +351,13 @@
         "EDGE",
         "TEMPORARY"
       ],
-      "enabled": false,
+      "enabled": true,
       "live_enabled": false,
       "metadata_json": {
-        "configuration_required": true,
-        "reason": "The user supplied an Ark credential but no deployable Doubao model or endpoint ID."
+        "transport": "ark",
+        "credential_required": true,
+        "shares_credential_with": "seedance",
+        "provider_model_id_source": "Operator-directed 2026-08-30: FREE-plan chat runs on doubao-seed-2-0-lite-260428 (Ark; token pricing seeded by migration 0051)."
       }
     },
     {
@@ -1847,6 +1849,13 @@
       "role": "VIDEO_SEEDANCE",
       "model_logical_name": "seedance-2.5-official",
       "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "IMAGE_GENERATION",
+      "model_logical_name": "seedream-5.0-ark",
+      "plan_tier": "FREE",
+      "binding_kind": "PRIMARY",
       "priority": 0
     }
   ]

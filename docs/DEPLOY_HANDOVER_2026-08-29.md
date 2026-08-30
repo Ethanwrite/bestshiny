@@ -1,5 +1,10 @@
 # Deployment session handover — 2026-08-29
 
+> **Superseded for current state by [`PRICING_HANDOVER_2026-08-30.md`](PRICING_HANDOVER_2026-08-30.md).**
+> This document is still the reasoning behind §2–§3.5; each of those sections is annotated
+> in place with what the following session resolved. Read it for *why*, and the newer
+> document for *where things stand*.
+
 Read this first, then [`DEPLOYMENT.md`](DEPLOYMENT.md) for the host,
 [`MODAL_CHARACTER_EVIDENCE.md`](MODAL_CHARACTER_EVIDENCE.md) for the GPU half, and
 [`RC_HANDOFF_2026-08-29.md`](RC_HANDOFF_2026-08-29.md) for what came before.

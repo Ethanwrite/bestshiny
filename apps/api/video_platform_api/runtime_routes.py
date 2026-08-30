@@ -598,6 +598,7 @@ def register_runtime_routes(
                 resolution=body.resolution,
                 enforce_plan=not principal.development_bypass,
                 image_task=body.image_task,
+                image_tier=body.image_tier,
             )
             estimate = admitted.estimate
             body = body.model_copy(

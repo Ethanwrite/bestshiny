@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # A VERIFYING claim older than this lapses and the asset re-verifies —
     # a worker that crashed mid-decode cannot strand an upload.
     media_verification_lease_seconds: int = 900
+    # FREE-plan hard usage gates, enforced server-side (browser payloads cannot
+    # widen them). Totals per FREE workspace — upgrading the plan lifts them —
+    # except the director-round limit, which is per creative session.
+    free_plan_max_images: int = 3
+    free_plan_max_director_turns: int = 10
+    free_plan_max_prompt_optimizations: int = 5
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     # The project's image-generation model, served by POST /images.

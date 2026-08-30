@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from evaluation_core import EvaluationDecision, RetryPlan
@@ -437,10 +438,28 @@ async def test_url_mode_provider_receives_urls_and_is_never_asked_to_upload(
     assert resolved != reference.public_url
     assert "/v1/storage/" not in resolved
     assert "signature=" in resolved and "expires=" in resolved
-    assert submitted["reference_urls"] == [resolved]
-    # The adapter payload's local asset IDs are rewritten to the same URLs.
-    assert submitted["first_frame_image"] == resolved
-    assert submitted["reference_images"] == [resolved]
+
+    def _stable(url: str) -> tuple[str, int]:
+        # Each field's URL is signed at its own moment, so `expires` (and with
+        # it the signature) can differ by a second across a clock tick. What
+        # the contract pins is the path and a near-identical validity window,
+        # not byte-identical signatures.
+        parsed = urlsplit(url)
+        query = dict(parse_qsl(parsed.query))
+        assert query.get("signature")
+        return parsed.path, int(query["expires"])
+
+    resolved_path, resolved_expires = _stable(resolved)
+    for url in (
+        str(submitted["reference_urls"][0]),
+        str(submitted["first_frame_image"]),
+        str(submitted["reference_images"][0]),
+    ):
+        path, expires = _stable(url)
+        assert path == resolved_path
+        assert abs(expires - resolved_expires) <= 2
+    assert len(submitted["reference_urls"]) == 1
+    assert len(submitted["reference_images"]) == 1
     assert "start_frame_provider_media_id" not in submitted
     assert "reference_provider_media_ids" not in submitted
 

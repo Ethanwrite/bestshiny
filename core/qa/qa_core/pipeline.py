@@ -23,7 +23,8 @@ from production_domain.models import (
     User,
     new_id,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from .evidence import (
     VLM_REVIEW_REQUIRED,
@@ -670,10 +671,69 @@ class QAPipeline:
                 if character_evidence.aggregate.average_identity is not None
                 else character_evidence.aggregate.appearance_similarity
             )
+        try:
+            return self._validate_candidate_once(
+                candidate_id,
+                evidence,
+                character_state_evidence,
+                profile=profile,
+                defer_pass=defer_pass,
+                character_evidence=character_evidence,
+                style_evaluation=style_evaluation,
+                observation_only=observation_only,
+            )
+        except IntegrityError:
+            # A concurrent delivery of the same Character Evidence run won the
+            # unique (candidate_id, producer_run_id) index. Its QAResult is the
+            # authoritative record of this run; return it instead of a duplicate.
+            if character_evidence is None:
+                raise
+            with self.database.session() as session:
+                existing = session.scalar(
+                    select(QAResult).where(
+                        QAResult.candidate_id == candidate_id,
+                        QAResult.producer_run_id == character_evidence.producer_run_id,
+                    )
+                )
+                if existing is None:
+                    raise
+                return existing
+
+    def _validate_candidate_once(
+        self,
+        candidate_id: str,
+        evidence: dict[str, Any],
+        character_state_evidence: dict[str, Any],
+        *,
+        profile: str,
+        defer_pass: bool,
+        character_evidence: CharacterEvidenceReport | None,
+        style_evaluation: CandidateStyleEvaluation | None,
+        observation_only: bool,
+    ) -> QAResult:
         with self.database.session() as session:
-            candidate = session.get(GenerationCandidate, candidate_id)
+            # The row lock serializes concurrent validations of one candidate:
+            # the completed-run check, the QAResult insert and the metadata
+            # read-modify-write below all happen inside this one transaction,
+            # so a replayed callback either sees the recorded run and returns
+            # the existing row, or fails the unique index and is deduplicated
+            # by the caller. SQLite ignores FOR UPDATE; its writers serialize.
+            candidate = session.scalar(
+                select(GenerationCandidate)
+                .where(GenerationCandidate.id == candidate_id)
+                .with_for_update()
+            )
             if not candidate or not candidate.output_asset_id:
                 raise LookupError("candidate output is not available")
+            if character_evidence is not None:
+                existing = session.scalar(
+                    select(QAResult).where(
+                        QAResult.candidate_id == candidate_id,
+                        QAResult.producer_run_id == character_evidence.producer_run_id,
+                    )
+                )
+                if existing is not None:
+                    return existing
             if candidate.status in TERMINAL_CANDIDATE_STATUSES and not observation_only:
                 raise LookupError("committed or rejected candidates cannot be revalidated")
             asset = session.get(MediaAsset, candidate.output_asset_id)
@@ -840,6 +900,9 @@ class QAPipeline:
             result = QAResult(
                 id=new_id(),
                 candidate_id=candidate.id,
+                producer_run_id=(
+                    character_evidence.producer_run_id if character_evidence is not None else None
+                ),
                 profile=profile,
                 level_reached=1,
                 decision=decision,

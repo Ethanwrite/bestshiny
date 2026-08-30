@@ -403,6 +403,26 @@ class Workspace(Base, TimestampMixin):
     reserved_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
 
+class WorkspaceUsageCounter(Base, TimestampMixin):
+    """Server-owned counters behind the FREE plan's hard usage gates.
+
+    One row per workspace, created on first metered use. Increments happen
+    inside the transaction that admits the metered action (row-locked on
+    PostgreSQL), so the browser cannot spend past a limit by racing requests.
+    """
+
+    __tablename__ = "workspace_usage_counters"
+    __table_args__ = (
+        CheckConstraint(
+            "prompt_optimizations >= 0", name="ck_workspace_usage_prompt_optimizations"
+        ),
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    prompt_optimizations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class WorkspaceCreditEntry(Base, TimestampMixin):
     """Current state of one server-priced generation credit reservation."""
 
@@ -2756,10 +2776,23 @@ class ProviderInstructionBinding(Base, TimestampMixin):
 
 class QAResult(Base, TimestampMixin):
     __tablename__ = "qa_results"
+    __table_args__ = (
+        # One row per Character Evidence producer run and candidate: concurrent
+        # signed callbacks replaying the same report must converge on a single
+        # QAResult instead of inserting duplicates. NULL run ids (results not
+        # produced by the async evidence path) never collide.
+        Index(
+            "uq_qa_result_candidate_producer_run",
+            "candidate_id",
+            "producer_run_id",
+            unique=True,
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     candidate_id: Mapped[str] = mapped_column(
         ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True
     )
+    producer_run_id: Mapped[str | None] = mapped_column(String(64))
     profile: Mapped[str] = mapped_column(String(80), default="DIALOGUE", nullable=False)
     level_reached: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     decision: Mapped[str] = mapped_column(String(40), index=True, nullable=False)

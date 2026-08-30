@@ -13,6 +13,14 @@ Before taking over development, read [the documentation index](docs/README.md)ã€
 > result download, media registration and billing reconciliation. Character Evidence remains SHADOW with
 > 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
 > callback reachability is unproven. Payment and whole-episode export are excluded from this release.
+>
+> **2026-08-30:** migration head `0064_free_tier_defaults`. FREE-plan hard gates landed (chat on
+> `doubao-seed-2-0-lite-260428`, images on `doubao-seedream-5-0-260128`, 3 images / 10 director
+> rounds / 5 deep optimizations, public Shiny/Shinier/Shiniest image tiers mapped server-side);
+> the UI is rebranded to **BestShiny Director** with model IDs and billing jargon removed; the
+> three Character Evidence QA defects (id-switch enforcement, callback dedup, promotion
+> authorization validation) are closed in code. Dev and the new `video_platform_staging`
+> database are both at head. See [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).
 
 The historical 2026-08-23 development checkpoint (commit `ea9d042`) added migrations `0028_persistent_character_state` through
 `0037_direct_uploads`, narrows the public payment flow to a single fixed 30 USDC DePay shared link, adds the

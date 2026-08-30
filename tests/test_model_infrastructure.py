@@ -136,8 +136,25 @@ def test_flow_legacy_alias_and_image_target_resolve_persisted_switches(container
     assert image.live_enabled is False
 
 
-def test_free_doubao_override_fails_closed_instead_of_using_openrouter(container) -> None:
+def test_free_doubao_resolves_the_operator_model_and_fails_closed_without_it(container) -> None:
+    """FREE reasoning runs on the operator-named Doubao model, never OpenRouter.
+
+    Since 0064 the FREE catalogue's reasoner carries a real Ark model ID
+    (`doubao-seed-2-0-lite-260428`) and resolves. Disabling it must fail
+    closed for FREE — the paid catalogue is a billing boundary, not a
+    fallback.
+    """
+
     service = container.model_infrastructure
+    route = service.resolve_role(
+        ModelRole.DIRECTOR,
+        plan_tier="FREE",
+        asset_criticality=AssetCriticality.STANDARD,
+    )
+    assert route.provider == "seedance"
+    assert route.provider_model_id == "doubao-seed-2-0-lite-260428"
+
+    service.set_enablement("doubao-free-reasoner", enabled=False, live_enabled=False)
     with pytest.raises(LookupError, match="role=DIRECTOR, plan=FREE"):
         service.resolve_role(
             ModelRole.DIRECTOR,

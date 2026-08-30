@@ -11,6 +11,22 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-08-30 update — FREE-plan gates and QA hardening.** Migration head is now
+> `0064_free_tier_defaults`. What moved since this snapshot's header:
+> the FREE catalogue has real targets (`doubao-free-reasoner` →
+> `doubao-seed-2-0-lite-260428` for every FREE reasoning role; a FREE
+> `IMAGE_GENERATION` binding → `seedream-5.0-ark`), the public image tiers
+> `shiny`/`shinier`/`shiniest` are mapped server-side in
+> `entitlement_core.admission.IMAGE_MODEL_TIERS`, and the FREE plan carries hard
+> server-side usage gates (3 images per workspace, 10 director rounds per creative
+> session, 5 deep prompt optimizations per workspace — `workspace_usage_counters`,
+> migration 0064). `qa_results` rows carry `producer_run_id` under a unique
+> (candidate, run) index (0063), and `QAPipeline.validate_candidate` performs the
+> run check, insert and metadata append in one row-locked transaction. The Modal
+> pipeline enforces `maximum_id_switches_for_decision`, and
+> `evaluate_promotion` validates the full authorized dataset document before
+> computing anything. Details: [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).
+
 This document describes the Phase III evidence checkpoint plus the current 2026-08-22 persistent-character-state
 development checkpoint. The offline baseline was frozen after the historical `348 passed, 39 warnings` gate. The tagged
 Phase III checkpoint passed `406 passed, 57 warnings in 71.58s`, Mypy over 121 source files, Ruff lint, Ruff format

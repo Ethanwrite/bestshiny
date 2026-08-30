@@ -1,8 +1,9 @@
 # AI Director Platform — Handoff
 
 > **Header below is historical.** It describes the 2026-08-29 release candidate. Current
-> truth: `main` `7e80d5a`, production in sync, Alembic head `0062_canonical_list_pricing`,
-> 21 of 24 models `live_enabled`. See the pointer block further down.
+> truth: Alembic head `0064_free_tier_defaults`, registry `phase2-model-infrastructure-v7`,
+> dev and the new staging database both at head, production moves on deploy. See the
+> pointer block further down.
 
 Date: 2026-08-29 · Branch `claude/rc-predeploy-integration` — the release-candidate
 integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference adaptation),
@@ -65,7 +66,16 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
-> **Next session: start with [`docs/PRICING_HANDOVER_2026-08-30.md`](docs/PRICING_HANDOVER_2026-08-30.md).**
+> **Next session: start with [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).**
+> It carries the FREE-plan hard gates (Doubao chat + Seedream images, the 3/10/5 usage
+> limits, the Shiny/Shinier/Shiniest tier mapping), the three Character Evidence fixes
+> (id-switch enforcement, one-transaction callback dedup under a unique
+> (candidate, producer_run) index, promotion authorization validation), the UI rebrand
+> to BestShiny Director with model IDs and billing jargon removed, and the environment
+> unification on `0064_free_tier_defaults` including the new `video_platform_staging`
+> database.
+>
+> The pricing session before it: [`docs/PRICING_HANDOVER_2026-08-30.md`](docs/PRICING_HANDOVER_2026-08-30.md).
 > `main` is `7e80d5a`, production is in sync at the same commit, and the Alembic head is
 > `0062_canonical_list_pricing`. That document carries the pricing rules now encoded in the
 > table, the PostgreSQL gate closing again after lapsing across four merged PRs, what the

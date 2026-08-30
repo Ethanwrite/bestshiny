@@ -733,6 +733,7 @@ def build_container(settings: Settings | None = None) -> Container:
         workspace_models,
         model_roles,
         credit_pricing,
+        free_plan_max_images=settings.free_plan_max_images,
     )
     video_router = VideoModelRouter(
         model_registry,
@@ -835,6 +836,7 @@ def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator,
         ledger=narrative_ledger,
         model_roles=model_roles,
+        free_plan_turn_limit=settings.free_plan_max_director_turns,
     )
     episode_continuations = EpisodeContinuationService(
         database,

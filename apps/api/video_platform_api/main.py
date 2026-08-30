@@ -126,7 +126,12 @@ from production_domain.models import (
     WorkspaceUsageCounter,
     utcnow,
 )
-from provider_sdk import LIVE_PROVIDER_CONFIRMATION, FactLockSet, NotConfiguredProvider
+from provider_sdk import (
+    LIVE_PROVIDER_CONFIRMATION,
+    FactLockSet,
+    NotConfiguredProvider,
+    verifiable_spans,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
 from sqlalchemy import select
@@ -1422,13 +1427,22 @@ def create_app(container: Container | None = None) -> FastAPI:
     async def _refine_prompt_body(body: PromptRefine):
         result = container.image_prompts.correct(ImagePromptCorrectRequest(prompt=body.prompt))
         approved_prompt = result.corrected_prompt
+        # Lock only what a rewrite must carry verbatim — quoted text and the
+        # explicit must/do-not/preserve clauses the corrected prompt still
+        # holds. Until 2026-08-30 this locked the entire prompt as one span,
+        # which no genuine rewording can reproduce, so every refinement came
+        # back IMMUTABLE_FACT_CONTENT_CHANGED and the model was billed for a
+        # candidate that was always discarded.
+        locked = verifiable_spans(approved_prompt, result.verbatim_spans)
+        fact_locks = (
+            FactLockSet({"narrative_event": list(locked)}, locked_spans={"narrative_event": locked})
+            if locked
+            else FactLockSet({})
+        )
         role_result = await container.model_roles.refine_prompt(
             body.project_id,
             original_prompt=approved_prompt,
-            fact_locks=FactLockSet(
-                {"narrative_event": approved_prompt},
-                locked_spans={"narrative_event": (approved_prompt,)},
-            ),
+            fact_locks=fact_locks,
         )
         refined_prompt = role_result.optimized_candidate
         with container.database.session() as session:

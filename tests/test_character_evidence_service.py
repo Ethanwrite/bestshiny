@@ -173,6 +173,11 @@ def _perfect_example(index: int, required_slices: list[str]) -> dict:
     same = index % 2 == 0
     face_present = index % 4 != 0
     return {
+        "example_id": f"example-{index}",
+        "media_asset_id": f"media-{index}",
+        "media_sha256": f"{index:064x}",
+        "consent_record_id": f"consent-{index}",
+        "annotator_record_id": f"annotator-{index}",
         "slices": required_slices,
         "person_present": True,
         "person_detected": True,
@@ -190,27 +195,165 @@ def _perfect_example(index: int, required_slices: list[str]) -> dict:
     }
 
 
+def _dataset(examples: list[dict]) -> dict:
+    return {
+        "dataset_version": "character-evidence-validation-test-v1",
+        "authorization_record": {
+            "owner": "operator",
+            "approved_at": "2026-08-30T00:00:00Z",
+            "purpose": "CHARACTER_EVIDENCE_VALIDATION",
+            "retention_policy": "delete after validation",
+        },
+        "examples": examples,
+    }
+
+
+def _approved_acceptance(tmp_path: Path, *, minimum: int = 4) -> Path:
+    acceptance = json.loads(ACCEPTANCE.read_text())
+    acceptance["validation_plan"] = {
+        "status": "APPROVED",
+        "minimum_authorized_examples": minimum,
+        "minimum_examples_per_required_slice": minimum,
+    }
+    approved = tmp_path / "approved-acceptance.json"
+    approved.write_text(json.dumps(acceptance))
+    return approved
+
+
 def test_validation_metrics_are_global_and_per_slice_and_unapproved_plan_cannot_promote(
     tmp_path: Path,
 ) -> None:
     acceptance = json.loads(ACCEPTANCE.read_text())
-    empty = evaluate_promotion([], ACCEPTANCE)
+    empty = evaluate_promotion(_dataset([]), ACCEPTANCE)
     assert empty["eligible"] is False
     assert empty["failures"] == ["VALIDATION_PLAN_NOT_APPROVED"]
     examples = [_perfect_example(index, acceptance["required_slices"]) for index in range(4)]
     metrics = calculate_metrics(examples)
     assert METRIC_FIELDS <= metrics.keys()
     assert all(metrics[name] == 0 for name in METRIC_FIELDS)
-    acceptance["validation_plan"] = {
-        "status": "APPROVED",
-        "minimum_authorized_examples": 4,
-        "minimum_examples_per_required_slice": 4,
-    }
-    approved = tmp_path / "approved-acceptance.json"
-    approved.write_text(json.dumps(acceptance))
-    result = evaluate_promotion(examples, approved)
+    result = evaluate_promotion(_dataset(examples), _approved_acceptance(tmp_path))
     assert result["eligible"] is True
     assert set(result["per_slice"]) == set(acceptance["required_slices"])
+
+
+def test_promotion_refuses_examples_without_consent_even_on_an_approved_plan(
+    tmp_path: Path,
+) -> None:
+    acceptance = json.loads(ACCEPTANCE.read_text())
+    examples = [_perfect_example(index, acceptance["required_slices"]) for index in range(4)]
+    examples[2]["consent_record_id"] = ""
+    result = evaluate_promotion(_dataset(examples), _approved_acceptance(tmp_path))
+    assert result["eligible"] is False
+    assert "EXAMPLE_CONSENT_MISSING:example-2" in result["failures"]
+    assert result["global"] is None
+
+    del examples[2]["consent_record_id"]
+    result = evaluate_promotion(_dataset(examples), _approved_acceptance(tmp_path))
+    assert result["eligible"] is False
+    assert "EXAMPLE_INVALID:example-2:consent_record_id_missing" in result["failures"]
+
+
+def test_promotion_refuses_a_dataset_without_an_authorization_record(tmp_path: Path) -> None:
+    acceptance = json.loads(ACCEPTANCE.read_text())
+    examples = [_perfect_example(index, acceptance["required_slices"]) for index in range(4)]
+    dataset = _dataset(examples)
+    del dataset["authorization_record"]
+    result = evaluate_promotion(dataset, _approved_acceptance(tmp_path))
+    assert result["eligible"] is False
+    assert "DATASET_FIELD_MISSING:authorization_record" in result["failures"]
+
+    dataset = _dataset(examples)
+    dataset["authorization_record"]["purpose"] = "SOMETHING_ELSE"
+    result = evaluate_promotion(dataset, _approved_acceptance(tmp_path))
+    assert result["eligible"] is False
+    assert "AUTHORIZATION_RECORD_INVALID:purpose" in result["failures"]
+
+    # The old bare-examples calling convention is gone on purpose; a list is
+    # not a dataset document and is refused outright, plan status regardless.
+    bare = evaluate_promotion([], _approved_acceptance(tmp_path))  # type: ignore[arg-type]
+    assert bare["eligible"] is False
+    assert bare["failures"] == ["DATASET_NOT_AN_OBJECT"]
+
+
+def test_dataset_validator_matches_the_published_schema() -> None:
+    from character_evidence.validation import (
+        AUTHORIZATION_REQUIRED_FIELDS,
+        DATASET_REQUIRED_FIELDS,
+        EXAMPLE_REQUIRED_FIELDS,
+    )
+
+    schema = json.loads(
+        (SERVICE_ROOT / "validation" / "dataset.schema.json").read_text(encoding="utf-8")
+    )
+    assert list(DATASET_REQUIRED_FIELDS) == schema["required"]
+    assert (
+        list(AUTHORIZATION_REQUIRED_FIELDS)
+        == schema["properties"]["authorization_record"]["required"]
+    )
+    assert list(EXAMPLE_REQUIRED_FIELDS) == schema["$defs"]["example"]["required"]
+
+
+def _evidence_sample(track_id: int, *, face: float | None, appearance: float, time: float) -> object:
+    from character_evidence.pipeline import EvidenceSample, ReferenceEmbedding
+
+    return EvidenceSample(
+        track_id=track_id,
+        sample_time=time,
+        face_similarity=face,
+        appearance_similarity=appearance,
+        face_visibility=0.9,
+        detection_confidence=0.9,
+        track_confidence=0.9,
+        pose_yaw=0.0,
+        blur_score=0.1,
+        reference=ReferenceEmbedding("reference-1", "sha256:v1", "FRONT", None, object()),
+    )
+
+
+def test_track_selection_counts_id_switches_against_the_zero_budget() -> None:
+    from character_evidence.pipeline import resolve_track_selection
+
+    thresholds = json.loads(
+        (ROOT / "config/character-evidence/thresholds-v1.json").read_text(encoding="utf-8")
+    )
+    assert thresholds["tracking"]["maximum_id_switches_for_decision"] == 0
+
+    # One person, one track: no switch, unambiguous.
+    single = {1: [_evidence_sample(1, face=0.8, appearance=0.9, time=0.0)]}
+    chosen, ambiguous, switches = resolve_track_selection(single, thresholds)
+    assert chosen is not None and chosen[0] == 1
+    assert not ambiguous
+    assert switches == 0
+
+    # The person leaves frame and re-enters as a new track ID. The two tracks
+    # score far enough apart that the old ambiguity margin never fired — this
+    # is exactly the case that used to PASS on half the evidence.
+    reappearing = {
+        1: [_evidence_sample(1, face=0.9, appearance=0.95, time=0.0)],
+        2: [_evidence_sample(2, face=0.55, appearance=0.60, time=3.0)],
+    }
+    chosen, ambiguous, switches = resolve_track_selection(reappearing, thresholds)
+    assert chosen is not None and chosen[0] == 1
+    assert not ambiguous
+    assert switches == 1
+
+    # A second, different person in frame (identity clearly failing, appearance
+    # unremarkable) is not an identity switch of the tracked character.
+    bystander = {
+        1: [_evidence_sample(1, face=0.9, appearance=0.95, time=0.0)],
+        2: [_evidence_sample(2, face=0.05, appearance=0.40, time=1.0)],
+    }
+    _, _, switches = resolve_track_selection(bystander, thresholds)
+    assert switches == 0
+
+    # No usable face on the second track, but a whole-body appearance match
+    # above the appearance pass bar still attributes it: fail closed.
+    faceless_match = {
+        1: [_evidence_sample(1, face=0.9, appearance=0.95, time=0.0)],
+        2: [_evidence_sample(2, face=None, appearance=0.85, time=2.0)],
+    }
+    _, _, switches = resolve_track_selection(faceless_match, thresholds)
+    assert switches == 1
 
 
 def test_modal_source_enforces_single_t4_worker_and_no_provider_fallback() -> None:

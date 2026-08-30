@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import os
 import time
 from collections.abc import Callable
@@ -12,6 +13,20 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from .schemas import AnalyzeAccepted, AnalyzeRequest, CallbackEnvelope
+
+
+async def _call(callable_: Callable[..., Any], *args: Any) -> Any:
+    """Invoke a sync or async collaborator from the async handler.
+
+    The Modal deployment passes coroutine functions (`.aio` variants), so no
+    blocking Modal client call ever runs on the event loop; test harnesses may
+    still pass plain callables.
+    """
+
+    result = callable_(*args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 #: In-process delivery attempts before an envelope is handed to the spool.
 #: Small on purpose: the worker holds a GPU container while it retries, and
@@ -47,12 +62,12 @@ def create_api(
         token = authorization.removeprefix("Bearer ").strip() if authorization else ""
         if not hmac.compare_digest(token, expected):
             raise HTTPException(401, "invalid bearer token")
-        if claim_job is not None and not claim_job(request.job_id):
+        if claim_job is not None and not await _call(claim_job, request.job_id):
             return JSONResponse(
                 status_code=202,
                 content=AnalyzeAccepted(job_id=request.job_id, duplicate=True).model_dump(),
             )
-        spawn_job(request.model_dump(mode="json"))
+        await _call(spawn_job, request.model_dump(mode="json"))
         return JSONResponse(
             status_code=202,
             content=AnalyzeAccepted(job_id=request.job_id).model_dump(),

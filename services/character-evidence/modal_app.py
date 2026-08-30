@@ -205,10 +205,18 @@ def https_api():
 
     jobs = _jobs_dict()
 
-    def claim_job(job_id: str) -> bool:
-        return bool(jobs.put(job_id, {"accepted_at": int(time.time())}, skip_if_exists=True))
+    # `.aio` variants keep the blocking Modal client off the ASGI event loop —
+    # the sync forms work but log "sync function called from async context"
+    # warnings on every accepted request.
+    async def claim_job(job_id: str) -> bool:
+        return bool(
+            await jobs.put.aio(job_id, {"accepted_at": int(time.time())}, skip_if_exists=True)
+        )
 
-    return create_api(lambda payload: CVWorker().analyze.spawn(payload), claim_job=claim_job)
+    async def spawn_job(payload: dict) -> None:
+        await CVWorker().analyze.spawn.aio(payload)
+
+    return create_api(spawn_job, claim_job=claim_job)
 
 
 @app.function(

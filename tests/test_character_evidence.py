@@ -327,6 +327,46 @@ def test_character_evidence_drives_qa_without_scalar_identity_samples(
     assert result.metrics_json["character_evidence"]["aggregate"]["hair_similarity"] == UNAVAILABLE
 
 
+def test_replayed_character_evidence_report_converges_on_one_qa_result(
+    container, project
+) -> None:  # type: ignore[no-untyped-def]
+    """The run-id check, QAResult insert and run-id append are one transaction.
+
+    Delivering the same producer run twice — the concurrent-callback replay the
+    webhook can see — must yield exactly one QAResult row (the unique
+    (candidate_id, producer_run_id) index is the backstop) and exactly one
+    entry in the candidate's completed-run list.
+    """
+
+    from production_domain.models import QAResult
+    from sqlalchemy import select as sa_select
+
+    candidate_id = _candidate_for_fixture(container, project)
+    report = _producer().produce(
+        FIXTURE_VIDEO,
+        candidate_id=candidate_id,
+        character_id="fixture-character",
+        references=[_reference()],
+    )
+
+    first = container.qa.validate_candidate(
+        candidate_id, _semantic_scores(), character_evidence=report, observation_only=True
+    )
+    second = container.qa.validate_candidate(
+        candidate_id, _semantic_scores(), character_evidence=report, observation_only=True
+    )
+
+    assert first.producer_run_id == report.producer_run_id
+    assert second.id == first.id
+    with container.database.session() as session:
+        rows = list(
+            session.scalars(sa_select(QAResult).where(QAResult.candidate_id == candidate_id))
+        )
+        assert [row.id for row in rows] == [first.id]
+        candidate = session.get(GenerationCandidate, candidate_id)
+        assert candidate.metadata_json["character_evidence_run_ids"] == [report.producer_run_id]
+
+
 def test_tracking_uncertain_requires_semantic_review(container, project) -> None:  # type: ignore[no-untyped-def]
     candidate_id = _candidate_for_fixture(container, project)
     container.qa.evidence_producer = _producer(tracker_status=TRACKING_UNCERTAIN)

@@ -104,6 +104,46 @@ def _face_in_track(track: TrackedPerson, faces: list[DetectedFace]) -> DetectedF
     return max(inside, key=lambda item: item.confidence, default=None)
 
 
+def resolve_track_selection(
+    tracks: dict[int, list[EvidenceSample]], thresholds: dict[str, Any]
+) -> tuple[tuple[int, list[EvidenceSample]] | None, bool, int]:
+    """Rank one character's candidate tracks and count identity switches.
+
+    Returns the best-scoring ``(track_id, samples)`` (or ``None`` with no
+    tracks), whether the top two scores are too close to trust the assignment,
+    and the number of identity switches the evidence implies — attributable
+    tracks beyond the first. A track is attributable when its face evidence
+    passes the identity threshold, or — with no usable face contradicting it —
+    its whole-body appearance passes the appearance threshold. Two attributable
+    tracks means the person re-entered under a new track ID, and a decision
+    made from one of them would rest on a fraction of the evidence.
+    """
+
+    identity_cfg = thresholds["identity"]
+    appearance_cfg = thresholds["appearance"]
+    ranked: list[tuple[float, int, list[EvidenceSample]]] = []
+    attributable_tracks = 0
+    for track_id, samples in tracks.items():
+        identities = [
+            float(item.face_similarity) for item in samples if item.face_similarity is not None
+        ]
+        identity_mean = mean(identities) if identities else None
+        appearance_mean = mean(item.appearance_similarity for item in samples)
+        score = (identity_mean or 0.0) * 0.75 + appearance_mean * 0.25
+        ranked.append((score, track_id, samples))
+        if identity_mean is not None and identity_mean >= identity_cfg["pass_cosine"]:
+            attributable_tracks += 1
+        elif (
+            (identity_mean is None or identity_mean > identity_cfg["fail_cosine"])
+            and appearance_mean >= appearance_cfg["pass_cosine"]
+        ):
+            attributable_tracks += 1
+    ranked.sort(reverse=True)
+    ambiguous = len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.05
+    chosen = (ranked[0][1], ranked[0][2]) if ranked else None
+    return chosen, ambiguous, max(0, attributable_tracks - 1)
+
+
 def _iou(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     area = max(0.0, min(left[2], right[2]) - max(left[0], right[0])) * max(
         0.0, min(left[3], right[3]) - max(left[1], right[1])
@@ -437,24 +477,19 @@ class CharacterEvidencePipeline:
                                 sample_time,
                             )
                         )
+            max_id_switches = int(self.thresholds["tracking"]["maximum_id_switches_for_decision"])
             chosen: dict[str, tuple[int, list[EvidenceSample]] | None] = {}
             ambiguous: set[str] = set()
+            switch_limited: set[str] = set()
             for character in request.characters:
-                ranked: list[tuple[float, int, list[EvidenceSample]]] = []
-                for track_id, samples in candidates[character.character_id].items():
-                    identities = [
-                        float(item.face_similarity)
-                        for item in samples
-                        if item.face_similarity is not None
-                    ]
-                    score = (mean(identities) if identities else 0.0) * 0.75 + mean(
-                        item.appearance_similarity for item in samples
-                    ) * 0.25
-                    ranked.append((score, track_id, samples))
-                ranked.sort(reverse=True)
-                if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.05:
+                selection, is_ambiguous, id_switches = resolve_track_selection(
+                    candidates[character.character_id], self.thresholds
+                )
+                if is_ambiguous:
                     ambiguous.add(character.character_id)
-                chosen[character.character_id] = (ranked[0][1], ranked[0][2]) if ranked else None
+                if id_switches > max_id_switches:
+                    switch_limited.add(character.character_id)
+                chosen[character.character_id] = selection
             track_owners: dict[int, list[str]] = defaultdict(list)
             for character_id, selection in chosen.items():
                 if selection:
@@ -470,13 +505,17 @@ class CharacterEvidencePipeline:
                     reasons.append("MULTIPLE_CHARACTER_CROSSING")
                 if character.character_id in ambiguous:
                     reasons.append("AMBIGUOUS_TRACK_TO_CHARACTER_ASSIGNMENT")
+                if character.character_id in switch_limited:
+                    reasons.append("ID_SWITCH_LIMIT_EXCEEDED")
                 reports.append(
                     self._report(
                         request,
                         character,
                         selection[1] if selection else [],
                         reasons,
-                        crossing or character.character_id in ambiguous,
+                        crossing
+                        or character.character_id in ambiguous
+                        or character.character_id in switch_limited,
                     )
                 )
             return reports

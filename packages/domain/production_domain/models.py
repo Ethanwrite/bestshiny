@@ -2756,10 +2756,23 @@ class ProviderInstructionBinding(Base, TimestampMixin):
 
 class QAResult(Base, TimestampMixin):
     __tablename__ = "qa_results"
+    __table_args__ = (
+        # One row per Character Evidence producer run and candidate: concurrent
+        # signed callbacks replaying the same report must converge on a single
+        # QAResult instead of inserting duplicates. NULL run ids (results not
+        # produced by the async evidence path) never collide.
+        Index(
+            "uq_qa_result_candidate_producer_run",
+            "candidate_id",
+            "producer_run_id",
+            unique=True,
+        ),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     candidate_id: Mapped[str] = mapped_column(
         ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True
     )
+    producer_run_id: Mapped[str | None] = mapped_column(String(64))
     profile: Mapped[str] = mapped_column(String(80), default="DIALOGUE", nullable=False)
     level_reached: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     decision: Mapped[str] = mapped_column(String(40), index=True, nullable=False)

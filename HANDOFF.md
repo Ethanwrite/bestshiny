@@ -1,5 +1,9 @@
 # AI Director Platform — Handoff
 
+> **Header below is historical.** It describes the 2026-08-29 release candidate. Current
+> truth: `main` `7e80d5a`, production in sync, Alembic head `0062_canonical_list_pricing`,
+> 21 of 24 models `live_enabled`. See the pointer block further down.
+
 Date: 2026-08-29 · Branch `claude/rc-predeploy-integration` — the release-candidate
 integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference adaptation),
 `claude/creative-director-episodes` `f5f68c6` (open PR #9, migrations `0053`/`0054`), and the
@@ -61,11 +65,19 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
+> **Next session: start with [`docs/PRICING_HANDOVER_2026-08-30.md`](docs/PRICING_HANDOVER_2026-08-30.md).**
+> `main` is `7e80d5a`, production is in sync at the same commit, and the Alembic head is
+> `0062_canonical_list_pricing`. That document carries the pricing rules now encoded in the
+> table, the PostgreSQL gate closing again after lapsing across four merged PRs, what the
+> two deploys exposed about the deployment procedure itself, and the one defect that is
+> narrowed rather than solved.
+>
 > **2026-08-29 — deployed.** `bestshiny.com` is live on `153.75.95.10` from `main`,
 > Character Evidence is on Modal in shadow mode, and one model has earned
-> `VERIFIED_LIVE`. Read [`docs/DEPLOY_HANDOVER_2026-08-29.md`](docs/DEPLOY_HANDOVER_2026-08-29.md)
-> first: it carries the deployment state, five defects found by running the system,
-> what remains unaudited, and one standing gate that lapsed across four merged PRs.
+> `VERIFIED_LIVE`. [`docs/DEPLOY_HANDOVER_2026-08-29.md`](docs/DEPLOY_HANDOVER_2026-08-29.md)
+> carries that state, five defects found by running the system, and what remains unaudited.
+> Its §2–§3.5 are annotated in place with what the 2026-08-30 session resolved, so read it
+> for the reasoning and the newer document for the outcome.
 
 ## 1. Gate state (all green, offline only)
 

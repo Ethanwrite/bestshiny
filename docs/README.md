@@ -1,9 +1,13 @@
 # AI Director Platform — Documentation Index
 
-Snapshot: 2026-08-29 · branch `claude/rc-predeploy-integration`
-Release verdict: **NOT PRODUCTION-READY**
+Snapshot: 2026-08-30 · `main` `7e80d5a` · deployed and in sync at `153.75.95.10`
+Current migration head is **`0062_canonical_list_pricing`**; 21 of 24 models are
+`live_enabled` and three are unpriced on purpose. Start with
+[PRICING_HANDOVER_2026-08-30.md](PRICING_HANDOVER_2026-08-30.md).
 
-Current migration head is `0060_flow_remote_owner_index`. The database records 22
+The paragraph below is the 2026-08-29 release-candidate snapshot, kept because the
+evidence documents still refer to it. Release verdict at that point: **NOT
+PRODUCTION-READY**. Migration head was `0060_flow_remote_owner_index`. The database records 22
 `live_enabled` models and 0 `VERIFIED_LIVE`; Alibaba OSS passes preflight, while Ark/DashScope
 return-media hosts and an end-to-end launch-model canary remain unverified. Character Evidence is
 SHADOW, Modal is not deployed, the authorized validation set is empty, and this deployment uses the
@@ -13,6 +17,11 @@ the evidence documents are labeled historical checkpoint evidence, not current r
 
 ## Read first
 
+0. [PRICING_HANDOVER_2026-08-30.md — current state](PRICING_HANDOVER_2026-08-30.md)
+   - Where `main` and production are, the three rules canonical pricing now encodes, the
+     PostgreSQL gate, and what the two deploys exposed about the deploy procedure itself.
+   - Supersedes [DEPLOY_HANDOVER_2026-08-29.md](DEPLOY_HANDOVER_2026-08-29.md) for state;
+     that document remains the reasoning, annotated in place with what was resolved.
 1. [HANDOFF.md — current handoff](../HANDOFF.md)
    - Gate state, what changed this session, and the Git facts to read before committing.
    - Supersedes the 2026-08-20 and 2026-08-22 handoffs; both described states the code no

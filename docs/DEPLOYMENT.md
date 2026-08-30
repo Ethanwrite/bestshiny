@@ -189,6 +189,18 @@ something else happens to reload it — the renewal succeeds and the site still 
   because the deploy predates it, `alembic current` plus the presence of files a known
   commit added).
 
+- **Payment configuration.** Server-side payment configuration was completed on
+  2026-08-30. The production `.env` now carries the DePay callback public key,
+  Alchemy webhook signing key and Base treasury address; the file and its rollback
+  copy remain mode `0600`. The API and worker were recreated without rebuilding
+  images. Runtime validation reports both the fixed DePay checkout and signed
+  callback as configured for the 30 USDC → 3,000 Credits → permanent PRO offer.
+  Public health returns `200`, while unsigned DePay and Alchemy callback probes are
+  rejected with `401`, proving that both authentication boundaries are active.
+  `ALCHEMY_CREDITING_ENABLED` and `LEGACY_WALLET_PAYMENTS_ENABLED` remain `false`:
+  DePay is the canonical credit issuer and Alchemy remains independent chain/reorg
+  evidence. This closes server configuration only; a deliberately authorized real
+  payment and DePay-dashboard parameter review remain separate live evidence.
 - **Backups.** `/usr/local/bin/bestshiny-backup` takes a nightly custom-format `pg_dump`
   into `/opt/bestshiny/backups` at 03:15 UTC and keeps 14 days. Restore is
   `pg_restore -U video_platform -d video_platform --clean`. **Restore has not been

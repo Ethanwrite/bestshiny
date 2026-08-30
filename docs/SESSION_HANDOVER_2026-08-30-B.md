@@ -211,6 +211,24 @@ reached the provider. Leaving usages `UNCERTAIN` is what makes the permit ledger
   was unharmed — its work lived in an isolated worktree. All affected sessions were notified.
   Use `git branch --set-upstream-to` alone, or work in a worktree; check `git status` for peers'
   edits before any destructive git command.
+  **Recovery exists, and it is fragile.** Every one of the ten lost files still had
+  `__pycache__` bytecode compiled from the destroyed source (a `.pyc` records the source
+  mtime and size it was built from, so the mismatch identifies it). Peer sessions preserved
+  the full set before anything recompiled it; it is now copied outside session scratchpads to
+  `backups/payment-wiring-recovery-20260830/` at the repository root — `pyc-rescue-all-10/`
+  holds all ten, plus the payment modules' bytecode alongside it. **Any import of those
+  modules — pytest, starting the API, a REPL — overwrites the in-tree originals**, so work
+  from the backup, never from `__pycache__`. Bytecode yields exact names, ordering, string
+  constants, defaults, docstrings and control flow; it does not yield comments or formatting.
+  Already extracted by peers: the full `router_evidence_core.__all__` in order, the lost
+  `/internal/production-evidence/sources` route, and the `DePayPaymentService(...)` kwargs
+  (`payment_link_url, integration_id, callback_public_key, dynamic_config_private_key,
+  treasury_address, checkout_ttl_minutes`) with `settings.depay_dynamic_config_private_key`
+  needing restoration in `config.py`.
+  **Do not rebuild the payment wiring without asking the operator**: payments are parked by
+  standing instruction (report, do not repair), so restoring `container.py`'s DePay wiring,
+  `depay.py` (~4.7 kB lost, the largest single loss) and `wallets.py` is repair inside a
+  parked subsystem. The material is preserved; the decision is the operator's.
 - The dev api/worker/web images must be rebuilt after a migration (`docker compose build api
   worker web`) or startup fails the schema-revision check.
 

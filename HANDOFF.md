@@ -66,12 +66,22 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
-> **Next session: start with [`docs/E2E_AUDIT_2026-08-30.md`](docs/E2E_AUDIT_2026-08-30.md).**
-> A real free-user E2E on production broke the image chain at seven seams — six are
-> fixed and deployed (#25 plus the provider-download rename), the seventh (live-canary
-> permit economics) is the open design item that taxes every live call. The audit doc
-> carries the findings table, the reconciliation ledger, the video quote awaiting the
-> operator's choice, and the optimized storyboard prompts.
+> **Next session: start with [`docs/SESSION_HANDOVER_2026-08-30-B.md`](docs/SESSION_HANDOVER_2026-08-30-B.md).**
+> It is the single entry point for the 2026-08-30 free-tier/rebrand/QA/E2E session: current
+> state (`main` `3b978e5`, production in sync, head `0064`), what landed, the live audit
+> outcome, what is owed to the operator (the video quote and a credit-reconciliation
+> decision), the live test account, and the gotchas that cost this session time.
+>
+> Its companion detail doc: [`docs/E2E_AUDIT_2026-08-30.md`](docs/E2E_AUDIT_2026-08-30.md).
+> A real free-user E2E on production broke the image chain at seven seams — all seven
+> are now fixed: six in #25 plus the provider-download rename (deployed), and the
+> seventh (live-canary permit economics, C5) closed on 2026-08-30 per the audit's
+> §4.1 — token-derived holds and `TOKENS_LIST` settlement through the new
+> `TokenCostEngine`, EXHAUSTED recovery on settlement, retryable canary refusals at
+> the gateway, and `refine_prompt` degrading instead of 500ing (§4.2). Not yet
+> deployed to production. The audit doc carries the findings table, the
+> reconciliation ledger, the video quote awaiting the operator's choice, and the
+> optimized storyboard prompts.
 >
 > **Before it: [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).**
 > It carries the FREE-plan hard gates (Doubao chat + Seedream images, the 3/10/5 usage

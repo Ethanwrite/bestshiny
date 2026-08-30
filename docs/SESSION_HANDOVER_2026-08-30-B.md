@@ -200,6 +200,17 @@ reached the provider. Leaving usages `UNCERTAIN` is what makes the permit ledger
   `json.dumps` the body.
 - **Production pins `PROVIDER_MEDIA_ALLOWED_HOSTS` in `/opt/bestshiny/.env`**, so a code-side
   allowlist change needs the env line updated during the deploy too.
+- **`git reset --hard` is never safe in this shared checkout.** I ran it to restore local
+  `main`'s upstream tracking after pushing a docs commit, and it discarded every uncommitted
+  modification to *tracked* files that three peer sessions had live in the tree. Untracked new
+  files survived; unstaged edits to tracked files were unrecoverable (never staged, so no blobs
+  for `git fsck`). Casualties: the payment session's `container.py` DePay wiring
+  (`integration_id` / `dynamic_config_private_key`; its `catalog.py` and migration `0065`
+  survived) and the router-evidence session's `runtime_routes.py` route registration plus
+  `router_evidence_core/__init__.py` exports (their new modules survived). The canary session
+  was unharmed — its work lived in an isolated worktree. All affected sessions were notified.
+  Use `git branch --set-upstream-to` alone, or work in a worktree; check `git status` for peers'
+  edits before any destructive git command.
 - The dev api/worker/web images must be rebuilt after a migration (`docker compose build api
   worker web`) or startup fails the schema-revision check.
 

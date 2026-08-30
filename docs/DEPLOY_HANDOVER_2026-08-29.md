@@ -21,7 +21,7 @@ first thing to fix.
 | | |
 | --- | --- |
 | `main` | `4832066` |
-| Production | `153.75.95.10`, in sync with `main`, all services healthy |
+| Production | `153.75.95.10`, all services healthy — but **`4832066`, not `main`**: #18 was merged and never deployed, and this row said otherwise for a day. Deployed to `980a6f9` on 2026-08-30. See `DEPLOYMENT.md` §6. |
 | Migration head | `0061_retire_wan_logical_name_pricing` (now `0062_canonical_list_pricing`) |
 | Models | 21 of 24 `live_enabled` |
 | Live canary | 1 model `VERIFIED_LIVE` (`wan-3.0-openrouter`), 23 `NOT_RUN` |

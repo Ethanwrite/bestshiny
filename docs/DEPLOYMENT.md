@@ -112,26 +112,57 @@ exactly a commit and never a dirty working tree.
 
 ```bash
 # from the worktree holding the revision to deploy
-git archive --format=tar HEAD | gzip -9 > /tmp/bestshiny.tar.gz
-scp /tmp/bestshiny.tar.gz root@153.75.95.10:/opt/bestshiny/
-ssh root@153.75.95.10 '
+SHA=$(git rev-parse HEAD)
+git archive --format=tar "$SHA" | gzip -9 > /tmp/bestshiny.tar.gz
+scp -o BindInterface=en0 /tmp/bestshiny.tar.gz root@153.75.95.10:/opt/bestshiny/
+ssh -B en0 root@153.75.95.10 "
   cd /opt/bestshiny &&
+  cp -a docker-compose.prod.yml docker-compose.prod.yml.bak-\$(date +%Y%m%d-%H%M%S) &&
+  /usr/local/bin/bestshiny-backup &&
   tar xzf bestshiny.tar.gz && rm bestshiny.tar.gz &&
+  echo $SHA > DEPLOYED_SHA &&
   docker compose -f docker-compose.prod.yml build api worker web &&
-  docker compose -f docker-compose.prod.yml up -d'
+  docker compose -f docker-compose.prod.yml up -d"
 ```
 
-`.env` and `docker-compose.prod.yml` are not in the archive and survive the extraction.
+**`.env` survives the extraction. `docker-compose.prod.yml` does not.** The first is
+gitignored and genuinely absent from the archive; the second is *tracked*, there is no
+`.gitattributes` to `export-ignore` it, and `git archive HEAD | tar tf -` lists it — so
+extraction overwrites the production copy with the repo's. This document previously
+claimed both were safe, which was wrong about the one that carries the compose topology.
+Verify before believing either:
+
+```bash
+git archive --format=tar HEAD | tar tf - | grep -E '^(docker-compose|\.env)'
+```
+
+Hence the `cp -a` above: take the copy before extracting, and diff after. Any hand-edit
+made on the host — the kind that gets made during an incident and never gets back into
+the repo — is otherwise reverted silently, and the deploy reports success.
+
+`echo $SHA > DEPLOYED_SHA` exists because **the extracted tree carries no `.git`**, so
+there is nothing on the host that says which commit is running. Without the marker the
+only way to answer "what is deployed?" is to hash files and bisect against candidate
+commits — which is how the 2026-08-30 deploy discovered production was on `4832066`
+while every record said `9eb2934` (see §6).
 
 The api container runs `alembic upgrade head` before uvicorn, so migrations apply on
 start. Startup refuses to run against a database that is not at
-`REQUIRED_SCHEMA_REVISION`, and names the command when it does.
+`REQUIRED_SCHEMA_REVISION`, and names the command when it does. Take the `pg_dump`
+before extracting rather than after: once the new tree is in place, the next `up -d`
+migrates, and the backup you want is the one from before that.
+
+**This is not a zero-downtime deploy.** `up -d` recreates the api container, and nginx
+answers `502` for the few seconds it is gone — on 2026-08-30 a real session polling a
+DePay checkout hit exactly that window. The gap is seconds, but it is user-visible, so
+deploy when the site is quiet rather than assuming nobody is mid-flow.
 
 Watch it come up:
 
 ```bash
 docker compose -f docker-compose.prod.yml ps
 docker compose -f docker-compose.prod.yml logs --tail=40 api
+docker compose -f docker-compose.prod.yml exec -T api alembic current
 ```
 
 ## 5. TLS
@@ -145,6 +176,19 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
+- **Current release.** `980a6f9` (`main`, [#19](https://github.com/Ethanwrite/bestshiny/pull/19)),
+  deployed 2026-08-30, Alembic `0062_canonical_list_pricing`, 21 of 24 models
+  `live_enabled`. The host records it in `/opt/bestshiny/DEPLOYED_SHA`.
+
+  **Read this before trusting any "in sync" claim.** The previous handover recorded
+  production as `9eb2934`; it was actually on `4832066`, one release behind. #18 was
+  merged and never deployed. It was documentation-only, so no code was stale and nothing
+  misbehaved — which is exactly why it went unnoticed for a day. What caught it was
+  hashing files on the host against candidate commits, not reading a document. Treat a
+  written release claim as a hypothesis and check `DEPLOYED_SHA` (or, if it is missing
+  because the deploy predates it, `alembic current` plus the presence of files a known
+  commit added).
+
 - **Backups.** `/usr/local/bin/bestshiny-backup` takes a nightly custom-format `pg_dump`
   into `/opt/bestshiny/backups` at 03:15 UTC and keeps 14 days. Restore is
   `pg_restore -U video_platform -d video_platform --clean`. **Restore has not been
@@ -154,6 +198,20 @@ something else happens to reload it — the renewal succeeds and the site still 
   worker polls continuously and would otherwise fill the disk on its own.
 - **Restart policy.** Every service is `restart: unless-stopped`, and docker and nginx
   are enabled units, so the stack returns after a reboot.
+- **Reaching the host from a developer laptop.** Both SSH and HTTPS need help here. SSH
+  needs `ssh -B en0` (`scp` needs `-o BindInterface=en0`, since its own `-B` means batch
+  mode) because the local TUN proxy makes every TCP port appear open and then kills 22.
+  `curl` to `api.bestshiny.com` needs the *opposite* treatment: the hostname resolves
+  into the proxy's `198.18.0.0/15` fake-IP range, so `--interface en0` binds to an
+  address that goes nowhere and times out. Either let curl use the proxy normally, or
+  bypass DNS entirely:
+
+  ```bash
+  curl -sS -k --interface en0 --noproxy '*' -H 'Host: api.bestshiny.com' https://153.75.95.10/health
+  ```
+
+  A timeout from one of these is not evidence the host is down. Check the other path
+  before concluding anything.
 
 ## 7. The first administrator
 

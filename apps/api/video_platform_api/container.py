@@ -14,7 +14,7 @@ from character_core import (
 from character_evidence.client import ModalCharacterEvidenceProducer
 from character_evidence.tracking import CharacterEvidenceTracker
 from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
-from cost_core import CostEngine, CreditPricingEngine
+from cost_core import CostEngine, CreditPricingEngine, TokenCostEngine
 from creative_director_core import CreativeDirectorService
 from deepseek_provider import DeepSeekProvider
 from director_production import AgentOrchestrator, CandidatePipeline
@@ -467,6 +467,10 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_capabilities,
         provider_mode=settings.provider_mode,
         live_canary=live_canary,
+        # Token-billing providers report counts, not cost. This prices live
+        # chat/embedding holds and settlements from the canonical list rates,
+        # so a multi-request permit stops degrading into a one-call permit.
+        token_costs=TokenCostEngine(database),
     )
     live_gate_ready = (
         settings.provider_mode == "live"

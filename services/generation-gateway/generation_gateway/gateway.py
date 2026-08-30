@@ -90,6 +90,10 @@ from .retry import RetryPolicy
 from .scheduler import AccountScheduler, NoAccountAvailable
 
 
+class LiveCanaryResubmissionForbidden(LiveCanaryDenied):
+    """The operation's canary is already UNCERTAIN/SETTLED; only an operator resolves it."""
+
+
 class IdempotencyConflict(RuntimeError):
     pass
 
@@ -344,7 +348,7 @@ class GenerationGateway:
             idempotency_key=self._live_canary_operation_key(job_id),
         )
         if reservation.replayed and reservation.status in {"UNCERTAIN", "SETTLED"}:
-            raise LiveCanaryDenied(
+            raise LiveCanaryResubmissionForbidden(
                 "live generation canary outcome is already uncertain or settled; "
                 "automatic resubmission is forbidden"
             )
@@ -2561,11 +2565,38 @@ class GenerationGateway:
                 provider=provider_name,
                 model=model,
             )
-        except (LiveCanaryDenied, LiveCanaryConflict) as exc:
+        except LiveCanaryResubmissionForbidden as exc:
+            # This operation's usage is already UNCERTAIN or SETTLED: a paid
+            # boundary may have been crossed. Only an operator can resolve it;
+            # automatic retry is exactly what the refusal forbids.
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
                 "LIVE_CANARY_DENIED",
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+            )
+        except LiveCanaryDenied as exc:
+            # A refused reservation is a spending fence doing its job before
+            # any boundary is crossed — the same shape as "no ready account".
+            # It resolves when an operator mints a permit or a settlement
+            # frees held budget, so the job waits instead of dying: RETRY_WAIT
+            # with backoff, never a refunded terminal FAILED that forces the
+            # user to rebuild the whole action (2026-08-30 audit, H6).
+            return self._schedule_error(
+                job_id,
+                RetryCategory.RATE_LIMIT,
+                "LIVE_CANARY_DENIED",
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+            )
+        except LiveCanaryConflict as exc:
+            return self._schedule_error(
+                job_id,
+                RetryCategory.PERMANENT_ERROR,
+                "LIVE_CANARY_CONFLICT",
                 str(exc),
                 submitted=False,
                 claim_token=claim_token,

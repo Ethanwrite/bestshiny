@@ -9,6 +9,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from cost_core import TokenCostEngine, TokenSettlement
 from model_registry_core import ModelRole, ResolvedModel
 from platform_database import Database
 from production_domain.models import (
@@ -35,7 +36,12 @@ from provider_sdk import (
 )
 from sqlalchemy import select
 
-from .canary import CanaryReservation, LiveCanaryDenied, LiveCanaryPermitService
+from .canary import (
+    CanaryReservation,
+    LiveCanaryConflict,
+    LiveCanaryDenied,
+    LiveCanaryPermitService,
+)
 from .service import WorkspaceModelResolver
 
 
@@ -63,6 +69,12 @@ class ModelRoleRuntime:
     version = "model-role-runtime-v1"
     edge_pricing_version = "runapi-edge-pricing-v1"
     edge_prompt_refinement_cost_usd = Decimal("0.01")
+    # The output-side token budget a live hold assumes when the caller sets no
+    # explicit cap. It bounds a *reservation*, not the response: settlement
+    # replaces it with the counted tokens. Generous on purpose — the observed
+    # director turn ran a 719-token reasoning chain, and an undershooting hold
+    # is the one direction a spending fence must not err in.
+    chat_output_token_budget = 4096
     _edge_task_namespace = uuid.UUID("dc01347d-b4a2-5ac9-bc5d-f709bb4ef5fa")
 
     def __init__(
@@ -73,6 +85,7 @@ class ModelRoleRuntime:
         *,
         provider_mode: ProviderMode | str = ProviderMode.MOCK,
         live_canary: LiveCanaryPermitService | None = None,
+        token_costs: TokenCostEngine | None = None,
     ):
         self.database = database
         self.resolver = resolver
@@ -82,6 +95,7 @@ class ModelRoleRuntime:
         except ValueError as exc:
             raise ValueError("provider_mode must be mock, recorded, or live") from exc
         self.live_canary = live_canary
+        self.token_costs = token_costs
 
     def resolve(
         self,
@@ -173,7 +187,16 @@ class ModelRoleRuntime:
             )
             canary = self._reserve_live_canary(
                 selected,
-                estimated_cost=_estimated_cost(parameters or {}),
+                estimated_cost=self._planning_estimate(
+                    selected,
+                    parameters,
+                    input_characters=len(
+                        json.dumps(_json_safe(messages), ensure_ascii=False)
+                    ),
+                    max_output_tokens=_output_token_cap(
+                        parameters, default=self.chat_output_token_budget
+                    ),
+                ),
             )
             if canary is not None:
                 self.live_canary.mark_uncertain(
@@ -259,7 +282,14 @@ class ModelRoleRuntime:
             )
             canary = self._reserve_live_canary(
                 selected,
-                estimated_cost=_estimated_cost(parameters or {}),
+                estimated_cost=self._planning_estimate(
+                    selected,
+                    parameters,
+                    input_characters=len(json.dumps(_json_safe(inputs), ensure_ascii=False)),
+                    # Embedding output is not billed per token anywhere this
+                    # platform prices; the hold covers the input side only.
+                    max_output_tokens=0,
+                ),
             )
             if canary is not None:
                 self.live_canary.mark_uncertain(
@@ -386,7 +416,17 @@ class ModelRoleRuntime:
         primary_unavailable = False
         try:
             result = await refiner.refine(original_prompt=original_prompt, fact_locks=fact_locks)
-        except (LookupError, ProviderError, ProviderTrustViolation):
+        except (
+            # A refused live-canary reservation is a budget/permit refusal, not
+            # a platform fault. The director's turn got this degradation in
+            # #25; refine kept 500ing on the same denial on production — each
+            # model call here must degrade the same way.
+            LiveCanaryConflict,
+            LiveCanaryDenied,
+            LookupError,
+            ProviderError,
+            ProviderTrustViolation,
+        ):
             primary_unavailable = True
 
             async def fallback_as_primary(_payload: dict[str, Any]) -> dict[str, Any]:
@@ -402,7 +442,13 @@ class ModelRoleRuntime:
                     source="fallback",
                     reason_codes=("PRIMARY_UNAVAILABLE", *result.reason_codes),
                 )
-            except (LookupError, ProviderError, ProviderTrustViolation):
+            except (
+                LiveCanaryConflict,
+                LiveCanaryDenied,
+                LookupError,
+                ProviderError,
+                ProviderTrustViolation,
+            ):
                 # A model outage must never make the deterministic product
                 # prompt path unavailable.  Keeping the already-approved input
                 # is the only safe fallback; it is explicitly recorded as an
@@ -447,8 +493,19 @@ class ModelRoleRuntime:
         reported_actual_cost = _actual_cost(response or {})
         actual_cost = reported_actual_cost if self.provider_mode is ProviderMode.LIVE else None
         estimated_cost = _estimated_cost(parameters or {})
+        token_priced: TokenSettlement | None = None
+        if actual_cost is None and self.provider_mode is ProviderMode.LIVE and response:
+            token_priced = self._token_settlement(
+                selected.provider, selected.provider_model_id, response
+            )
         if actual_cost is not None:
             cost_source = "VERIFIED_PROVIDER"
+        elif token_priced is not None:
+            # The provider reported token counts and no cost. Priced here from
+            # the dated canonical list rates — a real figure with a weaker
+            # provenance than a provider invoice, and it says which it is.
+            actual_cost = token_priced.cost_usd
+            cost_source = "TOKENS_LIST"
         elif estimated_cost is not None:
             cost_source = "ESTIMATED"
         else:
@@ -476,6 +533,11 @@ class ModelRoleRuntime:
                     "provider_mode": self.provider_mode.value,
                     "reported_actual_cost_ignored": (
                         reported_actual_cost is not None and self.provider_mode is not ProviderMode.LIVE
+                    ),
+                    **(
+                        {"token_pricing_detail": token_priced.detail}
+                        if token_priced is not None
+                        else {}
                     ),
                     **(
                         {
@@ -537,12 +599,56 @@ class ModelRoleRuntime:
         if self.live_canary is None:  # pragma: no cover - constructor invariant.
             raise RuntimeError("live canary service disappeared")
         actual = _actual_cost(response)
+        evidence = f"model-execution:{request_hash}"
+        if actual is None:
+            # Token-billing providers report counts, never a cost figure. A
+            # usage that cannot settle keeps its whole hold and the permit
+            # stays EXHAUSTED, so the counted tokens are priced at the same
+            # canonical list rates every quote uses. No rates, no counts — the
+            # usage stays UNCERTAIN for an operator, exactly as before.
+            settlement = self._token_settlement(reservation.provider, reservation.model, response)
+            if settlement is not None:
+                actual = settlement.cost_usd
+                evidence = f"model-execution-tokens:{request_hash}:{settlement.detail}"
         if actual is not None:
             self.live_canary.settle(
                 reservation.usage_id,
                 actual_cost_usd=actual,
-                evidence_reference=f"model-execution:{request_hash}",
+                evidence_reference=evidence,
             )
+
+    def _planning_estimate(
+        self,
+        selected: ResolvedModel,
+        parameters: dict[str, Any] | None,
+        *,
+        input_characters: int,
+        max_output_tokens: int,
+    ) -> Decimal | None:
+        explicit = _estimated_cost(parameters or {})
+        if explicit is not None:
+            return explicit
+        if self.provider_mode is not ProviderMode.LIVE or self.token_costs is None:
+            return None
+        return self.token_costs.estimate_call(
+            selected.provider,
+            selected.provider_model_id,
+            input_characters=input_characters,
+            max_output_tokens=max_output_tokens,
+        )
+
+    def _token_settlement(
+        self,
+        provider: str,
+        model: str,
+        response: dict[str, Any],
+    ) -> TokenSettlement | None:
+        if self.token_costs is None:
+            return None
+        usage = response.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            return None
+        return self.token_costs.settle_from_usage(provider, model, usage)
 
     def _release_pre_boundary_canary(
         self,
@@ -660,6 +766,14 @@ def _estimated_cost(parameters: dict[str, Any]) -> Decimal | None:
     if isinstance(task, EdgeTask):
         return _money(task.estimated_cost_usd)
     return _money(parameters.get("estimated_cost_usd"))
+
+
+def _output_token_cap(parameters: dict[str, Any] | None, *, default: int) -> int:
+    for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        value = (parameters or {}).get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return default
 
 
 def _refinement_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -482,7 +482,7 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
     monkeypatch.setattr(provider, "upload_asset", offline_upload)
     monkeypatch.setattr(provider, "generate_video", offline_submit)
 
-    denied_request = GenerationRequest(
+    allowed_request = GenerationRequest(
         project_id=project_id,
         type="video",
         provider="openrouter",
@@ -491,11 +491,16 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
         start_frame_asset_id=asset.id,
         idempotency_key="gateway-without-canary",
     )
-    denied_job, _ = live.gateway.create(denied_request)
-    active_job_id = denied_job.id
-    denied = await live.gateway.process(denied_job.id)
-    assert denied.status == "FAILED"
+    # A refused reservation is the spending fence, not a platform fault: the
+    # job waits for a permit instead of dying as a refunded terminal failure
+    # the user can only recover by rebuilding the whole action.
+    allowed_job, _ = live.gateway.create(allowed_request)
+    active_job_id = allowed_job.id
+    denied = await live.gateway.process(allowed_job.id)
+    assert denied.status == "RETRY_WAIT"
     assert denied.error_code == "LIVE_CANARY_DENIED"
+    assert denied.retry_category == "RATE_LIMIT"
+    assert denied.safe_to_retry is True
     assert calls == {"upload": 0, "submit": 0}
 
     wrong_permit = live.live_canary.create(
@@ -507,11 +512,11 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
         purpose="must never authorize the selected model",
     )
     wrong_job, _ = live.gateway.create(
-        denied_request.model_copy(update={"idempotency_key": "gateway-wrong-canary"})
+        allowed_request.model_copy(update={"idempotency_key": "gateway-wrong-canary"})
     )
     active_job_id = wrong_job.id
     wrong = await live.gateway.process(wrong_job.id)
-    assert wrong.status == "FAILED"
+    assert wrong.status == "RETRY_WAIT"
     assert wrong.error_code == "LIVE_CANARY_DENIED"
     assert calls == {"upload": 0, "submit": 0}
 
@@ -523,8 +528,11 @@ async def test_live_generation_gateway_requires_matching_canary_before_transport
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         purpose="one server-selected media operation",
     )
-    allowed_request = denied_request.model_copy(update={"idempotency_key": "gateway-matching-canary"})
-    allowed_job, _ = live.gateway.create(allowed_request)
+    # Minting the matching permit is all the recovery the waiting job needs.
+    with live.database.session() as session:
+        stored_job = session.get(GenerationJob, allowed_job.id)
+        assert stored_job is not None
+        stored_job.next_retry_at = utcnow() - timedelta(seconds=1)
     active_job_id = allowed_job.id
     submitted = await live.gateway.process(allowed_job.id)
     assert submitted.status == "SUBMITTED"

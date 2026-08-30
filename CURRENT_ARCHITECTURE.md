@@ -1290,6 +1290,19 @@ model, expiry, purpose, maximum request count and maximum USD cost. Reservation 
 is marked uncertain before network work; proven pre-boundary failure may release; a trusted actual amount settles;
 request or cost exhaustion hard-stops.
 
+Since 2026-08-30 (E2E audit C5) the economics make `max_requests > 1` real rather than nominal. A chat or embedding
+reservation holds a bounded token-derived estimate — `TokenCostEngine` (cost_core) prices a character-based input
+bound plus the output-token cap at the dated `model_pricing_profiles` token rows, with a margin, never below a
+minimum hold — instead of the permit's whole remaining budget; a model with no token pricing row keeps the
+conservative whole-budget hold. Settlement prices the *counted* tokens the same way when the provider reports no
+cost figure (Ark reports counts only), recorded as `cost_source=TOKENS_LIST` on the execution record — a real
+figure with weaker provenance than a provider invoice, and it says which it is. And EXHAUSTED is a measurement,
+not a sentence: `settle`/`reconcile_uncertain` re-derive ACTIVE when the freed budget leaves capacity and the
+permit is unexpired with requests remaining. A media-generation canary refusal at the Gateway schedules
+`RETRY_WAIT` (RATE_LIMIT, pre-submit, no attempt burned) exactly like "no ready account" — minting a matching
+permit un-blocks the waiting job — while the refusal that protects an already-UNCERTAIN/SETTLED operation stays
+terminal, and `refine_prompt` degrades to `local_safe_fallback` on a canary refusal instead of failing the route.
+
 `POST /internal/live-canary-permits` requires `PLATFORM_API_KEY`, explicit confirmation and an idempotency key. It
 only creates authorization and audit data; it never executes a Provider. No canary permit was used for a real call
 in this phase.
@@ -1317,6 +1330,10 @@ have refused the whole remaining audit on money nobody had spent. The rule is no
 ACTIVE               max(authorisation, actual + held)    nothing stops it drawing more
 EXHAUSTED/EXPIRED    actual + held                        it can never draw again
 ```
+
+The 2026-08-30 EXHAUSTED-recovery change does not move this rule: a cost-exhausted permit carries
+`actual + held ≈ authorisation` for exactly as long as it is exhausted, and a request-exhausted
+permit never recovers, so exposure is not understated in either state.
 
 `held` keeps an unreconciled `UNCERTAIN` usage counted, because UNCERTAIN is not evidence of zero.
 `POST /internal/live-canary-usages/{usage_id}/reconcile` is how an operator closes one with a

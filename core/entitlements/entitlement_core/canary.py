@@ -59,6 +59,29 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _refresh_permit_capacity(permit: LiveCanaryPermit) -> None:
+    """Re-derive ACTIVE/EXHAUSTED from what the permit can still authorize.
+
+    EXHAUSTED is a measurement of remaining capacity, not a terminal verdict:
+    an unquoted reservation holds the permit's entire remaining budget and
+    exhausts it, and the settlement that replaces the hold with the (much
+    smaller) actual cost must hand the freed budget back — otherwise every
+    permit is a one-call permit regardless of ``max_requests``, which is what
+    the 2026-08-30 live audit found. Recovery never applies to EXPIRED or
+    DISABLED, and never revives a permit whose request count is spent.
+    """
+
+    if permit.status not in {"ACTIVE", "EXHAUSTED"}:
+        return
+    if (
+        permit.used_requests >= permit.max_requests
+        or permit.actual_cost_usd + permit.reserved_cost_usd >= permit.max_cost_usd
+    ):
+        permit.status = "EXHAUSTED"
+    elif permit.status == "EXHAUSTED" and _aware(permit.expires_at) > datetime.now(UTC):
+        permit.status = "ACTIVE"
+
+
 def _new_permit(
     *,
     provider: str,
@@ -565,11 +588,7 @@ class LiveCanaryPermitService:
             usage.evidence_reference = evidence
             usage.status = "SETTLED"
             permit.version += 1
-            if (
-                permit.used_requests >= permit.max_requests
-                or permit.actual_cost_usd + permit.reserved_cost_usd >= permit.max_cost_usd
-            ):
-                permit.status = "EXHAUSTED"
+            _refresh_permit_capacity(permit)
             return self._view(usage, replayed=False)
 
     def reconcile_uncertain(
@@ -674,11 +693,7 @@ class LiveCanaryPermitService:
             usage.actual_cost_usd = actual
             usage.evidence_reference = evidence
             usage.status = "SETTLED"
-            if (
-                permit.used_requests >= permit.max_requests
-                or permit.actual_cost_usd + permit.reserved_cost_usd >= permit.max_cost_usd
-            ):
-                permit.status = "EXHAUSTED"
+            _refresh_permit_capacity(permit)
             session.add(
                 DecisionRecord(
                     id=audit_id,

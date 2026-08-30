@@ -297,6 +297,23 @@ def test_free_deep_prompt_optimization_budget_refunds_failed_refines(container, 
         failed = client.post("/v1/prompts/refine", headers=headers, json=body)
         assert failed.status_code == 500
 
+        # A refine that degraded to the unoptimized prompt — outage or a
+        # live-canary refusal — answers 200 but is not a deep optimization:
+        # the unit goes back too.
+        async def refine_degraded(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                optimized_candidate="Mina raises the red phone.",
+                accepted=False,
+                source="local_safe_fallback",
+                reason_codes=("PRIMARY_UNAVAILABLE", "FALLBACK_UNAVAILABLE"),
+                diff="",
+            )
+
+        monkeypatch.setattr(container.model_roles, "refine_prompt", refine_degraded)
+        degraded = client.post("/v1/prompts/refine", headers=headers, json=body)
+        assert degraded.status_code == 200, degraded.text
+        assert degraded.json()["model_refinement"]["source"] == "local_safe_fallback"
+
         monkeypatch.setattr(container.model_roles, "refine_prompt", refine_ok)
         second = client.post("/v1/prompts/refine", headers=headers, json=body)
         assert second.status_code == 200, second.text

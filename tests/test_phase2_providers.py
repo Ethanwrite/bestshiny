@@ -18,6 +18,7 @@ from production_domain.models import (
     DecisionRecord,
     JobStatus,
     ModelDefinition,
+    ModelRoleBinding,
     Project,
     ProviderAccount,
     ProviderCredential,
@@ -1284,11 +1285,34 @@ async def test_model_role_runtime_executes_chat_and_embeddings_and_logs_decision
 
 
 async def test_fact_lock_runtime_uses_openrouter_when_runapi_changes_facts(container, project) -> None:
+    """A primary whose refinement breaks the locks hands off to the fallback.
+
+    `0065` moved the shipped `PROMPT_REFINER_LOW_COST` binding off RunAPI, so
+    the RunAPI primary this exercises — and the server-issued `EdgeTask` only it
+    receives — is bound here rather than taken from the catalogue default.
+    """
+
     container.model_infrastructure.configure_runtime_model(
         "runapi-prompt-refiner-edge",
         "edge-refiner-test",
         enabled=True,
     )
+    with container.database.session() as session:
+        definition = session.scalar(
+            select(ModelDefinition).where(
+                ModelDefinition.logical_name == "runapi-prompt-refiner-edge"
+            )
+        )
+        assert definition is not None
+        binding = session.scalar(
+            select(ModelRoleBinding).where(
+                ModelRoleBinding.role == ModelRole.PROMPT_REFINER_LOW_COST.value,
+                ModelRoleBinding.plan_tier == "ALL",
+            )
+        )
+        assert binding is not None
+        binding.model_definition_id = definition.id
+
     edge = FakeRoleProvider(invalid_edge_refinement=True)
     fallback = FakeRoleProvider()
     catalog = ProviderCapabilityCatalog()

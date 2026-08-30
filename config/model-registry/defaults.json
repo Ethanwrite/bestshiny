@@ -1659,7 +1659,7 @@
     },
     {
       "role": "PROMPT_REFINER_LOW_COST",
-      "model_logical_name": "runapi-prompt-refiner-edge",
+      "model_logical_name": "claude-sonnet-5-openrouter",
       "priority": 0
     },
     {

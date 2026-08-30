@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 # schema it was not written for. Bump it in the same commit as the migration
 # that moves head — a test asserts the two agree, so forgetting is a gate
 # failure rather than a runtime surprise.
-REQUIRED_SCHEMA_REVISION = "0061_retire_wan_logical_name_pricing"
+REQUIRED_SCHEMA_REVISION = "0062_canonical_list_pricing"
 
 
 class SchemaRevisionMismatch(RuntimeError):

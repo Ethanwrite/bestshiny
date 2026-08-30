@@ -243,7 +243,10 @@ def test_migration_seeds_the_ark_rates_that_were_actually_published(tmp_path, mo
             sa.text(
                 "select resolution, estimate_unit_price, unit_price, currency, billing_unit, "
                 "source_url, effective_until from model_pricing_profiles "
-                "where provider_model_id = :model and effective_until is null"
+                "where provider_model_id = :model and effective_until is null "
+                # 0062 seeds video_input beside these; this test is about the
+                # no-video-input list rates 0044 read off the Ark page.
+                "and input_mode = 'no_video_input'"
             ),
             {"model": ARK_MODEL},
         ).mappings().all()
@@ -296,8 +299,26 @@ def test_pricing_status_is_derived_from_the_profiles_rather_than_left_to_drift(c
     assert status_of("seedance-2.5-official") == "UNVERIFIED"
 
 
-def test_video_input_rates_are_deliberately_absent_rather_than_estimated(tmp_path, monkeypatch) -> None:
-    """Ark publishes video-input pricing as a range. A range is not a price."""
+# Ark's video-input list, per 1M completion tokens. Cheaper than no-video-input
+# because Ark settles on completion tokens and input video adds none.
+ARK_VIDEO_INPUT_TOKEN_RATE = {"480p": 42.0, "720p": 42.0, "1080p": 46.0}
+ARK_NO_VIDEO_INPUT_TOKEN_RATE = {"480p": 70.0, "720p": 70.0, "1080p": 77.0}
+
+
+def test_video_input_is_priced_from_a_published_rate_once_one_exists(tmp_path, monkeypatch) -> None:
+    """A range is not a price — but 42.00/46.00 is, so the scope is no longer absent.
+
+    0044 left `video_input` unseeded because Ark published it as a range that
+    depends on input length, and an unseeded mode fails closed, which is the
+    right answer to "we do not know". This test used to pin that absence. The
+    operator's 2026-08-29 price sheet supplies the list rates, so the reason for
+    the absence is gone and 0062 seeds them.
+
+    What is pinned now is the shape rather than the emptiness: video input is
+    cheaper per token at every resolution, because it does not add completion
+    tokens and completion tokens are what Ark settles on. A video-input rate that
+    came out at or above the no-video-input one would be a transcription error.
+    """
 
     database_path = tmp_path / "pricing-modes.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
@@ -307,15 +328,52 @@ def test_video_input_rates_are_deliberately_absent_rather_than_estimated(tmp_pat
 
     engine = sa.create_engine(f"sqlite:///{database_path}")
     with engine.connect() as connection:
-        modes = connection.execute(
+        rows = connection.execute(
             sa.text(
-                "select distinct input_mode from model_pricing_profiles "
-                "where provider_model_id = :model"
+                "select input_mode, resolution, unit_price, estimate_unit_price, currency, "
+                "billing_unit from model_pricing_profiles where provider_model_id = :model"
             ),
             {"model": ARK_MODEL},
-        ).scalars().all()
+        ).mappings().all()
     engine.dispose()
-    assert set(modes) == {"no_video_input"}
+
+    assert {row["input_mode"] for row in rows} == {"no_video_input", "video_input"}
+    priced = {(row["input_mode"], row["resolution"]): row for row in rows}
+    for resolution, expected in ARK_VIDEO_INPUT_TOKEN_RATE.items():
+        row = priced[("video_input", resolution)]
+        assert float(row["unit_price"]) == pytest.approx(expected), resolution
+        # Still Ark's own currency and billing unit: the token is the source
+        # unit, and the per-second figure beside it is derived from it.
+        assert row["currency"] == "CNY"
+        assert row["billing_unit"] == "token"
+        assert float(row["estimate_unit_price"]) == pytest.approx(
+            ARK_CNY_PER_SECOND[resolution] * expected / ARK_NO_VIDEO_INPUT_TOKEN_RATE[resolution]
+        ), resolution
+        assert expected < ARK_NO_VIDEO_INPUT_TOKEN_RATE[resolution], resolution
+
+
+def test_a_continuation_on_seedance_is_quotable_now_that_its_rate_is_published(container) -> None:
+    """The scope that used to be refused outright is the one continuations use.
+
+    `CONTINUE_V2V` is the only policy that feeds a clip back in, and while Ark's
+    video-input rate was unpublished the whole class of shots failed closed. With
+    the rate seeded it quotes — from a row with a source, not from a guess.
+    """
+
+    _seed(
+        container,
+        _profile(),
+        _profile(input_mode="video_input", unit_price=42.0, estimate_unit_price=0.9072),
+    )
+    engine = _strict(container)
+    estimate = _estimate(engine, generation_policy="CONTINUE_V2V")
+    assert estimate.pricing_status == "VERIFIED"
+    assert estimate.provider_cost_usd == pytest.approx(
+        round(5 * 0.9072 * USD_PER_CNY, 4), abs=1e-9
+    )
+    # Cheaper than the same shot without video input, which is the whole point
+    # of Ark pricing the two modes differently.
+    assert estimate.provider_cost_usd < _estimate(engine).provider_cost_usd
 
 
 GPT_IMAGE_2 = "openai/gpt-image-2"
@@ -357,8 +415,21 @@ def test_migration_prices_gpt_image_2_for_the_quality_it_sends(tmp_path, monkeyp
         ).mappings().all()
     engine.dispose()
 
-    assert len(rows) == 1
-    row = rows[0]
+    # 0062 records the rest of OpenRouter's published SKU table for this model —
+    # image and text input, cached and uncached. None of them is reachable by a
+    # quote: an image request resolves ("default", resolution) then
+    # ("default", ""), and no other input mode is a scope the engine builds. The
+    # invariant that matters is therefore that exactly one row is *selectable*,
+    # not that exactly one row exists.
+    quotable = [row for row in rows if row["input_mode"] == "default"]
+    assert len(quotable) == 1
+    assert {row["input_mode"] for row in rows if row["input_mode"] != "default"} == {
+        "image_input_tokens",
+        "image_cached_input_tokens",
+        "text_input_tokens",
+        "text_cached_input_tokens",
+    }
+    row = quotable[0]
     assert float(row["unit_price"]) == pytest.approx(USD_PER_OUTPUT_TOKEN)
     assert float(row["estimate_unit_price"]) == pytest.approx(
         TOKENS_PER_IMAGE["low"] * USD_PER_OUTPUT_TOKEN
@@ -385,7 +456,9 @@ OPENROUTER_VIDEO_USD_PER_SECOND = {
     # 0.40) are recorded in the profile notes rather than seeded, because the
     # profile keys on input mode and resolution and audio is a third axis.
     "google/veo-3.1": {"720p": 0.40, "1080p": 0.40, "4k": 0.60},
-    "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12},
+    # 4K here is 0062, not 0047: OpenRouter publishes with_audio_4k 0.30 for Fast
+    # and the original seed carried only the two resolutions the registry declares.
+    "google/veo-3.1-fast": {"720p": 0.10, "1080p": 0.12, "4k": 0.30},
     "google/veo-3.1-lite": {"720p": 0.05, "1080p": 0.08},
     "kwaivgi/kling-v3.0-pro": {"720p": 0.168},
     "kwaivgi/kling-v3.0-std": {"720p": 0.126},
@@ -489,7 +562,7 @@ def test_the_quoted_image_price_is_the_quality_the_wire_actually_sends(
         seeded = connection.execute(
             sa.text(
                 "select estimate_unit_price from model_pricing_profiles "
-                "where provider_model_id = 'openai/gpt-image-2'"
+                "where provider_model_id = 'openai/gpt-image-2' and input_mode = 'default'"
             )
         ).scalar()
     engine.dispose()
@@ -605,17 +678,26 @@ def test_wan_is_priced_for_the_region_this_deployment_actually_calls(
     with engine.connect() as connection:
         rows = connection.execute(
             sa.text(
-                "select resolution, unit_price, billing_unit from model_pricing_profiles "
-                "where provider_model_id in "
-                "('wan2.7-t2v-2026-06-12', 'wan2.7-i2v-2026-04-25')"
+                "select provider_model_id, input_mode, resolution, unit_price, billing_unit "
+                "from model_pricing_profiles where provider_model_id in "
+                "('wan2.7-t2v-2026-06-12', 'wan2.7-i2v-2026-04-25', 'wan2.7-r2v-2026-06-12')"
             )
         ).mappings().all()
     engine.dispose()
 
     seeded = {row["resolution"]: float(row["unit_price"]) for row in rows}
     assert seeded == {"720p": pytest.approx(0.6), "1080p": pytest.approx(1.0)}
-    # Both deployments, not one of them priced and the other silently missing.
-    assert len(rows) == 4
+    # Every deployment a WAN2_7_*_MODEL_ID can point the registry row at, in both
+    # input modes: three snapshots x two modes x two resolutions. 0048 priced the
+    # family, 0051 seeded t2v and i2v for no-video-input, and 0062 added the
+    # video-input scope and the r2v snapshot 0051 had deliberately left out.
+    assert len(rows) == 12
+    assert {row["provider_model_id"] for row in rows} == {
+        "wan2.7-t2v-2026-06-12",
+        "wan2.7-i2v-2026-04-25",
+        "wan2.7-r2v-2026-06-12",
+    }
+    assert {row["input_mode"] for row in rows} == {"no_video_input", "video_input"}
     assert {row["billing_unit"] for row in rows} == {"second"}
     # Singapore is 0.733924 / 1.100886 and must not have been seeded.
     assert all(value not in (pytest.approx(0.733924), pytest.approx(1.100886)) for value in seeded.values())

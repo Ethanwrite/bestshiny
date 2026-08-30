@@ -89,7 +89,8 @@ replace, and nothing fake was added.
 
 A real free-user run on production: registered account → director conversation (real Doubao
 calls) → brief approval → key visuals → visual bible → beats → compiled storyboard.
-**Seven chain-breaking defects, six fixed and re-verified live, one open.**
+**Seven chain-breaking defects, six fixed and re-verified live; the seventh closed in code
+later the same day (§3.1).**
 
 Fixed and deployed: director turns 500ing on a canary refusal instead of degrading; Ark's
 synchronous image API being polled (a billed artefact stranded); missing Seedance *image*
@@ -102,17 +103,23 @@ from the **first real T4 inference**, which the logs show ran 2026-08-29 18:35 U
 `6a7b623b` compiled with 7 shots. Total real spend **$0.23**, every canary usage settled with
 evidence, zero `UNCERTAIN` remaining.
 
-### 3.1 The one open critical — canary permit economics (audit §4.1)
-An unquoted live call holds a permit's **entire remaining budget**; chat costs never settle
-(Ark reports tokens, `_actual_cost` wants `usage.cost`); `EXHAUSTED` is terminal even after the
-hold settles to ~$0. Permits are therefore strictly one-call regardless of `max_requests`, and
-`refine_prompt` still 500s on the refusal.
+### 3.1 The last critical — canary permit economics (audit §4.1) — **fixed in code, not yet deployed**
+The defect, as this session found it live: an unquoted call held a permit's **entire remaining
+budget**; chat costs never settled (Ark reports tokens, `_actual_cost` wants `usage.cost`);
+`EXHAUSTED` was terminal even after the hold settled to ~$0. Permits were therefore strictly
+one-call regardless of `max_requests`, and `refine_prompt` 500ed on the refusal.
 
-> **A peer session is landing exactly this fix** on branch `claude/canary-permit-economics`
-> (built in an isolated worktree; it touches `entitlement_core/canary.py` + `runtime.py`,
-> `cost_core` incl. a new `tokens.py`, `gateway.py`, `main.py`, `container.py`, and tests).
-> Coordinate before editing those files. I confirmed to them that none of the uncommitted work
-> in the shared checkout is mine — my session's work is entirely merged.
+> **Closed 2026-08-30 by the peer session** — [PR #30](https://github.com/Ethanwrite/bestshiny/pull/30),
+> branch `claude/canary-permit-economics`, built in an isolated worktree.
+> `cost_core.TokenCostEngine` prices holds and
+> settlements from the dated `model_pricing_profiles` token rows (`cost_source=TOKENS_LIST`,
+> which also closes the "tokens recorded but never priced" finding in §3.2.5); `settle` and
+> `reconcile_uncertain` re-derive ACTIVE when freed budget leaves capacity; a Gateway canary
+> refusal now schedules `RETRY_WAIT` (RATE_LIMIT) like `NO_ACCOUNT`, so minting a permit
+> un-blocks the waiting job; `refine_prompt` degrades to `local_safe_fallback`. Unpriced models
+> keep the conservative whole-budget hold and stay `UNCERTAIN`. Both engine halves green
+> (SQLite 1263/12, PostgreSQL 1268/7), no migration. **Production still runs `3b978e5` and
+> therefore still has the old semantics** — mint one permit per call there until it is deployed.
 
 ### 3.2 Product findings, in priority order
 1. **The director cannot take corrections.** The brief merge never overwrites, and list fields

@@ -176,9 +176,14 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `980a6f9` (`main`, [#19](https://github.com/Ethanwrite/bestshiny/pull/19)),
-  deployed 2026-08-30, Alembic `0062_canonical_list_pricing`, 21 of 24 models
-  `live_enabled`. The host records it in `/opt/bestshiny/DEPLOYED_SHA`.
+- **Current release.** `8b92639` (`main`, [#23](https://github.com/Ethanwrite/bestshiny/pull/23)),
+  deployed 2026-08-30, Alembic `0064_free_tier_defaults` — the FREE-plan hard gates, the
+  BestShiny Director rebrand and the Character Evidence QA hardening. The host records it
+  in `/opt/bestshiny/DEPLOYED_SHA`; verified post-deploy: api healthy, doubao repoint and
+  FREE image binding present in the production registry, homepage serving the rebranded
+  UI. (`7e80d5a` #22 and `f758a9c` were deployed between #19 and this without this line
+  moving — `DEPLOYED_SHA` was right throughout, this document was behind, which is
+  exactly the failure mode the paragraph below describes.)
 
   **Read this before trusting any "in sync" claim.** The previous handover recorded
   production as `9eb2934`; it was actually on `4832066`, one release behind. #18 was

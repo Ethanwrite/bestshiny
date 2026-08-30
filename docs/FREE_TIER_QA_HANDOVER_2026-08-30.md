@@ -13,7 +13,8 @@ unification (dev / staging / production on one migration head with isolated data
 | `REQUIRED_SCHEMA_REVISION` | `0064_free_tier_defaults` |
 | Development DB | `video_platform` @ 0064 (compose PostgreSQL) |
 | Staging DB | `video_platform_staging` @ 0064 — **new**, same server, fully separate data |
-| Production DB | migrates to 0064 on deploy (`alembic upgrade head` at api start) |
+| Production DB | **@ 0064** — deployed 2026-08-30 as `8b92639` (#23), verified: api healthy, registry rows correct, rebranded UI live |
+| Modal | redeployed 2026-08-30 (code-only, 7s) — id-switch enforcement and the `.aio` handler are live; still `SHADOW` |
 | Registry config | `phase2-model-infrastructure-v7` |
 
 One request in the operator's instructions could not be taken literally: it asked for
@@ -21,6 +22,25 @@ all three environments at head `00**_flow_remote_owner_index`. `0060_flow_remote
 has not been the head since 0061/0062 landed (pricing corrections), and this session
 added 0063/0064. All three environments unify on the *actual* head instead; nothing was
 downgraded.
+
+## 1b. Gate state (2026-08-30, this tree)
+
+```
+SQLite      1248 passed, 12 skipped   exit 0    5m34s
+PostgreSQL  1252 passed,  7 skipped   exit 0*  15m14s   (detached)
+ruff check                            all checks passed
+mypy                                  190 source files, no issues
+apps/web    node --check + vite build passed
+alembic     fresh up → down(0062) → up on SQLite and on the compose
+            PostgreSQL; `alembic check` clean (known FK-cycle warning only)
+```
+
+\* One failure in the recorded PostgreSQL run was
+`test_url_mode_provider_receives_urls_and_is_never_asked_to_upload` differing by one
+second of `expires=` — a pre-existing clock-tick flake (it also flaked once on SQLite
+the same day and passed on every rerun, including a full 69-test rerun of its file on
+PostgreSQL). The test now pins the actual contract (same path, ≤2s window) instead of
+byte-identical signatures.
 
 ## 2. The three Character Evidence defects — closed
 
@@ -122,10 +142,9 @@ with `auth_required=True`.
 
 ## 6. Not proven / left open
 
-- The id-switch enforcement and async-handler fix are **not live on Modal** until
-  `modal deploy services/character-evidence/modal_app.py` runs; the deployed image
-  still has the old selection logic. Everything else in §2 is BestShiny-side and live
-  on deploy.
+- ~~The id-switch enforcement and async-handler fix are not live on Modal~~ —
+  **redeployed 2026-08-30** (`modal deploy`, code-only, no image rebuild). As always: a
+  successful deploy is acceptance, not evidence; no real inference has run through it.
 - Character Evidence has still never run on real authorized media; no signed callback
   has ever been observed end-to-end (unchanged from previous handovers).
 - The payment framework remains parked per the operator (2026-08-30); its copy changed,

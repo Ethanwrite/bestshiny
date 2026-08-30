@@ -19,7 +19,7 @@ from provider_sdk import (
     VideoReferenceConstraints,
 )
 from provider_sdk.capabilities import ChatCapability
-from provider_sdk.http import ProviderJsonClient, provider_health_metadata
+from provider_sdk.http import ProviderJsonClient, provider_health_metadata, wire_parameters
 from provider_sdk.transport import (
     LiveProviderSettings,
     ProviderTransport,
@@ -696,7 +696,7 @@ class WanProvider(GenerationProvider, ChatCapability):
         return await self.chat_client.request(
             "POST",
             "/chat/completions",
-            json_body={"model": selected, "messages": messages, **(parameters or {})},
+            json_body={"model": selected, "messages": messages, **wire_parameters(parameters)},
             submitted=True,
         )
 

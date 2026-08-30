@@ -19,3 +19,4 @@ apps/web/dist/
 /output/
 .playwright-cli/
 node_modules/
+.worktrees/

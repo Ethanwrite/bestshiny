@@ -76,6 +76,16 @@ def create_api(
     return web
 
 
+class CallbackRejected(RuntimeError):
+    """BestShiny answered 4xx: the envelope itself is refused, not the transport.
+
+    Retrying a rejected envelope can never succeed — the receiver has decided
+    (unknown candidate, failed lineage, invalid payload). Redelivery must move
+    it to the dead partition instead of spinning on it; on 2026-08-29 exactly
+    that spin held the outbox drain past its own timeout for three runs.
+    """
+
+
 def _post_callback(raw: bytes, callback_url: str, signing_key: str) -> None:
     # The signature covers a fresh timestamp per attempt, so a redelivered
     # envelope still verifies inside the receiver's timestamp tolerance.
@@ -94,8 +104,30 @@ def _post_callback(raw: bytes, callback_url: str, signing_key: str) -> None:
         timeout=30.0,
         follow_redirects=False,
     )
+    if 400 <= response.status_code < 500:
+        raise CallbackRejected(f"BestShiny rejected the callback with HTTP {response.status_code}")
     if not 200 <= response.status_code < 300:
         raise RuntimeError(f"BestShiny callback failed with HTTP {response.status_code}")
+
+
+def deliver_callback_once(envelope: CallbackEnvelope) -> None:
+    """One delivery attempt, no in-process retries.
+
+    The scheduled outbox drain owns retry pacing across runs; a single bounded
+    attempt per item is what keeps one unreachable receiver from holding the
+    drain past its own function timeout. Raises ``CallbackRejected`` for a 4xx
+    answer and ``RuntimeError`` for transport failures and 5xx answers.
+    """
+
+    callback_url = os.environ.get("CHARACTER_EVIDENCE_CALLBACK_URL", "").strip()
+    signing_key = os.environ.get("CHARACTER_EVIDENCE_CALLBACK_SIGNING_KEY", "")
+    if not callback_url.startswith("https://") or not signing_key:
+        raise RuntimeError("signed Character Evidence callback is not configured")
+    raw = envelope.model_dump_json().encode("utf-8")
+    try:
+        _post_callback(raw, callback_url, signing_key)
+    except httpx.HTTPError as exc:
+        raise RuntimeError("BestShiny callback transport failed") from exc
 
 
 def deliver_callback(
@@ -115,6 +147,10 @@ def deliver_callback(
         try:
             _post_callback(raw, callback_url, signing_key)
             return
+        except CallbackRejected:
+            # A 4xx cannot be retried into a 2xx; hand it straight to the
+            # caller (the spool path), where the drain dead-letters it.
+            raise
         except (httpx.HTTPError, RuntimeError) as exc:
             last_error = exc
             if attempt < len(CALLBACK_BACKOFF_SECONDS):
@@ -156,8 +192,10 @@ def failure_envelope(payload: dict[str, Any], exc: Exception) -> CallbackEnvelop
 
 __all__ = [
     "CALLBACK_ATTEMPTS",
+    "CallbackRejected",
     "create_api",
     "deliver_callback",
+    "deliver_callback_once",
     "deliver_or_spool",
     "failure_envelope",
 ]

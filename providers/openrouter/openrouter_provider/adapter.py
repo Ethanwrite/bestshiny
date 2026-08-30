@@ -20,7 +20,7 @@ from provider_sdk import (
     ProviderTrustLevel,
 )
 from provider_sdk.capabilities import ChatCapability, EmbeddingCapability, ResponsesCapability
-from provider_sdk.http import ProviderJsonClient, provider_health_metadata
+from provider_sdk.http import ProviderJsonClient, provider_health_metadata, wire_parameters
 from provider_sdk.transport import (
     LiveProviderSettings,
     ProviderTransport,
@@ -232,7 +232,11 @@ class OpenRouterProvider(
         return await self.client.request(
             "POST",
             "/chat/completions",
-            json_body={"model": _required(model, "model"), "messages": messages, **(parameters or {})},
+            json_body={
+                "model": _required(model, "model"),
+                "messages": messages,
+                **wire_parameters(parameters),
+            },
             submitted=True,
         )
 
@@ -246,7 +250,11 @@ class OpenRouterProvider(
         return await self.client.request(
             "POST",
             "/responses",
-            json_body={"model": _required(model, "model"), "input": input_value, **(parameters or {})},
+            json_body={
+                "model": _required(model, "model"),
+                "input": input_value,
+                **wire_parameters(parameters),
+            },
             submitted=True,
         )
 
@@ -260,7 +268,7 @@ class OpenRouterProvider(
         return await self.client.request(
             "POST",
             "/embeddings",
-            json_body={"model": _required(model, "model"), "input": inputs, **(parameters or {})},
+            json_body={"model": _required(model, "model"), "input": inputs, **wire_parameters(parameters)},
             submitted=True,
         )
 

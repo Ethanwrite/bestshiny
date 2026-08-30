@@ -620,11 +620,24 @@ def build_container(settings: Settings | None = None) -> Container:
             supported_models=openrouter_models,
             capabilities=openrouter_capabilities,
         )
-    if seedance_available:
+    seedream_available = seedream_runtime.enabled and seedance.configured
+    if seedance_available or seedream_available:
+        # One Ark credential serves both the Seedance video model and the
+        # Seedream image model; the scheduler capacity must say so or image
+        # jobs die in RETRY_WAIT with "no ready seedance account" — observed
+        # live on 2026-08-30 when only the video model was registered here.
+        seedance_direct_models: set[str] = set()
+        seedance_direct_capabilities: set[str] = set()
+        if seedance_available:
+            seedance_direct_models.add(seedance_runtime.provider_model_id)
+            seedance_direct_capabilities.add("video")
+        if seedream_available:
+            seedance_direct_models.add(seedream_runtime.provider_model_id)
+            seedance_direct_capabilities.add("image")
         direct_api_resources.ensure_provider(
             "seedance",
-            supported_models={seedance_runtime.provider_model_id},
-            capabilities={"video"},
+            supported_models=seedance_direct_models,
+            capabilities=seedance_direct_capabilities,
         )
     if wan.configured and wan_models:
         direct_api_resources.ensure_provider(

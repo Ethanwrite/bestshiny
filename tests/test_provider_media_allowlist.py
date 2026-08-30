@@ -82,14 +82,18 @@ def test_no_provider_is_allowlisted_with_a_bare_wildcard(
                 assert pattern.count(".") >= 2, f"{provider} pattern {pattern!r} is a public suffix"
 
 
-def test_ark_and_dashscope_stay_closed_until_a_canary_shows_their_host(
+def test_ark_lists_only_its_observed_host_and_dashscope_stays_closed(
     shipped_hosts: dict[str, tuple[str, ...]],
 ) -> None:
     """A guessed host is either an SSRF hole or another silent failure.
 
-    This is a deliberate gap, not an oversight: it is recorded here so that
-    adding either provider is a conscious edit to a test that says why.
+    Ark's return host is no longer a guess: a real completed, billed image
+    generation on 2026-08-30 (production job e2d97342) delivered its artefact
+    from `ark-acg-cn-beijing.tos-cn-beijing.volces.com`, which is what the
+    shipped pattern covers — and nothing else. DashScope remains a deliberate
+    gap until its own canary shows its host; adding it must be a conscious
+    edit to this test.
     """
 
-    assert "seedance" not in shipped_hosts
+    assert shipped_hosts["seedance"] == ("*.tos-cn-beijing.volces.com",)
     assert "wan" not in shipped_hosts

@@ -1407,12 +1407,17 @@ def create_app(container: Container | None = None) -> FastAPI:
             else False
         )
         try:
-            return await _refine_prompt_body(body)
+            payload = await _refine_prompt_body(body)
         except Exception:
             # A refine that never happened must not burn the FREE budget.
             if charged:
                 _refund_free_prompt_optimization(project_workspace_id)
             raise
+        if charged and payload["model_refinement"]["source"] == "local_safe_fallback":
+            # Both model paths degraded — outage or live-canary refusal — and
+            # the prompt came back unoptimized, so the unit goes back too.
+            _refund_free_prompt_optimization(project_workspace_id)
+        return payload
 
     async def _refine_prompt_body(body: PromptRefine):
         result = container.image_prompts.correct(ImagePromptCorrectRequest(prompt=body.prompt))

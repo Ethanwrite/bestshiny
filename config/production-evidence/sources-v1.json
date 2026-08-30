@@ -1,0 +1,67 @@
+{
+  "frozen_at": "2026-08-30",
+  "registry_version": "public-project-sources-v1",
+  "sources": [
+    {
+      "api_base_url": "https://fnf-api-gw.higgsfield.ai/",
+      "default_folder_paths": [
+        "regenerations",
+        "SCENE 2 - LIVINGROOM/shot 1"
+      ],
+      "intended_uses": [
+        "router_reporting",
+        "production_evidence"
+      ],
+      "limitations": [
+        "The public final-film asset has no exposed edit-decision edge to a generated output, so final-shot selection is unobserved.",
+        "A job_set_type names a model family but not a provider-verifiable exact weight revision.",
+        "Folder membership records organisation, not acceptance, quality, cost, latency or a provider failure.",
+        "The regenerations folder is evidence of creative rework only; its completed jobs must not be counted as technical failures.",
+        "The project is a vendor-curated published case study and is subject to selection and survivorship bias."
+      ],
+      "observed_stats": {
+        "assets_bucket_count": 22960,
+        "final_duration_seconds": 1189,
+        "final_video_asset_id": "8e773bcc-7271-41a4-8024-3629f9ea9ca4",
+        "generations_count": 41096,
+        "observed_at": "2026-08-30",
+        "regeneration_bucket_count": 292,
+        "root_item_count": 41118,
+        "scene_folder_counts": {
+          "SCENE 1 - KITCHEN": 303,
+          "SCENE 10 - LIVING ROOM": 747,
+          "SCENE 11 - LAB": 116,
+          "SCENE 12 - TITLE SEQUENCE": 418,
+          "SCENE 2 - LIVINGROOM": 1326,
+          "SCENE 3  - TROY": 1665,
+          "SCENE 3B - LIVINGROOM": 52,
+          "SCENE 4 - LIVINGROOM": 862,
+          "SCENE 5 - COSMOS": 5397,
+          "SCENE 6 - LIVING ROOM": 912,
+          "SCENE 7 - FAIRYTALE": 1819,
+          "SCENE 8 - LIVINGROOM": 186,
+          "SCENE 9 - FAIRY TALE": 3743,
+          "SCENE 9A - LIVINGROOM": 64
+        },
+        "top_level_folder_count": 16,
+        "top_level_folder_item_sum": 40862
+      },
+      "page_url": "https://higgsfield.ai/original-series/oneiric/full-film",
+      "platform": "higgsfield_public_project",
+      "posterior_eligible": false,
+      "prompts_publicly_exposed": true,
+      "publication_id": "dfa3c067-3f17-47cc-bc0d-65cc82fb11f0",
+      "router_exclusion_reasons": [
+        "EXTERNAL_VENDOR_PROJECT",
+        "NO_EXACT_MODEL_REVISION",
+        "NO_FINAL_SELECTION_LINK",
+        "NO_CALIBRATION_BRIDGE",
+        "OUTCOME_SELECTION_BIAS"
+      ],
+      "series_id": "317fb649-95f9-42c7-9d08-26b1a6cfb3a2",
+      "snapshot_folder_id": "85a0f627-285b-4c8a-ac20-bcfd309d54c5",
+      "source_class": "vendor_public_project_trace",
+      "source_id": "higgsfield-oneiric-2026-08"
+    }
+  ]
+}

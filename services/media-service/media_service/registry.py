@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import PurePosixPath
 from typing import BinaryIO, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -17,6 +18,7 @@ import httpx
 from PIL import Image
 from platform_database import Database
 from platform_shared import (
+    EXTENSION_FOR_MIME,
     MEDIA_HEADER_BYTES,
     StorageLimitExceeded,
     StorageProvider,
@@ -1411,6 +1413,15 @@ class MediaRegistry:
             binary_content = cast(BinaryIO, content)
             mime_type = await self._download_provider_media(binary_content, url, provider=provider)
             binary_content.seek(0)
+            # The caller named this file before anything was downloaded, and a
+            # provider's artefact URL is not a meaningful filename: Ark serves
+            # JPEG from paths the platform had guessed as `.png`, and the
+            # filename/MIME agreement check then refused a real, paid artefact
+            # (production, 2026-08-30). The response's type names the file;
+            # magic-byte validation below still pins the bytes to that type.
+            extension = EXTENSION_FOR_MIME.get((mime_type or "").split(";", 1)[0].strip().lower())
+            if extension:
+                filename = f"{PurePosixPath(filename).stem}{extension}"
             return self._validate_and_stage(
                 binary_content,
                 key_prefix=key_prefix,

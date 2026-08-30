@@ -66,7 +66,14 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
-> **Next session: start with [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).**
+> **Next session: start with [`docs/E2E_AUDIT_2026-08-30.md`](docs/E2E_AUDIT_2026-08-30.md).**
+> A real free-user E2E on production broke the image chain at seven seams — six are
+> fixed and deployed (#25 plus the provider-download rename), the seventh (live-canary
+> permit economics) is the open design item that taxes every live call. The audit doc
+> carries the findings table, the reconciliation ledger, the video quote awaiting the
+> operator's choice, and the optimized storyboard prompts.
+>
+> **Before it: [`docs/FREE_TIER_QA_HANDOVER_2026-08-30.md`](docs/FREE_TIER_QA_HANDOVER_2026-08-30.md).**
 > It carries the FREE-plan hard gates (Doubao chat + Seedream images, the 3/10/5 usage
 > limits, the Shiny/Shinier/Shiniest tier mapping), the three Character Evidence fixes
 > (id-switch enforcement, one-transaction callback dedup under a unique

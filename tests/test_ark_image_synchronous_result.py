@@ -104,3 +104,25 @@ async def test_response_without_url_or_bytes_is_refused() -> None:
             account_id="",
             worker_id="",
         )
+
+
+def test_extension_for_mime_covers_every_accepted_media_type() -> None:
+    """The provider-download rename must be able to name every accepted type.
+
+    A provider's artefact URL is not a meaningful filename (Ark serves JPEG
+    from paths the platform had guessed as `.png`); staging renames the file
+    from the response's MIME type, so that map has to cover exactly what
+    validation accepts — pinned here against the accepted-type tables.
+    """
+
+    from platform_shared import EXTENSION_FOR_MIME
+    from platform_shared.media_validation import _IMAGE_TYPES, _VIDEO_TYPES
+
+    image_mimes = {mime for mime, _fmt in _IMAGE_TYPES.values()}
+    video_mimes = set(_VIDEO_TYPES.values())
+    assert set(EXTENSION_FOR_MIME) == image_mimes | video_mimes
+    for mime, extension in EXTENSION_FOR_MIME.items():
+        if mime in image_mimes:
+            assert _IMAGE_TYPES[extension][0] == mime
+        else:
+            assert _VIDEO_TYPES[extension] == mime

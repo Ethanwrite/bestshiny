@@ -2225,6 +2225,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         from router_evidence_core import (
             EvidenceLayer,
             EvidenceLayerStore,
+            PublicProjectSourceStore,
             attach_community_effective_sizes,
             build_coverage,
             build_layer_priors,
@@ -2262,6 +2263,9 @@ def create_app(container: Container | None = None) -> FastAPI:
                 for snapshot in snapshots
             },
             "source_distribution": store.source_distribution(),
+            "external_production_case_studies": [
+                source.router_view() for source in PublicProjectSourceStore().sources()
+            ],
             "production": {
                 "observations_by_version": observation_counts,
                 "latest_posterior_run_id": latest_run,

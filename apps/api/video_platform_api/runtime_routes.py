@@ -64,6 +64,7 @@ from provider_sdk import (
     assert_provider_can_handle,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from router_evidence_core import PublicProjectSourceStore
 from sqlalchemy import or_, select
 from style_core import SemanticStyleLayerRequired, StyleLockConflict
 
@@ -1427,6 +1428,16 @@ def register_runtime_routes(
                     _live_canary_permit_view(permit, usages_by_permit[permit.id]) for permit in permits
                 ],
             }
+
+    @internal_router.get("/internal/production-evidence/sources")
+    def production_evidence_sources():
+        """Registered external production cases, never local observations."""
+
+        store = PublicProjectSourceStore()
+        return {
+            "registry_version": store.registry().registry_version,
+            "sources": [source.production_view() for source in store.sources()],
+        }
 
     @internal_router.get("/internal/production-evidence")
     def production_evidence(

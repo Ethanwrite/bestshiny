@@ -3,7 +3,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -355,6 +355,20 @@ def _fact_literals(value: Any) -> tuple[str, ...]:
 
     collect(value)
     return tuple(dict.fromkeys(literals))
+
+
+def verifiable_spans(source_prompt: str, candidates: Iterable[str]) -> tuple[str, ...]:
+    """Keep only the spans ``source_prompt`` actually contains, in order.
+
+    A locked span the source does not carry fails closed as
+    ``LOCKED_SPAN_NOT_IN_SOURCE``, and a span covering the whole prompt can only
+    be satisfied by a candidate that repeats it verbatim — which no genuine
+    rewrite does. Filtering here, under the same normalization ``validate``
+    uses, is what keeps a lock both meaningful and satisfiable.
+    """
+
+    unique = dict.fromkeys(str(span).strip() for span in candidates if str(span).strip())
+    return tuple(span for span in unique if _contains_literal(source_prompt, span))
 
 
 def extract_fact_locks(

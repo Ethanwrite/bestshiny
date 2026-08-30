@@ -36,6 +36,7 @@ from .edge import (
     FactLockSet,
     PromptRefinementResult,
     extract_fact_locks,
+    verifiable_spans,
 )
 from .errors import ProviderError, RetryCategory
 from .http import ProviderJsonClient, provider_health_metadata
@@ -119,5 +120,6 @@ __all__ = [
     "ResponsesCapability",
     "create_provider_transport",
     "extract_fact_locks",
+    "verifiable_spans",
     "provider_health_metadata",
 ]

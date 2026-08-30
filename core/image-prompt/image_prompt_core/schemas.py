@@ -33,6 +33,9 @@ class ImagePromptCorrectResult(BaseModel):
     detected_type: str
     identity_preservation_mode: bool
     preserved_constraints: list[str]
+    # Prose for humans lives in preserved_constraints; these are the raw
+    # substrings a downstream fact lock can actually anchor to.
+    verbatim_spans: list[str] = Field(default_factory=list)
     editable_variables: list[str]
     changes: list[PromptChange]
     corrector_version: str

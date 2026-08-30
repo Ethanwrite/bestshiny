@@ -276,9 +276,8 @@ class ImagePromptCorrector:
                 "原文中的人物、动作、物品、空间关系、凝视方向和否定要求",
                 f"原文事实描述原样保留：{subject}",
             ]
-            preserved.extend(
-                f"逐字保留：{constraint}" for constraint in self._verbatim_chinese_constraints(subject)
-            )
+            verbatim_spans = self._verbatim_chinese_constraints(subject)
+            preserved.extend(f"逐字保留：{constraint}" for constraint in verbatim_spans)
             if detected in {"product", "commercial"}:
                 preserved.append("产品造型、材质、颜色、标志、标签和包装文字")
             if identity_mode:
@@ -305,9 +304,8 @@ class ImagePromptCorrector:
             explicit_invariants = re.findall(
                 r"[^,.;]*(?:preserve|unchanged|must|do not)[^,.;]*", original, re.IGNORECASE
             )
-            preserved.extend(
-                f"explicit invariant: {item.strip()}" for item in explicit_invariants if item.strip()
-            )
+            verbatim_spans = [item.strip() for item in explicit_invariants if item.strip()]
+            preserved.extend(f"explicit invariant: {item}" for item in verbatim_spans)
             if detected in {"product", "commercial"}:
                 preserved.append("product geometry, material, color, logo, label, and packaging text")
             if identity_mode:
@@ -348,6 +346,7 @@ class ImagePromptCorrector:
             detected_type=detected,
             identity_preservation_mode=identity_mode,
             preserved_constraints=preserved,
+            verbatim_spans=verbatim_spans,
             editable_variables=editable,
             changes=changes,
             corrector_version=self.version,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 import secrets
 from collections.abc import Mapping
@@ -52,6 +53,8 @@ _INTEGRATION_ID_PATHS = (
     ("payload", "integration_id"),
 )
 _PRICE_FIELDS = frozenset({"amount", "amount_usdc", "credits"})
+
+logger = logging.getLogger(__name__)
 
 
 class DePayError(RuntimeError):
@@ -336,6 +339,21 @@ class DePayPaymentService:
     ) -> DePayWebhookResult:
         self._verify_signature(raw_body, signature)
         payload = self._parse_payload(raw_body)
+        try:
+            return self._settle_verified_callback(payload, raw_body)
+        except DePayPayloadError as exc:
+            # A refusal here is a signed callback we would not honour, which is
+            # either our bug or a contract change. Say which fields drove it:
+            # reconstructing that from an HTTP status and a response length
+            # cost two days once already.
+            logger.warning("DePay callback refused (%s) — %s", exc, self._fingerprint(payload))
+            raise
+
+    def _settle_verified_callback(
+        self,
+        payload: dict[str, Any],
+        raw_body: bytes,
+    ) -> DePayWebhookResult:
         transfer = self._validate_transfer(payload)
         event_key = f"depay:{self.network}:{transfer['transaction']}"
         payload_hash = hashlib.sha256(raw_body).hexdigest()
@@ -362,6 +380,28 @@ class DePayPaymentService:
                 if attempt == 1:
                     raise DePayConflict("concurrent DePay callback could not be reconciled") from exc
         raise AssertionError("unreachable")
+
+    def _fingerprint(self, payload: dict[str, Any]) -> str:
+        """Non-secret fields of a callback, for a refusal log line.
+
+        Deliberately omits the injected payload: it carries the checkout token,
+        which is a bearer credential. Everything here is either public chain
+        data or a field DePay states about its own delivery.
+        """
+        declared = {
+            value
+            for value in (self._payload_path(payload, path) for path in _INTEGRATION_ID_PATHS)
+            if value
+        }
+        known = {value for value in (self.integration_id, self.legacy_link_id) if value}
+        return (
+            f"status={payload.get('status')!r} blockchain={payload.get('blockchain')!r} "
+            f"commitment={payload.get('commitment')!r} confirmations={payload.get('confirmations')!r} "
+            f"decimals={payload.get('decimals')!r} amount={payload.get('amount')!r} "
+            f"transaction={payload.get('transaction')!r} "
+            f"integration_declared={sorted(declared)} integration_matches={bool(declared & known)} "
+            f"top_level_keys={sorted(payload)}"
+        )
 
     def _apply_callback(
         self,
@@ -625,19 +665,27 @@ class DePayPaymentService:
             raise DePayPayloadError("DePay receiver or token does not match configuration")
         if payload.get("decimals") != 6:
             raise DePayPayloadError("DePay token decimals do not match Native USDC")
-        commitment = str(payload.get("commitment") or "").lower()
-        if commitment not in _SETTLED_COMMITMENTS:
-            raise DePayPayloadError(f"DePay commitment level is not settled: {commitment or 'missing'}")
         confirmations = payload.get("confirmations")
         if isinstance(confirmations, bool) or not isinstance(confirmations, int) or confirmations < 1:
             raise DePayPayloadError("DePay payment has no confirmation")
+        # `commitment` is corroboration, not the proof. The proof is the
+        # signature, `status == success`, at least one block confirmation, and
+        # a transfer of the exact snapshot amount to Treasury in canonical
+        # USDC. DePay does not put this field in every callback shape, and
+        # demanding it kept a genuinely settled payment out of the ledger for
+        # two days. So: honour a level it *does* state, and fall back to the
+        # confirmation count when it states none. A level we do not recognise
+        # is still refused — silence is not the same as a contradiction.
+        commitment = str(payload.get("commitment") or "").lower()
+        if commitment and commitment not in _SETTLED_COMMITMENTS:
+            raise DePayPayloadError(f"DePay commitment level is not settled: {commitment}")
         raw_amount = self._amount_to_microunits(payload.get("amount"))
         self._require_integration(payload)
         return {
             "transaction": transaction,
             "sender": sender,
             "raw_amount_microunits": raw_amount,
-            "commitment": commitment,
+            "commitment": commitment or f"unstated:{confirmations}conf",
             "confirmations": confirmations,
             "after_block": payload.get("after_block"),
         }

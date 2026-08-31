@@ -752,3 +752,68 @@ def test_the_signed_bytes_are_the_bytes_returned(tmp_path) -> None:
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=64),
         hashes.SHA256(),
     )
+
+
+def test_a_callback_that_states_no_commitment_still_settles(tmp_path) -> None:
+    """The shape production actually sends.
+
+    DePay's real callback for this integration carries no `commitment` at all.
+    Requiring one refused a signed, confirmed, exact-amount transfer to
+    Treasury — the second day of the same outage. Settlement rests on the
+    signature, `status`, the confirmation count and the frozen snapshot;
+    `commitment` corroborates when stated and is absent otherwise.
+    """
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+
+    payload = _callback_payload(token, order_ref)
+    del payload["commitment"]
+
+    response = _post_callback(container, private, payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "CREDITED"
+    assert response.json()["credits_granted"] == 5_000
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        delivery = session.scalar(select(DePayWebhookDelivery))
+        assert workspace is not None and workspace.credit_balance == 5_050
+        # The receipt records that the level was unstated rather than claiming
+        # a confirmation level DePay never gave.
+        assert delivery is not None
+        assert delivery.metadata_json["commitment"] == "unstated:1conf"
+
+
+def test_a_null_commitment_is_treated_as_unstated(tmp_path) -> None:
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+
+    payload = _callback_payload(token, order_ref)
+    payload["commitment"] = None
+    assert _post_callback(container, private, payload).status_code == 200
+
+
+def test_an_unconfirmed_payment_is_still_refused_either_way(tmp_path) -> None:
+    """Silence is not a contradiction, but a contradiction is."""
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+
+    # A stated level we do not recognise is refused even with confirmations.
+    stated = _callback_payload(token, order_ref, commitment="pending")
+    assert _post_callback(container, private, stated).status_code == 400
+
+    # No stated level and no confirmation is refused too — the fallback rests
+    # on the confirmation count, so it must actually be there.
+    silent = _callback_payload(token, order_ref)
+    del silent["commitment"]
+    silent["confirmations"] = 0
+    assert _post_callback(container, private, silent).status_code == 400
+
+    with container.database.session() as session:
+        assert session.scalar(select(WorkspaceCreditLedgerEntry)) is None
+        assert session.scalar(select(DePayWebhookDelivery)) is None

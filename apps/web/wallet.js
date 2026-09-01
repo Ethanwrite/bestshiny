@@ -13,6 +13,7 @@ const paymentState = {
   checkout: null,
   selectedSku: DEFAULT_SKU,
   pollTimer: null,
+  unmountWidget: null,
   busy: false,
 };
 
@@ -178,8 +179,24 @@ async function initializeForUser(user) {
   render();
 }
 
+// Hand the screen back to our own sheet once the purchase reaches a terminal
+// state. Until then the widget owns it, and reopening a modal <dialog> would
+// bury the widget in the top layer.
+function finishWidget() {
+  if (paymentState.unmountWidget) {
+    try {
+      paymentState.unmountWidget();
+    } catch {
+      // The widget may already be gone; nothing here is worth surfacing.
+    }
+    paymentState.unmountWidget = null;
+  }
+  const dialog = element("walletDialog");
+  if (!dialog.open) dialog.showModal();
+}
+
 // Success is whatever BestShiny's own settlement says it is. The widget
-// closing means the user paid, not that we were paid.
+// reporting a sent transaction means the user paid, not that we were paid.
 async function pollCheckout(checkoutId) {
   window.clearTimeout(paymentState.pollTimer);
   try {
@@ -187,6 +204,7 @@ async function pollCheckout(checkoutId) {
       `/v1/workspaces/${paymentState.workspace.id}/depay-checkouts/${checkoutId}`,
     );
     if (checkout.status === "PAID") {
+      finishWidget();
       await refreshBilling();
       window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
         detail: {
@@ -202,6 +220,7 @@ async function pollCheckout(checkoutId) {
       return;
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
+      finishWidget();
       setMessage("", `This payment did not complete (${humanStatus(checkout.status)}). Our team can restore it.`);
       return;
     }
@@ -238,15 +257,20 @@ async function createCheckout() {
     // to the body paints *behind* it and its backdrop. Our sheet has to step
     // aside, or the widget is present, initialized and completely invisible.
     if (dialog.open) dialog.close();
-    try {
-      await DePayWidgets.Payment({
-        integration: checkout.integration_id,
-        payload: { checkout_token: checkout.checkout_token },
-      });
-      setMessage("Waiting for the payment to confirm on Base…");
-    } finally {
-      if (!dialog.open) dialog.showModal();
-    }
+    // Payment() resolves with { unmount } the moment the widget *mounts* — the
+    // user has not connected a wallet, let alone paid. So the progress story
+    // comes from the widget's own callbacks, not from this promise, and our
+    // sheet stays out of the way until the purchase is actually finished.
+    const { unmount } = await DePayWidgets.Payment({
+      integration: checkout.integration_id,
+      payload: { checkout_token: checkout.checkout_token },
+      sent: () => setMessage("Payment sent — waiting for Base to confirm…"),
+      succeeded: () => setMessage("Confirmed on Base — posting your credits…"),
+      failed: () => setMessage("", "The payment failed on Base. Nothing was charged."),
+      error: (widgetError) => setMessage("", String(widgetError)),
+    });
+    paymentState.unmountWidget = unmount;
+    setMessage("Complete the payment in the DePay window.");
   } catch (error) {
     if (!dialog.open) dialog.showModal();
     // Closing the window without paying is a normal choice, not a failure.

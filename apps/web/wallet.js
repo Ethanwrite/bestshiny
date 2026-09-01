@@ -216,6 +216,7 @@ async function createCheckout() {
   if (!plan) return;
   setBusy(true);
   setMessage("Preparing your payment…");
+  const dialog = element("walletDialog");
   try {
     // The browser sends a SKU. Amount, currency and credits are decided and
     // frozen by the server, and DePay reads them back from /depay/config.
@@ -227,22 +228,33 @@ async function createCheckout() {
       }),
     });
     paymentState.checkout = checkout;
-    setMessage("Confirm the payment in the DePay window.");
     pollCheckout(checkout.id);
+    setMessage("Opening the payment window…");
     // Loaded on click, not on boot: the widget carries the whole wallet stack
     // and would otherwise be ~3 MB of JavaScript on every page view.
     const { default: DePayWidgets } = await import("@depay/widgets");
-    await DePayWidgets.Payment({
-      integration: checkout.integration_id,
-      payload: { checkout_token: checkout.checkout_token },
-      closed: () => {
-        if (!element("walletError").textContent) {
-          setMessage("Waiting for the payment to confirm on Base…");
-        }
-      },
-    });
+    // The widget mounts with document.body.appendChild, and a <dialog> opened
+    // via showModal() lives in the browser's top layer — so anything appended
+    // to the body paints *behind* it and its backdrop. Our sheet has to step
+    // aside, or the widget is present, initialized and completely invisible.
+    if (dialog.open) dialog.close();
+    try {
+      await DePayWidgets.Payment({
+        integration: checkout.integration_id,
+        payload: { checkout_token: checkout.checkout_token },
+      });
+      setMessage("Waiting for the payment to confirm on Base…");
+    } finally {
+      if (!dialog.open) dialog.showModal();
+    }
   } catch (error) {
-    setMessage("", error.message);
+    if (!dialog.open) dialog.showModal();
+    // Closing the window without paying is a normal choice, not a failure.
+    if (String(error).includes("USER_CLOSED_DIALOG")) {
+      setMessage("Payment window closed — nothing has been charged.");
+    } else {
+      setMessage("", error.message || String(error));
+    }
   } finally {
     setBusy(false);
   }

@@ -328,12 +328,18 @@ class DePayPaymentService:
             # only what the widget *asks* the payer for: the amount we accept
             # is `raw_amount_microunits` on the order, and settlement compares
             # against that integer, so a rounded quote cannot buy credits.
+            #
+            # It must survive a JavaScript round trip. DePay's verifier does
+            # `JSON.stringify(JSON.parse(response))` before checking the
+            # signature, and JSON.stringify renders 20.0 as "20" — so emitting
+            # a Python float signs bytes the widget never verifies. Integral
+            # amounts therefore go out as integers.
             body = json.dumps(
                 {
                     "accept": [
                         {
                             "blockchain": "base",
-                            "amount": float(order.amount.normalize()),
+                            "amount": self._json_number(order.amount),
                             "token": self.usdc_contract,
                             "receiver": self.treasury_address,
                         }
@@ -349,6 +355,19 @@ class DePayPaymentService:
                 separators=(",", ":"),
             ).encode()
         return body, self._sign_dynamic_configuration(body)
+
+    @staticmethod
+    def _json_number(amount: Decimal) -> int | float:
+        """Render a money amount the way JavaScript would render it back.
+
+        `JSON.stringify` collapses an integral number to its shortest form, so
+        anything we sign has to already be in that form or the bytes DePay
+        verifies will differ from the bytes we signed.
+        """
+        normalized = amount.normalize()
+        if normalized == normalized.to_integral_value():
+            return int(normalized)
+        return float(normalized)
 
     def handle_callback(
         self,

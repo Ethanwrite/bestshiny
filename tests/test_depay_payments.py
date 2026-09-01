@@ -316,7 +316,6 @@ def test_dynamic_config_returns_the_frozen_amount_and_never_settles(tmp_path) ->
     assert body["accept"] == [
         {"blockchain": "base", "amount": 100, "token": USDC, "receiver": TREASURY}
     ]
-    assert isinstance(json.loads(response.content)["accept"][0]["amount"], float)
     assert b" " not in response.content and b"\n" not in response.content
     assert body["payload"]["link_id"] == INTEGRATION_ID
     assert body["payload"]["injected"]["order_ref"] == order_ref
@@ -1020,3 +1019,50 @@ def test_either_depay_key_verifies_and_a_foreign_one_does_not(tmp_path) -> None:
     _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
     assert _post_dynamic_config(container, stranger_private, {"checkout_token": token}).status_code == 401
     assert _post_callback(container, stranger_private, _callback_payload(token, order_ref)).status_code == 401
+
+
+def _integral_floats(value: object) -> list[float]:
+    """Numbers JavaScript would re-render differently than Python wrote them."""
+    if isinstance(value, dict):
+        return [f for item in value.values() for f in _integral_floats(item)]
+    if isinstance(value, list):
+        return [f for item in value for f in _integral_floats(item)]
+    if isinstance(value, float) and value.is_integer():
+        return [value]
+    return []
+
+
+def test_the_signed_body_survives_javascript_reserialization(tmp_path) -> None:
+    """DePay verifies `JSON.stringify(JSON.parse(response))`, not our bytes.
+
+    Their verifier (@depay/js-verify-signature-web) re-serializes the parsed
+    response before checking the signature. JSON.stringify renders 20.0 as
+    "20", so signing a Python float signs bytes the widget never sees — which
+    is exactly what produced "Configuration response not verified!". Every
+    number we emit has to already be in the form JavaScript would print.
+    """
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+
+    for sku in ("starter_20", "creator_50", "pro_100"):
+        _checkout, token, _order_ref = _create_checkout(client, container, workspace_id, sku)
+        response = _post_dynamic_config(container, private, {"checkout_token": token})
+        assert response.status_code == 200, response.text
+        raw = response.content
+
+        offenders = _integral_floats(json.loads(raw))
+        assert not offenders, f"{sku}: {offenders} would be rewritten by JSON.stringify"
+
+        # Python's compact dump of the parsed body must reproduce the exact
+        # bytes we signed — the same identity JSON.stringify has to satisfy.
+        assert json.dumps(json.loads(raw), separators=(",", ":")).encode() == raw
+
+        # And the signature has to hold over those exact bytes.
+        signature = response.headers["x-signature"]
+        _DYNAMIC_PRIVATE.public_key().verify(
+            base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)),
+            raw,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=64),
+            hashes.SHA256(),
+        )

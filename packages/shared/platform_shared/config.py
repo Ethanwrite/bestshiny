@@ -236,6 +236,11 @@ class Settings(BaseSettings):
     # cannot be priced per order, so checkout fails closed.
     depay_dynamic_config_private_key: str = ""
     depay_checkout_ttl_minutes: int = 1_440
+    # DePay deducts its fee before forwarding, so Treasury nets less than the
+    # buyer was charged (1.5% on the 2026-08-30 payment). Settlement accepts a
+    # shortfall up to this allowance against the order snapshot; beyond it the
+    # payment is a mismatch, not a fee. 200 bps = 2%.
+    depay_max_provider_fee_bps: int = 200
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     # Layer 2 of the style lock. Off by default: it is a paid embedding call per

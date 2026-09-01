@@ -438,7 +438,7 @@ def test_callback_refuses_wrong_amount_network_token_or_treasury(tmp_path) -> No
     client, workspace_id = _registered(container)
     _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
     short = _post_callback(
-        container, private, _callback_payload(token, order_ref, amount="49.000000")
+        container, private, _callback_payload(token, order_ref, amount="45.000000")
     )
     assert short.status_code == 200
     assert short.json()["result"] == "RECONCILIATION_REQUIRED"
@@ -817,3 +817,115 @@ def test_an_unconfirmed_payment_is_still_refused_either_way(tmp_path) -> None:
     with container.database.session() as session:
         assert session.scalar(select(WorkspaceCreditLedgerEntry)) is None
         assert session.scalar(select(DePayWebhookDelivery)) is None
+
+
+def test_the_provider_fee_is_absorbed_but_a_short_payment_is_not(tmp_path) -> None:
+    """Treasury nets less than the buyer paid, because DePay takes its cut.
+
+    On 2026-08-30 a 30.00 USDC order landed 29.55 at Treasury — exactly 1.5%.
+    What the customer agreed to pay is the commercial fact and the fee is cost
+    of sale, so that settles; a materially short payment still does not.
+    """
+    for index, (amount, expected) in enumerate(
+        (
+            ("49.250000", "CREDITED"),           # 1.5% fee, the real-world case
+            ("49.000000", "CREDITED"),           # exactly the 2% allowance
+            ("48.990000", "RECONCILIATION_REQUIRED"),  # one microunit beyond it
+            ("50.000000", "CREDITED"),           # no fee at all
+        )
+    ):
+        private, public = _keys()
+        container = _container(tmp_path / f"fee{index}", public)
+        client, workspace_id = _registered(container)
+        _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+
+        response = _post_callback(
+            container, private, _callback_payload(token, order_ref, amount=amount)
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"] == expected, f"{amount} -> {response.json()}"
+        with container.database.session() as session:
+            workspace = session.get(Workspace, workspace_id)
+            ledger = session.scalar(select(WorkspaceCreditLedgerEntry))
+            if expected == "CREDITED":
+                assert workspace is not None and workspace.credit_balance == 5_050
+                assert ledger is not None
+                # The ledger records what was ordered and what actually landed,
+                # so the fee is visible rather than silently absorbed.
+                assert ledger.metadata_json["ordered_microunits"] == 50_000_000
+                assert ledger.metadata_json["received_microunits"] == int(
+                    Decimal(amount) * 1_000_000
+                )
+            else:
+                assert workspace is not None and workspace.credit_balance == 50
+                assert ledger is None
+
+
+def test_the_production_shortfall_settles_a_legacy_order(tmp_path) -> None:
+    """The exact 2026-08-30 payment: 30.00 ordered, 29.55 received."""
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+    with container.database.session() as session:
+        order = session.get(PaymentOrder, order_ref)
+        order.sku = "legacy_depay_fixed"
+        order.pricing_version = "legacy_depay_v1"
+        order.amount = Decimal("30")
+        order.raw_amount_microunits = 30_000_000
+        order.credits = 3_000
+
+    payload = _callback_payload(token, order_ref, amount="29.550000")
+    del payload["commitment"]
+    response = _post_callback(container, private, payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == "CREDITED"
+    assert response.json()["credits_granted"] == 3_000
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        ledger = session.scalar(select(WorkspaceCreditLedgerEntry))
+        assert workspace is not None and workspace.credit_balance == 3_050
+        assert ledger is not None
+        assert ledger.metadata_json["ordered_microunits"] == 30_000_000
+        assert ledger.metadata_json["received_microunits"] == 29_550_000
+
+
+def test_a_quarantined_transaction_can_still_be_recovered(tmp_path) -> None:
+    """RECONCILIATION_REQUIRED must be a state to recover from, not a verdict.
+
+    Memoizing it stranded a real payment permanently: every later delivery
+    replayed the failure instead of retrying it, and DePay's 200 ended the
+    retry sequence. A repeat delivery now re-attempts, and exactly-once still
+    holds because the credit is guarded by the ledger and the purchase check.
+    """
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+    payload = _callback_payload(token, order_ref)
+
+    # Quarantine it for a reason that can genuinely be repaired.
+    with container.database.session() as session:
+        session.get(Workspace, workspace_id).status = "SUSPENDED"
+    first = _post_callback(container, private, payload)
+    assert first.status_code == 200
+    assert first.json()["result"] == "RECONCILIATION_REQUIRED"
+
+    with container.database.session() as session:
+        session.get(Workspace, workspace_id).status = "ACTIVE"
+    second = _post_callback(container, private, payload)
+    assert second.status_code == 200, second.text
+    assert second.json()["result"] == "CREDITED"
+    assert second.json()["credits_granted"] == 5_000
+
+    # And it stays exactly-once from there.
+    third = _post_callback(container, private, payload)
+    assert third.status_code == 200 and third.json()["replayed"] is True
+
+    with container.database.session() as session:
+        workspace = session.get(Workspace, workspace_id)
+        deliveries = list(session.scalars(select(DePayWebhookDelivery)))
+        ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
+        assert workspace is not None and workspace.credit_balance == 5_050
+        assert len(deliveries) == 1 and deliveries[0].result == "CREDITED"
+        assert len(ledger) == 1

@@ -131,6 +131,7 @@ class DePayPaymentService:
         dynamic_config_private_key: str = "",
         treasury_address: str,
         packages: Mapping[str, PaymentPackage] | None = None,
+        max_provider_fee_bps: int = 200,
         checkout_ttl_minutes: int = 1_440,
     ) -> None:
         self.database = database
@@ -147,6 +148,9 @@ class DePayPaymentService:
         self._packages = dict(packages if packages is not None else PAYMENT_PACKAGES)
         if any(sku != package.sku for sku, package in self._packages.items()):
             raise ValueError("DePay package registry keys must match package SKUs")
+        if not 0 <= max_provider_fee_bps <= 1_000:
+            raise ValueError("DePay provider fee allowance must be between 0 and 10 percent")
+        self.max_provider_fee_bps = max_provider_fee_bps
         self.checkout_ttl = timedelta(minutes=max(15, min(checkout_ttl_minutes, 10_080)))
 
     @property
@@ -368,7 +372,22 @@ class DePayPaymentService:
                             raise DePayConflict(
                                 "DePay transaction was replayed with a different callback body"
                             )
-                        return self._delivery_result(existing, replayed=True)
+                        if existing.result != "RECONCILIATION_REQUIRED":
+                            return self._delivery_result(existing, replayed=True)
+                        # Quarantine is a state to recover from, not a verdict.
+                        # Memoizing it stranded a real payment for good: every
+                        # later delivery replayed the failure instead of
+                        # retrying it. Exactly-once still holds — the ledger's
+                        # unique external_reference and the existing-purchase
+                        # check below both refuse a second credit.
+                        return self._apply_callback(
+                            session,
+                            payload,
+                            transfer,
+                            event_key=event_key,
+                            payload_hash=payload_hash,
+                            delivery=existing,
+                        )
                     return self._apply_callback(
                         session,
                         payload,
@@ -411,6 +430,7 @@ class DePayPaymentService:
         *,
         event_key: str,
         payload_hash: str,
+        delivery: DePayWebhookDelivery | None = None,
     ) -> DePayWebhookResult:
         injected = self._injected_payload(payload)
         checkout_token = injected.get("checkout_token")
@@ -470,7 +490,7 @@ class DePayPaymentService:
             or order.chain_id != self.chain_id
             or order.token_address != self.usdc_contract
             or order.to_address != self.treasury_address
-            or order.raw_amount_microunits != transfer["raw_amount_microunits"]
+            or not self._covers_order(order.raw_amount_microunits, transfer["raw_amount_microunits"])
             or self._amount_to_microunits(order.amount) != order.raw_amount_microunits
             or order_transaction_conflict
             or checkout.status not in {"PENDING", "PAID", "RECONCILIATION_REQUIRED"}
@@ -542,6 +562,11 @@ class DePayPaymentService:
                         "integration_id": self.integration_id,
                         "checkout_session_id": checkout.id,
                         "payment_order_id": order.id,
+                        "ordered_microunits": order.raw_amount_microunits,
+                        "received_microunits": transfer["raw_amount_microunits"],
+                        "provider_fee_microunits": (
+                            order.raw_amount_microunits - transfer["raw_amount_microunits"]
+                        ),
                         "sku": order.sku,
                         "pricing_version": order.pricing_version,
                         "provider": order.provider,
@@ -563,25 +588,33 @@ class DePayPaymentService:
                 order.status = "PAID"
                 order.paid_at = now
 
-        delivery = DePayWebhookDelivery(
-            event_key=event_key,
-            payload_hash=payload_hash,
-            link_id=self.integration_id,
-            checkout_session_id=checkout.id,
-            payment_id=payment.id,
-            result=result,
-            metadata_json={
-                "commitment": transfer["commitment"],
-                "confirmations": transfer["confirmations"],
-                "credits_granted": credits,
-                "payment_order_id": order.id,
-                "sku": order.sku,
-                "pricing_version": order.pricing_version,
-                "plan_tier": plan_tier,
-                "pro_activated": pro_activated,
-            },
-        )
-        session.add(delivery)
+        receipt = {
+            "commitment": transfer["commitment"],
+            "confirmations": transfer["confirmations"],
+            "credits_granted": credits,
+            "payment_order_id": order.id,
+            "ordered_microunits": order.raw_amount_microunits,
+            "received_microunits": transfer["raw_amount_microunits"],
+            "sku": order.sku,
+            "pricing_version": order.pricing_version,
+            "plan_tier": plan_tier,
+            "pro_activated": pro_activated,
+        }
+        if delivery is None:
+            delivery = DePayWebhookDelivery(
+                event_key=event_key,
+                payload_hash=payload_hash,
+                link_id=self.integration_id,
+                checkout_session_id=checkout.id,
+                payment_id=payment.id,
+                result=result,
+                metadata_json=receipt,
+            )
+            session.add(delivery)
+        else:
+            delivery.result = result
+            delivery.payment_id = payment.id
+            delivery.metadata_json = {**dict(delivery.metadata_json or {}), **receipt}
         session.flush([payment, order, checkout, delivery])
         return DePayWebhookResult(
             event_key,
@@ -591,6 +624,19 @@ class DePayPaymentService:
             plan_tier=plan_tier,
             pro_activated=pro_activated,
         )
+
+    def _covers_order(self, ordered: int, received: int) -> bool:
+        """Does what reached Treasury settle an order priced at `ordered`?
+
+        DePay deducts its fee before forwarding, so Treasury nets less than the
+        buyer was charged — 29.55 against a 30.00 order, exactly 1.5%, on the
+        2026-08-30 payment. What the customer agreed to pay is the commercial
+        fact; the provider's cut is cost of sale. So accept a shortfall up to
+        the configured fee allowance and no further: a materially short payment
+        is still a mismatch, and an overpayment settles the order it names.
+        """
+        allowance = (ordered * self.max_provider_fee_bps + 9_999) // 10_000
+        return received >= ordered - allowance
 
     def _find_or_create_payment(
         self,

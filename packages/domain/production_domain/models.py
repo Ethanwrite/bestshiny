@@ -5227,8 +5227,22 @@ _install_project_style_integrity_ddl()
 def _install_payment_ledger_integrity_ddl() -> None:
     """Prevent authenticated webhook receipts and posted credit entries from being rewritten."""
 
-    anchor = WorkspaceCreditLedgerEntry.__table__
-    for table_name in ("alchemy_webhook_deliveries", "workspace_credit_ledger_entries"):
+    # Anchored to the metadata, not to one table: these triggers name three
+    # different tables and the PostgreSQL ones share a function, so hanging
+    # them off a single table's `after_create` makes their success depend on
+    # creation order. Metadata-level `after_create` runs once, after every
+    # table exists.
+    anchor = Base.metadata
+    # `depay_webhook_deliveries` belongs here too. Migration 0032 has guarded it
+    # on a migrated database since it was created, but this list did not, so a
+    # schema built from ORM metadata — which is what the test suite runs on —
+    # silently allowed writes production refuses. That drift hid a payment-path
+    # bug that only failed once it reached production.
+    for table_name in (
+        "alchemy_webhook_deliveries",
+        "depay_webhook_deliveries",
+        "workspace_credit_ledger_entries",
+    ):
         for operation in ("UPDATE", "DELETE"):
             event.listen(
                 anchor,
@@ -5254,7 +5268,11 @@ def _install_payment_ledger_integrity_ddl() -> None:
             "RETURN OLD; END; $$"
         ).execute_if(dialect="postgresql"),
     )
-    for table_name in ("alchemy_webhook_deliveries", "workspace_credit_ledger_entries"):
+    for table_name in (
+        "alchemy_webhook_deliveries",
+        "depay_webhook_deliveries",
+        "workspace_credit_ledger_entries",
+    ):
         event.listen(
             anchor,
             "after_create",

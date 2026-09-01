@@ -368,25 +368,35 @@ class DePayPaymentService:
                         select(DePayWebhookDelivery).where(DePayWebhookDelivery.event_key == event_key)
                     )
                     if existing is not None:
-                        if existing.payload_hash != payload_hash:
-                            raise DePayConflict(
-                                "DePay transaction was replayed with a different callback body"
-                            )
                         if existing.result != "RECONCILIATION_REQUIRED":
+                            if existing.payload_hash != payload_hash:
+                                raise DePayConflict(
+                                    "DePay transaction was replayed with a different callback body"
+                                )
                             return self._delivery_result(existing, replayed=True)
                         # Quarantine is a state to recover from, not a verdict.
                         # Memoizing it stranded a real payment for good: every
                         # later delivery replayed the failure instead of
-                        # retrying it. Exactly-once still holds — the ledger's
-                        # unique external_reference and the existing-purchase
-                        # check below both refuse a second credit.
+                        # retrying it, and because a replay answers 200 DePay
+                        # stopped retrying altogether.
+                        #
+                        # The receipt itself is immutable — the table is
+                        # append-only in the database, not merely by
+                        # convention — so re-run settlement and leave the
+                        # original outcome standing as evidence of what
+                        # happened first. The ledger entry is what records the
+                        # recovery, and its unique external_reference plus the
+                        # existing-purchase check are what keep it exactly-once.
+                        # A re-sent body may legitimately differ from the one
+                        # that was quarantined, so it is re-validated in full
+                        # rather than compared against the stored hash.
                         return self._apply_callback(
                             session,
                             payload,
                             transfer,
                             event_key=event_key,
                             payload_hash=payload_hash,
-                            delivery=existing,
+                            record_receipt=False,
                         )
                     return self._apply_callback(
                         session,
@@ -430,7 +440,7 @@ class DePayPaymentService:
         *,
         event_key: str,
         payload_hash: str,
-        delivery: DePayWebhookDelivery | None = None,
+        record_receipt: bool = True,
     ) -> DePayWebhookResult:
         injected = self._injected_payload(payload)
         checkout_token = injected.get("checkout_token")
@@ -600,7 +610,8 @@ class DePayPaymentService:
             "plan_tier": plan_tier,
             "pro_activated": pro_activated,
         }
-        if delivery is None:
+        written = [payment, order, checkout]
+        if record_receipt:
             delivery = DePayWebhookDelivery(
                 event_key=event_key,
                 payload_hash=payload_hash,
@@ -611,11 +622,8 @@ class DePayPaymentService:
                 metadata_json=receipt,
             )
             session.add(delivery)
-        else:
-            delivery.result = result
-            delivery.payment_id = payment.id
-            delivery.metadata_json = {**dict(delivery.metadata_json or {}), **receipt}
-        session.flush([payment, order, checkout, delivery])
+            written.append(delivery)
+        session.flush(written)
         return DePayWebhookResult(
             event_key,
             False,

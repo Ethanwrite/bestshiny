@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi.testclient import TestClient
@@ -18,7 +19,7 @@ from production_domain.models import (
     Workspace,
     WorkspaceCreditLedgerEntry,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 from video_platform_api.container import build_container
 from video_platform_api.main import create_app
 
@@ -918,14 +919,51 @@ def test_a_quarantined_transaction_can_still_be_recovered(tmp_path) -> None:
     assert second.json()["result"] == "CREDITED"
     assert second.json()["credits_granted"] == 5_000
 
-    # And it stays exactly-once from there.
+    # And it stays exactly-once from there. The receipt still reads
+    # RECONCILIATION_REQUIRED, so settlement re-runs rather than replaying a
+    # memo — and lands on the idempotent already-credited path instead of
+    # posting a second credit.
     third = _post_callback(container, private, payload)
-    assert third.status_code == 200 and third.json()["replayed"] is True
+    assert third.status_code == 200
+    assert third.json()["result"] == "ALREADY_CREDITED"
 
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         deliveries = list(session.scalars(select(DePayWebhookDelivery)))
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
         assert workspace is not None and workspace.credit_balance == 5_050
-        assert len(deliveries) == 1 and deliveries[0].result == "CREDITED"
+        # The receipt is append-only, in the database and not just by
+        # convention, so it still records the first outcome. The ledger entry
+        # is what records the recovery.
+        assert len(deliveries) == 1
+        assert deliveries[0].result == "RECONCILIATION_REQUIRED"
         assert len(ledger) == 1
+        assert ledger[0].credits == 5_000
+
+
+def test_the_delivery_receipt_really_is_append_only(tmp_path) -> None:
+    """The guarantee has to come from the database, not from our restraint.
+
+    Production enforces this with a trigger from migration 0032; the ORM
+    metadata did not install it, so a schema built for tests allowed writes
+    production refuses. That drift is how an in-place receipt update passed
+    every test and would have failed on the live database.
+    """
+    private, public = _keys()
+    container = _container(tmp_path, public)
+    client, workspace_id = _registered(container)
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+    assert _post_callback(container, private, _callback_payload(token, order_ref)).status_code == 200
+
+    for statement in (
+        "UPDATE depay_webhook_deliveries SET result = 'TAMPERED'",
+        "DELETE FROM depay_webhook_deliveries",
+    ):
+        with pytest.raises(Exception) as raised:  # noqa: PT011 - dialect-specific
+            with container.database.session() as session:
+                session.execute(text(statement))
+        assert "append-only" in str(raised.value)
+
+    with container.database.session() as session:
+        deliveries = list(session.scalars(select(DePayWebhookDelivery)))
+        assert len(deliveries) == 1 and deliveries[0].result == "CREDITED"

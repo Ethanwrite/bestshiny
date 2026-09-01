@@ -610,6 +610,75 @@ class DePayWebhookDelivery(Base):
     )
 
 
+class EIP3009Authorization(Base, TimestampMixin):
+    """One user-signed Base USDC authorization submitted by the platform relayer."""
+
+    __tablename__ = "eip3009_authorizations"
+    __table_args__ = (
+        UniqueConstraint("payment_intent_id", name="uq_eip3009_authorization_payment_intent"),
+        UniqueConstraint("nonce", name="uq_eip3009_authorization_nonce"),
+        UniqueConstraint("transaction_hash", name="uq_eip3009_authorization_transaction_hash"),
+        CheckConstraint("chain_id > 0", name="ck_eip3009_authorization_chain_positive"),
+        CheckConstraint("value_microunits > 0", name="ck_eip3009_authorization_value_positive"),
+        CheckConstraint("valid_after >= 0", name="ck_eip3009_authorization_valid_after"),
+        CheckConstraint("valid_before > valid_after", name="ck_eip3009_authorization_window"),
+        CheckConstraint("attempt_count >= 0", name="ck_eip3009_authorization_attempts"),
+        CheckConstraint(
+            "status IN ('PENDING', 'SUBMITTING', 'SUBMITTED', 'CONFIRMED', 'FAILED', "
+            "'EXPIRED', 'CANCELLED', "
+            "'RECONCILIATION_REQUIRED')",
+            name="ck_eip3009_authorization_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    payment_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("onchain_payment_intents.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    token_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    from_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    to_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    value_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    valid_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    valid_before: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    nonce: Mapped[str] = mapped_column(String(66), nullable=False)
+    typed_data_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_hash: Mapped[str | None] = mapped_column(String(64))
+    raw_transaction: Mapped[str | None] = mapped_column(Text)
+    relayer_address: Mapped[str] = mapped_column(String(42), nullable=False)
+    relayer_nonce: Mapped[int | None] = mapped_column(BigInteger)
+    transaction_hash: Mapped[str | None] = mapped_column(String(66), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    last_error_code: Mapped[str | None] = mapped_column(String(120))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class RelayerAccountState(Base, TimestampMixin):
+    """Database lock row serializing one relayer account's transaction nonce."""
+
+    __tablename__ = "relayer_account_states"
+    __table_args__ = (
+        CheckConstraint("chain_id > 0", name="ck_relayer_account_chain_positive"),
+        CheckConstraint(
+            "last_submitted_nonce IS NULL OR last_submitted_nonce >= 0",
+            name="ck_relayer_account_nonce_nonnegative",
+        ),
+    )
+    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_submitted_nonce: Mapped[int | None] = mapped_column(BigInteger)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class WorkspaceWalletBinding(Base, TimestampMixin):
     """Workspace ownership projection for a verified EVM wallet."""
 

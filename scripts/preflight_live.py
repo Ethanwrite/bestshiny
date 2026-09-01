@@ -86,7 +86,7 @@ def _payment(settings: Settings) -> None:
         ("ALCHEMY_WEBHOOK_SIGNING_KEY", bool(settings.alchemy_webhook_signing_key.strip())),
         ("ALCHEMY_WEBHOOK_ID", bool(settings.alchemy_webhook_id.strip())),
         ("ALCHEMY_TREASURY_ADDRESS", bool(settings.alchemy_treasury_address.strip())),
-        ("ALCHEMY_CREDITING_ENABLED", settings.alchemy_crediting_enabled is True),
+        ("ALCHEMY_CREDITING_DISABLED", settings.alchemy_crediting_enabled is False),
     ]
     for label, ok in alchemy:
         print(_line(label, READY if ok else BLOCKED, ""))
@@ -100,10 +100,17 @@ def _payment(settings: Settings) -> None:
     ]
     for label, ok in depay:
         print(_line(label, READY if ok else BLOCKED, ""))
-    if not all(ok for _label, ok in alchemy + depay):
+    relayer = [
+        ("RELAYER_ADDRESS", bool(settings.relayer_address.strip())),
+        ("RELAYER_PRIVATE_KEY", bool(settings.relayer_private_key.strip())),
+        ("BASE_RPC_URL", settings.base_rpc_url.strip().startswith("https://")),
+    ]
+    for label, ok in relayer:
+        print(_line(label, READY if ok else BLOCKED, ""))
+    if not all(ok for _label, ok in alchemy + depay + relayer):
         print(
-            "\n  On-chain crediting cannot be exercised end to end. These are a treasury\n"
-            "  address and provider webhook secrets — nothing here can supply them."
+            "\n  On-chain payment cannot be exercised end to end. Treasury/provider keys and\n"
+            "  the Base relayer account must be configured outside the repository."
         )
 
 
@@ -256,9 +263,9 @@ def main() -> int:
         blockers.append(
             "Production secrets. The container refuses to boot without PLATFORM_API_KEY and\n"
             "    CREDENTIAL_ENCRYPTION_KEY:\n"
-            "      python -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
-            "      python -c \"from cryptography.fernet import Fernet;"
-            ' print(Fernet.generate_key().decode())\"'
+            '      python -c "import secrets; print(secrets.token_urlsafe(48))"\n'
+            '      python -c "from cryptography.fernet import Fernet;'
+            ' print(Fernet.generate_key().decode())"'
         )
     elif not production_ready:
         blockers.append(

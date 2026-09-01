@@ -249,6 +249,18 @@ class Settings(BaseSettings):
     # shortfall up to this allowance against the order snapshot; beyond it the
     # payment is a mismatch, not a fee. 200 bps = 2%.
     depay_max_provider_fee_bps: int = 200
+    # Base USDC EIP-3009 relay. The browser signs typed authorization data;
+    # only the relayer key reaches the server and pays Base ETH gas.
+    relayer_address: str = ""
+    relayer_private_key: str = ""
+    base_rpc_url: str = ""
+    relayer_authorization_ttl_seconds: int = 900
+    relayer_min_confirmations: int = 1
+    relayer_rpc_timeout_seconds: int = 15
+    relayer_max_gas_limit: int = 200_000
+    relayer_max_fee_per_gas_wei: int = 5_000_000_000
+    relayer_sweep_interval_seconds: int = 5
+    relayer_sweep_limit: int = 50
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     # Layer 2 of the style lock. Off by default: it is a paid embedding call per

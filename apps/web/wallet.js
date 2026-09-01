@@ -11,6 +11,7 @@ const paymentState = {
   config: null,
   billing: null,
   checkout: null,
+  walletAccount: "",
   selectedSku: DEFAULT_SKU,
   pollTimer: null,
   unmountWidget: null,
@@ -43,7 +44,10 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail || `Request failed (${response.status})`);
+    const detail = typeof body.detail === "object"
+      ? body.detail?.message || body.detail?.code
+      : body.detail;
+    throw new Error(detail || `Request failed (${response.status})`);
   }
   return response.status === 204 ? null : response.json();
 }
@@ -129,20 +133,22 @@ function render() {
   element("walletNetwork").textContent = paymentState.config?.network === "BASE_MAINNET"
     ? "Base Mainnet"
     : "Base";
-  element("walletCreditingStatus").textContent = paymentState.config?.depay_dynamic_configured
+  const relayed = paymentState.config?.relayed_usdc_configured;
+  element("walletCreditingStatus").textContent = relayed
+    || paymentState.config?.depay_dynamic_configured
     ? "Ready"
     : "Not configured yet";
   element("walletTitle").textContent = isPro ? "Top up credits" : "Upgrade to Pro";
   element("walletDescription").textContent = isPro
-    ? `Pick a package — credits are added the moment the payment is confirmed.`
-    : `Any package unlocks Pro permanently and adds its credits. No subscription, no auto-renewal.`;
+    ? `Pick a package — credits are added when the Base USDC transfer confirms.${relayed ? " Network fees are sponsored." : ""}`
+    : `Any package unlocks Pro permanently and adds its credits. No subscription, no auto-renewal.${relayed ? " No Base ETH is required." : ""}`;
   renderPlans();
   element("payUsdcBtn").textContent = plan
     ? (isPro ? `Pay ${price}` : `Upgrade — ${price}`)
     : "Pay with USDC";
   element("payUsdcBtn").disabled = paymentState.busy
     || !paymentState.workspace
-    || !paymentState.config?.depay_dynamic_configured
+    || !(relayed || paymentState.config?.depay_dynamic_configured)
     || !plan;
   if (plan && !paymentState.busy && !element("walletStatus").textContent) {
     setMessage(`${price} · ${credits} credits`);
@@ -170,7 +176,8 @@ async function initializeForUser(user) {
   try {
     paymentState.config = await api("/v1/payments/config");
     await refreshBilling();
-    if (!paymentState.config.depay_dynamic_configured) {
+    if (!(paymentState.config.relayed_usdc_configured
+      || paymentState.config.depay_dynamic_configured)) {
       setMessage("Card and wallet payments are not switched on yet.");
     }
   } catch (error) {
@@ -231,6 +238,9 @@ async function pollCheckout(checkoutId) {
 }
 
 async function createCheckout() {
+  if (paymentState.config?.relayed_usdc_configured) {
+    return createRelayedCheckout();
+  }
   const plan = selectedPackage();
   if (!plan) return;
   setBusy(true);
@@ -276,6 +286,125 @@ async function createCheckout() {
     // Closing the window without paying is a normal choice, not a failure.
     if (String(error).includes("USER_CLOSED_DIALOG")) {
       setMessage("Payment window closed — nothing has been charged.");
+    } else {
+      setMessage("", error.message || String(error));
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function connectBaseWallet() {
+  const provider = window.ethereum;
+  if (!provider?.request) {
+    throw new Error("A browser wallet is required to sign the gas-sponsored USDC authorization.");
+  }
+  try {
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: "0x2105" }],
+    });
+  } catch (error) {
+    if (Number(error?.code) !== 4902) throw error;
+    await provider.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: "0x2105",
+        chainName: "Base",
+        nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+        rpcUrls: ["https://mainnet.base.org"],
+        blockExplorerUrls: ["https://basescan.org"],
+      }],
+    });
+  }
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  const account = String(accounts?.[0] || "").toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(account)) throw new Error("The wallet returned an invalid account.");
+  paymentState.walletAccount = account;
+  return { provider, account };
+}
+
+async function pollRelayedAuthorization(authorizationId) {
+  window.clearTimeout(paymentState.pollTimer);
+  try {
+    const result = await api(
+      `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${authorizationId}/reconcile`,
+      { method: "POST", body: "{}" },
+    );
+    if (result.status === "CONFIRMED") {
+      await refreshBilling();
+      window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
+        detail: {
+          workspaceId: paymentState.workspace.id,
+          planTier: paymentState.billing.plan_tier,
+        },
+      }));
+      setMessage(
+        paymentState.checkout?.purchase_kind === "UPGRADE_PRO_AND_CREDITS"
+          ? `Pro unlocked. ${result.credits_granted.toLocaleString()} credits posted.`
+          : `${result.credits_granted.toLocaleString()} credits posted.`,
+      );
+      return;
+    }
+    if (["FAILED", "EXPIRED", "RECONCILIATION_REQUIRED"].includes(result.status)) {
+      setMessage("", `This payment did not complete (${humanStatus(result.status)}).`);
+      return;
+    }
+    paymentState.pollTimer = window.setTimeout(
+      () => pollRelayedAuthorization(authorizationId),
+      3000,
+    );
+  } catch (error) {
+    setMessage("Payment is still being confirmed on Base…", error.message);
+    paymentState.pollTimer = window.setTimeout(
+      () => pollRelayedAuthorization(authorizationId),
+      5000,
+    );
+  }
+}
+
+async function createRelayedCheckout() {
+  const plan = selectedPackage();
+  if (!plan) return;
+  let checkout = null;
+  setBusy(true);
+  setMessage("Connect your wallet to authorize the Base USDC payment…");
+  try {
+    const { provider, account } = await connectBaseWallet();
+    checkout = await api("/v1/payments/relayed-checkout", {
+      method: "POST",
+      body: JSON.stringify({
+        workspace_id: paymentState.workspace.id,
+        sku: plan.sku,
+        from_address: account,
+      }),
+    });
+    paymentState.checkout = checkout;
+    setMessage("Review and sign the USDC authorization. No Base ETH will be charged.");
+    const signature = await provider.request({
+      method: "eth_signTypedData_v4",
+      params: [account, JSON.stringify(checkout.typed_data)],
+    });
+    setMessage("Authorization signed — BestShiny is submitting the transfer and paying Gas…");
+    const submitted = await api(
+      `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/submit`,
+      { method: "POST", body: JSON.stringify({ signature }) },
+    );
+    setMessage("Submitted on Base — waiting for confirmation…");
+    if (submitted.status === "CONFIRMED") {
+      await pollRelayedAuthorization(checkout.id);
+    } else {
+      pollRelayedAuthorization(checkout.id);
+    }
+  } catch (error) {
+    if (Number(error?.code) === 4001 || String(error).includes("User rejected")) {
+      if (checkout?.id) {
+        await api(
+          `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/cancel`,
+          { method: "POST", body: "{}" },
+        ).catch(() => {});
+      }
+      setMessage("Authorization cancelled — nothing was transferred.");
     } else {
       setMessage("", error.message || String(error));
     }

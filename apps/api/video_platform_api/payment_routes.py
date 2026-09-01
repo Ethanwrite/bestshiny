@@ -7,6 +7,11 @@ from payment_core import (
     DePayAuthenticationError,
     DePayConfigurationError,
     DePayPayloadError,
+    EIP3009ConfigurationError,
+    EIP3009Conflict,
+    EIP3009NotFound,
+    EIP3009Rejected,
+    EIP3009RPCError,
     WalletPaymentConflict,
     WalletPaymentNotFound,
     WalletPaymentRejected,
@@ -57,6 +62,14 @@ class DePayCheckoutRequest(BaseModel):
     sku: str = Field(min_length=1, max_length=80)
 
 
+class RelayedCheckoutRequest(CheckoutRequest):
+    from_address: str = Field(min_length=42, max_length=42)
+
+
+class RelayedAuthorizationSubmitRequest(BaseModel):
+    signature: str = Field(min_length=132, max_length=132)
+
+
 def _binding_view(binding: WorkspaceWalletBinding) -> dict[str, object]:
     return {
         "id": binding.id,
@@ -105,6 +118,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         settings = container.settings
         service = container.wallet_payments
         depay = container.depay_payments
+        relayer = container.eip3009_relayer
         return {
             "reown_project_id": settings.reown_project_id,
             "reown_configured": bool(settings.reown_project_id.strip()),
@@ -116,12 +130,15 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             "usdc_contract": service.usdc_contract,
             "usdc_microunits_per_credit": service.usdc_microunits_per_credit,
             "crediting_enabled": settings.alchemy_crediting_enabled,
-            "checkout_provider": "DEPAY",
+            "checkout_provider": ("EIP3009_RELAYER" if relayer.configured else "DEPAY"),
+            "relayed_usdc_configured": relayer.configured,
+            "gas_sponsored": relayer.configured,
+            "relayer_address": relayer.relayer_address if relayer.configured else "",
             "depay_checkout_configured": depay.checkout_configured,
             "depay_callback_configured": depay.callback_configured,
             "depay_dynamic_configured": depay.dynamic_configured,
             "depay_integration_id": depay.integration_id,
-            "payment_packages": depay.package_views(),
+            "payment_packages": (relayer.package_views() if relayer.configured else depay.package_views()),
         }
 
     @app.get("/v1/workspaces/{workspace_id}/billing")
@@ -184,6 +201,136 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
     ):
         return _open_checkout(body.workspace_id, body.sku, principal)
+
+    def _relayer_error(exc: Exception) -> HTTPException:
+        if isinstance(exc, EIP3009ConfigurationError):
+            return HTTPException(503, str(exc))
+        if isinstance(exc, EIP3009NotFound):
+            return HTTPException(404, str(exc))
+        if isinstance(exc, EIP3009Conflict):
+            return HTTPException(409, str(exc))
+        if isinstance(exc, EIP3009Rejected):
+            return HTTPException(422, str(exc))
+        if isinstance(exc, EIP3009RPCError):
+            return HTTPException(503, {"code": exc.code, "message": str(exc)})
+        return HTTPException(500, "Base USDC Relayer 发生未知错误")
+
+    @app.post("/v1/payments/relayed-checkout", status_code=201)
+    def create_relayed_checkout(
+        body: RelayedCheckoutRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, body.workspace_id)
+        if principal.development_bypass:
+            raise HTTPException(403, "Gas 代付充值需要真实登录账户")
+        try:
+            checkout = container.eip3009_relayer.prepare_checkout(
+                workspace_id=body.workspace_id,
+                user_id=principal.user_id,
+                sku=body.sku,
+                from_address=body.from_address,
+            )
+        except (
+            EIP3009ConfigurationError,
+            EIP3009Conflict,
+            EIP3009Rejected,
+            EIP3009RPCError,
+        ) as exc:
+            raise _relayer_error(exc) from exc
+        return {
+            "id": checkout.authorization_id,
+            "payment_intent_id": checkout.payment_intent_id,
+            "sku": checkout.sku,
+            "amount_usdc": checkout.amount_usdc,
+            "currency": "USDC",
+            "credits": checkout.credits,
+            "purchase_kind": checkout.purchase_kind,
+            "typed_data": checkout.typed_data,
+            "expires_at": checkout.expires_at,
+            "gas_sponsored": True,
+        }
+
+    @app.post("/v1/workspaces/{workspace_id}/relayed-authorizations/{authorization_id}/submit")
+    def submit_relayed_authorization(
+        workspace_id: str,
+        authorization_id: str,
+        body: RelayedAuthorizationSubmitRequest,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        try:
+            result = container.eip3009_relayer.submit_authorization(
+                workspace_id=workspace_id,
+                user_id=principal.user_id,
+                authorization_id=authorization_id,
+                signature=body.signature,
+            )
+        except (
+            EIP3009ConfigurationError,
+            EIP3009Conflict,
+            EIP3009NotFound,
+            EIP3009Rejected,
+            EIP3009RPCError,
+        ) as exc:
+            raise _relayer_error(exc) from exc
+        return result.as_dict()
+
+    @app.post("/v1/workspaces/{workspace_id}/relayed-authorizations/{authorization_id}/reconcile")
+    def reconcile_relayed_authorization(
+        workspace_id: str,
+        authorization_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        try:
+            result = container.eip3009_relayer.reconcile(
+                workspace_id=workspace_id,
+                user_id=principal.user_id,
+                authorization_id=authorization_id,
+            )
+        except (
+            EIP3009ConfigurationError,
+            EIP3009Conflict,
+            EIP3009NotFound,
+            EIP3009Rejected,
+            EIP3009RPCError,
+        ) as exc:
+            raise _relayer_error(exc) from exc
+        return result.as_dict()
+
+    @app.get("/v1/workspaces/{workspace_id}/relayed-authorizations/{authorization_id}")
+    def get_relayed_authorization(
+        workspace_id: str,
+        authorization_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        try:
+            result = container.eip3009_relayer.get_authorization(
+                workspace_id=workspace_id,
+                user_id=principal.user_id,
+                authorization_id=authorization_id,
+            )
+        except EIP3009NotFound as exc:
+            raise _relayer_error(exc) from exc
+        return result.as_dict()
+
+    @app.post("/v1/workspaces/{workspace_id}/relayed-authorizations/{authorization_id}/cancel")
+    def cancel_relayed_authorization(
+        workspace_id: str,
+        authorization_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        try:
+            result = container.eip3009_relayer.cancel(
+                workspace_id=workspace_id,
+                user_id=principal.user_id,
+                authorization_id=authorization_id,
+            )
+        except (EIP3009Conflict, EIP3009NotFound) as exc:
+            raise _relayer_error(exc) from exc
+        return result.as_dict()
 
     @app.post("/v1/payments/depay/config")
     async def depay_dynamic_configuration(request: Request):

@@ -127,7 +127,8 @@ class DePayPaymentService:
         payment_link_url: str = "",
         integration_id: str,
         legacy_link_id: str = "",
-        callback_public_key: str,
+        callback_public_key: str = "",
+        integration_public_key: str = "",
         dynamic_config_private_key: str = "",
         treasury_address: str,
         packages: Mapping[str, PaymentPackage] | None = None,
@@ -138,7 +139,20 @@ class DePayPaymentService:
         self.payment_link_url = payment_link_url.strip()
         self.integration_id = integration_id.strip()
         self.legacy_link_id = legacy_link_id.strip()
-        self.callback_public_key = callback_public_key.replace("\\n", "\n").strip()
+        # DePay issues a key pair **per object**, so the Managed Integration and
+        # the retired payment link sign with different keys. Both are accepted:
+        # new traffic arrives from the integration, while callbacks for payments
+        # started against the link are still in flight and signed by it. A
+        # signature has to verify under one of them — which one is not a
+        # security question, because both are ours.
+        self.callback_public_keys = tuple(
+            key
+            for key in (
+                integration_public_key.replace("\\n", "\n").strip(),
+                callback_public_key.replace("\\n", "\n").strip(),
+            )
+            if key
+        )
         self.dynamic_config_private_key = dynamic_config_private_key.replace("\\n", "\n").strip()
         self.network = "BASE_MAINNET"
         self.chain_id, self.usdc_contract = BASE_NETWORKS[self.network]
@@ -159,7 +173,7 @@ class DePayPaymentService:
 
     @property
     def callback_configured(self) -> bool:
-        return self.checkout_configured and bool(self.callback_public_key)
+        return self.checkout_configured and bool(self.callback_public_keys)
 
     @property
     def dynamic_configured(self) -> bool:
@@ -764,24 +778,30 @@ class DePayPaymentService:
             raise DePayPayloadError("DePay integration id does not match configuration")
 
     def _verify_signature(self, raw_body: bytes, signature: str | None) -> None:
-        if not self.callback_public_key:
-            raise DePayConfigurationError("DEPAY_CALLBACK_PUBLIC_KEY is not configured")
+        if not self.callback_public_keys:
+            raise DePayConfigurationError("no DePay public key is configured")
         if len(raw_body) > self.max_body_bytes:
             raise DePayPayloadError("DePay callback body is too large")
         supplied = (signature or "").strip()
         try:
             decoded = base64.urlsafe_b64decode(supplied + "=" * (-len(supplied) % 4))
-            key = serialization.load_pem_public_key(self.callback_public_key.encode())
-            if not isinstance(key, rsa.RSAPublicKey):
-                raise TypeError("not an RSA public key")
-            key.verify(
-                decoded,
-                raw_body,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=64),
-                hashes.SHA256(),
-            )
-        except (ValueError, TypeError, InvalidSignature) as exc:
+        except (ValueError, TypeError) as exc:
             raise DePayAuthenticationError("invalid DePay callback signature") from exc
+        for pem in self.callback_public_keys:
+            try:
+                key = serialization.load_pem_public_key(pem.encode())
+                if not isinstance(key, rsa.RSAPublicKey):
+                    raise TypeError("not an RSA public key")
+                key.verify(
+                    decoded,
+                    raw_body,
+                    padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=64),
+                    hashes.SHA256(),
+                )
+                return
+            except (ValueError, TypeError, InvalidSignature):
+                continue
+        raise DePayAuthenticationError("invalid DePay callback signature")
 
     def _sign_dynamic_configuration(self, response_body: bytes) -> str:
         try:

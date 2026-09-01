@@ -967,3 +967,56 @@ def test_the_delivery_receipt_really_is_append_only(tmp_path) -> None:
     with container.database.session() as session:
         deliveries = list(session.scalars(select(DePayWebhookDelivery)))
         assert len(deliveries) == 1 and deliveries[0].result == "CREDITED"
+
+
+def test_either_depay_key_verifies_and_a_foreign_one_does_not(tmp_path) -> None:
+    """DePay issues a key pair per object, so two of ours are live at once.
+
+    The Managed Integration signs new traffic; the retired payment link signs
+    callbacks for payments started against it, which are still in flight.
+    Configuring only one of them answered 401 to the other — which is what
+    stopped the widget from ever opening.
+    """
+    link_private, link_public = _keys()
+    integration_private, integration_public = _keys()
+    stranger_private, _stranger_public = _keys()
+
+    container = build_container(
+        Settings(
+            _env_file=None,
+            database_url=f"sqlite:///{tmp_path / 'twokeys.db'}",
+            storage_root=tmp_path / "media",
+            public_base_url="http://testserver",
+            web_origins="http://testserver",
+            auth_required=True,
+            platform_api_key="test-platform-key",
+            deployment_environment="test",
+            alchemy_network="BASE_MAINNET",
+            alchemy_treasury_address=TREASURY,
+            depay_payment_link_url=LINK_URL,
+            depay_link_id=LINK_ID,
+            depay_integration_id=INTEGRATION_ID,
+            depay_callback_public_key=link_public,
+            depay_integration_public_key=integration_public,
+            depay_dynamic_config_private_key=_pem_private(_DYNAMIC_PRIVATE),
+        )
+    )
+    client, workspace_id = _registered(container)
+    assert container.depay_payments.callback_configured is True
+
+    # Both of our own keys are honoured, on both signed endpoints.
+    for index, signer in enumerate((integration_private, link_private)):
+        _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+        assert _post_dynamic_config(container, signer, {"checkout_token": token}).status_code == 200
+        response = _post_callback(
+            container,
+            signer,
+            _callback_payload(token, order_ref, transaction="0x" + str(index + 1) * 64),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["result"] == "CREDITED"
+
+    # A key that is not ours is refused on both.
+    _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
+    assert _post_dynamic_config(container, stranger_private, {"checkout_token": token}).status_code == 401
+    assert _post_callback(container, stranger_private, _callback_payload(token, order_ref)).status_code == 401

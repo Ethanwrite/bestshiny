@@ -277,6 +277,7 @@ def build_container(settings: Settings | None = None) -> Container:
         integration_id=settings.depay_integration_id,
         legacy_link_id=settings.depay_link_id,
         callback_public_key=settings.depay_callback_public_key,
+        integration_public_key=settings.depay_integration_public_key,
         dynamic_config_private_key=settings.depay_dynamic_config_private_key,
         treasury_address=settings.alchemy_treasury_address,
         max_provider_fee_bps=settings.depay_max_provider_fee_bps,

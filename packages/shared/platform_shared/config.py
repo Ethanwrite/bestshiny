@@ -230,6 +230,14 @@ class Settings(BaseSettings):
     # started against it are still in flight and identify themselves by it.
     depay_payment_link_url: str = ""
     depay_link_id: str = ""
+    # DePay issues a key pair per object. This is the Managed Integration's
+    # public key, used to verify everything it sends us — Dynamic Configuration
+    # requests and its payment callbacks. Found on app.depay.com under the
+    # integration itself, not under Dynamic Configuration (that field holds the
+    # public half of *our* signing key).
+    depay_integration_public_key: str = ""
+    # The retired payment link's public key. Kept because callbacks for payments
+    # started against the link are still in flight and are signed by it.
     depay_callback_public_key: str = ""
     # DePay verifies our Dynamic Configuration *response* with the public half
     # of this key (RSA-PSS/SHA-256, salt length 64). Without it the widget

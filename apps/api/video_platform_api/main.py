@@ -3722,8 +3722,11 @@ def create_app(container: Container | None = None) -> FastAPI:
         generation = GenerationRequest(
             project_id=body["project_id"],
             type="video",
-            provider=body.get("provider", "google_flow"),
-            model=body.get("model", "flow-veo-3.1"),
+            # An omitted pair is Auto and is resolved by admission; it must not
+            # be filled in with a provider here, which would turn "no choice"
+            # into a named Flow selection.
+            provider=body.get("provider", ""),
+            model=body.get("model", ""),
             prompt=body["prompt"],
             duration=body.get("duration", 8),
             aspect_ratio=body.get("aspect_ratio", "9:16"),

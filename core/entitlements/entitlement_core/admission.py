@@ -160,28 +160,18 @@ class GenerationAdmissionService:
                 # for video it is what "Auto" means. Resolution runs through the
                 # workspace's plan-scoped catalogue, so a FREE workspace can only
                 # ever land on the model its FREE binding names.
-                admitted.metadata["model_selection"] = "ROUTER" if admitted.type == "image" else "AUTO"
-                if admitted.type == "video":
-                    role = (
-                        ModelRole(requested_role)
-                        if requested_role
-                        else self.workspace_models.default_video_role(admitted.project_id)
-                    )
-                    modality = "video"
-                else:
-                    role = ModelRole(requested_role) if requested_role else ModelRole.IMAGE_GENERATION
-                    modality = "image"
-                selected, _capability, _implementation = self.model_roles.resolve(
-                    admitted.project_id,
-                    role,
-                    asset_criticality=AssetCriticality.STANDARD,
-                    require_live=False,
+                role_value = self._resolve_auto_target(
+                    admitted, requested_role, asset_criticality=AssetCriticality.STANDARD
                 )
-                if selected.modality != modality:
-                    raise ValueError(f"model role {role.value} does not provide {modality} generation")
-                admitted.provider = selected.provider
-                admitted.model = selected.provider_model_id
-                role_value = role.value
+        elif admitted.is_auto:
+            # Unscoped and development-bypass requests keep their latitude — a
+            # named target passes through here unchecked — but an empty pair is
+            # still Auto, and Auto is resolved by the role path or not at all.
+            # The contract carries no default target, so nothing else would
+            # fill it in, and an empty pair reaching the gateway is refused.
+            role_value = self._resolve_auto_target(
+                admitted, requested_role, asset_criticality=admitted.asset_criticality
+            )
 
         try:
             estimate = self.pricing.estimate(
@@ -220,6 +210,44 @@ class GenerationAdmissionService:
             )
         admitted.cost_estimate = estimate.estimated_total_usd
         return AdmittedGeneration(admitted, estimate, role_value, context.plan_tier)
+
+    def _resolve_auto_target(
+        self,
+        admitted: GenerationRequest,
+        requested_role: str | None,
+        *,
+        asset_criticality: AssetCriticality,
+    ) -> str:
+        """Resolve an Auto request to the one model its role names.
+
+        The single implementation behind both admission branches: the
+        plan-enforced path and the unscoped/bypass path resolve identically,
+        so "Auto" means the same thing whichever path a request took. Records
+        the selection basis on the request and returns the role used.
+        """
+
+        admitted.metadata["model_selection"] = "ROUTER" if admitted.type == "image" else "AUTO"
+        if admitted.type == "video":
+            role = (
+                ModelRole(requested_role)
+                if requested_role
+                else self.workspace_models.default_video_role(admitted.project_id)
+            )
+            modality = "video"
+        else:
+            role = ModelRole(requested_role) if requested_role else ModelRole.IMAGE_GENERATION
+            modality = "image"
+        selected, _capability, _implementation = self.model_roles.resolve(
+            admitted.project_id,
+            role,
+            asset_criticality=asset_criticality,
+            require_live=False,
+        )
+        if selected.modality != modality:
+            raise ValueError(f"model role {role.value} does not provide {modality} generation")
+        admitted.provider = selected.provider
+        admitted.model = selected.provider_model_id
+        return role.value
 
     def _assert_named_model_usable(self, provider: str, model: str, media_type: str) -> None:
         """Refuse a named model the platform cannot run, rather than swapping it."""

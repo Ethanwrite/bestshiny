@@ -1662,6 +1662,10 @@ def test_running_out_of_credits_is_402_and_a_plan_denial_is_403(container):  # t
             json={
                 "project_id": project_id,
                 "type": "video",
+                # Named explicitly: an empty pair is Auto and resolves to the
+                # platform's default role, which this fixture has no credential for.
+                "provider": "google_flow",
+                "model": "veo",
                 "prompt": "one visible action",
                 "idempotency_key": "pro-out-of-credits",
             },
@@ -1682,6 +1686,8 @@ def test_running_out_of_credits_is_402_and_a_plan_denial_is_403(container):  # t
                 json={
                     "project_id": project_id,
                     "type": "video",
+                    "provider": "google_flow",
+                    "model": "veo",
                     "prompt": "one visible action",
                     "idempotency_key": "pro-not-entitled",
                 },

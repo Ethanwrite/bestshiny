@@ -48,8 +48,15 @@ class GenerationRequest(BaseModel):
     shot_id: str | None = None
     candidate_id: str | None = None
     type: Literal["image", "video"]
-    provider: str = "google_flow"
-    model: str = "veo"
+    # An empty pair is "Auto": the platform resolves the target — admission's
+    # plan-scoped role for a passenger request, the video router for a shot —
+    # and records which it was. A caller who names one must name both, and a
+    # named pair is used exactly or refused. There is deliberately no default
+    # provider or model: when the contract guessed "google_flow"/"veo", a
+    # request that said nothing was indistinguishable from one that chose
+    # Flow, and an omitted pair quietly took the named-model path.
+    provider: str = ""
+    model: str = ""
     prompt: str = Field(min_length=1, max_length=30_000)
     negative_prompt: str = ""
     duration: float | None = Field(default=None, ge=1, le=30)
@@ -69,6 +76,17 @@ class GenerationRequest(BaseModel):
     cost_estimate: float = Field(default=0.0, ge=0)
     provider_payload: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def is_auto(self) -> bool:
+        """True when the caller left the target to the platform.
+
+        Such a request must be resolved (admission or the router) before it
+        reaches the gateway; the gateway refuses an unresolved one rather than
+        running it on a guess.
+        """
+
+        return not self.provider.strip() and not self.model.strip()
 
     @model_validator(mode="after")
     def validate_frames(self) -> GenerationRequest:

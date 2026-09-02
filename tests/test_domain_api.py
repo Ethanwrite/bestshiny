@@ -58,7 +58,15 @@ def test_openai_compatibility_is_only_an_adapter(container, project):
         response = client.post(
             "/v1/videos/generations",
             headers={"Idempotency-Key": "openai-adapter-1"},
-            json={"project_id": project.id, "prompt": "A locked-off establishing shot."},
+            json={
+                "project_id": project.id,
+                # Named explicitly: the adapter no longer fills an omitted pair
+                # with Flow. An empty pair is Auto and resolves to the platform's
+                # default role, which this fixture has no credential for.
+                "provider": "google_flow",
+                "model": "veo",
+                "prompt": "A locked-off establishing shot.",
+            },
         )
         assert response.status_code == 202
         assert response.json()["object"] == "video.generation"

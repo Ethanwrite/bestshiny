@@ -800,7 +800,11 @@ survives the filter, and `RouterDecision` says which happened: it carries `scena
 `champion_rank` (its position in the final champion order; `None` for open-scored candidates). This inverts the earlier design on purpose:
 the champion table is recorded product judgement that production data *corrects* (via the existing evidence blend
 and, when enabled, the conservative LCB), rather than a ranking data must *discover* across a dozen
-mostly-unevidenced models.
+mostly-unevidenced models. The request contract matches: `GenerationRequest` carries **no default target** — an
+empty provider/model pair is the explicit Auto contract (`is_auto`), resolved by admission's role path on every
+route whether or not plan enforcement applies, and refused by the gateway (`PROVIDER_NOT_REGISTERED`) if it ever
+arrives unresolved. It used to default to `google_flow`/`veo`, so a request that said nothing was
+indistinguishable from one that chose Flow.
 
 Measured evidence is passed **per ranking** as a frozen `RoutingEvidence`, never written onto the router. The router
 is a container singleton shared by every concurrent request; while live metrics were assigned onto it, the

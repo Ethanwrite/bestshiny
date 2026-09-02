@@ -114,9 +114,11 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 > reference+end-frame shots its R2V mode refuses, and champion demotion read pooled
 > per-model counts. Known residuals, deliberate: only Wan 2.7 declares `modes` (others keep
 > profile-level flags and bounds); the tier/model availability report is stricter than mock-mode admission
-> (unpriced → unavailable in every mode); `GenerationRequest` still *defaults*
-> `provider="google_flow", model="veo"` at the contract level — the browser always sends
-> explicit values, but a directly-constructed request silently takes the MANUAL path.
+> (unpriced → unavailable in every mode). Closed before merge: `GenerationRequest` no
+> longer defaults `provider="google_flow", model="veo"` — an empty pair is the explicit
+> Auto contract (`is_auto`), resolved by admission or the router and refused by the gateway
+> if it arrives unresolved (`PROVIDER_NOT_REGISTERED`); the OpenAI-style
+> `POST /v1/videos/generations` route no longer fills an omitted pair with Flow.
 >
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-08-30-B.md`](docs/SESSION_HANDOVER_2026-08-30-B.md).**
 > It is the single entry point for the 2026-08-30 free-tier/rebrand/QA/E2E session: current

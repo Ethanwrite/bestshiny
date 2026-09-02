@@ -112,13 +112,26 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 > ran separately) confirmed nine findings, all fixed before commit — the two that mattered
 > most: the mode gate had checked duration only, so the champion table pinned Wan 2.7 onto
 > reference+end-frame shots its R2V mode refuses, and champion demotion read pooled
-> per-model counts. Known residuals, deliberate: only Wan 2.7 declares `modes` (others keep
+> per-model counts. A second review of the final PR diff (backend + frontend/security lenses)
+> found the five frontend defects fixed in the last commit — the Create canvas not repainting
+> a job that finished on another page, provider placeholder progress (0.0/0.5 from Seedance,
+> Wan, RunAPI, Flow) freezing the bar below the time creep, a boot-time catalogue race that
+> could paint FREE locks over a PRO project, switching media orphaning a running poll, and the
+> listing-cap refresh proxy — and the dev-bypass HERO consequence documented above. Still
+> pre-existing, not touched: the Quality select ignores `supported_resolutions`, so Kling at
+> 1080p (priced 720p-only) reaches admission as `PricingUnverified` while the catalogue shows
+> it available. Known residuals, deliberate: only Wan 2.7 declares `modes` (others keep
 > profile-level flags and bounds); the tier/model availability report is stricter than mock-mode admission
 > (unpriced → unavailable in every mode). Closed before merge: `GenerationRequest` no
 > longer defaults `provider="google_flow", model="veo"` — an empty pair is the explicit
 > Auto contract (`is_auto`), resolved by admission or the router and refused by the gateway
 > if it arrives unresolved (`PROVIDER_NOT_REGISTERED`); the OpenAI-style
-> `POST /v1/videos/generations` route no longer fills an omitted pair with Flow.
+> `POST /v1/videos/generations` route no longer fills an omitted pair with Flow. One
+> consequence, deliberate and dev-bypass-only: an Auto video at HERO/IMPORTANT/CANONICAL
+> criticality on the unscoped/bypass path now refuses (`no compatible model binding for
+> role=VIDEO_SEEDANCE … criticality=HERO`) because the default role's only binding is
+> STANDARD-trust — it used to run silently on Flow. Production (plan-enforced) forces
+> STANDARD before resolving and is unaffected; name the pair to run a HERO asset there.
 >
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-08-30-B.md`](docs/SESSION_HANDOVER_2026-08-30-B.md).**
 > It is the single entry point for the 2026-08-30 free-tier/rebrand/QA/E2E session: current

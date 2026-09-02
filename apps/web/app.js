@@ -447,6 +447,11 @@ function switchPage(page) {
 
   if (page === "admin" && state.authUser) loadOperations().catch((error) => toast(error.message));
   if (page === "productions") refreshProductions().catch((error) => toast(error.message));
+  // The poll only paints the canvas while it is visible; a job that reached
+  // its terminal state on another page is painted on the way back in.
+  if (page === "create" && state.passengerJobs[state.passengerMedia]) {
+    renderPassengerJob(state.passengerJobs[state.passengerMedia]).catch(() => null);
+  }
   if (page === "ai-director" && state.project) {
     loadCreativeSessions().catch((error) => toast(error.message));
   }
@@ -481,9 +486,23 @@ function setPassengerMedia(media) {
     ? "Video prompts are never rewritten by the image rules. What you wrote is what is submitted."
     : "Only composition, light, material and depth are enhanced. Your subject is never redesigned.";
   renderPassengerModels();
-  renderPassengerJob(state.passengerJobs[media]);
+  const snapshot = state.passengerJobs[media];
+  renderPassengerJob(snapshot);
+  // Only one poll runs at a time, so switching media stops the other slot's
+  // poll; coming back to a job that is still running resumes it rather than
+  // leaving a frozen bar that promises a result nothing is fetching.
+  if (snapshot && !TERMINAL_JOB_STATES.has(snapshot.status) && passengerPoll?.jobId !== snapshot.id) {
+    startPassengerPolling(snapshot.id, media);
+  }
   updatePassengerCost();
 }
+
+// The catalogues load unscoped at workspace start and again scoped to each
+// selected project; the later request always wins, whichever response lands
+// first, so a slow unscoped (most-restrictive) answer cannot paint FREE locks
+// over a PRO project.
+let modelCatalogueSequence = 0;
+let imageTierSequence = 0;
 
 async function loadPassengerModels() {
   // The full user-facing video catalogue, independent of provider credential
@@ -491,8 +510,10 @@ async function loadPassengerModels() {
   // — it renders disabled, and the server says why.
   // Plan locks are those of the active project's workspace — exactly what
   // admission applies; without a project the server under-promises.
+  const sequence = ++modelCatalogueSequence;
   const scope = state.project ? `&project_id=${encodeURIComponent(state.project.id)}` : "";
   const catalogue = await request(`/v1/models?modality=video${scope}`);
+  if (sequence !== modelCatalogueSequence) return; // superseded by a later load
   state.modelProfiles = catalogue.map((model) => ({ ...model, media: "video" }));
   renderPassengerModels();
 }
@@ -500,19 +521,26 @@ async function loadPassengerModels() {
 async function loadImageTiers() {
   // Server truth for the three quality levels: what the plan allows and what
   // is actually runnable right now. The static array stays as fallback copy.
+  const sequence = ++imageTierSequence;
+  let tiers = null;
   try {
     const scope = state.project ? `?project_id=${encodeURIComponent(state.project.id)}` : "";
-    const tiers = await request(`/v1/image-tiers${scope}`);
-    state.imageTiers = Array.isArray(tiers) && tiers.length ? tiers : null;
+    const response = await request(`/v1/image-tiers${scope}`);
+    tiers = Array.isArray(response) && response.length ? response : null;
   } catch (_error) {
-    state.imageTiers = null;
+    tiers = null;
   }
+  if (sequence !== imageTierSequence) return; // superseded by a later load
+  state.imageTiers = tiers;
   renderImageTierOptions();
 }
 
 function renderPassengerModels() {
   state.passengerModels = state.modelProfiles;
-  const freeVideo = state.passengerMedia === "video" && isFreeWorkspace();
+  // Server truth: the catalogue carries the active project's plan locks, so
+  // a multi-workspace user on a PRO project is not told they are on FREE.
+  const freeVideo = state.passengerMedia === "video"
+    && state.modelProfiles.some((model) => model.plan_locked);
   const auto = '<option value="">Auto — Recommended</option>';
   $("passengerModel").innerHTML = auto + state.modelProfiles.map((model) => {
     // Locked and unavailable routes stay visible: an option that disappears
@@ -769,10 +797,12 @@ function stopPassengerPolling() {
 function estimateJobProgress(job, startedAt) {
   if (job.status === "COMPLETED") return 100;
   const events = job.events || [];
+  let provider = null;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event.type === "PROVIDER_JOB_POLL" && typeof event.detail?.progress === "number") {
-      return Math.max(0, Math.min(1, event.detail.progress)) * 100;
+      provider = Math.max(0, Math.min(1, event.detail.progress)) * 100;
+      break;
     }
   }
   let stage = null;
@@ -780,12 +810,18 @@ function estimateJobProgress(job, startedAt) {
     const mapped = STAGE_PROGRESS[events[index].type];
     if (mapped !== undefined) { stage = mapped; break; }
   }
+  let estimate = stage;
   if (["RUNNING", "GENERATING", "SUBMITTED"].includes(job.status)) {
-    // No provider signal: creep with elapsed time toward 80%, never past it.
+    // Creep with elapsed time toward 80%, never past it.
     const minutes = (Date.now() - startedAt) / 60000;
-    return Math.max(stage ?? 0, Math.min(80, 20 + minutes * 12));
+    estimate = Math.max(stage ?? 0, Math.min(80, 20 + minutes * 12));
   }
-  return stage; // null → no signal at all yet: indeterminate shimmer
+  // A provider that reports real progress (OpenRouter) moves the bar past
+  // the creep. Most report a placeholder — 0.0 while queued, 0.5 while
+  // running from Seedance, Wan, RunAPI and Flow — which must not freeze the
+  // bar below the creep for the whole generation.
+  if (provider === null) return estimate; // null → no signal yet: shimmer
+  return estimate === null ? provider : Math.max(provider, estimate);
 }
 
 /** Monotonic progress for the job currently being polled (0-100 or null). */
@@ -1868,21 +1904,21 @@ function jobProgress(job) {
 /** Seed and refresh state.jobs from the server's per-project listing, so
  *  productions survive a reload instead of living only in session memory. */
 async function loadProjectGenerations() {
-  if (!state.project) return;
+  if (!state.project) return new Set();
   const listing = await request(
     `/v1/generations?project_id=${encodeURIComponent(state.project.id)}&limit=100`,
   ).catch(() => null);
-  (listing?.jobs || []).forEach((job) => rememberJob(job));
+  const jobs = listing?.jobs || [];
+  jobs.forEach((job) => rememberJob(job));
+  return new Set(jobs.map((job) => job.id));
 }
 
 async function refreshProductions() {
-  await loadProjectGenerations();
   // Jobs this session remembered that the capped listing did not return
-  // (older shot candidates, for instance) are refreshed by id so a remembered
-  // status never freezes; bounded so a long session cannot fan out.
-  const listed = new Set(
-    projectJobs().filter((job) => job.created_at).map((job) => job.id),
-  );
+  // (older shot candidates, or anything past the 100 newest) are refreshed
+  // by id so a remembered status never freezes; bounded so a long session
+  // cannot fan out.
+  const listed = await loadProjectGenerations();
   const stale = projectJobs()
     .filter((job) => !listed.has(job.id) && !TERMINAL_JOB_STATES.has(job.status))
     .slice(0, 20);

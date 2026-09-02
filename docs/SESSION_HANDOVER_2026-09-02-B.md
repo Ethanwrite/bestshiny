@@ -157,6 +157,35 @@ budget off it needs a permit; a tripped breaker refuses a director call as a `Li
   operator-declared envelopes keep the generic set. `tests/test_openrouter_image_generation.py`
   pins both. Unproven until one real gpt-image-2 generation runs on the new tree.
 
+### 2.9 The operator's first hour on the open gate (2026-09-02, late) — three product defects
+Read from production data, not from the report alone:
+
+- **The director never spoke.** Six `DIRECTOR` turns on claude-opus-5 SUCCEEDED and were paid
+  (~USD 0.002 each) while every turn the user saw was one of two fixed English sentences —
+  the model was only asked for a JSON field patch. Now `_model_patch` asks for
+  `{"reply", "fields"}` with the last twelve turns as conversation (`_DIRECTOR_SYSTEM_PROMPT`,
+  `_recent_turns`); the reply, in the user's language, is the turn's content, with the fixed
+  sentence as the fallback when the model is unavailable or terse (`MODEL_REPLY` /
+  `MODEL_NO_REPLY` reason codes). Typing an unmistakable approval (`批准`, `approve`, …) into
+  the chat on a `BRIEF_PROPOSED` session approves the current revision exactly like the button
+  (`_is_approval`, route-level); a conditional "批准，但…" stays a turn. The web reply box
+  disables itself while a turn is in flight (the same message had posted twice).
+- **Image requests carried video parameters.** The create form's "Quality" select was the video
+  resolution (720p/1080p) and was sent for images too; the gateway then stated it on the
+  provider request and OpenRouter refused (`invalid_value` on `resolution`, values
+  512/1K/2K/4K — job `da3b1a8e`, refunded and released with audit). Now the field is labelled
+  Resolution, shown for video only, the ratio list is per medium (images: 1:1, 3:2, 2:3, 4:3,
+  3:4, 16:9, 9:16), an image payload carries no `resolution`, and `_submit` states the priced
+  resolution for **video** jobs only. Image quality remains the server-owned tier
+  (Shiny/Shinier/Shiniest → model; OpenRouter quality fixed by `OPENROUTER_IMAGE_QUALITY`).
+- **Nothing could be deleted.** `DELETE /v1/creative/sessions/{id}` retires a conversation
+  (ABANDONED: leaves the list, keeps its paid history, refuses new turns; a COMPILED session is
+  part of an episode and is refused). `DELETE /v1/shots/{id}` removes a shot that has never
+  been generated on and re-joins its neighbours; a shot with a job or an approved take is
+  refused with the reason (jobs, credits, cost records and decisions reference it). Both have
+  buttons in the web app. Tests: `tests/test_creative_director.py` (five new),
+  `tests/test_shot_delete.py`.
+
 ## 4. Owed to the operator / unresolved
 
 1. **Three models cannot be switched on by a switch:** `flow-narwhal-image-internal` and
@@ -200,6 +229,7 @@ Run from the worktree root on the main checkout's venv, the long halves detached
 | `main` | `34c9323` (#39 squash) |
 | Dev stack (`ai-director-platform`, this worktree) | api, worker and web rebuilt from `34c9323`'s tree and recreated; dev database at `0069_production_budget`; dev `.env` carries `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=10` and `PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY=seedance=5,openrouter=5,wan=5` (dev runs `PROVIDER_MODE=live`, so these bound real dev spend); `GET /internal/production-budget` answers `enabled: true` |
 | Production | **`34c9323` deployed by the operator on 2026-09-02 ≈19:45Z** (the auto-mode permission classifier had refused the scp + ssh twice from this session, so the operator ran the documented command). Verified afterwards: `DEPLOYED_SHA = 34c9323`, `.prev = 0f90f0b`, alembic `0069_production_budget`, `GET /health` 200, api/worker/web running image IDs equal the built ones, `GET /internal/production-budget` `enabled: true` with the platform row at 200 USD/day and no per-provider ceiling. Then `ALLOW_RUNAPI_EDGE_CALLS=true` set and api + worker recreated (healthy). No job, model call or spend authorization had run on the new tree at the time of writing — the first real director turn, refinement and generation are the operator's next click |
+| Production, later | **`cb316c2` (#40) deployed from this session ≈20:55Z** once the permission mode allowed ssh: `.prev = 34c9323`, no env change, no migration; api healthy, images match, budget on, zero tracebacks. First real traffic on the open gate that hour: six director turns and one refinement succeeded and settled (`VERIFIED_PROVIDER`); the one gpt-image-2 job failed on the `resolution` field #40 removes, and was refunded/released with audit. #41 (the director's own words, image parameters, deletions) was gated and deployed after — see §2.9 and the table row below |
 | Verification to run after the deploy | `DEPLOYED_SHA` = `34c9323`; `alembic current` = `0069_production_budget`; every container's running image ID equals the built one (web has been skipped by `up -d` three times); `GET /health` 200; `POST /internal/router/video` still `CHAMPION_TABLE`; `GET /internal/production-budget` `enabled: true` with the platform row at 200; `select count(*) from model_definitions where enabled and live_enabled and lifecycle_status not in ('DISABLED','BLOCKED')` = 21; then one real director turn and one real generation, and watch for the Seedance host refusal (§4.2) |
 
 ## 6. Gotchas this session paid for

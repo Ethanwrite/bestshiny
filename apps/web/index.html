@@ -403,6 +403,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <div class="shot-notes-main">
                 <div class="pane-head">
                   <h2 id="shotTitle">No shot selected</h2>
+                  <button id="shotDeleteBtn" class="btn btn-ghost btn-danger" type="button" hidden title="Delete this shot">Delete shot</button>
                 </div>
                 <p id="shotPrompt" class="shot-directive">Compile a script on the left and the system builds an ordered, producible shot list, remembering the state each shot starts and ends in.</p>
                 <label class="field">Director notes<textarea id="rawPrompt" rows="3" readonly placeholder="Select a shot to see the original directive"></textarea></label>
@@ -502,7 +503,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <h3 class="group-title">Output</h3>
                 <div class="field-grid">
                   <label class="field"><span class="field-label">Ratio</span><select id="passengerAspect"><option>9:16</option><option>16:9</option><option>1:1</option></select></label>
-                  <label class="field"><span class="field-label">Quality</span><select id="passengerResolution"><option>720p</option><option>1080p</option></select></label>
+                  <label class="field" id="passengerResolutionField"><span class="field-label">Resolution</span><select id="passengerResolution"><option>720p</option><option>1080p</option></select></label>
                 </div>
                 <label class="field hidden" id="passengerDurationField"><span class="field-label">Duration (seconds)</span><input id="passengerDuration" type="number" min="1" max="30" value="4" /></label>
               </section>

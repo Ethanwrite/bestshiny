@@ -56,6 +56,11 @@ class CreativeMessage(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
 
 
+_APPROVAL_PHRASES = frozenset(
+    {"批准", "同意", "确认", "通过", "批准吧", "approve", "approved", "lgtm", "approve it"}
+)
+
+
 class BriefApprove(BaseModel):
     revision: int = Field(ge=1)
 
@@ -91,6 +96,11 @@ def register_creative_routes(
     creative: CreativeDirectorService,
     continuations: EpisodeContinuationService,
 ) -> None:
+    def _is_approval(content: str) -> bool:
+        """Only an unmistakable one-word approval; anything with conditions is a turn."""
+
+        return content.strip().strip("。.!！ ").lower() in _APPROVAL_PHRASES
+
     def _require_session(principal: AuthPrincipal, session_id: str, *, write: bool = False) -> str:
         with container.database.session() as session:
             row = session.get(CreativeSession, session_id)
@@ -253,13 +263,54 @@ def register_creative_routes(
             "actions": state.actions,
         }
 
+    @app.delete("/v1/creative/sessions/{session_id}")
+    def delete_creative_session(
+        session_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Retire a conversation. Rows stay (paid history); it leaves the list."""
+
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.abandon_session(session_id)
+        except CreativeSessionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @app.post("/v1/creative/sessions/{session_id}/messages")
     async def post_creative_message(
         session_id: str,
         body: CreativeMessage,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        _require_session(principal, session_id, write=True)
+        project_id = _require_session(principal, session_id, write=True)
+        if _is_approval(body.content):
+            # "批准" typed into the chat means the same thing as the Approve
+            # button. Before this it was a new turn that re-proposed the same
+            # brief with the same sentence (production, 2026-09-02).
+            current = creative.session_state(session_id)
+            brief = current.brief or {}
+            if current.session.get("status") == "BRIEF_PROPOSED" and brief.get("revision"):
+                revision = int(brief["revision"])
+                try:
+                    actions = creative.approve_brief(
+                        session_id, revision=revision, actor=principal.user_id or "development"
+                    )
+                except CreativeSessionConflict as exc:
+                    raise HTTPException(409, str(exc)) from exc
+                executions = _execute_visual_actions(principal, session_id, project_id)
+                return {
+                    "status": "VISUALS_IN_PROGRESS",
+                    "message": "Brief approved. The key visuals are being generated.",
+                    "questions": [],
+                    "brief_revision": revision,
+                    "proposable": False,
+                    "reasoner": "APPROVAL",
+                    "approved_revision": revision,
+                    "actions": actions,
+                    "executions": executions,
+                }
         try:
             reply = await creative.post_message(session_id, body.content)
         except CreativeTurnLimitReached as exc:

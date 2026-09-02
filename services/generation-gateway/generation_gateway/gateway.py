@@ -2787,7 +2787,10 @@ class GenerationGateway:
                 # came back 1920x1080 with audio and cost USD 0.85, 8.5x the
                 # estimate. The standing rule is that a parameter which decides
                 # the bill is stated, never inherited.
-                if not request.get("resolution"):
+                # Video only: an image is priced per image and quality level,
+                # and the images APIs either reject the field (OpenRouter,
+                # 2026-09-02: `invalid_value` on `resolution`) or ignore it.
+                if job.generation_type == "video" and not request.get("resolution"):
                     priced_resolution = str(request_metadata.get("resolution") or "").strip()
                     if priced_resolution:
                         request["resolution"] = priced_resolution

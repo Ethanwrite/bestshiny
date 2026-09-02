@@ -32,14 +32,15 @@ from .alchemy import BASE_NETWORKS
 from .catalog import PAYMENT_PACKAGES, PaymentPackage
 
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_SIGNATURE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 _TRANSACTION_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _NONCE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 _TRANSFER_AUTHORIZATION_FUNCTION = (
-    "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)"
+    "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)"
 )
 _AUTHORIZATION_STATE_FUNCTION = "authorizationState(address,bytes32)"
+_ERC1271_FUNCTION = "isValidSignature(bytes32,bytes)"
+_ERC1271_MAGIC_VALUE = "0x1626ba7e"
 _TRANSFER_EVENT = "Transfer(address,address,uint256)"
 _AUTHORIZATION_USED_EVENT = "AuthorizationUsed(address,bytes32)"
 
@@ -295,7 +296,13 @@ class EIP3009RelayerService:
         signature: str,
     ) -> EIP3009AuthorizationResult:
         self._require_configured()
-        if not _SIGNATURE.fullmatch(signature):
+        if not signature.startswith("0x") or len(signature) < 4 or len(signature) > 16_386:
+            raise EIP3009Rejected("EIP-712 签名格式无效")
+        try:
+            signature_bytes = bytes.fromhex(signature[2:])
+        except ValueError as exc:
+            raise EIP3009Rejected("EIP-712 签名格式无效") from exc
+        if not signature_bytes:
             raise EIP3009Rejected("EIP-712 签名格式无效")
         should_broadcast = False
         with self._submission_lock, self.database.session() as session:
@@ -320,13 +327,14 @@ class EIP3009RelayerService:
                 digest = self._message_hash(signable).hex()
                 if digest != authorization.typed_data_hash:
                     raise EIP3009Conflict("支付授权快照已改变")
-                try:
-                    recovered = Account.recover_message(signable, signature=signature).lower()
-                except (ValueError, TypeError) as exc:
-                    raise EIP3009Rejected("EIP-712 签名无法恢复付款钱包") from exc
-                if recovered != authorization.from_address:
-                    raise EIP3009Rejected("EIP-712 签名钱包与订单不匹配")
-                authorization.signature_hash = hashlib.sha256(bytes.fromhex(signature[2:])).hexdigest()
+                self._verify_payer_signature(
+                    authorization=authorization,
+                    signable=signable,
+                    digest=bytes.fromhex(digest),
+                    signature=signature,
+                    signature_bytes=signature_bytes,
+                )
+                authorization.signature_hash = hashlib.sha256(signature_bytes).hexdigest()
                 authorization.attempt_count += 1
                 self._require_chain()
                 if self._authorization_used(authorization):
@@ -889,13 +897,6 @@ class EIP3009RelayerService:
 
     def _transfer_calldata(self, authorization: EIP3009Authorization, signature: str) -> str:
         raw = bytes.fromhex(signature[2:])
-        r = raw[:32]
-        s = raw[32:64]
-        v = raw[64]
-        if v in {0, 1}:
-            v += 27
-        if v not in {27, 28}:
-            raise EIP3009Rejected("EIP-712 签名 recovery id 无效")
         selector = keccak(text=_TRANSFER_AUTHORIZATION_FUNCTION)[:4]
         arguments = encode(
             [
@@ -905,9 +906,7 @@ class EIP3009RelayerService:
                 "uint256",
                 "uint256",
                 "bytes32",
-                "uint8",
-                "bytes32",
-                "bytes32",
+                "bytes",
             ],
             [
                 to_checksum_address(authorization.from_address),
@@ -916,12 +915,50 @@ class EIP3009RelayerService:
                 authorization.valid_after,
                 authorization.valid_before,
                 bytes.fromhex(authorization.nonce[2:]),
-                v,
-                r,
-                s,
+                raw,
             ],
         )
         return "0x" + (selector + arguments).hex()
+
+    def _verify_payer_signature(
+        self,
+        *,
+        authorization: EIP3009Authorization,
+        signable: SignableMessage,
+        digest: bytes,
+        signature: str,
+        signature_bytes: bytes,
+    ) -> None:
+        code = str(self._rpc("eth_getCode", [authorization.from_address, "latest"]) or "0x")
+        if code not in {"0x", "0x0", "0x00"}:
+            selector = keccak(text=_ERC1271_FUNCTION)[:4]
+            calldata = selector + encode(["bytes32", "bytes"], [digest, signature_bytes])
+            try:
+                result = str(
+                    self._rpc(
+                        "eth_call",
+                        [
+                            {
+                                "to": authorization.from_address,
+                                "data": "0x" + calldata.hex(),
+                            },
+                            "latest",
+                        ],
+                    )
+                ).lower()
+            except EIP3009RPCError as exc:
+                raise EIP3009Rejected("智能钱包拒绝了 EIP-712 授权签名") from exc
+            if not result.startswith(_ERC1271_MAGIC_VALUE):
+                raise EIP3009Rejected("智能钱包 EIP-712 授权签名无效")
+            return
+        if len(signature_bytes) != 65:
+            raise EIP3009Rejected("普通钱包必须返回 65-byte EIP-712 签名")
+        try:
+            recovered = Account.recover_message(signable, signature=signature).lower()
+        except (ValueError, TypeError) as exc:
+            raise EIP3009Rejected("EIP-712 签名无法恢复付款钱包") from exc
+        if recovered != authorization.from_address:
+            raise EIP3009Rejected("EIP-712 签名钱包与订单不匹配")
 
     def _typed_data(
         self,

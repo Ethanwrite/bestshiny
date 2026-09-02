@@ -67,7 +67,7 @@ class RelayedCheckoutRequest(CheckoutRequest):
 
 
 class RelayedAuthorizationSubmitRequest(BaseModel):
-    signature: str = Field(min_length=132, max_length=132)
+    signature: str = Field(min_length=4, max_length=16_386)
 
 
 def _binding_view(binding: WorkspaceWalletBinding) -> dict[str, object]:
@@ -395,9 +395,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 "status": checkout.status,
                 "sku": intent.sku if intent else None,
                 "amount_usdc": (
-                    f"{Decimal(intent.raw_amount_microunits) / Decimal(1_000_000):.2f}"
-                    if intent
-                    else None
+                    f"{Decimal(intent.raw_amount_microunits) / Decimal(1_000_000):.2f}" if intent else None
                 ),
                 "credits": intent.credits if intent else None,
                 "purchase_kind": (intent.metadata_json or {}).get("purchase_kind") if intent else None,

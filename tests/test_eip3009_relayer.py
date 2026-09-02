@@ -31,6 +31,8 @@ class FakeBaseRPC:
         self.sent_raw: list[str] = []
         self.receipt: dict[str, Any] | None = None
         self.send_failures = 0
+        self.contract_wallets: set[str] = set()
+        self.invalid_contract_wallets: set[str] = set()
 
     def __call__(self, method: str, params: list[Any]) -> Any:
         if method == "eth_chainId":
@@ -58,7 +60,14 @@ class FakeBaseRPC:
                         )
                     ).hex()
                 )
+            if data.startswith("0x" + keccak(text="isValidSignature(bytes32,bytes)")[:4].hex()):
+                wallet = str(params[0].get("to") or "").lower()
+                if wallet in self.invalid_contract_wallets:
+                    return "0xffffffff" + "0" * 56
+                return "0x1626ba7e" + "0" * 56
             return "0x" + "0" * 64
+        if method == "eth_getCode":
+            return "0x6001600055" if str(params[0]).lower() in self.contract_wallets else "0x"
         if method == "eth_getTransactionCount":
             return "0x7"
         if method == "eth_estimateGas":
@@ -268,6 +277,40 @@ def test_wrong_wallet_signature_is_rejected_before_any_relayer_transaction(tmp_p
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)).status == "PENDING"
         assert session.scalar(select(EIP3009Authorization)).signature_hash is None
+
+
+def test_deployed_erc1271_smart_wallet_signature_is_relayed(tmp_path) -> None:
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    smart_wallet = "0x3333333333333333333333333333333333333333"
+    fake.contract_wallets.add(smart_wallet)
+    checkout = _checkout(client, workspace_id, type("Wallet", (), {"address": smart_wallet})())
+
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit",
+        json={"signature": "0x" + "ab" * 96},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "SUBMITTED"
+    assert len(fake.sent_raw) == 1
+
+
+def test_invalid_erc1271_signature_is_rejected_before_broadcast(tmp_path) -> None:
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    smart_wallet = "0x4444444444444444444444444444444444444444"
+    fake.contract_wallets.add(smart_wallet)
+    fake.invalid_contract_wallets.add(smart_wallet)
+    checkout = _checkout(client, workspace_id, type("Wallet", (), {"address": smart_wallet})())
+
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit",
+        json={"signature": "0x" + "cd" * 96},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 422
+    assert fake.sent_raw == []
 
 
 def test_duplicate_submit_reuses_the_same_transaction_without_spending_gas_twice(tmp_path) -> None:

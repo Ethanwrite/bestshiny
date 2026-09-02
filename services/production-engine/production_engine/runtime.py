@@ -171,6 +171,7 @@ class VisualProductionRuntime:
         *,
         estimated_credits: int | None = None,
         pricing_version: str = "",
+        quoted_cost_usd: float | None = None,
     ):  # type: ignore[no-untyped-def]
         request = GenerationRequest(
             project_id=command.project_id,
@@ -205,6 +206,7 @@ class VisualProductionRuntime:
             # server Admission result supplied by the caller may price a job.
             estimated_credits=estimated_credits,
             pricing_version=pricing_version,
+            quoted_cost_usd=quoted_cost_usd,
             resolution=command.resolution,
         )
 
@@ -220,6 +222,7 @@ class VisualProductionRuntime:
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
         estimated_credits: int | None = None,
         pricing_version: str = "",
+        quoted_cost_usd: float | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
     ):  # type: ignore[no-untyped-def]
@@ -254,6 +257,10 @@ class VisualProductionRuntime:
             on_create=add_trace,
             estimated_credits=estimated_credits,
             pricing_version=pricing_version,
+            # The USD ceiling of the job's spend authorization. Only the server
+            # Admission result may supply it; the request's own cost_estimate
+            # is never read for this.
+            quoted_cost_usd=quoted_cost_usd,
             resolution=resolution,
             timeline_fence=timeline_fence,
         )
@@ -578,6 +585,7 @@ class VisualProductionRuntime:
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
         estimated_credits: int | None = None,
         pricing_version: str = "",
+        quoted_cost_usd: float | None = None,
         resolution: str = "720p",
     ):  # type: ignore[no-untyped-def]
         candidates = [candidate.model_dump(mode="json") for candidate in prepared.router.candidates]
@@ -613,6 +621,7 @@ class VisualProductionRuntime:
             on_create=add_autopilot_records,
             estimated_credits=estimated_credits,
             pricing_version=pricing_version,
+            quoted_cost_usd=quoted_cost_usd,
             resolution=resolution,
             timeline_fence=prepared.timeline_fence,
         )
@@ -1020,11 +1029,13 @@ class VisualProductionRuntime:
         try:
             estimated_credits: int | None = None
             pricing_version = ""
+            quoted_cost_usd: float | None = None
             if self.generation_admission is not None:
                 admitted_retry = self.generation_admission.admit_autopilot(retry_request)
                 retry_request = admitted_retry.request
                 estimated_credits = admitted_retry.estimate.credits
                 pricing_version = self.generation_admission.pricing.version
+                quoted_cost_usd = admitted_retry.estimate.estimated_total_usd
             job, replayed = self.submit(
                 retry_request,
                 mode="AUTOPILOT_RETRY",
@@ -1033,6 +1044,7 @@ class VisualProductionRuntime:
                 router_scores=(metadata.get("router") or {}).get("candidates", []),
                 estimated_credits=estimated_credits,
                 pricing_version=pricing_version,
+                quoted_cost_usd=quoted_cost_usd,
             )
             if replayed and candidate_id and job.candidate_id != candidate_id:
                 with self.database.session() as session:

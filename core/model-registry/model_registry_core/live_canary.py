@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from platform_database import Database
 from production_domain.models import ModelDefinition, utcnow
@@ -194,6 +195,86 @@ def record_canary_outcome(
         )
 
 
+# Cost provenances that count as a settled, priced live call for a chat or
+# embedding model. ESTIMATED and UNKNOWN are not evidence that money moved for
+# a figure anyone can check, so they earn nothing.
+_ROLE_SETTLEMENT_SOURCES = frozenset({"VERIFIED_PROVIDER", "TOKENS_LIST"})
+
+
+def production_serviceable(
+    *,
+    enabled: bool,
+    live_enabled: bool,
+    lifecycle_status: str,
+) -> bool:
+    """Whether ordinary traffic may run this model on the automatic production budget.
+
+    A paying user's credits are the user-side gate; this is the platform's,
+    and it is the model's own switches and nothing else: enabled, switched on
+    for live traffic, and not DISABLED or BLOCKED. A serviceable model runs
+    user requests on their quote-bound spend authorization under the platform
+    breaker with no operator-minted permit in the way (operator decision
+    2026-09-02: a user who bought credits is settled in credits).
+
+    `live_canary_status` is deliberately not a condition. It is evidence about
+    the model — written when a loop closes, reset when the capability contract
+    changes — that lifecycle promotion and routing read. It was briefly a gate
+    on paying traffic, and with no chat or image model ever verified that gate
+    kept the whole platform behind expired permits. The `LiveCanaryPermit`
+    remains the fence only where the budget does not reach: the budget
+    disabled, or a call the platform cannot price.
+    """
+
+    return bool(enabled and live_enabled and lifecycle_status not in {"DISABLED", "BLOCKED"})
+
+
+def record_role_canary_outcome(
+    database: Database,
+    *,
+    provider: str,
+    model: str,
+    cost_usd: Decimal,
+    cost_source: str,
+    evidence_reference: str,
+    observed_at: datetime | None = None,
+) -> CanaryRecord | None:
+    """Stamp `VERIFIED_LIVE` for a chat or embedding model whose permit call settled.
+
+    A media generation closes its loop across several boundaries; a role call
+    closes it inside one request. The whole loop here is: the request reached
+    the provider, a response came back, and the usage settled at a figure with
+    a checkable provenance — the provider's own cost or counted tokens at the
+    dated list rate. Anything less (no counts, no rates, an estimate) earns
+    nothing, exactly as a generation whose artifact never landed earns nothing.
+    """
+
+    if cost_source not in _ROLE_SETTLEMENT_SOURCES:
+        return None
+    stamped_at = observed_at or utcnow()
+    detail = f"role call settled USD {cost_usd} ({cost_source}) · {evidence_reference}"[:_DETAIL_LIMIT]
+    with database.session() as session:
+        row = session.scalar(
+            select(ModelDefinition).where(
+                ModelDefinition.provider == provider,
+                ModelDefinition.provider_model_id == model,
+            )
+        )
+        if row is None:
+            return None
+        previous = row.live_canary_status
+        row.live_canary_status = VERIFIED_LIVE
+        row.live_canary_detail = detail
+        row.last_live_test_at = stamped_at
+        row.last_verified_at = stamped_at
+        return CanaryRecord(
+            logical_name=row.logical_name,
+            previous_status=previous,
+            status=VERIFIED_LIVE,
+            detail=detail,
+            observed_at=stamped_at,
+        )
+
+
 __all__ = [
     "CONTRACT_INVALID",
     "CanaryLoop",
@@ -201,5 +282,7 @@ __all__ = [
     "LIVE_BLOCKED_EXTERNAL",
     "NOT_RUN",
     "VERIFIED_LIVE",
+    "production_serviceable",
     "record_canary_outcome",
+    "record_role_canary_outcome",
 ]

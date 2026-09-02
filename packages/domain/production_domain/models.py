@@ -4123,6 +4123,102 @@ class LiveCanaryUsage(Base, TimestampMixin):
     evidence_reference: Mapped[str | None] = mapped_column(String(500))
 
 
+class ProductionBudgetLedger(Base, TimestampMixin):
+    """One spend window of the automatic production budget, for one scope.
+
+    Two scopes exist: ``PLATFORM`` (``scope_key = "platform"``) and one
+    ``PROVIDER`` row per provider. Every live spend authorization reserves
+    against both rows of its window before any money can move, and settles or
+    releases against the same two rows afterwards, so the breaker is a
+    conditional update on a row and never a sum that a concurrent request can
+    race past. Windows are UTC calendar days: a held-but-unreconciled amount
+    stops burdening the platform when its day ends, while the authorization it
+    belongs to keeps waiting for the operator's finding.
+    """
+
+    __tablename__ = "production_budget_ledgers"
+    __table_args__ = (
+        UniqueConstraint("scope", "scope_key", "window_start", name="uq_production_budget_window"),
+        CheckConstraint("limit_usd >= 0", name="ck_production_budget_limit_nonnegative"),
+        CheckConstraint("reserved_usd >= 0", name="ck_production_budget_reserved_nonnegative"),
+        CheckConstraint("actual_usd >= 0", name="ck_production_budget_actual_nonnegative"),
+        CheckConstraint("window_seconds > 0", name="ck_production_budget_window_positive"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    reserved_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    actual_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class GenerationSpendAuthorization(Base, TimestampMixin):
+    """One single-use USD authorization for one live provider operation.
+
+    A generation's authorization is created in the same transaction as its
+    workspace credit reservation, bound to the workspace, the job, the
+    provider and the model, with ``max_cost_usd`` taken from the server quote
+    and never from the request. A model-role call (director, embeddings) gets
+    one per call, sized by the token estimate. The row is the unit the
+    platform breaker reserves and settles, and its status mirrors the canary
+    usage vocabulary: RESERVED before any transport, UNCERTAIN once the paid
+    boundary may have been crossed, SETTLED with a figure, RELEASED with proof
+    that nothing left the process.
+    """
+
+    __tablename__ = "generation_spend_authorizations"
+    __table_args__ = (
+        UniqueConstraint("operation_key", name="uq_spend_authorization_operation"),
+        UniqueConstraint("generation_job_id", name="uq_spend_authorization_job"),
+        Index("ix_spend_authorization_lookup", "provider", "model", "status"),
+        Index("ix_spend_authorization_workspace", "workspace_id", "created_at"),
+        CheckConstraint("max_cost_usd > 0", name="ck_spend_authorization_max_positive"),
+        CheckConstraint("reserved_cost_usd >= 0", name="ck_spend_authorization_reserved_nonnegative"),
+        CheckConstraint(
+            "actual_cost_usd IS NULL OR actual_cost_usd >= 0",
+            name="ck_spend_authorization_actual_nonnegative",
+        ),
+        CheckConstraint("quoted_credits >= 0", name="ck_spend_authorization_credits_nonnegative"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    operation_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"), index=True
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"), index=True
+    )
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="RESTRICT")
+    )
+    model_role: Mapped[str | None] = mapped_column(String(80))
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    max_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), nullable=False)
+    actual_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    quoted_credits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pricing_version: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="RESERVED", index=True, nullable=False)
+    #: PENDING until the gateway decides at the paid boundary; then PRODUCTION
+    #: (the authorization alone fenced the call) or CANARY (an operator permit
+    #: fenced it too, because the model had not yet earned VERIFIED_LIVE).
+    fence: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    settlement_source: Mapped[str | None] = mapped_column(String(40))
+    evidence_reference: Mapped[str | None] = mapped_column(String(500))
+    platform_ledger_id: Mapped[str] = mapped_column(
+        ForeignKey("production_budget_ledgers.id", ondelete="RESTRICT"), nullable=False
+    )
+    provider_ledger_id: Mapped[str] = mapped_column(
+        ForeignKey("production_budget_ledgers.id", ondelete="RESTRICT"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
 class RunAPIBenchmark(Base, TimestampMixin):
     __tablename__ = "runapi_benchmarks"
     __table_args__ = (UniqueConstraint("task_id", name="uq_runapi_benchmark_task"),)

@@ -53,6 +53,11 @@ class ResolvedModel:
     plan_tier: str
     binding_kind: ModelBindingKind
     priority: int
+    #: Where the model stands in the live canary sequence (`live_canary.py`).
+    #: VERIFIED_LIVE is what lets ordinary traffic run on the automatic
+    #: production budget instead of an operator's permit.
+    live_canary_status: str = "NOT_RUN"
+    lifecycle_status: str = "CONFIGURED"
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,7 @@ class RuntimeModelState:
     router_enabled: bool
     supported_operations: tuple[str, ...]
     capability_profile_version: str
+    live_canary_status: str = "NOT_RUN"
 
 
 def load_model_infrastructure_config(path: Path) -> ModelInfrastructureConfig:
@@ -550,6 +556,7 @@ class ModelInfrastructureService:
             router_enabled=definition.router_enabled,
             supported_operations=tuple(profile.supported_operations),
             capability_profile_version=profile.profile_version,
+            live_canary_status=definition.live_canary_status,
         )
 
     @staticmethod
@@ -648,6 +655,8 @@ class ModelInfrastructureService:
                     plan_tier=binding.plan_tier,
                     binding_kind=ModelBindingKind(binding.binding_kind),
                     priority=binding.priority,
+                    live_canary_status=definition.live_canary_status,
+                    lifecycle_status=definition.lifecycle_status,
                 )
                 for binding, definition, _profile in compatible
             ]

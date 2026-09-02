@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -15,9 +16,20 @@ from entitlement_core import (
     LiveCanaryConflict,
     LiveCanaryDenied,
     LiveCanaryPermitService,
+    LiveSpendDenied,
     WorkspaceCreditConflict,
     WorkspaceCreditService,
     WorkspaceCreditTransition,
+)
+from entitlement_core.production_budget import (
+    FENCE_CANARY,
+    FENCE_PRODUCTION,
+    SOURCE_ESTIMATED_QUOTE,
+    SOURCE_VERIFIED_PROVIDER,
+    ProductionBudgetExceeded,
+    ProductionBudgetService,
+    SpendAuthorizationConflict,
+    SpendAuthorizationView,
 )
 from media_service import (
     MediaRegistry,
@@ -26,7 +38,13 @@ from media_service import (
     StagedProviderOutput,
     generation_staging_prefix,
 )
-from model_registry_core import ModelInfrastructureService, RuntimeModelState
+from model_registry_core import (
+    CanaryLoop,
+    ModelInfrastructureService,
+    RuntimeModelState,
+    production_serviceable,
+    record_canary_outcome,
+)
 from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
     AuthoritativeTimelineFence,
@@ -46,6 +64,7 @@ from production_domain.models import (
     GenerationIdempotency,
     GenerationJob,
     JobStatus,
+    LiveCanaryUsage,
     MediaAsset,
     ModelCapabilityProfile,
     ModelDefinition,
@@ -92,6 +111,21 @@ from .scheduler import AccountScheduler, NoAccountAvailable
 
 class LiveCanaryResubmissionForbidden(LiveCanaryDenied):
     """The operation's canary is already UNCERTAIN/SETTLED; only an operator resolves it."""
+
+
+@dataclass(frozen=True)
+class LiveGenerationFence:
+    """What fenced one live generation at the paid boundary.
+
+    ``canary`` is the operator's permit usage — present while the model has
+    not earned ``VERIFIED_LIVE``. ``authorization`` is the job's quote-bound
+    spend authorization under the platform breaker — present for every job
+    created while the production budget is enabled, on either side of the
+    verification line. A verified model runs on the authorization alone.
+    """
+
+    canary: CanaryReservation | None
+    authorization: SpendAuthorizationView | None
 
 
 class IdempotencyConflict(RuntimeError):
@@ -226,6 +260,7 @@ class GenerationGateway:
         provider_mode: ProviderMode | str = ProviderMode.MOCK,
         flow_affinity: FlowProjectAllocator | None = None,
         live_canary: LiveCanaryPermitService | None = None,
+        production_budget: ProductionBudgetService | None = None,
     ):
         if claim_lease_seconds < 30:
             raise ValueError("claim_lease_seconds must be at least 30")
@@ -243,6 +278,7 @@ class GenerationGateway:
         self.model_infrastructure = model_infrastructure
         self.flow_affinity = flow_affinity or FlowProjectAllocator(database, scheduler)
         self.live_canary = live_canary
+        self.production_budget = production_budget
         # A synchronous result is not held in this process. It goes into the
         # `provider_synchronous_results` inbox in the same transaction that
         # confirms the submission, because a paid artefact must not depend on
@@ -328,58 +364,124 @@ class GenerationGateway:
     def _live_canary_operation_key(job_id: str) -> str:
         return f"generation:{job_id}"
 
-    def _reserve_live_generation_canary(
+    def _reserve_live_generation_fence(
         self,
         *,
         job_id: str,
         provider: str,
         model: str,
-    ) -> CanaryReservation | None:
+        media_type: str,
+    ) -> LiveGenerationFence | None:
+        """Take every hold this live generation needs, then mark them UNCERTAIN.
+
+        The job's spend authorization (created with its credit reservation)
+        is the automatic fence; it is enough on its own for every serviceable
+        model — enabled, live-enabled, not blocked — while the budget is
+        enabled. The operator's ``LiveCanaryPermit`` is required only where the
+        budget does not reach (budget disabled, or no authorization was
+        created for the job), holding its whole remaining budget for the one
+        call exactly as before. Every hold is taken before any of them is
+        marked UNCERTAIN, so a refused permit or a tripped breaker leaves
+        nothing held.
+        """
+
         if self.provider_mode is not ProviderMode.LIVE:
             return None
-        if self.live_canary is None:
-            raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
-        reservation = self.live_canary.reserve_matching(
-            provider=provider,
-            model=model,
-            # GenerationRequest.cost_estimate is not a trusted billing quote.
-            # Hold the permit's entire remaining budget for the one operation.
-            estimated_cost_usd=None,
-            idempotency_key=self._live_canary_operation_key(job_id),
-        )
-        if reservation.replayed and reservation.status in {"UNCERTAIN", "SETTLED"}:
+        key = self._live_canary_operation_key(job_id)
+        authorization: SpendAuthorizationView | None = None
+        if self.production_budget is not None:
+            authorization = self.production_budget.find_operation(key)
+        if authorization is not None and authorization.status in {"UNCERTAIN", "SETTLED"}:
             raise LiveCanaryResubmissionForbidden(
-                "live generation canary outcome is already uncertain or settled; "
+                "live generation spend authorization is already uncertain or settled; "
                 "automatic resubmission is forbidden"
             )
-        try:
-            return self.live_canary.mark_uncertain(
-                reservation.usage_id,
-                evidence_reference=f"generation-boundary-prepared:{job_id}",
+        serviceable = False
+        if (
+            authorization is not None
+            and self.production_budget is not None
+            and self.production_budget.enabled
+            and self.model_infrastructure is not None
+        ):
+            state = self.model_infrastructure.runtime_model_for_target(provider, model, media_type)
+            serviceable = state is not None and production_serviceable(
+                enabled=state.enabled,
+                live_enabled=state.live_enabled,
+                lifecycle_status=state.lifecycle_status,
             )
+        canary: CanaryReservation | None = None
+        if not serviceable:
+            if self.live_canary is None:
+                raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
+            reservation = self.live_canary.reserve_matching(
+                provider=provider,
+                model=model,
+                # GenerationRequest.cost_estimate is not a trusted billing quote.
+                # Hold the permit's entire remaining budget for the one operation.
+                estimated_cost_usd=None,
+                idempotency_key=key,
+            )
+            if reservation.replayed and reservation.status in {"UNCERTAIN", "SETTLED"}:
+                raise LiveCanaryResubmissionForbidden(
+                    "live generation canary outcome is already uncertain or settled; "
+                    "automatic resubmission is forbidden"
+                )
+            canary = reservation
+        evidence = f"generation-boundary-prepared:{job_id}"
+        try:
+            if authorization is not None:
+                if self.production_budget is None:  # pragma: no cover - guarded above.
+                    raise RuntimeError("production budget service disappeared")
+                # First, because a RELEASED authorization is re-reserved here and
+                # the breaker may refuse it; the permit is still only RESERVED.
+                authorization = self.production_budget.prepare_boundary(
+                    authorization.id,
+                    provider=provider,
+                    model=model,
+                    fence=FENCE_CANARY if canary is not None else FENCE_PRODUCTION,
+                    evidence_reference=evidence,
+                )
+            if canary is not None:
+                if self.live_canary is None:  # pragma: no cover - guarded above.
+                    raise RuntimeError("live canary service disappeared")
+                canary = self.live_canary.mark_uncertain(canary.usage_id, evidence_reference=evidence)
         except BaseException:
-            if reservation.status == "RESERVED":
+            if canary is not None and canary.status == "RESERVED" and self.live_canary is not None:
                 try:
-                    self.live_canary.release(reservation.usage_id)
+                    self.live_canary.release(canary.usage_id)
+                except Exception:
+                    pass
+            if (
+                authorization is not None
+                and authorization.status == "UNCERTAIN"
+                and self.production_budget is not None
+            ):
+                try:
+                    self.production_budget.release_pre_boundary(
+                        authorization.id,
+                        evidence_reference=f"generation-boundary-abandoned:{job_id}",
+                    )
                 except Exception:
                     pass
             raise
+        return LiveGenerationFence(canary=canary, authorization=authorization)
 
-    def _release_live_generation_canary_before_boundary(
+    def _release_live_generation_fence_before_boundary(
         self,
-        reservation: CanaryReservation | None,
+        fence: LiveGenerationFence | None,
         *,
         job_id: str,
         boundary_crossed: bool,
     ) -> None:
-        if reservation is None or boundary_crossed or self.live_canary is None:
+        if fence is None or boundary_crossed:
             return
-        self.live_canary.release_pre_boundary(
-            reservation.usage_id,
-            evidence_reference=f"generation-pre-boundary-release:{job_id}",
-        )
+        evidence = f"generation-pre-boundary-release:{job_id}"
+        if fence.canary is not None and self.live_canary is not None:
+            self.live_canary.release_pre_boundary(fence.canary.usage_id, evidence_reference=evidence)
+        if fence.authorization is not None and self.production_budget is not None:
+            self.production_budget.release_pre_boundary(fence.authorization.id, evidence_reference=evidence)
 
-    def _require_live_generation_canary_boundary(
+    def _require_live_generation_fence_boundary(
         self,
         *,
         job_id: str,
@@ -387,25 +489,44 @@ class GenerationGateway:
         model: str,
         session: Session | None = None,
         allow_settled: bool = False,
-    ) -> CanaryReservation | None:
+    ) -> LiveGenerationFence | None:
+        """Assert the operation owns the durable hold(s) its fence kind requires."""
+
         if self.provider_mode is not ProviderMode.LIVE:
             return None
-        if self.live_canary is None:
-            raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
+        key = self._live_canary_operation_key(job_id)
         allowed = frozenset({"UNCERTAIN", "SETTLED"}) if allow_settled else frozenset({"UNCERTAIN"})
-        return self.live_canary.require_operation_boundary(
-            provider=provider,
-            model=model,
-            idempotency_key=self._live_canary_operation_key(job_id),
-            allowed_statuses=allowed,
-            # A fresh paid upload/submit must still be inside its explicit
-            # authorization window. Poll/cancel/settle may safely manage an
-            # operation whose paid boundary was already crossed.
-            require_unexpired=not allow_settled,
-            session=session,
-        )
+        authorization: SpendAuthorizationView | None = None
+        if self.production_budget is not None:
+            authorization = self.production_budget.find_operation(key, session=session)
+        canary: CanaryReservation | None = None
+        if authorization is None or authorization.fence != FENCE_PRODUCTION:
+            if self.live_canary is None:
+                raise LiveCanaryDenied("live media generation requires a durable LiveCanaryPermit")
+            canary = self.live_canary.require_operation_boundary(
+                provider=provider,
+                model=model,
+                idempotency_key=key,
+                allowed_statuses=allowed,
+                # A fresh paid upload/submit must still be inside its explicit
+                # authorization window. Poll/cancel/settle may safely manage an
+                # operation whose paid boundary was already crossed.
+                require_unexpired=not allow_settled,
+                session=session,
+            )
+        if authorization is not None:
+            if self.production_budget is None:  # pragma: no cover - guarded above.
+                raise RuntimeError("production budget service disappeared")
+            authorization = self.production_budget.require_operation(
+                operation_key=key,
+                provider=provider,
+                model=model,
+                allowed_statuses=allowed,
+                session=session,
+            )
+        return LiveGenerationFence(canary=canary, authorization=authorization)
 
-    def _settle_live_generation_canary(
+    def _settle_live_generation_fence(
         self,
         *,
         job_id: str,
@@ -414,24 +535,132 @@ class GenerationGateway:
         provider_job_id: str,
         raw: dict[str, Any],
     ) -> None:
-        if self.provider_mode is not ProviderMode.LIVE or self.live_canary is None:
+        if self.provider_mode is not ProviderMode.LIVE:
             return
         actual, _, _, _, _ = _provider_billing_facts(raw)
-        if actual is None:
+        key = self._live_canary_operation_key(job_id)
+        authorization = (
+            self.production_budget.find_operation(key) if self.production_budget is not None else None
+        )
+        if actual is None and authorization is None:
+            # The permit keeps its whole hold until an operator reconciles the
+            # usage, exactly as before: an unpriced settlement is not evidence.
             return
-        reservation = self._require_live_generation_canary_boundary(
+        fence = self._require_live_generation_fence_boundary(
             job_id=job_id,
             provider=provider,
             model=model,
             allow_settled=True,
         )
-        if reservation is None:  # pragma: no cover - live mode invariant.
-            raise RuntimeError("live generation canary disappeared")
-        self.live_canary.settle(
-            reservation.usage_id,
-            actual_cost_usd=actual,
-            evidence_reference=f"provider-job:{provider}:{provider_job_id}",
-        )
+        if fence is None:  # pragma: no cover - live mode invariant.
+            raise RuntimeError("live generation fence disappeared")
+        evidence = f"provider-job:{provider}:{provider_job_id}"
+        if fence.canary is not None and actual is not None and self.live_canary is not None:
+            self.live_canary.settle(
+                fence.canary.usage_id,
+                actual_cost_usd=actual,
+                evidence_reference=evidence,
+            )
+        if fence.authorization is not None and self.production_budget is not None:
+            settled = self.production_budget.settle(
+                fence.authorization.id,
+                actual_cost_usd=actual,
+                evidence_reference=evidence,
+                source=SOURCE_VERIFIED_PROVIDER if actual is not None else SOURCE_ESTIMATED_QUOTE,
+            )
+            if settled.overran_quote and not settled.replayed:
+                # The fence held; the price table did not. Loud, never silent.
+                with self.database.session() as session:
+                    self._event(
+                        session,
+                        job_id,
+                        "SPEND_QUOTE_OVERRUN",
+                        max_cost_usd=str(settled.max_cost_usd),
+                        actual_cost_usd=str(settled.actual_cost_usd),
+                        authorization_id=settled.id,
+                    )
+
+    def _artifact_in_storage(self, asset: MediaAsset | None) -> bool:
+        if asset is None or asset.size_bytes <= 0:
+            return False
+        storage = getattr(self.media, "storage", None)
+        stat = getattr(storage, "stat", None)
+        if not callable(stat):
+            return True
+        try:
+            found = stat(asset.storage_key)
+        except Exception:
+            return False
+        return found is not None and int(getattr(found, "size", -1)) == int(asset.size_bytes)
+
+    def _record_live_generation_canary_verdict(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        model: str,
+        provider_job_id: str,
+    ) -> None:
+        """A live generation that closed its loop earns the model VERIFIED_LIVE.
+
+        The verdict rule lives in `model_registry_core.live_canary` and is not
+        re-decided here: every link — reached the provider, COMPLETED, artifact
+        registered and readable, credits settled for exactly what was held —
+        or nothing is written. Both fences count: a permit-fenced canary and a
+        user's generation on the automatic budget are the same evidence about
+        the model. The verdict is evidence for lifecycle and routing, never a
+        gate on paying traffic.
+        """
+
+        if self.provider_mode is not ProviderMode.LIVE:
+            return
+        key = self._live_canary_operation_key(job_id)
+        with self.database.session() as session:
+            usage = session.scalar(select(LiveCanaryUsage).where(LiveCanaryUsage.idempotency_key == key))
+            authorization = (
+                self.production_budget.find_operation(key, session=session)
+                if self.production_budget is not None
+                else None
+            )
+            if usage is None and authorization is None:
+                return
+            job = session.get(GenerationJob, job_id)
+            if job is None:
+                return
+            asset = session.get(MediaAsset, job.output_asset_id) if job.output_asset_id else None
+            credit = (
+                self.workspace_credits.entry_for_job_in_session(session, job_id)
+                if self.workspace_credits is not None
+                else None
+            )
+            loop = CanaryLoop(
+                provider=provider,
+                model=model,
+                job_id=job_id,
+                submission_state=job.submission_state,
+                terminal_status=job.status,
+                output_asset_id=job.output_asset_id,
+                artifact_bytes=int(asset.size_bytes) if asset is not None else 0,
+                artifact_in_storage=self._artifact_in_storage(asset),
+                credit_status=credit.status if credit is not None else "",
+                credits_reserved=int(credit.credits) if credit is not None else 0,
+                credits_settled=int(credit.settled_credits) if credit is not None else 0,
+                error_code=job.error_code,
+                provider_task_id=provider_job_id,
+            )
+        record = record_canary_outcome(self.database, loop)
+        if record is None:
+            return
+        with self.database.session() as session:
+            self._event(
+                session,
+                job_id,
+                "LIVE_CANARY_VERDICT_RECORDED",
+                logical_name=record.logical_name,
+                previous_status=record.previous_status,
+                status=record.status,
+                detail=record.detail,
+            )
 
     @staticmethod
     def _event(session, job_id: str, event_type: str, **detail: Any) -> None:  # type: ignore[no-untyped-def]
@@ -505,6 +734,7 @@ class GenerationGateway:
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
         estimated_credits: int | None = None,
         pricing_version: str = "",
+        quoted_cost_usd: float | Decimal | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
     ) -> tuple[GenerationJob, bool]:
@@ -516,6 +746,7 @@ class GenerationGateway:
                     on_create=on_create,
                     estimated_credits=estimated_credits,
                     pricing_version=pricing_version,
+                    quoted_cost_usd=quoted_cost_usd,
                     resolution=resolution,
                     timeline_fence=timeline_fence,
                 )
@@ -533,6 +764,7 @@ class GenerationGateway:
         on_create: Callable[[Any, GenerationJob, bool], None] | None = None,
         estimated_credits: int | None = None,
         pricing_version: str = "",
+        quoted_cost_usd: float | Decimal | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
     ) -> tuple[GenerationJob, bool]:
@@ -672,6 +904,40 @@ class GenerationGateway:
                                 "CREDIT_RESERVED",
                                 credits=credit_reservation.credits,
                                 balance_after=credit_reservation.balance_after,
+                            )
+                    if (
+                        self.provider_mode is ProviderMode.LIVE
+                        and self.production_budget is not None
+                        and self.production_budget.enabled
+                    ):
+                        # Same transaction as the credit reservation: one
+                        # single-use USD authorization bound to workspace, job,
+                        # provider and model, capped at the server quote, and
+                        # counted against the platform and provider breakers
+                        # before any of it can be spent. A tripped breaker
+                        # rolls the job and its credits back together.
+                        authorization = self.production_budget.authorize_generation_in_session(
+                            session,
+                            operation_key=self._live_canary_operation_key(job.id),
+                            generation_job_id=job.id,
+                            workspace_id=project.workspace_id,
+                            project_id=job.project_id,
+                            provider=job.provider,
+                            model=job.model,
+                            max_cost_usd=(
+                                Decimal(str(quoted_cost_usd)) if quoted_cost_usd is not None else Decimal("0")
+                            ),
+                            quoted_credits=estimated_credits or 0,
+                            pricing_version=pricing_version,
+                        )
+                        if not authorization.replayed:
+                            self._event(
+                                session,
+                                job.id,
+                                "SPEND_AUTHORIZED",
+                                authorization_id=authorization.id,
+                                max_cost_usd=str(authorization.max_cost_usd),
+                                quoted_credits=authorization.quoted_credits,
                             )
                     session.add(
                         CostRecord(
@@ -1055,7 +1321,7 @@ class GenerationGateway:
             )
         try:
             provider = self.providers.validate_target(provider_name, model, capability)
-            self._require_live_generation_canary_boundary(
+            self._require_live_generation_fence_boundary(
                 job_id=job_id,
                 provider=provider_name,
                 model=model,
@@ -1694,7 +1960,7 @@ class GenerationGateway:
                 RetryCategory.PERMANENT_ERROR,
                 code="PROVIDER_TARGET_CHANGED",
             )
-        self._require_live_generation_canary_boundary(
+        self._require_live_generation_fence_boundary(
             job_id=job.id,
             provider=job.provider,
             model=job.model,
@@ -2362,7 +2628,7 @@ class GenerationGateway:
                     "PROVIDER_TARGET_CHANGED",
                     "provider implementation no longer matches the server-selected generation target",
                 )
-            self._require_live_generation_canary_boundary(
+            self._require_live_generation_fence_boundary(
                 job_id=boundary_job.id,
                 provider=provider_name,
                 model=model,
@@ -2558,12 +2824,13 @@ class GenerationGateway:
                 submitted=False,
                 claim_token=claim_token,
             )
-        canary_reservation: CanaryReservation | None = None
+        live_fence: LiveGenerationFence | None = None
         try:
-            canary_reservation = self._reserve_live_generation_canary(
+            live_fence = self._reserve_live_generation_fence(
                 job_id=job_id,
                 provider=provider_name,
                 model=model,
+                media_type=capability,
             )
         except LiveCanaryResubmissionForbidden as exc:
             # This operation's usage is already UNCERTAIN or SETTLED: a paid
@@ -2577,7 +2844,19 @@ class GenerationGateway:
                 submitted=False,
                 claim_token=claim_token,
             )
-        except LiveCanaryDenied as exc:
+        except ProductionBudgetExceeded as exc:
+            # The platform or provider breaker is out of room for this
+            # window. Same shape as a refused permit: nothing was spent, and
+            # the job waits for the window to roll or the ceiling to move.
+            return self._schedule_error(
+                job_id,
+                RetryCategory.RATE_LIMIT,
+                "PRODUCTION_BUDGET_EXCEEDED",
+                str(exc),
+                submitted=False,
+                claim_token=claim_token,
+            )
+        except LiveSpendDenied as exc:
             # A refused reservation is a spending fence doing its job before
             # any boundary is crossed — the same shape as "no ready account".
             # It resolves when an operator mints a permit or a settlement
@@ -2592,7 +2871,7 @@ class GenerationGateway:
                 submitted=False,
                 claim_token=claim_token,
             )
-        except LiveCanaryConflict as exc:
+        except (LiveCanaryConflict, SpendAuthorizationConflict) as exc:
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
@@ -2640,8 +2919,8 @@ class GenerationGateway:
                 "FLOW_PROVISIONING_UNAVAILABLE",
             }:
                 canary_boundary_crossed = False
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -2654,8 +2933,8 @@ class GenerationGateway:
                 claim_token=claim_token,
             )
         except FlowAffinityConflict as exc:
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -2668,8 +2947,8 @@ class GenerationGateway:
                 claim_token=claim_token,
             )
         except NoAccountAvailable as exc:
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -2739,8 +3018,8 @@ class GenerationGateway:
                     self._event(session, job.id, "WORKER_SELECTED", worker_id=worker.id)
                     session.flush()
         if claim_lost or affinity_lost:
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -2806,8 +3085,8 @@ class GenerationGateway:
                     error="submission claim expired or was superseded",
                     clear_routing=True,
                 )
-                self._release_live_generation_canary_before_boundary(
-                    canary_reservation,
+                self._release_live_generation_fence_before_boundary(
+                    live_fence,
                     job_id=job_id,
                     boundary_crossed=canary_boundary_crossed,
                 )
@@ -2921,8 +3200,8 @@ class GenerationGateway:
                 return self._require_job(job_id)
             return await self._poll(job_id, poll_claim)
         except GenerationTargetError as exc:
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -2943,8 +3222,8 @@ class GenerationGateway:
             # conservative. It must never move the job back to NOT_SENT or
             # authorize a refund/re-submit after provider execution began.
             effective_submitted = submission_boundary_crossed or exc.submitted
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed or effective_submitted,
             )
@@ -2960,8 +3239,8 @@ class GenerationGateway:
                 clear_routing=not effective_submitted,
             )
         except Exception as exc:
-            self._release_live_generation_canary_before_boundary(
-                canary_reservation,
+            self._release_live_generation_fence_before_boundary(
+                live_fence,
                 job_id=job_id,
                 boundary_crossed=canary_boundary_crossed,
             )
@@ -3004,13 +3283,13 @@ class GenerationGateway:
                 release_error=str(exc),
             )
         try:
-            self._require_live_generation_canary_boundary(
+            self._require_live_generation_fence_boundary(
                 job_id=job_id,
                 provider=provider_name,
                 model=model,
                 allow_settled=True,
             )
-        except (LiveCanaryDenied, LiveCanaryConflict) as exc:
+        except (LiveSpendDenied, LiveCanaryConflict, SpendAuthorizationConflict) as exc:
             return self._schedule_error(
                 job_id,
                 RetryCategory.PERMANENT_ERROR,
@@ -3264,14 +3543,14 @@ class GenerationGateway:
             asset_id = job.output_asset_id
             assert asset_id is not None
             try:
-                self._settle_live_generation_canary(
+                self._settle_live_generation_fence(
                     job_id=job_id,
                     provider=provider_name,
                     model=model,
                     provider_job_id=provider_job_id,
                     raw=result.raw,
                 )
-            except (LiveCanaryDenied, LiveCanaryConflict, ValueError) as exc:
+            except (LiveSpendDenied, LiveCanaryConflict, SpendAuthorizationConflict, ValueError) as exc:
                 # Generation is already durably complete. Canary settlement
                 # ambiguity must remain reviewable, never roll back media.
                 with self.database.session() as session:
@@ -3281,6 +3560,18 @@ class GenerationGateway:
                         "LIVE_CANARY_SETTLEMENT_REVIEW_REQUIRED",
                         error=str(exc),
                     )
+            try:
+                self._record_live_generation_canary_verdict(
+                    job_id=job_id,
+                    provider=provider_name,
+                    model=model,
+                    provider_job_id=provider_job_id,
+                )
+            except Exception as exc:
+                # The verdict is evidence about the model, never a reason to
+                # touch a completed generation.
+                with self.database.session() as session:
+                    self._event(session, job_id, "LIVE_CANARY_VERDICT_FAILED", error=str(exc))
             if shot_id and not candidate_id and capability == "video" and self.continuity:
                 try:
                     end_frame = self.continuity.extract_and_chain(shot_id, asset_id)

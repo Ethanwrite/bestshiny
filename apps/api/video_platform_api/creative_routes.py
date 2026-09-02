@@ -20,6 +20,8 @@ from creative_director_core import (
 from entitlement_core import (
     InsufficientWorkspaceCredits,
     PlanEntitlementDenied,
+    ProductionBudgetExceeded,
+    SpendAuthorizationDenied,
     WorkspaceCreditConflict,
 )
 from episode_continuation_core import EpisodeContinuationConflict, EpisodeContinuationService
@@ -156,12 +158,15 @@ def register_creative_routes(
                     prompt_version="creative-key-visual-v1",
                     estimated_credits=admitted.estimate.credits,
                     pricing_version=container.credit_pricing.version,
+                    quoted_cost_usd=admitted.estimate.estimated_total_usd,
                 )
             except (
                 IdempotencyConflict,
                 GenerationTargetError,
                 InsufficientWorkspaceCredits,
                 PlanEntitlementDenied,
+                ProductionBudgetExceeded,
+                SpendAuthorizationDenied,
                 WorkspaceCreditConflict,
                 LookupError,
                 ValueError,

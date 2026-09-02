@@ -9,6 +9,7 @@ from .canary import (
     LiveCanaryConflict,
     LiveCanaryDenied,
     LiveCanaryPermitService,
+    LiveSpendDenied,
 )
 from .credits import (
     InsufficientWorkspaceCredits,
@@ -18,6 +19,17 @@ from .credits import (
     WorkspaceCreditConflict,
     WorkspaceCreditService,
     WorkspaceCreditTransition,
+)
+from .production_budget import (
+    ProductionBudgetExceeded,
+    ProductionBudgetPolicy,
+    ProductionBudgetService,
+    ProductionBudgetWindow,
+    SpendAuthorizationConflict,
+    SpendAuthorizationDenied,
+    SpendAuthorizationView,
+    authorization_dict,
+    window_dict,
 )
 from .runtime import ModelRoleExecution, ModelRoleRuntime, capability_for_model_role
 from .service import (
@@ -37,10 +49,18 @@ __all__ = [
     "LiveCanaryConflict",
     "LiveCanaryDenied",
     "LiveCanaryPermitService",
+    "LiveSpendDenied",
     "ModelRoleExecution",
     "ModelRoleRuntime",
     "PlanEntitlementDenied",
+    "ProductionBudgetExceeded",
+    "ProductionBudgetPolicy",
+    "ProductionBudgetService",
+    "ProductionBudgetWindow",
     "ReconcileAction",
+    "SpendAuthorizationConflict",
+    "SpendAuthorizationDenied",
+    "SpendAuthorizationView",
     "WorkspaceCreditBalance",
     "WorkspaceCreditCharge",
     "WorkspaceCreditConflict",
@@ -49,5 +69,7 @@ __all__ = [
     "WorkspaceModelResolver",
     "WorkspacePlanContext",
     "WorkspacePlanTier",
+    "authorization_dict",
     "capability_for_model_role",
+    "window_dict",
 ]

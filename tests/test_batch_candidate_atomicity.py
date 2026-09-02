@@ -331,7 +331,7 @@ def _install_crash(monkeypatch, container, point: str) -> None:  # type: ignore[
         def crash_settle(*args: Any, **kwargs: Any):
             raise SimulatedCrash(point)
 
-        monkeypatch.setattr(gateway, "_settle_live_generation_canary", crash_settle)
+        monkeypatch.setattr(gateway, "_settle_live_generation_fence", crash_settle)
     else:  # pragma: no cover - parametrization names every point.
         raise AssertionError(f"unknown crash point: {point}")
 

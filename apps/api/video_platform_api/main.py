@@ -28,6 +28,8 @@ from entitlement_core import (
     IMAGE_MODEL_TIERS,
     InsufficientWorkspaceCredits,
     PlanEntitlementDenied,
+    ProductionBudgetExceeded,
+    SpendAuthorizationDenied,
     WorkspaceCreditConflict,
     WorkspacePlanTier,
 )
@@ -3022,8 +3024,16 @@ def create_app(container: Container | None = None) -> FastAPI:
                 prompt_version="user-authored-v1",
                 estimated_credits=admitted.estimate.credits,
                 pricing_version=container.credit_pricing.version,
+                quoted_cost_usd=admitted.estimate.estimated_total_usd,
             )
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ProductionBudgetExceeded as exc:
+            # The platform's own spend breaker, not the user's balance: 503
+            # with the window's remaining figure, so a client retries later
+            # rather than topping up.
+            raise HTTPException(503, str(exc)) from exc
+        except SpendAuthorizationDenied as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -3685,8 +3695,16 @@ def create_app(container: Container | None = None) -> FastAPI:
                 prompt_version="openai-image-adapter-v1",
                 estimated_credits=admitted.estimate.credits,
                 pricing_version=container.credit_pricing.version,
+                quoted_cost_usd=admitted.estimate.estimated_total_usd,
             )
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ProductionBudgetExceeded as exc:
+            # The platform's own spend breaker, not the user's balance: 503
+            # with the window's remaining figure, so a client retries later
+            # rather than topping up.
+            raise HTTPException(503, str(exc)) from exc
+        except SpendAuthorizationDenied as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -3746,8 +3764,16 @@ def create_app(container: Container | None = None) -> FastAPI:
                 prompt_version="openai-video-adapter-v1",
                 estimated_credits=admitted.estimate.credits,
                 pricing_version=container.credit_pricing.version,
+                quoted_cost_usd=admitted.estimate.estimated_total_usd,
             )
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ProductionBudgetExceeded as exc:
+            # The platform's own spend breaker, not the user's balance: 503
+            # with the window's remaining figure, so a client retries later
+            # rather than topping up.
+            raise HTTPException(503, str(exc)) from exc
+        except SpendAuthorizationDenied as exc:
             raise HTTPException(409, str(exc)) from exc
         except GenerationTargetError as exc:
             raise HTTPException(400, str(exc)) from exc

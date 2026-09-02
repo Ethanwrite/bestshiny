@@ -10,7 +10,12 @@ from enum import Enum
 from typing import Any
 
 from cost_core import TokenCostEngine, TokenSettlement
-from model_registry_core import ModelRole, ResolvedModel
+from model_registry_core import (
+    ModelRole,
+    ResolvedModel,
+    production_serviceable,
+    record_role_canary_outcome,
+)
 from platform_database import Database
 from production_domain.models import (
     DecisionRecord,
@@ -41,8 +46,37 @@ from .canary import (
     LiveCanaryConflict,
     LiveCanaryDenied,
     LiveCanaryPermitService,
+    LiveSpendDenied,
+)
+from .production_budget import (
+    FENCE_CANARY,
+    FENCE_PRODUCTION,
+    MODEL_ROLE_KIND,
+    SOURCE_ESTIMATED_QUOTE,
+    SOURCE_TOKENS_LIST,
+    SOURCE_VERIFIED_PROVIDER,
+    ProductionBudgetService,
+    SpendAuthorizationDenied,
+    SpendAuthorizationView,
 )
 from .service import WorkspaceModelResolver
+
+
+@dataclass(frozen=True)
+class LiveRoleFence:
+    """What fenced one live role call: an operator's permit, the budget, or both.
+
+    ``canary`` is set while the model has not earned ``VERIFIED_LIVE`` — the
+    operator's permit is what authorizes the call. ``authorization`` is the
+    quote-bound spend authorization under the platform breaker; it is set for
+    every priced call once the budget is enabled, on both sides of the
+    verification line, because the breaker bounds all live spend and not only
+    the automatic part of it.
+    """
+
+    operation_key: str
+    canary: CanaryReservation | None
+    authorization: SpendAuthorizationView | None
 
 
 @dataclass(frozen=True)
@@ -86,6 +120,7 @@ class ModelRoleRuntime:
         provider_mode: ProviderMode | str = ProviderMode.MOCK,
         live_canary: LiveCanaryPermitService | None = None,
         token_costs: TokenCostEngine | None = None,
+        production_budget: ProductionBudgetService | None = None,
     ):
         self.database = database
         self.resolver = resolver
@@ -96,6 +131,7 @@ class ModelRoleRuntime:
             raise ValueError("provider_mode must be mock, recorded, or live") from exc
         self.live_canary = live_canary
         self.token_costs = token_costs
+        self.production_budget = production_budget
 
     def resolve(
         self,
@@ -176,8 +212,8 @@ class ModelRoleRuntime:
             {"messages": messages, "parameters": parameters or {}},
         )
         started = time.perf_counter()
-        canary: CanaryReservation | None = None
-        canary_boundary_crossed = False
+        fence: LiveRoleFence | None = None
+        boundary_crossed = False
         try:
             self._revalidate_execution_boundary(
                 project_id,
@@ -185,8 +221,9 @@ class ModelRoleRuntime:
                 criticality=criticality,
                 require_live=require_live,
             )
-            canary = self._reserve_live_canary(
+            fence = self._reserve_live_fence(
                 selected,
+                project_id=project_id,
                 estimated_cost=self._planning_estimate(
                     selected,
                     parameters,
@@ -198,20 +235,17 @@ class ModelRoleRuntime:
                     ),
                 ),
             )
-            if canary is not None:
-                self.live_canary.mark_uncertain(
-                    canary.usage_id,
-                    evidence_reference=f"model-execution-boundary:{request_hash}",
-                )
-                canary_boundary_crossed = True
+            if fence is not None:
+                self._prepare_live_boundary(fence, request_hash=request_hash)
+                boundary_crossed = True
             response = await implementation.chat(
                 model=selected.provider_model_id,
                 messages=messages,
                 parameters=parameters,
             )
-            self._settle_live_canary(canary, response=response, request_hash=request_hash)
+            self._settle_live_fence(fence, response=response, request_hash=request_hash)
         except Exception as exc:
-            self._release_pre_boundary_canary(canary, crossed=canary_boundary_crossed)
+            self._release_pre_boundary_fence(fence, crossed=boundary_crossed)
             self._record(
                 project_id=project_id,
                 selected=selected,
@@ -224,7 +258,7 @@ class ModelRoleRuntime:
                 latency_ms=(time.perf_counter() - started) * 1000,
                 parameters=parameters,
                 error_code=getattr(exc, "code", type(exc).__name__),
-                canary_usage_id=canary.usage_id if canary is not None else None,
+                fence=fence,
             )
             raise
         decision_id, execution_id = self._record(
@@ -239,7 +273,7 @@ class ModelRoleRuntime:
             latency_ms=(time.perf_counter() - started) * 1000,
             parameters=parameters,
             response=response,
-            canary_usage_id=canary.usage_id if canary is not None else None,
+            fence=fence,
         )
         return ModelRoleExecution(selected, capability, response, decision_id, execution_id)
 
@@ -271,8 +305,8 @@ class ModelRoleRuntime:
             {"inputs": inputs, "parameters": parameters or {}},
         )
         started = time.perf_counter()
-        canary: CanaryReservation | None = None
-        canary_boundary_crossed = False
+        fence: LiveRoleFence | None = None
+        boundary_crossed = False
         try:
             self._revalidate_execution_boundary(
                 project_id,
@@ -280,8 +314,9 @@ class ModelRoleRuntime:
                 criticality=criticality,
                 require_live=require_live,
             )
-            canary = self._reserve_live_canary(
+            fence = self._reserve_live_fence(
                 selected,
+                project_id=project_id,
                 estimated_cost=self._planning_estimate(
                     selected,
                     parameters,
@@ -291,20 +326,17 @@ class ModelRoleRuntime:
                     max_output_tokens=0,
                 ),
             )
-            if canary is not None:
-                self.live_canary.mark_uncertain(
-                    canary.usage_id,
-                    evidence_reference=f"model-execution-boundary:{request_hash}",
-                )
-                canary_boundary_crossed = True
+            if fence is not None:
+                self._prepare_live_boundary(fence, request_hash=request_hash)
+                boundary_crossed = True
             response = await implementation.create_embeddings(
                 model=selected.provider_model_id,
                 inputs=inputs,
                 parameters=parameters,
             )
-            self._settle_live_canary(canary, response=response, request_hash=request_hash)
+            self._settle_live_fence(fence, response=response, request_hash=request_hash)
         except Exception as exc:
-            self._release_pre_boundary_canary(canary, crossed=canary_boundary_crossed)
+            self._release_pre_boundary_fence(fence, crossed=boundary_crossed)
             self._record(
                 project_id=project_id,
                 selected=selected,
@@ -317,7 +349,7 @@ class ModelRoleRuntime:
                 latency_ms=(time.perf_counter() - started) * 1000,
                 parameters=parameters,
                 error_code=getattr(exc, "code", type(exc).__name__),
-                canary_usage_id=canary.usage_id if canary is not None else None,
+                fence=fence,
             )
             raise
         decision_id, execution_id = self._record(
@@ -332,7 +364,7 @@ class ModelRoleRuntime:
             latency_ms=(time.perf_counter() - started) * 1000,
             parameters=parameters,
             response=response,
-            canary_usage_id=canary.usage_id if canary is not None else None,
+            fence=fence,
         )
         return ModelRoleExecution(selected, capability, response, decision_id, execution_id)
 
@@ -417,12 +449,13 @@ class ModelRoleRuntime:
         try:
             result = await refiner.refine(original_prompt=original_prompt, fact_locks=fact_locks)
         except (
-            # A refused live-canary reservation is a budget/permit refusal, not
-            # a platform fault. The director's turn got this degradation in
-            # #25; refine kept 500ing on the same denial on production — each
-            # model call here must degrade the same way.
+            # A refused live-spend reservation — a missing permit or a tripped
+            # production breaker — is a budget refusal, not a platform fault.
+            # The director's turn got this degradation in #25; refine kept
+            # 500ing on the same denial on production — each model call here
+            # must degrade the same way.
             LiveCanaryConflict,
-            LiveCanaryDenied,
+            LiveSpendDenied,
             LookupError,
             ProviderError,
             ProviderTrustViolation,
@@ -444,7 +477,7 @@ class ModelRoleRuntime:
                 )
             except (
                 LiveCanaryConflict,
-                LiveCanaryDenied,
+                LiveSpendDenied,
                 LookupError,
                 ProviderError,
                 ProviderTrustViolation,
@@ -487,8 +520,12 @@ class ModelRoleRuntime:
         parameters: dict[str, Any] | None,
         response: dict[str, Any] | None = None,
         error_code: str | None = None,
-        canary_usage_id: str | None = None,
+        fence: LiveRoleFence | None = None,
     ) -> tuple[str, str]:
+        canary_usage_id = fence.canary.usage_id if fence is not None and fence.canary is not None else None
+        spend_authorization_id = (
+            fence.authorization.id if fence is not None and fence.authorization is not None else None
+        )
         usage = response.get("usage") if response and isinstance(response.get("usage"), dict) else {}
         reported_actual_cost = _actual_cost(response or {})
         actual_cost = reported_actual_cost if self.provider_mode is ProviderMode.LIVE else None
@@ -530,6 +567,12 @@ class ModelRoleRuntime:
                     "asset_criticality": criticality.value,
                     "input_count": input_count,
                     "live_canary_usage_id": canary_usage_id,
+                    "spend_authorization_id": spend_authorization_id,
+                    "live_fence": (
+                        None
+                        if fence is None
+                        else (FENCE_CANARY if fence.canary is not None else FENCE_PRODUCTION)
+                    ),
                     "provider_mode": self.provider_mode.value,
                     "reported_actual_cost_ignored": (
                         reported_actual_cost is not None and self.provider_mode is not ProviderMode.LIVE
@@ -560,6 +603,7 @@ class ModelRoleRuntime:
                     "input_count": input_count,
                     "outcome": outcome,
                     "live_canary_usage_id": canary_usage_id,
+                    "spend_authorization_id": spend_authorization_id,
                 },
                 selected_action=(f"{selected.provider}:{selected.provider_model_id}:{capability.value}"),
                 reason_codes=reason_codes,
@@ -570,35 +614,106 @@ class ModelRoleRuntime:
             session.flush()
             return record.id, execution.id
 
-    def _reserve_live_canary(
+    def _reserve_live_fence(
         self,
         selected: ResolvedModel,
         *,
+        project_id: str,
         estimated_cost: Decimal | None,
-    ) -> CanaryReservation | None:
+    ) -> LiveRoleFence | None:
+        """Choose the fence for one live role call.
+
+        A serviceable model — enabled, live-enabled, not blocked — runs on its
+        own token-priced authorization under the platform breaker, with no
+        operator permit. The permit is the fence only where the budget does
+        not reach: the budget disabled, or a call the platform cannot price
+        (no token rates), which holds the permit's whole remaining budget —
+        the conservative shape it always had. When both apply, the breaker is
+        reserved for the permit-fenced call as well, so the platform ceiling
+        bounds canary spend too.
+        """
+
         if self.provider_mode is not ProviderMode.LIVE:
             return None
+        operation_key = f"model-role:{uuid.uuid4().hex}"
+        budget = self.production_budget
+        authorization: SpendAuthorizationView | None = None
+        if budget is not None and budget.enabled and estimated_cost is not None:
+            # Resolution in live mode already required `enabled` and
+            # `live_enabled`; the lifecycle travels on the resolved model.
+            serviceable = production_serviceable(
+                enabled=True,
+                live_enabled=True,
+                lifecycle_status=selected.lifecycle_status,
+            )
+            try:
+                authorization = budget.authorize_operation(
+                    operation_key=operation_key,
+                    provider=selected.provider,
+                    model=selected.provider_model_id,
+                    max_cost_usd=estimated_cost,
+                    kind=MODEL_ROLE_KIND,
+                    model_role=selected.role.value,
+                    project_id=project_id,
+                )
+            except SpendAuthorizationDenied:
+                # A zero estimate: nothing to authorize automatically.
+                authorization = None
+            if authorization is not None and serviceable:
+                return LiveRoleFence(operation_key=operation_key, canary=None, authorization=authorization)
         if self.live_canary is None:
+            self._release_authorization(authorization, evidence="no-permit-service")
             raise LiveCanaryDenied("live model execution requires a durable LiveCanaryPermit")
-        return self.live_canary.reserve_matching(
-            provider=selected.provider,
-            model=selected.provider_model_id,
-            estimated_cost_usd=estimated_cost,
-            idempotency_key=f"model-role:{uuid.uuid4().hex}",
-        )
+        try:
+            canary = self.live_canary.reserve_matching(
+                provider=selected.provider,
+                model=selected.provider_model_id,
+                estimated_cost_usd=estimated_cost,
+                idempotency_key=operation_key,
+            )
+        except BaseException:
+            self._release_authorization(authorization, evidence="permit-refused")
+            raise
+        return LiveRoleFence(operation_key=operation_key, canary=canary, authorization=authorization)
 
-    def _settle_live_canary(
+    def _release_authorization(self, authorization: SpendAuthorizationView | None, *, evidence: str) -> None:
+        if authorization is None or self.production_budget is None:
+            return
+        try:
+            self.production_budget.release_pre_boundary(authorization.id, evidence_reference=evidence)
+        except Exception:
+            pass
+
+    def _prepare_live_boundary(self, fence: LiveRoleFence, *, request_hash: str) -> None:
+        evidence = f"model-execution-boundary:{request_hash}"
+        if fence.canary is not None:
+            if self.live_canary is None:  # pragma: no cover - constructor invariant.
+                raise RuntimeError("live canary service disappeared")
+            self.live_canary.mark_uncertain(fence.canary.usage_id, evidence_reference=evidence)
+        if fence.authorization is not None:
+            if self.production_budget is None:  # pragma: no cover - constructor invariant.
+                raise RuntimeError("production budget service disappeared")
+            self.production_budget.prepare_boundary(
+                fence.authorization.id,
+                provider=fence.authorization.provider,
+                model=fence.authorization.model,
+                fence=FENCE_CANARY if fence.canary is not None else FENCE_PRODUCTION,
+                evidence_reference=evidence,
+            )
+
+    def _settle_live_fence(
         self,
-        reservation: CanaryReservation | None,
+        fence: LiveRoleFence | None,
         *,
         response: dict[str, Any],
         request_hash: str,
     ) -> None:
-        if reservation is None:
+        if fence is None:
             return
-        if self.live_canary is None:  # pragma: no cover - constructor invariant.
-            raise RuntimeError("live canary service disappeared")
+        provider = fence.canary.provider if fence.canary is not None else fence.authorization.provider  # type: ignore[union-attr]
+        model = fence.canary.model if fence.canary is not None else fence.authorization.model  # type: ignore[union-attr]
         actual = _actual_cost(response)
+        source = SOURCE_VERIFIED_PROVIDER
         evidence = f"model-execution:{request_hash}"
         if actual is None:
             # Token-billing providers report counts, never a cost figure. A
@@ -606,15 +721,39 @@ class ModelRoleRuntime:
             # stays EXHAUSTED, so the counted tokens are priced at the same
             # canonical list rates every quote uses. No rates, no counts — the
             # usage stays UNCERTAIN for an operator, exactly as before.
-            settlement = self._token_settlement(reservation.provider, reservation.model, response)
+            settlement = self._token_settlement(provider, model, response)
             if settlement is not None:
                 actual = settlement.cost_usd
+                source = SOURCE_TOKENS_LIST
                 evidence = f"model-execution-tokens:{request_hash}:{settlement.detail}"
-        if actual is not None:
+        if fence.canary is not None and actual is not None:
+            if self.live_canary is None:  # pragma: no cover - constructor invariant.
+                raise RuntimeError("live canary service disappeared")
             self.live_canary.settle(
-                reservation.usage_id,
+                fence.canary.usage_id,
                 actual_cost_usd=actual,
                 evidence_reference=evidence,
+            )
+        if actual is not None:
+            # A live call that closed its loop at a checkable figure is
+            # evidence about the model under either fence: lifecycle promotion
+            # and routing read it. It gates nothing.
+            record_role_canary_outcome(
+                self.database,
+                provider=provider,
+                model=model,
+                cost_usd=actual,
+                cost_source=source,
+                evidence_reference=evidence,
+            )
+        if fence.authorization is not None:
+            if self.production_budget is None:  # pragma: no cover - constructor invariant.
+                raise RuntimeError("production budget service disappeared")
+            self.production_budget.settle(
+                fence.authorization.id,
+                actual_cost_usd=actual,
+                evidence_reference=evidence,
+                source=source if actual is not None else SOURCE_ESTIMATED_QUOTE,
             )
 
     def _planning_estimate(
@@ -650,15 +789,17 @@ class ModelRoleRuntime:
             return None
         return self.token_costs.settle_from_usage(provider, model, usage)
 
-    def _release_pre_boundary_canary(
+    def _release_pre_boundary_fence(
         self,
-        reservation: CanaryReservation | None,
+        fence: LiveRoleFence | None,
         *,
         crossed: bool,
     ) -> None:
-        if reservation is None or crossed or self.live_canary is None:
+        if fence is None or crossed:
             return
-        self.live_canary.release(reservation.usage_id)
+        if fence.canary is not None and self.live_canary is not None:
+            self.live_canary.release(fence.canary.usage_id)
+        self._release_authorization(fence.authorization, evidence="model-execution-pre-boundary-release")
 
     def _record_refinement(
         self,
@@ -832,6 +973,7 @@ def _chat_json(response: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "LiveRoleFence",
     "ModelRoleExecution",
     "ModelRoleRuntime",
     "capability_for_model_role",

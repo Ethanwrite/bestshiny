@@ -942,6 +942,7 @@ class CandidatePipeline:
                 pricing_version=(
                     self.generation_admission.pricing.version if self.generation_admission is not None else ""
                 ),
+                quoted_cost_usd=(admitted.estimate.estimated_total_usd if admitted is not None else None),
             )
             with self.database.session() as session:
                 if replayed:

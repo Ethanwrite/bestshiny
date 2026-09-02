@@ -263,6 +263,11 @@ class Settings(BaseSettings):
     relayer_sweep_limit: int = 50
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
+    # The hand-authored scene_type -> champion/fallback table the video router
+    # selects within. Loaded and validated at container build; a missing or
+    # malformed table fails startup rather than silently reverting routing
+    # policy to open scoring.
+    scene_champion_config: Path = Path("./config/model-registry/scene-champions.json")
     # Layer 2 of the style lock. Off by default: it is a paid embedding call per
     # locked style and per evaluated candidate, and it changes what "committable"
     # means, so switching it on is a deliberate act.

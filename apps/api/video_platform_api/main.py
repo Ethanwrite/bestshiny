@@ -25,9 +25,11 @@ from character_evidence.client import (
 from continuity_core import ContinuityRiskVector
 from director_production import CandidateNotCommittable
 from entitlement_core import (
+    IMAGE_MODEL_TIERS,
     InsufficientWorkspaceCredits,
     PlanEntitlementDenied,
     WorkspaceCreditConflict,
+    WorkspacePlanTier,
 )
 from fastapi import (
     Depends,
@@ -104,6 +106,7 @@ from production_domain.models import (
     DirectUploadStatus,
     Episode,
     GenerationCandidate,
+    GenerationJob,
     MediaAsset,
     MediaProviderBinding,
     MediaRendition,
@@ -125,6 +128,9 @@ from production_domain.models import (
     Workspace,
     WorkspaceUsageCounter,
     utcnow,
+)
+from production_domain.models import (
+    ModelCapabilityProfile as ModelCapabilityProfileRow,
 )
 from provider_sdk import (
     LIVE_PROVIDER_CONFIRMATION,
@@ -331,10 +337,16 @@ class ProviderProjectBind(BaseModel):
     provider_project_id: str = Field(min_length=1, max_length=500)
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 def _job_view(job, *, credit_status: str | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     return {
         "id": job.id,
+        "project_id": getattr(job, "project_id", None),
         "status": job.status,
+        "generation_type": getattr(job, "generation_type", None),
         "provider": job.provider,
         "model": job.model,
         "provider_job_id": job.provider_job_id,
@@ -345,6 +357,15 @@ def _job_view(job, *, credit_status: str | None = None) -> dict[str, Any]:  # ty
         "attempt_count": job.attempt_count,
         "error_code": job.error_code,
         "error_message": job.error_message,
+        # The quote the job was reserved on. The reconciled provider figure
+        # (actual_cost) stays server-side: what the platform really paid a
+        # provider is a billing internal, not a user surface.
+        "estimated_cost": getattr(job, "cost_estimate", None),
+        "estimated_credits": getattr(job, "quoted_credits", None),
+        "created_at": _iso(getattr(job, "created_at", None)),
+        "submitted_at": _iso(getattr(job, "submitted_at", None)),
+        "started_at": _iso(getattr(job, "started_at", None)),
+        "completed_at": _iso(getattr(job, "completed_at", None)),
     }
 
 
@@ -3021,6 +3042,36 @@ def create_app(container: Container | None = None) -> FastAPI:
             "replayed": replayed,
         }
 
+    @app.get("/v1/generations")
+    def list_generations(
+        project_id: str,
+        limit: int = 50,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """The project's generation jobs, newest first.
+
+        This is the durable Productions list: it answers from the jobs table,
+        so a reload shows the same history the session built up. Events are
+        deliberately not included — fifty jobs times a poll history is a
+        payload, and the per-job endpoint already serves them.
+        """
+
+        auth.require_project(principal, project_id)
+        capped = max(1, min(int(limit), 100))
+        with container.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(GenerationJob)
+                    .where(GenerationJob.project_id == project_id)
+                    .order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc())
+                    .limit(capped + 1)
+                )
+            )
+        return {
+            "jobs": [_job_view(job) for job in rows[:capped]],
+            "has_more": len(rows) > capped,
+        }
+
     @app.get("/v1/generations/{job_id}")
     def get_generation(
         job_id: str,
@@ -3098,6 +3149,165 @@ def create_app(container: Container | None = None) -> FastAPI:
             )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+
+    def _generation_provider_ready(name: str) -> bool:
+        """Whether a provider can take generation traffic right now."""
+
+        return container.providers.is_configured(name) and container.model_registry.provider_enabled(
+            name
+        )
+
+    _PLAN_TIER_RESTRICTIVENESS = {
+        WorkspacePlanTier.FREE: 0,
+        WorkspacePlanTier.PRO: 1,
+        WorkspacePlanTier.ENTERPRISE: 2,
+        WorkspacePlanTier.ALL: 3,
+    }
+
+    def _caller_plan_tier(principal: AuthPrincipal, project_id: str | None) -> WorkspacePlanTier:
+        """The plan tier the catalogue's locks must be computed against.
+
+        With a project, it is that project's workspace — the same tier
+        admission gates on, so the locks the browser renders are exactly the
+        ones a generation in that project would meet. Without one, a user who
+        belongs to several workspaces has no single tier, so the most
+        restrictive of them is reported: the catalogue may under-promise until
+        a project is chosen, never over-promise. The development bypass keeps
+        its unscoped catalogue.
+        """
+
+        if principal.development_bypass:
+            return WorkspacePlanTier.ALL
+        if project_id is not None:
+            auth.require_project(principal, project_id)
+            try:
+                return container.workspace_models.context_for_project(project_id).plan_tier
+            except (LookupError, PlanEntitlementDenied) as exc:
+                raise HTTPException(403, str(exc)) from exc
+        if not principal.workspace_roles:
+            return WorkspacePlanTier.FREE
+        with container.database.session() as session:
+            workspaces = session.scalars(
+                select(Workspace).where(Workspace.id.in_(list(principal.workspace_roles)))
+            ).all()
+        tiers: list[WorkspacePlanTier] = []
+        for workspace in workspaces:
+            try:
+                tiers.append(WorkspacePlanTier(workspace.plan_tier))
+            except ValueError:
+                tiers.append(WorkspacePlanTier.FREE)
+        if not tiers:
+            return WorkspacePlanTier.FREE
+        return min(tiers, key=lambda tier: _PLAN_TIER_RESTRICTIVENESS[tier])
+
+    @app.get("/v1/image-tiers")
+    def list_image_tiers(
+        project_id: str | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """The three public image quality levels, as admission would treat them.
+
+        Availability comes from the same checks admission performs when a tier
+        is actually used — model registered and enabled, provider configured,
+        pricing verified — reported instead of raised, first failing check
+        first. Locked tiers are still listed: the UI renders them locked
+        rather than pretending they do not exist. Pass ``project_id`` to get
+        the locks of that project's workspace — the ones admission applies.
+        """
+
+        plan_tier = _caller_plan_tier(principal, project_id)
+        return [
+            asdict(tier)
+            for tier in container.generation_admission.describe_image_tiers(
+                plan_tier=plan_tier,
+                provider_configured=_generation_provider_ready,
+            )
+        ]
+
+    @app.get("/v1/models")
+    def list_models(
+        modality: Literal["video", "image"],
+        project_id: str | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """The user-facing model catalogue, independent of credential state.
+
+        `/v1/providers` drops providers without credentials, which is right for
+        routing and wrong for a product page: a model the platform sells does
+        not stop existing because a key is absent — it becomes unavailable,
+        and this endpoint says so instead of hiding it. Pass ``project_id`` to
+        get the plan locks of that project's workspace — the ones admission
+        applies.
+        """
+
+        plan_tier = _caller_plan_tier(principal, project_id)
+        free_video_provider: str | None = None
+        if plan_tier is WorkspacePlanTier.FREE and modality == "video":
+            try:
+                free_video_provider = container.model_infrastructure.resolve_role(
+                    ModelRole.VIDEO_SEEDANCE,
+                    plan_tier=WorkspacePlanTier.FREE.value,
+                ).provider
+            except LookupError:
+                free_video_provider = None
+        free_image_logical_names = {
+            logical_name
+            for logical_name, allowed_plans in IMAGE_MODEL_TIERS.values()
+            if WorkspacePlanTier.FREE.value in allowed_plans
+        }
+        with container.database.session() as session:
+            pairs = session.execute(
+                select(ModelDefinition, ModelCapabilityProfileRow)
+                .join(
+                    ModelCapabilityProfileRow,
+                    ModelCapabilityProfileRow.model_definition_id == ModelDefinition.id,
+                )
+                .where(
+                    ModelDefinition.enabled.is_(True),
+                    ModelDefinition.user_visible.is_(True),
+                    ModelDefinition.modality == modality,
+                )
+                .order_by(ModelDefinition.provider, ModelDefinition.logical_name)
+            ).all()
+        result = []
+        for definition, profile in pairs:
+            provider_ready = _generation_provider_ready(definition.provider)
+            priced = container.generation_admission.pricing_verified(
+                definition.provider, definition.provider_model_id, modality
+            )
+            if not provider_ready:
+                unavailable_reason = "PROVIDER_NOT_CONFIGURED"
+            elif not priced:
+                unavailable_reason = "PRICING_UNVERIFIED"
+            else:
+                unavailable_reason = None
+            if plan_tier is WorkspacePlanTier.FREE:
+                # The same FREE gates admission enforces: video is the Seedance
+                # route only, and images reach only the FREE-tier mapping.
+                plan_locked = (
+                    definition.provider != free_video_provider
+                    if modality == "video"
+                    else definition.logical_name not in free_image_logical_names
+                )
+            else:
+                plan_locked = False
+            result.append(
+                {
+                    "logical_name": definition.logical_name,
+                    "provider": definition.provider,
+                    "model_id": definition.provider_model_id,
+                    "modality": definition.modality,
+                    "available": unavailable_reason is None,
+                    "unavailable_reason": unavailable_reason,
+                    "plan_locked": plan_locked,
+                    "min_duration": profile.min_duration,
+                    "max_duration": profile.max_duration,
+                    "supported_resolutions": list(profile.supported_resolutions),
+                    "supports_reference_image": profile.supports_reference_image,
+                    "max_reference_images": profile.max_reference_images,
+                }
+            )
+        return result
 
     @app.get("/v1/providers")
     async def list_providers(_principal: AuthPrincipal = Depends(auth.current_user)):
@@ -3512,8 +3722,11 @@ def create_app(container: Container | None = None) -> FastAPI:
         generation = GenerationRequest(
             project_id=body["project_id"],
             type="video",
-            provider=body.get("provider", "google_flow"),
-            model=body.get("model", "flow-veo-3.1"),
+            # An omitted pair is Auto and is resolved by admission; it must not
+            # be filled in with a provider here, which would turn "no choice"
+            # into a named Flow selection.
+            provider=body.get("provider", ""),
+            model=body.get("model", ""),
             prompt=body["prompt"],
             duration=body.get("duration", 8),
             aspect_ratio=body.get("aspect_ratio", "9:16"),

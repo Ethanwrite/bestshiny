@@ -27,9 +27,12 @@ def test_media_registry_deduplicates_same_reference_twenty_times(container, proj
 
 
 def test_idempotency_replays_same_payload_and_conflicts_on_change(container, project):
+    # The gateway needs a resolved target; the contract no longer supplies one.
     original = GenerationRequest(
         project_id=project.id,
         type="video",
+        provider="google_flow",
+        model="veo",
         prompt="A single action",
         idempotency_key="paid-request-1",
     )
@@ -49,6 +52,10 @@ def test_api_returns_409_for_reused_key_with_different_payload(container, projec
         base = {
             "project_id": project.id,
             "type": "video",
+            # Named explicitly: an empty pair is Auto and resolves to the
+            # platform's default role, which this fixture has no credential for.
+            "provider": "google_flow",
+            "model": "veo",
             "prompt": "First prompt",
             "idempotency_key": "conflict-key",
         }

@@ -67,7 +67,9 @@ const ROUTES = [
   ["Continuity bridge between shots", "Same light, same wardrobe", "Kling"],
 ];
 
-const MODELS = ["Seedance", "Veo", "Wan", "Kling", "GPT Image", "Grok", "Runway", "Flux"];
+// The brands the platform actually runs (see the backend model catalogue) —
+// advertising a route that does not exist is a support ticket, not marketing.
+const MODELS = ["Seedance", "Seedream", "Veo", "Wan", "Kling", "Grok", "GPT Image"];
 
 function landing() {
   return `

@@ -762,13 +762,49 @@ aspect ratio, resolution, Provider metadata and manual quality priors. Old per-p
 were removed, so UI, admission, policy, router, cost and adapters cannot read a parallel capability truth. Wan is
 registered consistently as 2.7 rather than borrowing experimental 3.0 priors.
 
-`VideoModelRouter` ranks **video generators only**. The registry is one table across every modality, and
-`registry.all()` joins all of them, so the router declares `modality = "video"` and
-`required_operation = "video_generation"` and applies both as hard constraints before any score exists. A model
-that fails a hard constraint is not dropped silently: it is returned in `RouterDecision.rejected` as a
-`RejectedModel` carrying machine-readable `reason_codes` (`MODALITY_MISMATCH`, `VIDEO_GENERATION_UNSUPPORTED`,
-`RESOLUTION_UNSUPPORTED`, `PROVIDER_TRUST_INSUFFICIENT`, `EXCLUDED_BY_CALLER`, …), so "why was that model not
-chosen?" is answerable after the fact rather than by re-deriving the decision.
+`VideoModelRouter` (v3, `video-router-v3`, 2026-09-01) ranks **video generators only**. The registry is one table
+across every modality, and `registry.all()` joins all of them, so the router declares `modality = "video"` and
+`required_operation = "video_generation"` and applies both as hard constraints before any score exists. The hard
+filter is deterministic and runs before any score: modality/operation, derived **task type** (T2V/I2V/R2V/V2V, the
+same derivation the posterior uses, mapped to `supports_t2v`/`supports_i2v`/`supports_reference_image`/
+`supports_v2v`), duration bounds, **per-mode facts** read from `provider_metadata.modes` for the mode the request
+resolves to — duration ceilings (Wan 2.7's 10s reference-video R2V cap; formerly OPEN_ISSUES §2.27), the roles the
+mode `accepts` (a profile-wide `supports_end_frame` is earned by Wan's I2V mode and says nothing about its R2V mode,
+which carries no last frame) and its closed `material_combinations` list (formerly §2.28) — resolution, aspect
+ratio, reference-image count, provider trust/criticality, per-axis capability flags, and an optional **cost
+ceiling** (`ShotRequirements.max_cost_per_second` against the profile's declared `cost.estimated_per_second`; an
+undeclared rate is excluded as `COST_UNKNOWN`, never assumed cheap). A model that fails a hard constraint is not
+dropped silently: it is returned in `RouterDecision.rejected` as a `RejectedModel` carrying machine-readable
+`reason_codes` (`MODALITY_MISMATCH`, `TASK_TYPE_UNSUPPORTED`, `DURATION_UNSUPPORTED`, `MODE_ROLE_UNSUPPORTED`,
+`MODE_COMBINATION_UNSUPPORTED`, `COST_LIMIT_EXCEEDED`, `PROVIDER_TRUST_INSUFFICIENT`, `EXCLUDED_BY_CALLER`, …), so
+"why was that model not chosen?" is answerable after the fact rather than by re-deriving the decision. The mode
+gate is what keeps a champion honest: without it the `first_last_frame` table entry pinned Wan 2.7 onto
+reference-images-plus-end-frame shots its R2V mode cannot carry, a pick the adapter refused on every attempt.
+
+**Selection is champion-first, not open argmax.** The request is read as one evidence scenario via the same
+`router_scenario()` the production posterior groups by, and the hand-authored table in
+`config/model-registry/scene-champions.json` (`scene-champions-v1`, loaded fail-closed at container build,
+validated by `tests/test_scene_champion_config.py`) names an ordered champion list per scene — e.g. `motion` →
+Seedance 2.5 then Kling 3 Pro, `first_last_frame` → Wan 2.7 then Kling 3 Pro, `dialogue_lipsync` → Veo 3.1 then
+Seedance 2.5. Champions that survive the hard filter are ranked in table order ahead of everything else; the
+open-scored remainder stays behind them as deep fallback. Production evidence reorders champions only when it is
+**sufficient on both sides** (`min_demotion_samples`, default 20, per model) **and decisive**
+(blended-score gap above `demotion_margin`, default 0.05) — so a few dozen cold-start observations adjust scores
+but cannot thrash the routing. Sufficiency is read from `RoutingEvidence.scene_sample_counts` — observations of
+*this* request's task and scenario, which only the conservative LCB overlay fills from its posterior cell — never
+from the pooled per-model `production_sample_counts` the adaptive-router path supplies (those mix every scene a
+model ever served and may weight the score blend, but a physics champion is not demoted on dialogue failures). Open scoring still decides when a scene has no champion entry or no champion
+survives the filter, and `RouterDecision` says which happened: it carries `scenario`, `selection_basis`
+(`CHAMPION_TABLE` / `OPEN_SCORING` / `OPEN_SCORING_NO_CHAMPION_SCENE` / `OPEN_SCORING_NO_ELIGIBLE_CHAMPION`) and a
+`champion_audit` recording every champion skipped or demoted and why, and each `ModelCandidate` carries its
+`champion_rank` (its position in the final champion order; `None` for open-scored candidates). This inverts the earlier design on purpose:
+the champion table is recorded product judgement that production data *corrects* (via the existing evidence blend
+and, when enabled, the conservative LCB), rather than a ranking data must *discover* across a dozen
+mostly-unevidenced models. The request contract matches: `GenerationRequest` carries **no default target** — an
+empty provider/model pair is the explicit Auto contract (`is_auto`), resolved by admission's role path on every
+route whether or not plan enforcement applies, and refused by the gateway (`PROVIDER_NOT_REGISTERED`) if it ever
+arrives unresolved. It used to default to `google_flow`/`veo`, so a request that said nothing was
+indistinguishable from one that chose Flow.
 
 Measured evidence is passed **per ranking** as a frozen `RoutingEvidence`, never written onto the router. The router
 is a container singleton shared by every concurrent request; while live metrics were assigned onto it, the
@@ -776,12 +812,13 @@ adjustments in force during any one ranking were whatever the previous caller ha
 decision could be replayed. `benchmark_adjustments`, `production_adjustments` and `production_sample_counts` are now
 read-only properties over the baseline evidence, so an assignment raises instead of quietly winning a race.
 
-Manual priors are labeled `MANUAL_PRIOR`. Runtime observations are blended per ranking with:
+Manual priors are labeled `MANUAL_PRIOR`. Runtime observations are blended per ranking on a sample-count ladder
+(weights over prior/benchmark/production evidence per dimension):
 
 ```text
-prior_weight = 0.80
-observation_weight = 0.20
-minimum_sample_count = 20
+< 20 observations   0.75 / 0.15 / 0.10
+< 50 observations   0.55 / 0.25 / 0.20
+>= 50 observations  0.40 / 0.30 / 0.30
 ```
 
 The observation weight scales with sample coverage; a few attempts cannot replace reviewed priors.

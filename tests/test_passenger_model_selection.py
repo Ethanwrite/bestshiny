@@ -28,7 +28,8 @@ def paid_client(container, monkeypatch):  # type: ignore[no-untyped-def]
     """A PRO workspace with two usable image models and one usable video model."""
 
     container.settings.auth_required = True
-    # google_flow backs the PRO default video role, so Auto needs it configured.
+    # Seedance backs the default video role for every plan (the priced,
+    # live-verified route); the others exist so named selection has targets.
     for provider in ("openrouter", "seedance", "google_flow"):
         # raising=False: adapters differ in whether they carry the flag natively.
         monkeypatch.setattr(container.providers.get(provider), "configured", True, raising=False)
@@ -395,3 +396,77 @@ def test_free_plan_refuses_a_named_paid_video_model(container, monkeypatch):  # 
     assert response.status_code == 403, response.text
     assert "requires a paid plan" in response.text
     assert "command" not in seen
+
+
+# ------------------------------------------------------------------
+# Auto is an explicit contract: no default target, ever
+# ------------------------------------------------------------------
+
+
+def test_generation_request_has_no_default_target() -> None:
+    """An omitted pair is Auto — not a quiet choice of Flow/Veo."""
+
+    from platform_contracts import GenerationRequest
+
+    request = GenerationRequest(
+        project_id="project", type="video", prompt="one action", idempotency_key="auto-contract"
+    )
+    assert request.provider == ""
+    assert request.model == ""
+    assert request.is_auto is True
+
+    named = request.model_copy(update={"provider": "seedance", "model": "doubao-seedance-2-5-260628"})
+    assert named.is_auto is False
+
+
+def test_admission_resolves_an_omitted_pair_and_never_to_flow(paid_client, container):  # type: ignore[no-untyped-def]
+    """Admission owns the resolution of an Auto request, and records it."""
+
+    from platform_contracts import GenerationRequest
+
+    _client, _headers, project_id = paid_client
+    admitted = container.generation_admission.admit_passenger(
+        GenerationRequest(
+            project_id=project_id, type="video", prompt="Left to the platform", idempotency_key="auto-admit"
+        )
+    )
+
+    assert admitted.request.metadata["model_selection"] == "AUTO"
+    assert admitted.request.provider and admitted.request.model
+    assert admitted.request.provider != "google_flow"
+    assert admitted.request.model not in {"veo", "flow-veo-3.1"}
+
+
+def test_openai_style_video_route_treats_an_omitted_pair_as_auto(paid_client, container, monkeypatch):  # type: ignore[no-untyped-def]
+    """The compatibility route used to fill an omitted pair with Flow, turning
+    "no choice" into a named selection of an unpriced route. It is Auto now."""
+
+    client, headers, project_id = paid_client
+
+    response = client.post(
+        "/v1/videos/generations",
+        headers={**headers, "Idempotency-Key": "openai-style-auto"},
+        json={"project_id": project_id, "prompt": "No provider, no model"},
+    )
+
+    assert response.status_code == 202, response.text
+    # This route submits through the runtime proper, so read the job it made.
+    with container.database.session() as session:
+        job = session.get(GenerationJob, response.json()["id"])
+        assert job is not None
+        assert job.provider and job.provider != "google_flow"
+        assert job.model not in {"veo", "flow-veo-3.1"}
+
+
+def test_the_gateway_refuses_an_unresolved_auto_request(container, project):  # type: ignore[no-untyped-def]
+    """A request that skipped admission and the router cannot run on a guess."""
+
+    from generation_gateway import GenerationTargetError
+    from platform_contracts import GenerationRequest
+
+    with pytest.raises(GenerationTargetError, match="not registered"):
+        container.gateway.create(
+            GenerationRequest(
+                project_id=project.id, type="video", prompt="Unresolved", idempotency_key="auto-unresolved"
+            )
+        )

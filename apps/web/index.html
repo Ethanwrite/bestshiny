@@ -446,6 +446,18 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 </div>
               </div>
             </div>
+
+            <div class="canvas-toolbar creations-head">
+              <h2 class="page-title">My creations</h2>
+              <span class="page-subtitle">Everything generated in this project — it stays here across reloads.</span>
+            </div>
+            <div id="creationsGrid" class="creations-grid empty-state">
+              <div class="empty-block">
+                <span class="empty-icon" aria-hidden="true">▦</span>
+                <strong>No creations yet</strong>
+                <p>Everything you generate in this project lands here, ready to save as an asset.</p>
+              </div>
+            </div>
           </section>
 
         </main>
@@ -652,7 +664,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <div class="pane actionbar-pane" data-page="productions" hidden>
           <div class="actionbar-facts">
             <div class="fact"><span>Tracked</span><b id="barJobCount" class="mono">0 jobs</b></div>
-            <div class="fact fact-cost"><span>Session spend</span><b id="barJobSpend" class="mono">0 credits</b></div>
+            <div class="fact fact-cost"><span>Quoted (this project)</span><b id="barJobSpend" class="mono">0 credits</b></div>
           </div>
           <button class="btn btn-primary btn-cta" type="button" data-empty-action="go-create">New generation</button>
         </div>
@@ -853,6 +865,15 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         </div>
         <div class="sheet-actions">
           <button id="closeAssetDetailsBtn" class="btn btn-tertiary" type="button">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="mediaViewerDialog" class="sheet sheet-wide" aria-label="View media">
+      <div class="sheet-body">
+        <div id="mediaViewerBody" class="media-viewer"></div>
+        <div class="sheet-actions">
+          <button id="closeMediaViewerBtn" class="btn btn-tertiary" type="button">Close</button>
         </div>
       </div>
     </dialog>

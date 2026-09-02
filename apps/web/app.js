@@ -53,8 +53,12 @@ const state = {
   continuation: { mode: "CONTINUOUS", view: null },
   selectedCharacterId: null, page: "create", passengerMedia: "image", passengerOriginal: null,
   passengerPrompts: { image: "", video: "" }, passengerJobs: { image: null, video: null },
-  passengerReferenceUpload: null, modelProfiles: [], imageModelProfiles: [], passengerModels: [],
+  passengerReferenceUpload: null, modelProfiles: [], passengerModels: [],
+  imageTiers: null,           // server truth from /v1/image-tiers; null = static fallback
   confirmedAssets: new Set(), logicalAssets: [],
+  thumbCache: new Map(),      // media asset id -> resolved thumbnail object URL (or null)
+  assetMediaIds: new Map(),   // canonical version id -> primary media asset id (or null)
+  savingJobId: null,          // job the save-to-project dialog is acting on
   authUser: null,
   authMode: "login", passengerPreviewObjectUrl: null,
   styleLock: null,
@@ -143,6 +147,31 @@ const MODEL_LABELS = {
   "flow-veo-3.1": "Flow Cinema",
 };
 const friendlyModel = (modelId) => MODEL_LABELS[modelId] || (modelId ? "Studio model" : "—");
+
+/** Provider names shown to users. Aggregator transports (openrouter, runapi)
+ *  deliberately map to nothing: their models already carry their own brand,
+ *  and the transport is an internal fact. */
+const PROVIDER_BRANDS = {
+  google_flow: "Google Flow", seedance: "Seedance", veo_official: "Veo", grok: "Grok",
+  kling: "Kling", runway: "Runway", omni: "Omni", wan: "Wan",
+};
+const providerBrand = (provider) => PROVIDER_BRANDS[provider] || "";
+
+/** The quote the job's reservation was taken on, in USD. The provider-verified
+ *  figure never reaches the browser — it is a billing internal. */
+function jobCostUsd(job) {
+  const value = Number(job.estimated_cost ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Credits for one job: the quoted credits column when the server sent it,
+ *  otherwise derived from the USD cost at the platform rate. */
+function jobCredits(job) {
+  const quoted = Number(job.estimated_credits);
+  if (Number.isFinite(quoted) && quoted > 0) return quoted;
+  const cost = jobCostUsd(job);
+  return cost > 0 ? Math.max(1, Math.ceil(cost / .01)) : 0;
+}
 
 /** The public image quality levels. The backend owns what each level runs on;
  *  the browser only ever sends the level's name. */
@@ -260,6 +289,12 @@ function clearWorkspaceState() {
   state.jobs.clear();
   state.selectedJobId = null;
   state.credits = null;
+  state.imageTiers = null;
+  state.savingJobId = null;
+  state.assetMediaIds.clear();
+  state.thumbCache.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+  state.thumbCache.clear();
+  stopPassengerPolling();
   sessionStorage.removeItem(SUBMISSION_STORAGE_KEY);
   state.confirmedAssets.clear();
   $("projectSelect").innerHTML = '<option value="">No projects yet</option>';
@@ -347,7 +382,7 @@ async function logout() {
 let workspaceLoad = null;
 async function startWorkspace() {
   if (workspaceLoad) return workspaceLoad;
-  workspaceLoad = Promise.all([loadProjects(), loadPassengerModels()])
+  workspaceLoad = Promise.all([loadProjects(), loadPassengerModels(), loadImageTiers()])
     .finally(() => { workspaceLoad = null; });
   return workspaceLoad;
 }
@@ -412,6 +447,11 @@ function switchPage(page) {
 
   if (page === "admin" && state.authUser) loadOperations().catch((error) => toast(error.message));
   if (page === "productions") refreshProductions().catch((error) => toast(error.message));
+  // The poll only paints the canvas while it is visible; a job that reached
+  // its terminal state on another page is painted on the way back in.
+  if (page === "create" && state.passengerJobs[state.passengerMedia]) {
+    renderPassengerJob(state.passengerJobs[state.passengerMedia]).catch(() => null);
+  }
   if (page === "ai-director" && state.project) {
     loadCreativeSessions().catch((error) => toast(error.message));
   }
@@ -446,40 +486,74 @@ function setPassengerMedia(media) {
     ? "Video prompts are never rewritten by the image rules. What you wrote is what is submitted."
     : "Only composition, light, material and depth are enhanced. Your subject is never redesigned.";
   renderPassengerModels();
-  renderPassengerJob(state.passengerJobs[media]);
+  const snapshot = state.passengerJobs[media];
+  renderPassengerJob(snapshot);
+  // Only one poll runs at a time, so switching media stops the other slot's
+  // poll; coming back to a job that is still running resumes it rather than
+  // leaving a frozen bar that promises a result nothing is fetching.
+  if (snapshot && !TERMINAL_JOB_STATES.has(snapshot.status) && passengerPoll?.jobId !== snapshot.id) {
+    startPassengerPolling(snapshot.id, media);
+  }
   updatePassengerCost();
 }
 
+// The catalogues load unscoped at workspace start and again scoped to each
+// selected project; the later request always wins, whichever response lands
+// first, so a slow unscoped (most-restrictive) answer cannot paint FREE locks
+// over a PRO project.
+let modelCatalogueSequence = 0;
+let imageTierSequence = 0;
+
 async function loadPassengerModels() {
-  // /v1/providers is already filtered server-side to configured providers whose
-  // models are enabled and user-visible; it deliberately no longer reports
-  // `configured`/`healthy`, so the client must not re-filter on absent fields.
-  const configuredProviders = await request("/v1/providers");
-  state.modelProfiles = configuredProviders.flatMap((provider) => (provider.models || [])
-    .filter((model) => model.status !== "disabled"
-      && model.modality === "video"
-      && (model.supported_operations || []).includes("video_generation"))
-    .map((model) => ({ ...model, provider: provider.name, media: "video" })));
-  state.imageModelProfiles = configuredProviders.flatMap((provider) => (provider.models || [])
-    .filter((model) => model.status !== "disabled"
-      && model.modality === "image"
-      && (model.supported_operations || []).includes("image_generation"))
-    .map((model) => ({ ...model, provider: provider.name, media: "image" })));
+  // The full user-facing video catalogue, independent of provider credential
+  // state: a route the platform sells does not vanish because a key is absent
+  // — it renders disabled, and the server says why.
+  // Plan locks are those of the active project's workspace — exactly what
+  // admission applies; without a project the server under-promises.
+  const sequence = ++modelCatalogueSequence;
+  const scope = state.project ? `&project_id=${encodeURIComponent(state.project.id)}` : "";
+  const catalogue = await request(`/v1/models?modality=video${scope}`);
+  if (sequence !== modelCatalogueSequence) return; // superseded by a later load
+  state.modelProfiles = catalogue.map((model) => ({ ...model, media: "video" }));
   renderPassengerModels();
 }
 
-function renderPassengerModels() {
-  state.passengerModels = state.passengerMedia === "image" ? state.imageModelProfiles : state.modelProfiles;
-  const freeVideo = state.passengerMedia === "video"
-    && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
-  if (freeVideo) {
-    state.passengerModels = state.passengerModels.filter((model) => model.provider === "seedance");
+async function loadImageTiers() {
+  // Server truth for the three quality levels: what the plan allows and what
+  // is actually runnable right now. The static array stays as fallback copy.
+  const sequence = ++imageTierSequence;
+  let tiers = null;
+  try {
+    const scope = state.project ? `?project_id=${encodeURIComponent(state.project.id)}` : "";
+    const response = await request(`/v1/image-tiers${scope}`);
+    tiers = Array.isArray(response) && response.length ? response : null;
+  } catch (_error) {
+    tiers = null;
   }
+  if (sequence !== imageTierSequence) return; // superseded by a later load
+  state.imageTiers = tiers;
+  renderImageTierOptions();
+}
+
+function renderPassengerModels() {
+  state.passengerModels = state.modelProfiles;
+  // Server truth: the catalogue carries the active project's plan locks, so
+  // a multi-workspace user on a PRO project is not told they are on FREE.
+  const freeVideo = state.passengerMedia === "video"
+    && state.modelProfiles.some((model) => model.plan_locked);
   const auto = '<option value="">Auto — Recommended</option>';
-  $("passengerModel").innerHTML = auto + state.passengerModels
-    .filter((model) => model.media === "video")
-    .map((model) => `<option value="${model.provider}|${model.model_id}">${simpleLabel(model.provider)} · ${escapeHTML(friendlyModel(model.model_id))}</option>`)
-    .join("");
+  $("passengerModel").innerHTML = auto + state.modelProfiles.map((model) => {
+    // Locked and unavailable routes stay visible: an option that disappears
+    // is indistinguishable from one that never existed.
+    const locked = Boolean(model.plan_locked);
+    const unavailable = model.available === false;
+    const suffix = locked ? " \u{1F512}" : (unavailable ? " — unavailable right now" : "");
+    const title = locked
+      ? "Part of the Pro plan"
+      : (unavailable ? "Temporarily unavailable" : "");
+    return `<option value="${model.provider}|${model.model_id}"${locked || unavailable ? " disabled" : ""}${title ? ` title="${title}"` : ""}>`
+      + `${escapeHTML(friendlyModel(model.model_id))}${suffix}</option>`;
+  }).join("");
   $("modelHint").textContent = freeVideo
     ? "Free plan video runs on Seedance. Upgrade to reach every route."
     : "Auto lets the platform choose. Pick a route and exactly that route runs, or the request is refused.";
@@ -487,31 +561,61 @@ function renderPassengerModels() {
   updatePassengerCost();
 }
 
+/** One view over the tier list: server truth when we have it, static fallback
+ *  otherwise. Taglines are UI copy and always come from the static array. */
+function imageTierViews() {
+  const copy = Object.fromEntries(IMAGE_TIERS.map((tier) => [tier.value, tier]));
+  if (state.imageTiers) {
+    return state.imageTiers.map((remote) => ({
+      value: remote.tier,
+      stars: remote.stars || copy[remote.tier]?.stars || "✨",
+      name: remote.name || copy[remote.tier]?.name || remote.tier,
+      plan: remote.plan_requirement === "FREE" ? "Free" : "Pro",
+      tagline: copy[remote.tier]?.tagline || "",
+      locked: !remote.allowed_for_workspace,
+      unavailable: !remote.available,
+    }));
+  }
+  const free = isFreeWorkspace();
+  return IMAGE_TIERS.map((tier) => ({
+    ...tier,
+    locked: free && tier.plan === "Pro",
+    unavailable: false,
+  }));
+}
+
 function renderImageTierOptions() {
   const select = $("passengerImageTier");
   if (!select) return;
-  const free = isFreeWorkspace();
   const previous = select.value;
-  select.innerHTML = IMAGE_TIERS.map((tier) => {
-    const locked = free && tier.plan === "Pro";
-    return `<option value="${tier.value}" ${locked ? "disabled" : ""}>`
-      + `${tier.stars} ${tier.name}${locked ? " \u{1F512}" : ""} — ${tier.plan}</option>`;
+  select.innerHTML = imageTierViews().map((tier) => {
+    const disabled = tier.locked || tier.unavailable;
+    const suffix = tier.locked
+      ? " \u{1F512}"
+      : (tier.unavailable ? " — unavailable right now" : "");
+    const title = tier.unavailable ? "This quality level is temporarily unavailable." : "";
+    return `<option value="${tier.value}"${disabled ? " disabled" : ""}${title ? ` title="${title}"` : ""}>`
+      + `${tier.stars} ${escapeHTML(tier.name)}${suffix} — ${tier.plan}</option>`;
   }).join("");
-  const selectable = [...select.options].find((option) => option.value === previous && !option.disabled);
-  select.value = selectable ? previous : "shiny";
+  const keepable = [...select.options].find((option) => option.value === previous && !option.disabled);
+  const firstEnabled = [...select.options].find((option) => !option.disabled);
+  select.value = keepable ? previous : (firstEnabled ? firstEnabled.value : "shiny");
   syncImageTierHint();
 }
 
 function selectedImageTier() {
-  return IMAGE_TIERS.find((tier) => tier.value === $("passengerImageTier")?.value) || IMAGE_TIERS[0];
+  const tiers = imageTierViews();
+  return tiers.find((tier) => tier.value === $("passengerImageTier")?.value) || tiers[0];
 }
 
 function syncImageTierHint() {
   const tier = selectedImageTier();
-  const free = isFreeWorkspace();
-  $("imageTierHint").textContent = free && tier.plan === "Pro"
+  if (!tier) return;
+  $("imageTierHint").textContent = tier.locked
     ? `${tier.name} is part of the Pro plan.`
-    : tier.tagline;
+    : (tier.unavailable
+      ? `${tier.name} is temporarily unavailable. Pick another level — your prompt stays as written.`
+      : tier.tagline);
 }
 
 function selectedPassengerModel() {
@@ -522,14 +626,9 @@ function selectedPassengerModel() {
 const isAutoModel = () => !$("passengerModel").value;
 
 function passengerEstimatedCost() {
-  const profile = selectedPassengerModel();
-  if (!profile) return 0;
-  const providerCost = state.passengerMedia === "image"
-    ? Number(profile.cost?.estimated_per_image || .04)
-    : Math.max(Number(profile.cost?.estimated_per_second || 0) * Number($("passengerDuration").value || 4), 0);
-  const resolution = { "720p": 1, "1080p": 1.3 }[$("passengerResolution").value] || 1;
-  const references = $("passengerReference").files[0] ? 1.04 : 1;
-  return providerCost * resolution * references * 1.2;
+  // The catalogue deliberately carries no per-unit provider rates — nothing to
+  // leak, nothing to drift. Every figure the user sees is the server's quote.
+  return 0;
 }
 
 function updatePassengerCost() {
@@ -537,9 +636,7 @@ function updatePassengerCost() {
   $("barAspect").textContent = $("passengerAspect").value;
   $("barResolution").textContent = $("passengerResolution").value;
   $("barDuration").textContent = `${$("passengerDuration").value || 4}s`;
-  $("barModel").textContent = profile
-    ? `${simpleLabel(profile.provider)} · ${friendlyModel(profile.model_id)}`
-    : "None";
+  $("barModel").textContent = profile ? friendlyModel(profile.model_id) : "None";
   $("advModel").textContent = profile ? friendlyModel(profile.model_id) : "—";
   $("advPricing").textContent = "Quoted before you generate";
   syncImageTierHint();
@@ -558,10 +655,7 @@ function updatePassengerCost() {
     }
     return;
   }
-  const estimate = passengerEstimatedCost();
-  $("passengerCost").textContent = estimate > 0
-    ? `About ${Math.max(1, Math.ceil(estimate / .01))} credits`
-    : "Quoted on submit";
+  $("passengerCost").textContent = "Quoted on submit";
 }
 
 function passengerReferenceFingerprint(projectId, file) {
@@ -680,6 +774,102 @@ function emptyCanvasMarkup() {
     </div>`;
 }
 
+/* ---- Create-canvas progress ------------------------------------
+   Real provider progress when the gateway has polled one; otherwise a
+   stage-based estimate from the job's event trail. The displayed value
+   never moves backwards, and with no signal at all the bar shimmers. */
+const TERMINAL_JOB_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED", "WORKER_NEEDS_USER_ACTION"]);
+const STAGE_PROGRESS = {
+  REQUEST_SUBMITTED: 10, WORKER_SELECTED: 20,
+  MEDIA_DOWNLOADED: 90, VIDEO_GENERATED: 90,
+  JOB_COMPLETED: 100,
+};
+const PASSENGER_POLL_INTERVAL_MS = 2500;
+const PASSENGER_POLL_BUDGET_MS = 10 * 60 * 1000;
+let passengerPoll = null;
+
+function stopPassengerPolling() {
+  if (!passengerPoll) return;
+  window.clearTimeout(passengerPoll.timer);
+  passengerPoll = null;
+}
+
+function estimateJobProgress(job, startedAt) {
+  if (job.status === "COMPLETED") return 100;
+  const events = job.events || [];
+  let provider = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type === "PROVIDER_JOB_POLL" && typeof event.detail?.progress === "number") {
+      provider = Math.max(0, Math.min(1, event.detail.progress)) * 100;
+      break;
+    }
+  }
+  let stage = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const mapped = STAGE_PROGRESS[events[index].type];
+    if (mapped !== undefined) { stage = mapped; break; }
+  }
+  let estimate = stage;
+  if (["RUNNING", "GENERATING", "SUBMITTED"].includes(job.status)) {
+    // Creep with elapsed time toward 80%, never past it.
+    const minutes = (Date.now() - startedAt) / 60000;
+    estimate = Math.max(stage ?? 0, Math.min(80, 20 + minutes * 12));
+  }
+  // A provider that reports real progress (OpenRouter) moves the bar past
+  // the creep. Most report a placeholder — 0.0 while queued, 0.5 while
+  // running from Seedance, Wan, RunAPI and Flow — which must not freeze the
+  // bar below the creep for the whole generation.
+  if (provider === null) return estimate; // null → no signal yet: shimmer
+  return estimate === null ? provider : Math.max(provider, estimate);
+}
+
+/** Monotonic progress for the job currently being polled (0-100 or null). */
+function passengerDisplayProgress(job) {
+  const poll = passengerPoll && passengerPoll.jobId === job.id ? passengerPoll : null;
+  const raw = estimateJobProgress(job, poll?.startedAt ?? Date.now());
+  if (raw === null) return poll?.shown ?? null;
+  const shown = Math.max(poll?.shown ?? 0, Math.min(100, Math.round(raw)));
+  if (poll) poll.shown = shown;
+  return shown;
+}
+
+function startPassengerPolling(jobId, media) {
+  stopPassengerPolling(); // only ever one active poll per page
+  const poll = { jobId, media, startedAt: Date.now(), shown: 0, timedOut: false, timer: null };
+  passengerPoll = poll;
+  const tick = async () => {
+    if (passengerPoll !== poll) return;
+    const job = await request(`/v1/generations/${encodeURIComponent(jobId)}`).catch(() => null);
+    if (passengerPoll !== poll) return;
+    if (job) {
+      rememberJob({ ...job, progress: passengerDisplayProgress(job) });
+      state.passengerJobs[media] = job;
+      if (state.passengerMedia === media && state.page === "create") {
+        await renderPassengerJob(job).catch(() => null);
+      }
+      if (state.page === "productions") renderProductions();
+      if (TERMINAL_JOB_STATES.has(job.status)) {
+        stopPassengerPolling();
+        await loadCredits().catch(() => null);
+        if (job.status === "COMPLETED") toast(`${friendlyModel(job.model)} finished.`);
+        else if (job.status === "FAILED") toast(job.error_message || "The generation failed.");
+        return;
+      }
+    }
+    if (Date.now() - poll.startedAt > PASSENGER_POLL_BUDGET_MS) {
+      poll.timedOut = true;
+      if (job && state.passengerMedia === media && state.page === "create") {
+        await renderPassengerJob(job).catch(() => null);
+      }
+      stopPassengerPolling();
+      return;
+    }
+    poll.timer = window.setTimeout(() => { tick(); }, PASSENGER_POLL_INTERVAL_MS);
+  };
+  poll.timer = window.setTimeout(() => { tick(); }, PASSENGER_POLL_INTERVAL_MS);
+}
+
 async function renderPassengerJob(job) {
   const stage = $("passengerResult");
   if (!job) {
@@ -694,6 +884,34 @@ async function renderPassengerJob(job) {
   }
   rememberJob(job);
   $("operationsJobId").value = job.id;
+
+  const reconciling = job.credit_status === "RECONCILIATION_REQUIRED";
+  const displayedStatus = reconciling ? "Reconciling · credits held" : simpleLabel(job.status);
+  const tone = reconciling ? "is-queued" : statusTone(job.status);
+  const running = !TERMINAL_JOB_STATES.has(job.status);
+  const progress = running ? passengerDisplayProgress(job) : 100;
+  const timedOut = Boolean(passengerPoll?.jobId === job.id && passengerPoll.timedOut);
+
+  if (running && !job.output_asset_id && !timedOut) {
+    // In-place update keeps the width transition animating instead of
+    // rebuilding the bar at its new width every poll tick. The timeout tick
+    // must fall through to the full render so its copy actually appears.
+    const existing = stage.querySelector("[data-progress-stage]");
+    if (existing && existing.dataset.jobId === job.id) {
+      const bar = existing.querySelector(".job-progress");
+      const fill = existing.querySelector(".job-progress i");
+      if (bar && fill) {
+        bar.classList.toggle("indeterminate", progress === null);
+        fill.style.width = `${progress === null ? 30 : progress}%`;
+      }
+      const title = existing.querySelector("strong");
+      if (title) title.textContent = displayedStatus;
+      const chip = stage.querySelector(".result-bar .status-chip");
+      if (chip) { chip.className = `status-chip ${tone}`; chip.textContent = displayedStatus; }
+      return;
+    }
+  }
+
   if (state.passengerPreviewObjectUrl) URL.revokeObjectURL(state.passengerPreviewObjectUrl);
   state.passengerPreviewObjectUrl = null;
 
@@ -714,18 +932,26 @@ async function renderPassengerJob(job) {
       }
     }
     if (mediaUrl && asset.mime_type?.startsWith("image/")) {
-      preview = `<img class="result-preview" src="${escapeHTML(mediaUrl)}" alt="Generated result" />`;
+      preview = `<img class="result-preview fade-in" src="${escapeHTML(mediaUrl)}" alt="Generated result" />`;
     } else if (mediaUrl && asset.mime_type?.startsWith("video/")) {
-      preview = `<video class="result-preview" src="${escapeHTML(mediaUrl)}" controls playsinline></video>`;
+      preview = `<video class="result-preview fade-in" src="${escapeHTML(mediaUrl)}" controls playsinline></video>`;
     }
   }
 
-  const reconciling = job.credit_status === "RECONCILIATION_REQUIRED";
-  const displayedStatus = reconciling ? "Reconciling · credits held" : simpleLabel(job.status);
-  const tone = reconciling ? "is-queued" : statusTone(job.status);
+  const waitingBlock = `
+    <div class="empty-block" data-progress-stage data-job-id="${escapeHTML(job.id)}">
+      <span class="empty-icon" aria-hidden="true">◷</span>
+      <strong>${escapeHTML(displayedStatus)}</strong>
+      ${running
+        ? `<div class="job-progress create-progress${progress === null ? " indeterminate" : ""}"><i style="width:${progress === null ? 30 : progress}%"></i></div>`
+        : ""}
+      <p>${timedOut
+        ? "Still running — refresh to check again. Your credits stay reserved until the job settles."
+        : "The result appears here as soon as the provider returns it."}</p>
+    </div>`;
   stage.className = "canvas-stage has-result";
   stage.innerHTML = `
-    ${preview || `<div class="empty-block"><span class="empty-icon" aria-hidden="true">◷</span><strong>${escapeHTML(displayedStatus)}</strong><p>The result appears here as soon as the provider returns it.</p></div>`}
+    ${preview || waitingBlock}
     <div class="result-bar">
       <span class="status-chip ${tone}">${escapeHTML(displayedStatus)}</span>
       <div class="result-meta">
@@ -804,6 +1030,7 @@ async function generatePassenger() {
     const job = await request("/api/passenger/generate", { method: "POST", body: JSON.stringify(payload) });
     state.passengerJobs[mediaType] = job;
     await renderPassengerJob(job);
+    startPassengerPolling(job.id, mediaType);
     await loadCredits();
     succeeded = true;
     toast(auto
@@ -825,6 +1052,11 @@ async function refreshPassengerJob() {
   const job = await request(`/v1/generations/${current.id}`);
   state.passengerJobs[state.passengerMedia] = job;
   await renderPassengerJob(job);
+  // A manual refresh on a live job also restarts the poll loop (e.g. after
+  // the ten-minute budget gave up).
+  if (!TERMINAL_JOB_STATES.has(job.status) && passengerPoll?.jobId !== job.id) {
+    startPassengerPolling(job.id, state.passengerMedia);
+  }
   // A job that fails before submission has its reservation refunded server-side.
   // Without this the pill keeps showing the reserved balance and the credits look
   // lost, which is exactly the moment a user is most likely to distrust the meter.
@@ -832,9 +1064,13 @@ async function refreshPassengerJob() {
 }
 
 async function confirmPassengerAsset() {
-  const job = state.passengerJobs[state.passengerMedia];
+  // The dialog acts on the gallery job it was opened for, or falls back to
+  // the Create canvas's current job.
+  const job = (state.savingJobId && state.jobs.get(state.savingJobId))
+    || state.passengerJobs[state.passengerMedia];
   if (!job?.output_asset_id) return toast("Wait for the generation to finish");
-  const name = $("passengerAssetName").value.trim() || `${state.passengerMedia === "image" ? "Image" : "Video"} asset`;
+  const kind = job.generation_type || state.passengerMedia;
+  const name = $("passengerAssetName").value.trim() || `${kind === "video" ? "Video" : "Image"} asset`;
   const result = await request(`/api/generations/${job.id}/promote`, {
     method: "POST",
     body: JSON.stringify({
@@ -846,8 +1082,10 @@ async function confirmPassengerAsset() {
     }),
   });
   state.confirmedAssets.add(job.output_asset_id);
+  state.savingJobId = null;
   await loadLogicalAssets();
-  await renderPassengerJob(job);
+  if (job.id === state.passengerJobs[state.passengerMedia]?.id) await renderPassengerJob(job);
+  renderProductions();
   $("saveAssetDialog").close();
   toast(result.canonical ? "Version saved and set as canonical" : "Version saved to the project");
 }
@@ -890,12 +1128,48 @@ function renderAssetRail() {
   rail.classList.remove("empty");
   rail.innerHTML = state.logicalAssets.map((asset) => `
     <button class="asset-chip" type="button" data-asset="${escapeHTML(asset.id)}">
+      <span class="asset-chip-thumb" data-rail-thumb="${escapeHTML(asset.id)}" aria-hidden="true">▣</span>
       <span class="asset-kind" style="color:${assetKindColor(asset.asset_type)}">${escapeHTML(simpleLabel(asset.asset_type)).toUpperCase()}</span>
       <span class="asset-name">${escapeHTML(asset.name)}</span>
       ${asset.canonical_version_id ? '<span class="asset-flag">●</span>' : ""}
     </button>`).join("");
   rail.querySelectorAll("[data-asset]").forEach((button) => {
     button.addEventListener("click", () => openAssetDetails(button.dataset.asset));
+  });
+  hydrateAssetRailThumbs();
+}
+
+/** The media asset behind an asset's canonical version, cached per version so
+ *  a promotion (new canonical id) refreshes and everything else does not. */
+async function assetCanonicalMediaId(asset) {
+  if (!asset?.canonical_version_id) return null;
+  if (state.assetMediaIds.has(asset.canonical_version_id)) {
+    return state.assetMediaIds.get(asset.canonical_version_id);
+  }
+  const detail = await request(`/api/assets/${asset.id}`).catch(() => null);
+  const canonical = (detail?.versions || []).find((version) => version.id === asset.canonical_version_id);
+  const mediaId = canonical?.primary_media_asset_id || null;
+  state.assetMediaIds.set(asset.canonical_version_id, mediaId);
+  return mediaId;
+}
+
+/** Thumbnail object URL for a media asset, resolved once per session. */
+async function cachedAssetThumbnail(mediaAssetId) {
+  if (!mediaAssetId) return null;
+  if (state.thumbCache.has(mediaAssetId)) return state.thumbCache.get(mediaAssetId);
+  const media = await resolveAssetThumbnail(mediaAssetId).catch(() => null);
+  const url = media?.url || null;
+  state.thumbCache.set(mediaAssetId, url);
+  return url;
+}
+
+function hydrateAssetRailThumbs() {
+  state.logicalAssets.forEach(async (asset) => {
+    const mediaId = await assetCanonicalMediaId(asset).catch(() => null);
+    if (!mediaId) return; // graceful: the chip keeps its placeholder glyph
+    const url = await cachedAssetThumbnail(mediaId);
+    const cell = document.querySelector(`[data-rail-thumb="${CSS.escape(asset.id)}"]`);
+    if (url && cell) cell.innerHTML = `<img src="${escapeHTML(url)}" alt="" loading="lazy" />`;
   });
 }
 
@@ -942,6 +1216,21 @@ async function syncManualAssetSelection() {
 
   const detail = await request(`/api/assets/${selected.id}`).catch(() => null);
   const versions = detail?.versions || [];
+
+  // Current reference preview: the canonical version's primary media, when it
+  // has one; otherwise the placeholder glyph stays.
+  const mediaBox = $("assetCurrentMedia");
+  mediaBox.innerHTML = '<span class="empty-icon" aria-hidden="true">▣</span>';
+  const canonicalVersion = versions.find((version) => version.id === selected.canonical_version_id);
+  if (canonicalVersion?.primary_media_asset_id) {
+    state.assetMediaIds.set(selected.canonical_version_id, canonicalVersion.primary_media_asset_id);
+    cachedAssetThumbnail(canonicalVersion.primary_media_asset_id).then((url) => {
+      if (url && $("manualExistingAsset").value === selected.id) {
+        mediaBox.innerHTML = `<img src="${escapeHTML(url)}" alt="" />`;
+      }
+    }).catch(() => null);
+  }
+
   const list = $("assetVersionList");
   if (!versions.length) {
     list.className = "version-list empty-state";
@@ -1065,6 +1354,7 @@ async function selectProject(id) {
     state.passengerReferenceUpload = null;
     state.passengerJobs = { image: null, video: null };
     state.confirmedAssets.clear();
+    stopPassengerPolling();
     $("passengerReference").value = "";
     $("referenceFileName").hidden = true;
     renderPassengerJob(null);
@@ -1072,7 +1362,12 @@ async function selectProject(id) {
   const projectChanged = state.project?.id !== id;
   state.project = await request(`/v1/projects/${id}`);
   $("projectSelect").value = id;
-  if (projectChanged) { state.creative.session = null; renderCreative(); }
+  if (projectChanged) {
+    state.creative.session = null;
+    renderCreative();
+    // The catalogues' plan locks belong to this project's workspace.
+    Promise.all([loadPassengerModels(), loadImageTiers()]).catch(() => null);
+  }
   await loadLogicalAssets();
   await loadCharacters();
   await loadEpisodeStrip();
@@ -1083,6 +1378,7 @@ async function selectProject(id) {
   else resetProductionView();
   if (!state.passengerJobs[state.passengerMedia]) await renderPassengerJob(null);
   if (state.page === "ai-director") await loadCreativeSessions();
+  if (state.page === "productions") refreshProductions().catch(() => null);
   syncOperationsContext();
 }
 
@@ -1573,17 +1869,19 @@ async function continuity() {
 }
 
 /* ============================================================
-   Productions — user-facing job list.
+   Productions — user-facing job list and "My creations" gallery.
 
-   There is no server-side "list my generations" endpoint, and adding one
-   would be a backend change. So Productions tracks the jobs this workspace
-   started in this session plus every job referenced by a shot candidate, and
-   refreshes each against /v1/generations/{id}. Real data, no invention.
+   The durable source is GET /v1/generations?project_id=…, so the history
+   survives a reload; jobs the session touched directly are merged on top.
    ============================================================ */
 function rememberJob(job) {
   if (!job?.id) return;
   const previous = state.jobs.get(job.id) || {};
-  state.jobs.set(job.id, { ...previous, ...job });
+  // A job remembered from a surface that does not carry project_id (shot
+  // candidates, the generate response) belongs to the project that surface
+  // was showing; stamping it here keeps it out of every other project's list.
+  const projectId = job.project_id || previous.project_id || state.project?.id || null;
+  state.jobs.set(job.id, { ...previous, ...job, project_id: projectId });
 }
 
 const JOB_BUCKET = {
@@ -1595,22 +1893,56 @@ const JOB_BUCKET = {
 const bucketOf = (job) => JOB_BUCKET[job.status] || "queued";
 
 function jobProgress(job) {
+  // Real progress when the job carries it (the create-canvas poll writes it);
+  // the coarse per-bucket estimate only as a fallback.
+  if (typeof job.progress === "number" && Number.isFinite(job.progress)) {
+    return Math.max(0, Math.min(100, Math.round(job.progress)));
+  }
   return ({ queued: 8, running: 55, completed: 100, failed: 100 })[bucketOf(job)] || 0;
 }
 
+/** Seed and refresh state.jobs from the server's per-project listing, so
+ *  productions survive a reload instead of living only in session memory. */
+async function loadProjectGenerations() {
+  if (!state.project) return new Set();
+  const listing = await request(
+    `/v1/generations?project_id=${encodeURIComponent(state.project.id)}&limit=100`,
+  ).catch(() => null);
+  const jobs = listing?.jobs || [];
+  jobs.forEach((job) => rememberJob(job));
+  return new Set(jobs.map((job) => job.id));
+}
+
 async function refreshProductions() {
-  const ids = [...state.jobs.keys()];
-  const fresh = await Promise.all(ids.map((id) => request(`/v1/generations/${encodeURIComponent(id)}`).catch(() => null)));
-  fresh.forEach((job, index) => {
-    if (job) rememberJob({ ...state.jobs.get(ids[index]), ...job });
-  });
+  // Jobs this session remembered that the capped listing did not return
+  // (older shot candidates, or anything past the 100 newest) are refreshed
+  // by id so a remembered status never freezes; bounded so a long session
+  // cannot fan out.
+  const listed = await loadProjectGenerations();
+  const stale = projectJobs()
+    .filter((job) => !listed.has(job.id) && !TERMINAL_JOB_STATES.has(job.status))
+    .slice(0, 20);
+  const fresh = await Promise.all(
+    stale.map((job) => request(`/v1/generations/${encodeURIComponent(job.id)}`).catch(() => null)),
+  );
+  fresh.forEach((job) => { if (job) rememberJob(job); });
   renderProductions();
+}
+
+/** Jobs that belong on this project's surfaces, newest first. Every
+ *  remembered job carries a project_id (stamped on remember), so nothing
+ *  from another project can leak in; without a project there is nothing. */
+function projectJobs() {
+  if (!state.project) return [];
+  return [...state.jobs.values()]
+    .filter((job) => job.project_id === state.project.id)
+    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
 }
 
 function renderProductions() {
   const list = $("productionsList");
   if (!list) return;
-  const jobs = [...state.jobs.values()];
+  const jobs = projectJobs();
   const counts = { running: 0, queued: 0, completed: 0, failed: 0 };
   jobs.forEach((job) => { counts[bucketOf(job)] += 1; });
   $("prodCountRunning").textContent = counts.running;
@@ -1618,8 +1950,15 @@ function renderProductions() {
   $("prodCountCompleted").textContent = counts.completed;
   $("prodCountFailed").textContent = counts.failed;
   $("barJobCount").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
-  const spend = jobs.reduce((total, job) => total + Number(job.cost || 0), 0);
-  $("barJobSpend").textContent = `${Math.ceil(spend / .01) || 0} credits`;
+  // The quoted credits of this project's jobs that ran or are running. Failed
+  // and cancelled jobs are left out: a pre-submission failure is refunded
+  // server-side and the job row keeps its quote, so counting it would show
+  // credits the workspace got back. This is a quote total, not a ledger.
+  const spendCredits = jobs
+    .filter((job) => bucketOf(job) !== "failed")
+    .reduce((total, job) => total + jobCredits(job), 0);
+  $("barJobSpend").textContent = `${spendCredits} credits`;
+  renderCreationsGallery(jobs);
 
   const visible = state.jobFilter === "all" ? jobs : jobs.filter((job) => bucketOf(job) === state.jobFilter);
   if (!visible.length) {
@@ -1642,27 +1981,97 @@ function renderProductions() {
   list.innerHTML = visible.map((job) => {
     const bucket = bucketOf(job);
     const tone = statusTone(job.status);
-    const credits = job.cost ? `${Math.max(1, Math.ceil(job.cost / .01))} credits` : "—";
+    const credits = jobCredits(job);
+    const brand = providerBrand(job.provider);
     return `<button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job="${escapeHTML(job.id)}">
       <span class="job-rail ${tone}"></span>
       <span class="job-main">
         <span class="job-title">
-          <strong>${escapeHTML(job.shotLabel || job.model || "Generation")}</strong>
+          <strong>${escapeHTML(job.shotLabel || friendlyModel(job.model))}</strong>
           <span class="status-chip ${tone}">${simpleLabel(job.status)}</span>
         </span>
-        <span class="job-sub mono">${escapeHTML(job.id)}${job.provider ? ` · ${escapeHTML(simpleLabel(job.provider))}` : ""}</span>
+        <span class="job-sub mono">${escapeHTML(job.id)}${brand ? ` · ${escapeHTML(brand)}` : ""}</span>
       </span>
       <span class="job-side">
         ${bucket === "running" || bucket === "queued"
           ? `<span class="job-progress"><i style="width:${jobProgress(job)}%"></i></span>`
           : ""}
-        <span class="job-cost mono">${credits}</span>
+        <span class="job-cost mono">${credits ? `${credits} credits` : "—"}</span>
       </span>
     </button>`;
   }).join("");
   list.querySelectorAll("[data-job]").forEach((button) => {
     button.addEventListener("click", guard(() => selectJob(button.dataset.job)));
   });
+}
+
+/* ---- My creations: the project's generations as a durable gallery ---- */
+function renderCreationsGallery(jobs = projectJobs()) {
+  const grid = $("creationsGrid");
+  if (!grid) return;
+  if (!jobs.length) {
+    grid.className = "creations-grid empty-state";
+    grid.innerHTML = `
+      <div class="empty-block">
+        <span class="empty-icon" aria-hidden="true">▦</span>
+        <strong>No creations yet</strong>
+        <p>Everything you generate in this project lands here, ready to save as an asset.</p>
+      </div>`;
+    return;
+  }
+  grid.className = "creations-grid";
+  grid.innerHTML = jobs.map((job) => {
+    const tone = statusTone(job.status);
+    const finished = job.status === "COMPLETED" && job.output_asset_id;
+    const saved = state.confirmedAssets.has(job.output_asset_id);
+    const when = job.created_at ? job.created_at.slice(0, 16).replace("T", " ") : job.id.slice(0, 8);
+    return `<figure class="creation-card" data-creation="${escapeHTML(job.id)}">
+      <div class="creation-thumb${finished ? "" : " is-pending"}" data-creation-thumb="${escapeHTML(job.output_asset_id || "")}">
+        ${finished ? "" : `<span class="status-chip ${tone}">${simpleLabel(job.status)}</span>`}
+      </div>
+      <figcaption>
+        <b>${escapeHTML(job.shotLabel || friendlyModel(job.model))}</b>
+        <small class="mono">${escapeHTML(when)}</small>
+      </figcaption>
+      ${finished ? `<div class="creation-actions">
+        <button class="btn btn-tertiary" type="button" data-creation-open="${escapeHTML(job.id)}">View</button>
+        <button class="btn btn-tertiary" type="button" data-creation-save="${escapeHTML(job.id)}"${saved ? " disabled" : ""}>${saved ? "Saved" : "Save to project"}</button>
+      </div>` : ""}
+    </figure>`;
+  }).join("");
+  jobs.filter((job) => job.status === "COMPLETED" && job.output_asset_id).forEach(async (job) => {
+    const url = await cachedAssetThumbnail(job.output_asset_id).catch(() => null);
+    const cell = grid.querySelector(`[data-creation-thumb="${CSS.escape(job.output_asset_id)}"]`);
+    if (url && cell) cell.innerHTML = `<img src="${escapeHTML(url)}" alt="" loading="lazy" />`;
+  });
+  grid.querySelectorAll("[data-creation-open]").forEach((button) => {
+    button.addEventListener("click", guard(() => openCreationMedia(button.dataset.creationOpen)));
+  });
+  grid.querySelectorAll("[data-creation-save]").forEach((button) => {
+    button.addEventListener("click", () => openSaveDialogForJob(button.dataset.creationSave));
+  });
+}
+
+let mediaViewerObjectUrl = null;
+async function openCreationMedia(jobId) {
+  const job = state.jobs.get(jobId);
+  if (!job?.output_asset_id) return;
+  const media = await resolveAssetMedia(job.output_asset_id);
+  if (!media) return toast("The media is not readable yet");
+  if (mediaViewerObjectUrl) URL.revokeObjectURL(mediaViewerObjectUrl);
+  mediaViewerObjectUrl = media.revocable ? media.url : null;
+  $("mediaViewerBody").innerHTML = media.mime.startsWith("video/")
+    ? `<video src="${escapeHTML(media.url)}" controls autoplay playsinline></video>`
+    : `<img src="${escapeHTML(media.url)}" alt="Generated media" />`;
+  if (!$("mediaViewerDialog").open) $("mediaViewerDialog").showModal();
+}
+
+function openSaveDialogForJob(jobId) {
+  const job = state.jobs.get(jobId);
+  if (!job?.output_asset_id) return toast("Wait for the generation to finish");
+  state.savingJobId = jobId;
+  $("promotePassengerAssetBtn").disabled = false;
+  if (!$("saveAssetDialog").open) $("saveAssetDialog").showModal();
 }
 
 async function selectJob(id) {
@@ -1789,7 +2198,7 @@ function renderGenerationControl(job) {
   $("generationControlStatus").className = "output-box";
   $("generationControlStatus").innerHTML = `
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
-    ${escapeHTML(simpleLabel(job.provider))} · ${escapeHTML(friendlyModel(job.model))}<br>
+    ${escapeHTML([providerBrand(job.provider), friendlyModel(job.model)].filter(Boolean).join(" · "))}<br>
     Stage ${escapeHTML(humanizeCode(simpleLabel(job.submission_state)))} · credits ${escapeHTML(humanizeCode(simpleLabel(job.credit_status)))}<br>
     Attempts ${Number(job.attempt_count || 0)}
     ${job.error_message ? `<br><span style="color:var(--danger)">${escapeHTML(job.error_message)}</span>` : ""}`;
@@ -2193,7 +2602,7 @@ function renderCreative() {
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
       if (media && cell) {
         cell.classList.remove("empty-state");
-        cell.innerHTML = `<img src="${media.url}" alt="" loading="lazy" />`;
+        cell.innerHTML = `<img src="${escapeHTML(media.url)}" alt="" loading="lazy" />`;
       }
     });
     const terminal = anchors.every((anchor) => ["READY", "FAILED"].includes(anchor.status));
@@ -2526,6 +2935,7 @@ if (dropzone) {
 on("saveToProjectBtn", "click", () => {
   const job = state.passengerJobs[state.passengerMedia];
   if (!job?.output_asset_id) return toast("Wait for the generation to finish");
+  state.savingJobId = null; // this flow saves the Create canvas's own job
   $("promotePassengerAssetBtn").disabled = false;
   if (!$("saveAssetDialog").open) $("saveAssetDialog").showModal();
 });
@@ -2590,6 +3000,13 @@ on("closeScriptDrawerBtn", "click", () => $("scriptDrawer").close());
 
 /* Productions */
 on("productionsRefreshBtn", "click", guard(refreshProductions));
+on("closeMediaViewerBtn", "click", () => {
+  $("mediaViewerDialog").close();
+});
+on("mediaViewerDialog", "close", () => {
+  $("mediaViewerBody").innerHTML = "";
+  if (mediaViewerObjectUrl) { URL.revokeObjectURL(mediaViewerObjectUrl); mediaViewerObjectUrl = null; }
+});
 on("loadJobBtn", "click", guard(loadGenerationJob));
 on("retryJobBtn", "click", guard(() => mutateGenerationJob("retry")));
 on("cancelJobBtn", "click", guard(() => mutateGenerationJob("cancel")));
@@ -2631,8 +3048,12 @@ window.addEventListener("ai-director:plan-changed", (event) => {
   const workspace = state.authUser?.workspaces?.find((item) => item.id === event.detail?.workspaceId);
   if (!workspace || !event.detail?.planTier) return;
   workspace.plan_tier = event.detail.planTier;
-  renderPassengerModels();
-  renderImageTierOptions();
+  // Plan locks live server-side now: refetch both catalogues, and fall back
+  // to a local re-render if the network refuses.
+  Promise.all([loadPassengerModels(), loadImageTiers()]).catch(() => {
+    renderPassengerModels();
+    renderImageTierOptions();
+  });
   loadCredits().catch(() => null);
 });
 

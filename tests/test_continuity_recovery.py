@@ -95,9 +95,12 @@ def test_end_frame_extraction_and_next_shot_chaining(container, project, tmp_pat
 
 
 def test_restart_recovery_never_blindly_resubmits(container, project, account_worker):
+    # Flow-specific recovery: the target is named, not left to the contract.
     request = GenerationRequest(
         project_id=project.id,
         type="video",
+        provider="google_flow",
+        model="veo",
         prompt="One action",
         idempotency_key="restart-1",
     )
@@ -129,6 +132,8 @@ def test_restart_recovery_does_not_steal_a_live_generation_claim(container, proj
         GenerationRequest(
             project_id=project.id,
             type="video",
+            provider="google_flow",
+            model="veo",
             prompt="One action",
             idempotency_key="live-claim-restart",
         )
@@ -151,6 +156,8 @@ def test_restart_recovery_quarantines_only_an_expired_uncertain_claim(
         GenerationRequest(
             project_id=project.id,
             type="video",
+            provider="google_flow",
+            model="veo",
             prompt="One action",
             idempotency_key="expired-claim-restart",
         )
@@ -183,6 +190,8 @@ def test_late_browser_response_is_reconciled_without_resubmission(
     request = GenerationRequest(
         project_id=project.id,
         type="video",
+        provider="google_flow",
+        model="veo",
         prompt="One action",
         idempotency_key="orphan-response-1",
     )

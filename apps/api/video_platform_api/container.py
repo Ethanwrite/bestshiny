@@ -53,6 +53,7 @@ from model_registry_core import (
     ModelCapabilityRegistry,
     ModelInfrastructureService,
     VideoModelRouter,
+    load_scene_champions,
 )
 from narrative_core import NarrativeCompiler
 from narrative_ledger_core import NarrativeLedgerService, ShotDependencyService
@@ -774,6 +775,10 @@ def build_container(settings: Settings | None = None) -> Container:
     video_router = VideoModelRouter(
         model_registry,
         require_live_lifecycle=settings.provider_mode == "live",
+        # The hand-authored scene_type -> champion table. Loading fails closed:
+        # a container without a valid table does not fall back to open scoring,
+        # because a silent policy reversion is the failure the table prevents.
+        scene_champions=load_scene_champions(settings.scene_champion_config),
     )
     video_adapters = VideoAdapterRegistry()
     image_prompts = ImagePromptCorrector()

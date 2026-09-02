@@ -207,11 +207,17 @@ def test_the_latest_run_is_the_last_saved_not_the_last_dated(container, project)
 
 
 def test_the_router_itself_was_not_changed() -> None:
-    """The mandate says not to refactor a stable base, so pin its identity."""
+    """Evidence work must not silently change the router, so pin its identity.
+
+    v2 -> v3 was a deliberate, operator-directed change (2026-09-01): scene
+    champions, task-type/mode-duration/cost hard filters. This pin still
+    exists so the *next* silent drift fails a test; bump it only alongside an
+    intentional routing-policy change.
+    """
 
     from model_registry_core import VideoModelRouter
 
-    assert VideoModelRouter.version == "video-router-v2"
+    assert VideoModelRouter.version == "video-router-v3"
     signature = VideoModelRouter.rank.__code__.co_varnames[: VideoModelRouter.rank.__code__.co_argcount]
     assert signature == ("self", "requirements")
     assert set(VideoModelRouter.profile_weights) == {

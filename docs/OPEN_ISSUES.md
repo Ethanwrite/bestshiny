@@ -157,6 +157,25 @@ media, and are older than 24 hours; retirement is a status change to `RETIRED` p
 `DecisionRecord` per row, never a delete. Cost: none. Risk: none beyond reading the report first,
 which is what the two-step shape is for.
 
+### 1.17 Routing admission is in cold-start mode; you decide when to switch it back
+
+Added 2026-09-02. `ROUTER_ADMISSION_POLICY` defaults to `cold_start`: the automatic video
+router may pick any enabled, router-enabled model of a configured provider unless its
+lifecycle is `DISABLED` or `BLOCKED`, so the first real calls can produce the evidence that
+later ranks models — your instruction, because with the previous LIVE-only rule the router
+had no routable model in production at all (every video row is `CONFIGURED`). The gates are
+untouched: capability, mode, duration, resolution and reference bounds still exclude, the
+quote still precedes submission, and every live generation still needs a `LiveCanaryPermit`.
+
+When the catalogue has earned its lifecycle states, set on the host:
+
+```
+ROUTER_ADMISSION_POLICY=strict
+```
+
+and recreate the api and worker containers. Only you can say when "mature" is; nothing in
+the code will flip it for you.
+
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 
 `FEATURE_ROUTER_LCB` is `false` and must stay false until a replay passes. A replay needs

@@ -66,6 +66,22 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
+> **2026-09-02 — cold-start routing admission** (follows the #36 deploy). Deploying `2090992`
+> showed the automatic video router had **no routable model in production**: every video row
+> is `lifecycle_status = CONFIGURED` and live mode admitted only `LIVE/DEGRADED`, so
+> `POST /internal/router/video` failed with an empty rejection list (pre-existing since v2;
+> passenger Auto/named video resolves roles with `require_live=False` and never noticed).
+> The operator's phase policy: **evidence decides the ranking, not who is eligible for a
+> first call.** `ROUTER_ADMISSION_POLICY` (`packages/shared/platform_shared/config.py`,
+> default `cold_start`) makes `registry.routable()` admit every enabled, router-enabled
+> model of a configured provider except `DISABLED`/`BLOCKED`; `strict` restores LIVE-only
+> routing and is the setting to return to once the catalogue has earned its lifecycle
+> states. Nothing else moved: capability/mode/duration/resolution/reference gates are
+> identical under both policies (pinned by `tests/test_router_admission_policy.py`), the
+> quote and reservation still precede submission, and every live generation still needs a
+> `LiveCanaryPermit` at the gateway — the ceiling that caught a 2s/480p request billed at a
+> provider's 5s/1080p defaults. `docs/DEPLOYMENT.md` §6 now names `2090992` as the release.
+>
 > **2026-09-01 — scene-champion routing and UI/backend alignment** (branch
 > `claude/video-model-routing-5f93e5`). Two streams, operator-directed:
 >

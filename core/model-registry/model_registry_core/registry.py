@@ -10,6 +10,7 @@ from production_domain.models import (
 )
 from production_domain.models import (
     ModelDefinition,
+    ModelLifecycleStatus,
     ProviderControl,
 )
 from provider_sdk import AssetCriticality, ProviderTrustLevel
@@ -176,7 +177,14 @@ class ModelCapabilityRegistry:
             return control is None or control.enabled
 
     def routable(self, *, require_live: bool = True) -> list[ModelCapabilityProfile]:
-        """Models eligible for automatic selection, distinct from explicit use."""
+        """Models eligible for automatic selection, distinct from explicit use.
+
+        ``require_live`` is the strict admission policy: only a model that has
+        earned LIVE (or is DEGRADED) may be routed to. Without it — the
+        cold-start policy — any lifecycle may be picked except the two that
+        mean "do not run this": DISABLED and BLOCKED. Neither answer touches
+        the capability, bound and mode gates the router applies afterwards.
+        """
 
         with self.database.session() as session:
             definition_statement = select(ModelDefinition).where(
@@ -186,6 +194,12 @@ class ModelCapabilityRegistry:
             if require_live:
                 definition_statement = definition_statement.where(
                     ModelDefinition.lifecycle_status.in_(("LIVE", "DEGRADED"))
+                )
+            else:
+                definition_statement = definition_statement.where(
+                    ModelDefinition.lifecycle_status.not_in(
+                        (ModelLifecycleStatus.DISABLED.value, ModelLifecycleStatus.BLOCKED.value)
+                    )
                 )
             definitions = list(session.scalars(definition_statement))
             enabled_ids = {item.id for item in definitions}

@@ -176,14 +176,23 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `8b92639` (`main`, [#23](https://github.com/Ethanwrite/bestshiny/pull/23)),
-  deployed 2026-08-30, Alembic `0064_free_tier_defaults` — the FREE-plan hard gates, the
-  BestShiny Director rebrand and the Character Evidence QA hardening. The host records it
-  in `/opt/bestshiny/DEPLOYED_SHA`; verified post-deploy: api healthy, doubao repoint and
-  FREE image binding present in the production registry, homepage serving the rebranded
-  UI. (`7e80d5a` #22 and `f758a9c` were deployed between #19 and this without this line
-  moving — `DEPLOYED_SHA` was right throughout, this document was behind, which is
-  exactly the failure mode the paragraph below describes.)
+- **Current release.** `2090992` (`main`, [#36](https://github.com/Ethanwrite/bestshiny/pull/36)),
+  deployed 2026-09-02, Alembic `0067_eip3009_relayer` (no migration in that release) —
+  scene-champion video routing (v3), the catalogue endpoints and the explicit Auto
+  contract. `DEPLOYED_SHA.prev` is `89e1126`, the `codex/sponsored-usdc-walletconnect` tip
+  whose tree is identical to `main`'s #35 squash (`48f62d6`) — proven with an empty
+  `git diff` before extraction, which is the check to repeat whenever the running SHA is
+  not a `main` commit. Verified post-deploy: all three containers on the rebuilt image IDs,
+  api healthy, public `/health` 200, the new bundle served. **Found during that deploy:**
+  every video model row is `lifecycle_status = CONFIGURED`, so with `PROVIDER_MODE=live` the
+  automatic router had no routable model at all (pre-existing; passenger Auto/named video
+  resolves roles with `require_live=False` and was unaffected). The cold-start admission
+  policy (`ROUTER_ADMISSION_POLICY`, default `cold_start`; `strict` restores LIVE-only
+  routing) is the answer, and it ships with the release after this one.
+  Earlier: `8b92639` (#23, 2026-08-30, FREE gates + rebrand); `7e80d5a` #22 and `f758a9c`
+  were deployed between #19 and #23 without this line moving — `DEPLOYED_SHA` was right
+  throughout, this document was behind, which is exactly the failure mode the paragraph
+  below describes.
 
   **Read this before trusting any "in sync" claim.** The previous handover recorded
   production as `9eb2934`; it was actually on `4832066`, one release behind. #18 was

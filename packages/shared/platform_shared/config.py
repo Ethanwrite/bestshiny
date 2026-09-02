@@ -223,13 +223,44 @@ class Settings(BaseSettings):
     legacy_wallet_payments_enabled: bool = False
     wallet_challenge_ttl_seconds: int = 300
     payment_intent_ttl_minutes: int = 30
+    # The DePay Managed Integration the widget pays through, and the object
+    # whose Dynamic Configuration calls back to us for a per-order amount.
+    depay_integration_id: str = ""
+    # The older fixed-offer payment link. Kept because callbacks for payments
+    # started against it are still in flight and identify themselves by it.
     depay_payment_link_url: str = ""
     depay_link_id: str = ""
+    # DePay issues a key pair per object. This is the Managed Integration's
+    # public key, used to verify everything it sends us — Dynamic Configuration
+    # requests and its payment callbacks. Found on app.depay.com under the
+    # integration itself, not under Dynamic Configuration (that field holds the
+    # public half of *our* signing key).
+    depay_integration_public_key: str = ""
+    # The retired payment link's public key. Kept because callbacks for payments
+    # started against the link are still in flight and are signed by it.
     depay_callback_public_key: str = ""
+    # DePay verifies our Dynamic Configuration *response* with the public half
+    # of this key (RSA-PSS/SHA-256, salt length 64). Without it the widget
+    # cannot be priced per order, so checkout fails closed.
+    depay_dynamic_config_private_key: str = ""
     depay_checkout_ttl_minutes: int = 1_440
-    depay_offer_amount_usdc: Decimal = Decimal("30")
-    depay_offer_credits: int = 3_000
-    depay_offer_upgrade_plan: Literal["PRO"] = "PRO"
+    # DePay deducts its fee before forwarding, so Treasury nets less than the
+    # buyer was charged (1.5% on the 2026-08-30 payment). Settlement accepts a
+    # shortfall up to this allowance against the order snapshot; beyond it the
+    # payment is a mismatch, not a fee. 200 bps = 2%.
+    depay_max_provider_fee_bps: int = 200
+    # Base USDC EIP-3009 relay. The browser signs typed authorization data;
+    # only the relayer key reaches the server and pays Base ETH gas.
+    relayer_address: str = ""
+    relayer_private_key: str = ""
+    base_rpc_url: str = ""
+    relayer_authorization_ttl_seconds: int = 900
+    relayer_min_confirmations: int = 1
+    relayer_rpc_timeout_seconds: int = 15
+    relayer_max_gas_limit: int = 200_000
+    relayer_max_fee_per_gas_wei: int = 5_000_000_000
+    relayer_sweep_interval_seconds: int = 5
+    relayer_sweep_limit: int = 50
     skills_root: Path = Path("./skills")
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     # Layer 2 of the style lock. Off by default: it is a paid embedding call per

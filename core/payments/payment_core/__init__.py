@@ -7,6 +7,7 @@ from .alchemy import (
     AlchemyWebhookPayloadError,
     AlchemyWebhookResult,
 )
+from .catalog import PAYMENT_PACKAGES, PRICING_VERSION, PaymentPackage
 from .depay import (
     DePayAuthenticationError,
     DePayCheckoutResult,
@@ -16,6 +17,18 @@ from .depay import (
     DePayPayloadError,
     DePayPaymentService,
     DePayWebhookResult,
+)
+from .eip3009 import (
+    EIP3009AuthorizationResult,
+    EIP3009CheckoutResult,
+    EIP3009ConfigurationError,
+    EIP3009Conflict,
+    EIP3009Error,
+    EIP3009NotFound,
+    EIP3009Rejected,
+    EIP3009RelayerService,
+    EIP3009RPCError,
+    EIP3009SweepResult,
 )
 from .wallets import (
     WalletChallengeResult,
@@ -28,6 +41,9 @@ from .wallets import (
 
 __all__ = [
     "BASE_NETWORKS",
+    "PAYMENT_PACKAGES",
+    "PRICING_VERSION",
+    "PaymentPackage",
     "AlchemyUSDCWebhookService",
     "AlchemyWebhookAuthenticationError",
     "AlchemyWebhookConfigurationError",
@@ -42,6 +58,16 @@ __all__ = [
     "DePayPayloadError",
     "DePayPaymentService",
     "DePayWebhookResult",
+    "EIP3009AuthorizationResult",
+    "EIP3009CheckoutResult",
+    "EIP3009ConfigurationError",
+    "EIP3009Conflict",
+    "EIP3009Error",
+    "EIP3009NotFound",
+    "EIP3009Rejected",
+    "EIP3009RelayerService",
+    "EIP3009RPCError",
+    "EIP3009SweepResult",
     "WalletChallengeResult",
     "WalletPaymentConflict",
     "WalletPaymentError",

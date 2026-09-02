@@ -58,7 +58,12 @@ from narrative_core import NarrativeCompiler
 from narrative_ledger_core import NarrativeLedgerService, ShotDependencyService
 from omni_provider import OmniProvider
 from openrouter_provider import OpenRouterProvider
-from payment_core import AlchemyUSDCWebhookService, DePayPaymentService, WalletPaymentService
+from payment_core import (
+    AlchemyUSDCWebhookService,
+    DePayPaymentService,
+    EIP3009RelayerService,
+    WalletPaymentService,
+)
 from platform_database import Database
 from platform_shared import (
     CredentialVault,
@@ -166,6 +171,7 @@ class Container:
     alchemy_webhooks: AlchemyUSDCWebhookService
     wallet_payments: WalletPaymentService
     depay_payments: DePayPaymentService
+    eip3009_relayer: EIP3009RelayerService
     video_router: VideoModelRouter
     video_adapters: VideoAdapterRegistry
     image_prompts: ImagePromptCorrector
@@ -274,13 +280,26 @@ def build_container(settings: Settings | None = None) -> Container:
     depay_payments = DePayPaymentService(
         database,
         payment_link_url=settings.depay_payment_link_url,
-        link_id=settings.depay_link_id,
+        integration_id=settings.depay_integration_id,
+        legacy_link_id=settings.depay_link_id,
         callback_public_key=settings.depay_callback_public_key,
+        integration_public_key=settings.depay_integration_public_key,
+        dynamic_config_private_key=settings.depay_dynamic_config_private_key,
         treasury_address=settings.alchemy_treasury_address,
-        offer_amount_usdc=settings.depay_offer_amount_usdc,
-        offer_credits=settings.depay_offer_credits,
-        upgrade_plan_tier=settings.depay_offer_upgrade_plan,
+        max_provider_fee_bps=settings.depay_max_provider_fee_bps,
         checkout_ttl_minutes=settings.depay_checkout_ttl_minutes,
+    )
+    eip3009_relayer = EIP3009RelayerService(
+        database,
+        relayer_address=settings.relayer_address,
+        relayer_private_key=settings.relayer_private_key,
+        rpc_url=settings.base_rpc_url,
+        treasury_address=settings.alchemy_treasury_address,
+        authorization_ttl_seconds=settings.relayer_authorization_ttl_seconds,
+        min_confirmations=settings.relayer_min_confirmations,
+        rpc_timeout_seconds=settings.relayer_rpc_timeout_seconds,
+        max_gas_limit=settings.relayer_max_gas_limit,
+        max_fee_per_gas_wei=settings.relayer_max_fee_per_gas_wei,
     )
     storage: StorageProvider
     if settings.storage_backend.lower() == "s3":
@@ -909,6 +928,7 @@ def build_container(settings: Settings | None = None) -> Container:
         alchemy_webhooks=alchemy_webhooks,
         wallet_payments=wallet_payments,
         depay_payments=depay_payments,
+        eip3009_relayer=eip3009_relayer,
         video_router=video_router,
         video_adapters=video_adapters,
         image_prompts=image_prompts,

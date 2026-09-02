@@ -76,12 +76,26 @@ def _evaluate(policy: ExplorationPolicy, **overrides: object):  # type: ignore[n
     return policy.evaluate(CANDIDATE, **arguments)  # type: ignore[arg-type]
 
 
+def _first_party_python(directory: str) -> list[Path]:
+    """Our own sources only.
+
+    `apps/web/node_modules` holds vendored JavaScript packages, some of which
+    ship Python 2 reference implementations that no longer parse. They are not
+    call sites and are not even checked in.
+    """
+    return [
+        path
+        for path in (ROOT / directory).rglob("*.py")
+        if "node_modules" not in path.parts
+    ]
+
+
 def test_no_service_or_app_imports_the_exploration_module() -> None:
     """The strongest guarantee available: there is no call site to switch on."""
 
     importers: list[str] = []
     for directory in ("services", "apps", "agents", "providers"):
-        for path in (ROOT / directory).rglob("*.py"):
+        for path in _first_party_python(directory):
             tree = ast.parse(path.read_text("utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("exploration"):
@@ -97,7 +111,7 @@ def test_the_names_it_exports_appear_in_no_service_or_app() -> None:
     forbidden = ("ExplorationPolicy", "ExplorationConstraints", "ExplorationSimulation")
     hits: list[str] = []
     for directory in ("services", "apps", "agents", "providers", "core"):
-        for path in (ROOT / directory).rglob("*.py"):
+        for path in _first_party_python(directory):
             if path.name in {"exploration.py", "__init__.py"}:
                 continue
             text = path.read_text("utf-8")

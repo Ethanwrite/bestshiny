@@ -224,6 +224,23 @@ def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-
     return result.dispatched
 
 
+def sweep_eip3009_payments_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Finish gas-sponsored payments even after the buyer closes their browser."""
+
+    result = container.eip3009_relayer.sweep(
+        limit=max(1, container.settings.relayer_sweep_limit)
+    )
+    if result.expired or result.confirmed or result.failed:
+        logger.info(
+            "EIP-3009 sweep: %d expired, %d confirmed, %d pending, %d failed",
+            result.expired,
+            result.confirmed,
+            result.pending,
+            result.failed,
+        )
+    return result.confirmed
+
+
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
@@ -231,6 +248,12 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
     rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
     verification_interval = max(0, int(container.settings.media_verification_interval_seconds))
+    # Older embedders/tests may supply a deliberately narrow settings object.
+    # Missing means disabled, never "run with guessed defaults".
+    relayer_interval = max(
+        0,
+        int(getattr(container.settings, "relayer_sweep_interval_seconds", 0)),
+    )
     # Due immediately on start, then on the interval. A worker that restarts
     # often would otherwise never reach its first sweep.
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
@@ -238,7 +261,18 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
     next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
     next_verification = asyncio.get_running_loop().time() if verification_interval else None
+    next_relayer_sweep = (
+        asyncio.get_running_loop().time()
+        if relayer_interval and container.eip3009_relayer.configured
+        else None
+    )
     while True:
+        if next_relayer_sweep is not None and asyncio.get_running_loop().time() >= next_relayer_sweep:
+            try:
+                await asyncio.to_thread(sweep_eip3009_payments_once, container)
+            except Exception:
+                logger.exception("EIP-3009 payment sweep failed")
+            next_relayer_sweep = asyncio.get_running_loop().time() + relayer_interval
         if next_verification is not None and asyncio.get_running_loop().time() >= next_verification:
             try:
                 await asyncio.to_thread(verify_media_once, container)

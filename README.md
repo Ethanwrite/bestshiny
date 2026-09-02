@@ -61,7 +61,7 @@ payment operations, Provider accuracy, or public production reachability.
 - Evaluation/Retry：结构化质量维度、关键失败、`ACCEPT / RETRY_SAME_MODEL / RETRY_REWRITE_PROMPT / SWITCH_MODEL / REJECT` 与有界重试计划。
 - Metrics/Benchmark/Trace：生产指标、基准测试结果与镜头级生产 trace；自适应路由默认关闭。
 - Credits admission + lifecycle：所有已认证的公开生成入口都由服务端解析套餐/模型角色/部署可用性/信任/估价；**FREE / PRO / ENTERPRISE 一律**在同一交易中创建 Job、积分预占、CostRecord 和幂等记录。「谁扣款」由 `WorkspaceCreditBalance.billable` 一处定义：所有**套餐**都扣；无 workspace 的项目、以及 `ALL` 工作空间（关闭鉴权时的本地开发旁路，不是套餐）不扣。套餐决定额度发放、折扣与模型权限，不决定一次生成是否要花钱。余额不足返回 **402**，与套餐权限不足的 **403** 区分开——一个是充值，一个是升级。完成时结算，明确的提交前终态会原子退回，跨过付费边界的不确定结果则冻结并进入内部审计对账，不盲退、不盲重试。
-- DePay/Base USDC 支付：全站只使用一条固定 30 USDC、Quantity OFF 的 DePay Link。每次点击都先生成独立 PaymentIntent，并注入 `order_ref` 与只保存 hash 的短期 checkout token。签名回调必须匹配订单、Base Mainnet、Circle Native USDC、Treasury 和精确 30 USDC，才会在同一事务中为 FREE 工作空间永久升级 `PRO` 并追加 3,000 Credits；已是 PRO 则只追加 3,000 Credits。无订阅、自动续费或钱包二次扣款。Alchemy 保留为链上重组/对账证据源。
+- Base USDC 支付：主入口使用 Circle USDC EIP-3009。桌面端默认显示 WalletConnect 二维码，用户用实际付款钱包扫码并签 EIP-712 `TransferWithAuthorization`；浏览器插件钱包作为备用，用户私钥始终不离开钱包。BestShiny 对普通 EOA 验证 ECDSA、对已部署智能钱包验证 ERC-1271，再由平台 Relayer 调用 Base USDC 并支付 ETH Gas。系统在签名前和广播前都检查用户的 Base 原生 USDC 余额；只有链上回执同时证明相同 nonce 的 `AuthorizationUsed` 与从用户到 Treasury 的精确 `Transfer`，才会原子升级 `PRO`/追加 Credits。DePay Managed Integration 保留为兼容入口，Alchemy 继续作为独立链上重组证据源。
 - Candidate + QA + Commit：一个镜头可有多个候选；自动证据不足时可由有写权限的真实用户填写理由并显式确认，形成独立审计记录，再单独采用；采用后原子写入唯一正式候选、时间线快照、尾帧与成本记录。
 - Persistent Narrative Character State：已将不可变的角色 identity 与可随剧情变化的伤口、衣物破损/污渍/湿润、道具、位置、时间和灯光状态硬隔离。每个候选以显式 JSON Patch 提议 delta，先过确定性 policy，再校验与候选输出绑定的可视证据；只有采用候选时才追加新版本、commit 记录，通过 branch-aware head CAS 前移并传播给下一镜。旧版本、delta、验证与 commit 全部保留，保留审计/比较所需事实并拒绝过期冲突。
 - 状态提议只能在 Candidate 仍为 `CREATED`、生成尚未 dispatch 时，于 Candidate/Generation Job 分配事务内写入。全部提议的 proposal-set hash 同时绑定 Candidate 与 Generation Job，并在 validate/commit 再校验，阻断生成后偷换 delta。显式 `branch_key` 可从 input TimelineState 选定的不可变状态版本创建独立 scope v1/head，不推进 main head。
@@ -175,10 +175,16 @@ python3 -m http.server 18081 --directory apps/web
 | `ALCHEMY_WEBHOOK_SIGNING_KEY` / `ALCHEMY_WEBHOOK_ID` | 校验 Alchemy Delivery 的签名与可选 Webhook 身份 | 只放 Secret Manager；签名必须覆盖未经 JSON 重排的原始 body |
 | `ALCHEMY_NETWORK` / `ALCHEMY_TREASURY_ADDRESS` | `BASE_MAINNET` 与平台 USDC 收款地址 | 地址需与 Alchemy Address Activity 跟踪目标和前端付款目标一致 |
 | `ALCHEMY_CREDITING_ENABLED` / `ALCHEMY_USDC_MICROUNITS_PER_CREDIT` | 默认关闭；默认 10,000 微单位（0.01 USDC）兑换 1 credit | 真实小额回归和对账 Runbook 通过前保持关闭 |
+| `REOWN_PROJECT_ID` | WalletConnect 二维码连接使用的公开 Project ID | 在 Reown Dashboard 创建，并允许 `https://bestshiny.com` 与实际使用的 `www` 域名；不要把官方 localhost 示例 ID 用于生产 |
 | `LEGACY_WALLET_PAYMENTS_ENABLED` | 默认 `false` | 旧的自定义金额/钱包绑定 API 仅作兼容代码；公开商业流程不得开启 |
 | `DEPAY_PAYMENT_LINK_URL` / `DEPAY_LINK_ID` | DePay 共享 Base Native USDC Payment Link 及其 ID | 链接必须仅收 Base Native USDC，并与 Treasury 地址一致 |
 | `DEPAY_CALLBACK_PUBLIC_KEY` | DePay 在启用 callback 后生成的 RSA 公钥 | 用于验证原始 body 的 `x-signature`；不要用任意未签名请求入账 |
 | `DEPAY_OFFER_AMOUNT_USDC` / `DEPAY_OFFER_CREDITS` / `DEPAY_OFFER_UPGRADE_PLAN` | 默认 `30` / `3000` / `PRO` | 服务端单一 Offer 事实源；修改时必须同步 DePay 固定金额 Link |
+| `RELAYER_ADDRESS` / `RELAYER_PRIVATE_KEY` | Base EVM Relayer 地址与 32-byte 私钥 | 私钥只放 Secret Manager；启动时强制校验两者匹配，不进入浏览器或数据库 |
+| `BASE_RPC_URL` | Base Mainnet HTTPS JSON-RPC | 启动/提交时校验 chain id `8453`；不得使用不可信 RPC |
+| `RELAYER_AUTHORIZATION_TTL_SECONDS` / `RELAYER_MIN_CONFIRMATIONS` | 默认 `900` / `1` | 用户授权短期有效；Alchemy 继续监控后续 reorg |
+| `RELAYER_MAX_GAS_LIMIT` / `RELAYER_MAX_FEE_PER_GAS_WEI` | 默认 `200000` / `5000000000` | 防止异常授权或 Gas 峰值耗尽 Relayer ETH |
+| `RELAYER_SWEEP_INTERVAL_SECONDS` / `RELAYER_SWEEP_LIMIT` | 默认 `5` / `50` | Worker 独立确认已提交交易并回收过期未签订单，浏览器关闭不影响入账 |
 
 ### Object-storage browser CORS
 
@@ -226,6 +232,9 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/api/workspaces/{workspace_id}/credits` | 查询余额、冻结额、生命周期聚合与最近事件 |
 | `POST` | `/v1/webhooks/alchemy` | 公开但必须通过 Alchemy HMAC；接收 Base Native USDC Address Activity Delivery |
 | `POST` | `/v1/webhooks/depay` | 公开但必须通过 DePay RSA-PSS `x-signature`；验证付款并追加积分 Ledger |
+| `POST` | `/v1/payments/relayed-checkout` | 创建服务器定价订单并返回 Circle USDC EIP-712 authorization |
+| `POST` | `/v1/workspaces/{workspace_id}/relayed-authorizations/{id}/submit` | 验证用户签名并由 Relayer 提交 `transferWithAuthorization` |
+| `POST` | `/v1/workspaces/{workspace_id}/relayed-authorizations/{id}/reconcile` | 验证 Base 回执/确认数并原子入账 |
 | `GET` | `/v1/payments/config`、`/v1/workspaces/{workspace_id}/billing` | 读取 DePay/Base 配置和工作空间积分 |
 | `POST` | `/v1/workspaces/{workspace_id}/depay-checkouts` | 为已登录工作空间创建 DePay 充值会话与带上下文的共享链接 |
 | `GET` | `/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}` | 查询充值会话状态供 Web 轮询 |

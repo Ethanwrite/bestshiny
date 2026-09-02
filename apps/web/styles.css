@@ -730,14 +730,19 @@ input[type="file"]::file-selector-button {
 .wallet-balance span { font-size: var(--t-label); color: var(--fg-label); }
 .wallet-balance strong { font-size: var(--t-figure); font-weight: 600; letter-spacing: -.02em; }
 .wallet-offer { margin-top: 14px; padding: 16px; border-radius: var(--radius); background: linear-gradient(150deg, rgba(242, 169, 59, .09), rgba(169, 123, 242, .05)); }
-.wallet-offer-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-.wallet-offer-head span { font-size: 13px; color: var(--fg-body); }
-.wallet-offer-head strong { font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
-.wallet-offer p { font-size: var(--t-label); color: var(--fg-body); line-height: 1.7; margin-bottom: 12px; }
-.depay-checkout { display: grid; justify-items: center; gap: 12px; margin-top: 14px; padding: 16px; border-radius: var(--radius); background: var(--bg-2); }
-.depay-checkout img { border-radius: 8px; background: #fff; padding: 6px; }
-.depay-checkout strong { font-size: var(--t-meta); color: var(--fg-label); word-break: break-all; text-align: center; }
-.depay-checkout .btn-row { width: 100%; }
+.wallet-connect-qr { display: flex; align-items: center; justify-content: center; min-height: 264px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.wallet-connect-qr[hidden] { display: none; }
+.wallet-connect-qr canvas, .wallet-connect-qr svg { display: block; max-width: 240px; width: 100%; height: auto; }
+.wallet-browser-pay { margin-top: 8px; }
+.wallet-plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+.wallet-plan { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 14px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); cursor: pointer; text-align: center; transition: border-color .15s, background .15s; }
+.wallet-plan:hover { border-color: var(--accent); }
+.wallet-plan.is-selected { border-color: var(--accent); background: rgba(242, 169, 59, .12); }
+.wallet-plan.is-recommended { padding-top: 22px; }
+.wallet-plan-price { font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+.wallet-plan-credits { font-size: var(--t-label); color: var(--fg-body); }
+.wallet-plan-badge { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); font-size: 10px; font-style: normal; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
+@media (max-width: 420px) { .wallet-plans { grid-template-columns: 1fr; } .wallet-plan.is-recommended { padding-top: 14px; } .wallet-plan-badge { position: static; transform: none; } }
 
 .toast {
   /* `popover` puts this in the top layer so it can be seen over an open

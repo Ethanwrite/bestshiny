@@ -860,7 +860,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
     <dialog id="walletDialog" class="sheet" aria-labelledby="walletTitle">
       <div class="sheet-body">
         <div class="sheet-head">
-          <span class="eyebrow">DePay · Base USDC</span>
+          <span id="walletProviderLabel" class="eyebrow">Base USDC</span>
           <h2 id="walletTitle">Top up credits</h2>
           <p id="walletDescription">One payment — credits are added the moment it is confirmed. No subscription, no auto-renewal.</p>
         </div>
@@ -871,28 +871,17 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <div class="kv-list">
           <div class="kv"><span>Network</span><b id="walletNetwork">Base</b></div>
           <div class="kv"><span>Currency</span><b>Native USDC</b></div>
-          <div class="kv"><span>Settlement</span><b>DePay</b></div>
+          <div class="kv"><span>Settlement</span><b id="walletSettlement">Checking</b></div>
           <div class="kv"><span>Crediting</span><b id="walletCreditingStatus">Checking</b></div>
         </div>
         <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
         <p id="walletError" class="sheet-error" role="alert"></p>
         <div class="wallet-offer">
-          <div class="wallet-offer-head">
-            <span id="walletOfferLabel">Top up credits</span>
-            <strong id="walletOfferPrice">30 USDC</strong>
-          </div>
-          <p id="walletOfferBenefits">✓ Unlock Pro<br>✓ Includes 3,000 credits</p>
+          <div id="walletConnectQr" class="wallet-connect-qr" aria-label="WalletConnect QR code" hidden></div>
+          <div id="walletPlans" class="wallet-plans" role="radiogroup" aria-label="Credit packages"></div>
           <button id="payUsdcBtn" class="btn btn-primary btn-full" type="button" disabled>Pay with USDC</button>
-          <small class="field-note">Each attempt starts a fresh order for the same fixed offer — you can never be charged twice for one click.</small>
-        </div>
-        <div id="depayCheckout" class="depay-checkout" hidden>
-          <img id="depayQrCode" alt="DePay payment QR code" width="200" height="200"
-               src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" />
-          <strong id="depayCheckoutSummary" class="mono"></strong>
-          <div class="btn-row">
-            <button id="openDePayBtn" class="btn btn-secondary btn-grow" type="button">Open DePay</button>
-            <button id="copyDePayBtn" class="btn btn-tertiary" type="button">Copy link</button>
-          </div>
+          <button id="payBrowserWalletBtn" class="btn btn-tertiary btn-full wallet-browser-pay" type="button" hidden>Use browser wallet instead</button>
+          <small class="field-note">Each attempt starts a fresh order — you can never be charged twice for one click.</small>
         </div>
         <div class="sheet-actions">
           <button id="closeWalletBtn" class="btn btn-tertiary" type="button">Close</button>

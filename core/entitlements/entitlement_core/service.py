@@ -74,10 +74,14 @@ class WorkspaceModelResolver:
         )
 
     def default_video_role(self, project_id: str) -> ModelRole:
-        context = self.context_for_project(project_id)
-        if context.plan_tier is WorkspacePlanTier.FREE:
-            return ModelRole.VIDEO_SEEDANCE
-        return ModelRole.VIDEO_FLOW
+        # What "Auto" means, for every plan. Deliberately the priced,
+        # live-verified route: the previous paid default (VIDEO_FLOW's
+        # flow-veo-3.1) carries no verified provider price, so every paid Auto
+        # video died at the quote with a 400 — the server's own default failing
+        # the server's own pricing gate. The context lookup stays so a missing
+        # or inactive project keeps failing here exactly as it always has.
+        self.context_for_project(project_id)
+        return ModelRole.VIDEO_SEEDANCE
 
     @staticmethod
     def _assert_role_allowed(plan_tier: WorkspacePlanTier, role: ModelRole) -> None:

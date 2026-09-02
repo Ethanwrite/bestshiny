@@ -17,6 +17,12 @@ from .live_canary import (
 )
 from .registry import CapabilityObservationConflict, ModelCapabilityRegistry
 from .router import VideoModelRouter
+from .scene_champions import (
+    ChampionBinding,
+    SceneChampions,
+    SceneChampionTable,
+    load_scene_champions,
+)
 from .schemas import (
     ModelBindingKind,
     ModelCandidate,
@@ -36,6 +42,10 @@ __all__ = [
     "CONTRACT_INVALID",
     "CanaryLoop",
     "CanaryRecord",
+    "ChampionBinding",
+    "SceneChampionTable",
+    "SceneChampions",
+    "load_scene_champions",
     "LIVE_BLOCKED_EXTERNAL",
     "NOT_RUN",
     "VERIFIED_LIVE",

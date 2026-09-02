@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cost_core import CreditEstimate, CreditPricingEngine, PricingUnverified
@@ -31,6 +32,27 @@ IMAGE_MODEL_TIERS: dict[str, tuple[str, frozenset[str]]] = {
     "shinier": ("flow-narwhal-image-internal", frozenset({"PRO", "ENTERPRISE", "ALL"})),
     "shiniest": ("gpt-image-2-openrouter", frozenset({"PRO", "ENTERPRISE", "ALL"})),
 }
+
+# The tiers' public presentation, server-owned so the browser and every other
+# API client render the same three levels the backend actually maps.
+IMAGE_TIER_DISPLAY: dict[str, tuple[str, str]] = {
+    "shiny": ("Shiny", "✨"),
+    "shinier": ("Shinier", "✨✨"),
+    "shiniest": ("Shiniest", "✨✨✨"),
+}
+
+
+@dataclass(frozen=True)
+class ImageTierStatus:
+    """One public image tier, described the way admission would treat it."""
+
+    tier: str
+    name: str
+    stars: str
+    plan_requirement: str
+    allowed_for_workspace: bool
+    available: bool
+    unavailable_reason: str | None
 
 
 class ExplicitModelUnavailable(ValueError):
@@ -237,12 +259,105 @@ class GenerationAdmissionService:
                 "this image quality level is part of the Pro plan; upgrade to use it"
             )
         state = self.workspace_models.models.runtime_model(logical_name)
+        self._assert_image_tier_model_usable(state)
+        return state
+
+    def _assert_image_tier_model_usable(self, state) -> None:  # type: ignore[no-untyped-def]
+        """The model-side checks a tier admission performs.
+
+        Shared with `describe_image_tiers`, so the report an API client sees and
+        the refusal an admission raises are the same checks by construction.
+        """
+
         if not state.enabled:
             raise ExplicitModelUnavailable(
                 "this image quality level is temporarily unavailable"
             )
         self._assert_named_model_usable(state.provider, state.provider_model_id, "image")
-        return state
+
+    def pricing_verified(
+        self,
+        provider: str,
+        model: str,
+        media_type: str,
+        *,
+        resolution: str = "720p",
+    ) -> bool:
+        """True when the quote path holds a provider-verified price for this target.
+
+        Read-only twin of the estimate admission performs: same engine, same
+        profile-resolution rules. A seeded placeholder does not count — it is
+        exactly the price a paid route refuses (`PricingUnverified`), so a
+        model is only reported as priced when a live deployment could quote it.
+        """
+
+        try:
+            estimate = self.pricing.estimate(
+                provider=provider,
+                model=model,
+                media_type=media_type,
+                duration=1,
+                resolution=resolution,
+            )
+        except (PricingUnverified, LookupError, ValueError):
+            return False
+        return getattr(estimate, "pricing_status", "") == "VERIFIED"
+
+    def describe_image_tiers(
+        self,
+        *,
+        plan_tier: WorkspacePlanTier,
+        provider_configured: Callable[[str], bool],
+    ) -> list[ImageTierStatus]:
+        """Report each public tier the way admission would treat it, without spending.
+
+        Availability reuses the exact checks `_resolve_image_tier` and the quote
+        perform, so this report and an actual admission cannot drift. The first
+        failing check names the reason; a tier a plan does not include is still
+        described, because the UI renders it locked rather than hiding it.
+        """
+
+        tiers: list[ImageTierStatus] = []
+        for tier, (logical_name, allowed_plans) in IMAGE_MODEL_TIERS.items():
+            name, stars = IMAGE_TIER_DISPLAY.get(tier, (tier.title(), "✨"))
+            available, reason = self._image_tier_availability(logical_name, provider_configured)
+            tiers.append(
+                ImageTierStatus(
+                    tier=tier,
+                    name=name,
+                    stars=stars,
+                    plan_requirement=(
+                        WorkspacePlanTier.FREE.value
+                        if WorkspacePlanTier.FREE.value in allowed_plans
+                        else WorkspacePlanTier.PRO.value
+                    ),
+                    allowed_for_workspace=plan_tier.value in allowed_plans,
+                    available=available,
+                    unavailable_reason=reason,
+                )
+            )
+        return tiers
+
+    def _image_tier_availability(
+        self,
+        logical_name: str,
+        provider_configured: Callable[[str], bool],
+    ) -> tuple[bool, str | None]:
+        """The first failing admission check for a tier's model, as a report."""
+
+        try:
+            state = self.workspace_models.models.runtime_model(logical_name)
+        except (LookupError, ValueError):
+            return False, "MODEL_UNAVAILABLE"
+        if not provider_configured(state.provider):
+            return False, "PROVIDER_NOT_CONFIGURED"
+        try:
+            self._assert_image_tier_model_usable(state)
+        except ExplicitModelUnavailable:
+            return False, "MODEL_UNAVAILABLE"
+        if not self.pricing_verified(state.provider, state.provider_model_id, "image"):
+            return False, "PRICING_UNVERIFIED"
+        return True, None
 
     def _enforce_free_image_quota(
         self, context: WorkspacePlanContext, request: GenerationRequest
@@ -362,4 +477,10 @@ class GenerationAdmissionService:
         return AdmittedGeneration(admitted, estimate, role_value, context.plan_tier)
 
 
-__all__ = ["AdmittedGeneration", "GenerationAdmissionService"]
+__all__ = [
+    "AdmittedGeneration",
+    "GenerationAdmissionService",
+    "IMAGE_MODEL_TIERS",
+    "IMAGE_TIER_DISPLAY",
+    "ImageTierStatus",
+]

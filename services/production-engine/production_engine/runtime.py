@@ -1346,6 +1346,9 @@ class VisualProductionRuntime:
                 **dict(evidence.production_sample_counts),
                 **adjustments.sample_counts,
             },
+            # The LCB cell is this request's task and scenario, so its counts
+            # are the only ones that may qualify a scene-champion demotion.
+            scene_sample_counts=dict(adjustments.sample_counts),
         )
 
     @staticmethod

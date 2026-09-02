@@ -1,4 +1,9 @@
-from .admission import AdmittedGeneration, GenerationAdmissionService
+from .admission import (
+    IMAGE_MODEL_TIERS,
+    AdmittedGeneration,
+    GenerationAdmissionService,
+    ImageTierStatus,
+)
 from .canary import (
     CanaryReservation,
     LiveCanaryConflict,
@@ -26,6 +31,8 @@ __all__ = [
     "AdmittedGeneration",
     "CanaryReservation",
     "GenerationAdmissionService",
+    "IMAGE_MODEL_TIERS",
+    "ImageTierStatus",
     "InsufficientWorkspaceCredits",
     "LiveCanaryConflict",
     "LiveCanaryDenied",

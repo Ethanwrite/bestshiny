@@ -66,6 +66,58 @@ development handoffs and the Visual Runtime implementation record, all three del
 because they described states the code no longer has.
 Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md).
 
+> **2026-09-01 — scene-champion routing and UI/backend alignment** (branch
+> `claude/video-model-routing-5f93e5`). Two streams, operator-directed:
+>
+> **Routing (v3).** `VideoModelRouter` moved from open scoring over every video model to
+> **champion-first selection**: the deterministic hard filter gained task-type
+> (T2V/I2V/R2V/V2V), per-mode facts from `provider_metadata.modes` — duration ceilings,
+> accepted roles and material combinations (closes OPEN_ISSUES §2.27 and §2.28 — Wan 2.7's
+> 10s reference-video cap and its "R2V carries no last frame" rule are routing exclusions,
+> no migration needed) and an optional `max_cost_per_second` ceiling; then the hand-authored
+> table `config/model-registry/scene-champions.json` (11 derivable scenes, each with a
+> primary, a fallback and a written rationale — motion→Seedance→Kling Pro,
+> first_last_frame→Wan 2.7→Kling Pro, dialogue_lipsync→Veo 3.1→Seedance, …) decides the
+> order among survivors. Production evidence demotes a champion below its fallback only
+> with ≥20 **scene-scoped** observations on **both** sides (`RoutingEvidence.scene_sample_counts`,
+> filled only by the LCB overlay's posterior cell — pooled per-model counts never qualify)
+> and a blended-score gap >0.05, so a cold start cannot thrash routing and a physics
+> champion is not demoted on dialogue failures; no champion scene / no surviving champion falls back to open
+> scoring, and `RouterDecision` records `scenario`, `selection_basis` and a
+> `champion_audit`. The LCB/evidence contract is untouched (`FEATURE_ROUTER_LCB` still
+> false, still replay-gated); the version pin in `test_router_lcb_runtime_gate.py` was
+> bumped deliberately. New suites: `tests/test_scene_champions.py` (19),
+> `tests/test_scene_champion_config.py` (7).
+>
+> **UI/backend alignment.** Three new user endpoints — `GET /v1/image-tiers` (server-truth
+> tier availability: Shinier reports PRICING_UNVERIFIED, Shiniest reports
+> PROVIDER_NOT_CONFIGURED when the credential is absent), `GET /v1/models?modality=`
+> (the full catalogue independent of credential state, with `available`/`plan_locked` and
+> reasons; both take `project_id` so the locks are the project workspace's — the ones
+> admission applies — and under-promise across a multi-workspace user's memberships
+> without one) and `GET /v1/generations?project_id=` (durable job history; `_job_view` now
+> carries the quoted credits and lifecycle timestamps — the reconciled provider
+> `actual_cost` deliberately stays server-side) — plus **paid "Auto" video repointed
+> `VIDEO_FLOW`→`VIDEO_SEEDANCE`** (flow-veo-3.1 is unpriced, so every paid Auto video
+> 400'd at the quote). The web app polls generations (~2.5s) into a real progress bar
+> (provider `PROVIDER_JOB_POLL detail.progress`, stage-mapped fallback, monotonic,
+> shimmer + fade-in), renders both dropdowns from the new endpoints (locked/unavailable
+> options stay visible and disabled instead of vanishing; FREE no longer hides paid
+> routes; no raw "openrouter" label), adds a "My creations" gallery fed by the list
+> endpoint with `/v1/assets/{id}/thumbnail` thumbnails (history now survives reload),
+> puts thumbnails in the asset rail/dialog, and drops Runway/Flux from the marketing
+> model list. `tests/test_ui_alignment_endpoints.py` (8) pins the endpoints.
+>
+> A five-lens adversarial review (router, endpoints, frontend, security; the contract lens
+> ran separately) confirmed nine findings, all fixed before commit — the two that mattered
+> most: the mode gate had checked duration only, so the champion table pinned Wan 2.7 onto
+> reference+end-frame shots its R2V mode refuses, and champion demotion read pooled
+> per-model counts. Known residuals, deliberate: only Wan 2.7 declares `modes` (others keep
+> profile-level flags and bounds); the tier/model availability report is stricter than mock-mode admission
+> (unpriced → unavailable in every mode); `GenerationRequest` still *defaults*
+> `provider="google_flow", model="veo"` at the contract level — the browser always sends
+> explicit values, but a directly-constructed request silently takes the MANUAL path.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-08-30-B.md`](docs/SESSION_HANDOVER_2026-08-30-B.md).**
 > It is the single entry point for the 2026-08-30 free-tier/rebrand/QA/E2E session: current
 > state (`main` `3b978e5`, production in sync, head `0064`), what landed, the live audit

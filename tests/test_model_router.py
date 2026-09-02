@@ -70,7 +70,17 @@ def test_router_penalizes_grok_for_rear_view_ending(container):
     assert any("direct-gaze" in item for item in rear_grok.penalties)
 
 
-def test_router_uses_dynamic_commercial_and_action_weights(container):
+def test_scene_champions_decide_commercial_and_physics_scenes(container):
+    """v3: the winner is the scene champion, not the open-scoring argmax.
+
+    A commercial_hero request reads as the commercial_product scene, whose
+    champion is the priced Veo 3.1 route (flow-veo-3.1 scores higher on paper
+    but has no verified price and cannot quote). Physical plausibility reads
+    as the physics scene — precedence puts it ahead of motion — whose champion
+    is Kling 3 Pro. The dynamic profile weights still act underneath: the same
+    model scores differently under the two weight vectors.
+    """
+
     router = container.video_router
     commercial = router.rank(
         ShotRequirements(profile="commercial_hero", product_fidelity_priority=1, cost_priority=0)
@@ -83,11 +93,19 @@ def test_router_uses_dynamic_commercial_and_action_weights(container):
             cost_priority=0,
         )
     )
-    assert commercial.candidates[0].model in {"veo-3.1-generate-preview", "flow-veo-3.1"}
-    assert action.candidates[0].model in {
-        "kwaivgi/kling-v3.0-std",
-        "kwaivgi/kling-v3.0-pro",
-    }
+    assert commercial.scenario == "commercial_product"
+    assert commercial.selection_basis == "CHAMPION_TABLE"
+    assert commercial.candidates[0].model == "google/veo-3.1"
+    assert commercial.candidates[0].champion_rank == 1
+    assert action.scenario == "physics"
+    assert action.selection_basis == "CHAMPION_TABLE"
+    assert action.candidates[0].model == "kwaivgi/kling-v3.0-pro"
+
+    def _score(decision, model):
+        return next(c.score for c in decision.candidates if c.model == model)
+
+    # The weight vectors still shape the blended scores under the champions.
+    assert _score(commercial, "kwaivgi/kling-v3.0-pro") != _score(action, "kwaivgi/kling-v3.0-pro")
 
 
 def test_router_rejects_models_without_required_duration_or_features(container):
@@ -186,7 +204,11 @@ def test_a_rejected_model_records_why_rather_than_vanishing(container):
 
     embedding = rejected["openrouter:google/gemini-embedding-2"]
     assert embedding.modality == "embedding"
-    assert embedding.reason_codes == ["MODALITY_MISMATCH", "VIDEO_GENERATION_UNSUPPORTED"]
+    assert embedding.reason_codes == [
+        "MODALITY_MISMATCH",
+        "VIDEO_GENERATION_UNSUPPORTED",
+        "TASK_TYPE_UNSUPPORTED",
+    ]
 
     chat = rejected["openrouter:anthropic/claude-opus-5"]
     assert "MODALITY_MISMATCH" in chat.reason_codes

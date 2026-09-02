@@ -1,0 +1,139 @@
+{
+  "version": "scene-champions-v1",
+  "demotion_margin": 0.05,
+  "min_demotion_samples": 20,
+  "scenes": {
+    "motion": {
+      "champions": [
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "Operator-designated action champion (2026-09-01): action prior .88 at 0.09 USD/s, and the platform's only live-proven route."
+        },
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Operator-designated fallback: the registry's highest action (.93) and physics (.92) priors, at a higher rate."
+        }
+      ]
+    },
+    "physics": {
+      "champions": [
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Highest physical-plausibility prior (.92) in the registry; Wan 2.1's public .939 physics score is version-mismatched evidence and deliberately not a prior."
+        },
+        {
+          "logical_name": "veo-3.1-openrouter",
+          "rationale": "Physics .90 with the strongest render prior among priced routes (.92; flow-veo-3.1's .94 has no verified price) as the second opinion."
+        }
+      ]
+    },
+    "dialogue_lipsync": {
+      "champions": [
+        {
+          "logical_name": "veo-3.1-openrouter",
+          "rationale": "Operator-designated dialogue champion (2026-09-01): native synced audio on the full-quality variant."
+        },
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "Operator-designated fallback: dialogue prior .88, multi-reference support for multi-character dialogue, and the FREE-tier route."
+        }
+      ]
+    },
+    "chinese_text": {
+      "champions": [
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "ByteDance-native Chinese-dialogue lineage; the Seedance 2.0 Chinese-dialogue benchmark evidence is recorded as a near-miss version, so this stays judgement, not a measured prior."
+        },
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Chinese-ecosystem model with the registry's highest text-render prior (.84)."
+        }
+      ]
+    },
+    "text_rendering": {
+      "champions": [
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Highest text-render prior (.84)."
+        },
+        {
+          "logical_name": "kling-3-standard-openrouter",
+          "rationale": "Text prior .82 at a lower rate; same transport, so this is a quality/cost step, not a provider-outage hedge."
+        }
+      ]
+    },
+    "first_last_frame": {
+      "champions": [
+        {
+          "logical_name": "wan-2.7-official",
+          "rationale": "Operator-designated start/end-frame champion (2026-09-01): documented first+last-frame material combination in I2V and frame conditioning in R2V. Its priors are all initial 0.5, so open scoring would never pick it — this entry is the correction a manual table exists to make."
+        },
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Operator-designated fallback: declares start_end with the highest identity prior across the transition."
+        }
+      ]
+    },
+    "reference_adherence": {
+      "champions": [
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Identity prior .90 with 4-reference support."
+        },
+        {
+          "logical_name": "wan-2.7-official",
+          "rationale": "Native R2V mode with 5 reference assets; takes the shots whose reference count exceeds Kling's 4."
+        }
+      ]
+    },
+    "identity": {
+      "champions": [
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Highest identity prior (.90)."
+        },
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "Identity .82 with 4-reference support at 0.09 USD/s on the live-proven transport."
+        }
+      ]
+    },
+    "camera_motion": {
+      "champions": [
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "Camera prior .90 at the lowest rate in the .90 tier."
+        },
+        {
+          "logical_name": "veo-3.1-openrouter",
+          "rationale": "Camera .90 with the strongest render prior among priced routes (.92)."
+        }
+      ]
+    },
+    "commercial_product": {
+      "champions": [
+        {
+          "logical_name": "veo-3.1-openrouter",
+          "rationale": "Highest render prior (.92) among priced routes for product surfaces; flow-veo-3.1 renders better on paper but has no verified price and cannot quote."
+        },
+        {
+          "logical_name": "kling-3-pro-openrouter",
+          "rationale": "Render .88 with the best text prior, for packshots carrying on-frame copy."
+        }
+      ]
+    },
+    "generic": {
+      "champions": [
+        {
+          "logical_name": "seedance-2.5-official",
+          "rationale": "Balanced priors at 0.09 USD/s; the platform's live-proven default."
+        },
+        {
+          "logical_name": "veo-3.1-fast-openrouter",
+          "rationale": "Near-flagship priors at 0.10 USD/s; the only video model here with exact-version public benchmark backing (OSCBench)."
+        }
+      ]
+    }
+  }
+}

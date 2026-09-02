@@ -28,7 +28,8 @@ def paid_client(container, monkeypatch):  # type: ignore[no-untyped-def]
     """A PRO workspace with two usable image models and one usable video model."""
 
     container.settings.auth_required = True
-    # google_flow backs the PRO default video role, so Auto needs it configured.
+    # Seedance backs the default video role for every plan (the priced,
+    # live-verified route); the others exist so named selection has targets.
     for provider in ("openrouter", "seedance", "google_flow"):
         # raising=False: adapters differ in whether they carry the flag natively.
         monkeypatch.setattr(container.providers.get(provider), "configured", True, raising=False)

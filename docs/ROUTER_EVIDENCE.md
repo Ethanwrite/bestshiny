@@ -285,6 +285,19 @@ this produces one, through the existing `production_adjustments` channel. No lin
 moved. `test_router_lcb_runtime_gate.py` pins the router's version, `rank`'s signature and its four
 scoring profiles.
 
+> **2026-09-01 amendment.** The router itself later changed — deliberately, by operator direction,
+> not by this evidence system: `video-router-v3` selects within a hand-authored scene-champion table
+> (`config/model-registry/scene-champions.json`) after the deterministic hard filter, and open
+> scoring became the fallback. Nothing in *this* document's contract moved: evidence is still
+> per-request, the LCB still arrives through `production_adjustments`, the flag is still off until a
+> replay passes, and the version pin in `test_router_lcb_runtime_gate.py` was bumped alongside the
+> intentional change (that test now exists to catch the *next* silent drift). Champion order is
+> additionally protected by its own rule: production evidence can demote a champion below its
+> fallback only with ≥ `min_demotion_samples` observations on **both** sides and a blended-score gap
+> above `demotion_margin` — so the sufficiency discipline here and the demotion discipline there
+> agree on the same 20-observation floor. See `CURRENT_ARCHITECTURE.md` § Model capability and role
+> runtime for the v3 selection semantics.
+
 Three documented fallbacks, each returning the caller's evidence object unchanged:
 
 1. `router_lcb` flag off — the default;

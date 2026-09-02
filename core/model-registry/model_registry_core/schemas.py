@@ -391,6 +391,11 @@ class ShotRequirements(BaseModel):
     latency_priority: float = Field(default=0.2, ge=0, le=1)
     preferred_provider: str | None = None
     asset_criticality: AssetCriticality = AssetCriticality.STANDARD
+    # A hard ceiling in USD per second of output, matched against the profile's
+    # declared ``cost.estimated_per_second``. None means no ceiling. A model
+    # whose rate is undeclared cannot be shown to respect a ceiling and is
+    # excluded rather than assumed cheap.
+    max_cost_per_second: float | None = Field(default=None, gt=0)
 
 
 class ModelCandidate(BaseModel):
@@ -403,6 +408,9 @@ class ModelCandidate(BaseModel):
     penalties: list[str]
     components: dict[str, float]
     confidence_level: str
+    # Position in the scene-champion order when the ranking was decided by the
+    # champion table; None for open-scored candidates.
+    champion_rank: int | None = None
 
 
 class RoutingEvidence(BaseModel):
@@ -418,6 +426,13 @@ class RoutingEvidence(BaseModel):
     benchmark_adjustments: dict[str, dict[str, float]] = Field(default_factory=dict)
     production_adjustments: dict[str, dict[str, float]] = Field(default_factory=dict)
     production_sample_counts: dict[str, int] = Field(default_factory=dict)
+    # Observation counts for the scene this evidence was built for, keyed by
+    # ``provider:model_id``. Only a scene-scoped source — the conservative LCB,
+    # which reads the posterior cell for this request's task and scenario —
+    # fills it. The pooled ``production_sample_counts`` above mix every scene a
+    # model ever served and may weight the score blend, but never qualify a
+    # scene-champion demotion.
+    scene_sample_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class RejectedModel(BaseModel):
@@ -442,3 +457,11 @@ class RouterDecision(BaseModel):
     rejected: list[RejectedModel] = Field(default_factory=list)
     router_version: str
     profile: str
+    # The evidence scenario this request was read as (the same derivation the
+    # posterior uses), and whether the champion table or open scoring produced
+    # the ordering. ``champion_audit`` records every champion skipped or
+    # demoted, so the answer to "why was the primary not chosen?" is on the
+    # decision itself.
+    scenario: str | None = None
+    selection_basis: str = "OPEN_SCORING"
+    champion_audit: list[str] = Field(default_factory=list)

@@ -206,26 +206,26 @@ def production_serviceable(
     enabled: bool,
     live_enabled: bool,
     lifecycle_status: str,
-    live_canary_status: str,
 ) -> bool:
     """Whether ordinary traffic may run this model on the automatic production budget.
 
-    The first live call on a model is an operator's decision, taken by issuing
-    a `LiveCanaryPermit`; once that call has closed its loop the model reads
-    `VERIFIED_LIVE`, and from then on user requests are fenced by their own
-    quote-bound spend authorization and the platform breaker instead of a
-    hand-minted permit. Every switch that can turn a model off still applies:
-    a disabled, blocked or live-disabled model is not serviceable whatever its
-    canary history says, and a capability-contract change resets the canary
-    status, which pulls the model back behind a permit.
+    A paying user's credits are the user-side gate; this is the platform's,
+    and it is the model's own switches and nothing else: enabled, switched on
+    for live traffic, and not DISABLED or BLOCKED. A serviceable model runs
+    user requests on their quote-bound spend authorization under the platform
+    breaker with no operator-minted permit in the way (operator decision
+    2026-09-02: a user who bought credits is settled in credits).
+
+    `live_canary_status` is deliberately not a condition. It is evidence about
+    the model — written when a loop closes, reset when the capability contract
+    changes — that lifecycle promotion and routing read. It was briefly a gate
+    on paying traffic, and with no chat or image model ever verified that gate
+    kept the whole platform behind expired permits. The `LiveCanaryPermit`
+    remains the fence only where the budget does not reach: the budget
+    disabled, or a call the platform cannot price.
     """
 
-    return bool(
-        enabled
-        and live_enabled
-        and lifecycle_status not in {"DISABLED", "BLOCKED"}
-        and live_canary_status == VERIFIED_LIVE
-    )
+    return bool(enabled and live_enabled and lifecycle_status not in {"DISABLED", "BLOCKED"})
 
 
 def record_role_canary_outcome(

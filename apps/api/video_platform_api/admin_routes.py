@@ -235,13 +235,13 @@ def _model_view(model: ModelDefinition, profile: ModelCapabilityProfile | None) 
         # production-proven, which is the one thing this column exists to stop.
         "live_canary_status": model.live_canary_status,
         # Whether ordinary live traffic runs on the automatic production budget
-        # (quote-bound authorization under the platform breaker) instead of an
-        # operator's LiveCanaryPermit. Earned by one closed canary loop.
+        # (credits + quote-bound authorization under the platform breaker) with
+        # no operator LiveCanaryPermit in the way: the model's own switches,
+        # never its canary verdict.
         "production_serviceable": production_serviceable(
             enabled=model.enabled,
             live_enabled=model.live_enabled,
             lifecycle_status=model.lifecycle_status,
-            live_canary_status=model.live_canary_status,
         ),
         "live_canary_detail": model.live_canary_detail,
         "health": "UNKNOWN",

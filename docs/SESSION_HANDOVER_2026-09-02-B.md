@@ -1,9 +1,12 @@
 # Session handover — 2026-09-02 B (the automatic production budget)
 
-**This is the entry point for the next session.** One workstream: the hand-minted
-`LiveCanaryPermit` became the fence for a model's *first* live call only, and every call after
-it is fenced by a quote-bound spend authorization under a daily platform/provider USD breaker.
-Built, gated on both engines, **not deployed, and off by default even when deployed.**
+**This is the entry point for the next session.** One workstream, in two steps the same day: the
+hand-minted `LiveCanaryPermit` first became the fence for a model's *first* live call only; then,
+on the operator's instruction ("用户充值了积分，那肯定要积分结算"), it stopped gating paying traffic
+altogether. With the budget on, every enabled, live-enabled, priced model runs a user's request on
+credits plus a quote-bound spend authorization under a daily platform/provider USD breaker, and no
+permit is consulted. The permit is the fence only where the budget does not reach (budget off, or
+an unpriceable call). See §7 for the production rollout done in this session.
 Companions, in the order you will need them:
 [`OPEN_ISSUES.md`](OPEN_ISSUES.md) §1.18 (what to set, and the one product decision you may
 overturn) · [`DEPLOYMENT.md`](DEPLOYMENT.md) §6 (the next release's env lines and migration) ·
@@ -21,7 +24,7 @@ before; its §4 items are addressed or restated in §4 below).
 | Production | `153.75.95.10`, `DEPLOYED_SHA = 0f90f0b`, `.prev = 9109186`, alembic `0068_xunhupay`, `PROVIDER_MODE=live`, `ROUTER_ADMISSION_POLICY` unset (`cold_start`); router probe still answers `video-router-v3 / CHAMPION_TABLE / seedance` — re-verified read-only this session (§7.1 of the previous handover, done) |
 | Migration head on the branch | `0069_production_budget` (dev/test/production still at `0068` until deploy) |
 | Gates on the branch | see §5 |
-| Budget state after deploy | **off** until `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY` is set — behaviour identical to today's permit rule |
+| Budget state after deploy | **on in production** (§7): with the ceiling set, every enabled, live-enabled, priced model runs on credits with no permit; with it unset (code default) the old permit rule applies |
 
 ---
 
@@ -29,12 +32,16 @@ before; its §4 items are addressed or restated in §4 below).
 
 ### 2.1 The two fences, and the line between them
 `production_serviceable()` in `core/model-registry/model_registry_core/live_canary.py` is the
-one predicate: `enabled`, `live_enabled`, lifecycle not `DISABLED`/`BLOCKED`, and
-`live_canary_status = VERIFIED_LIVE`. Below the line the operator's permit fences the call
-exactly as before (whole remaining budget held for a media call, token estimate for a role
-call). Above it the call runs on its own authorization. `RuntimeModelState` and
-`ResolvedModel` now carry `live_canary_status` (and the latter `lifecycle_status`) so both
-runtimes can answer the predicate without another query.
+one predicate: `enabled`, `live_enabled`, lifecycle not `DISABLED`/`BLOCKED` — the model's own
+switches (the quote path already refuses an unpriced model). `live_canary_status` is deliberately
+**not** a condition: it was one for a few hours, and with no chat or image model ever canaried
+that condition would have left production exactly where it was — every director turn, refinement
+and generation refused behind expired permits (14-day production data: 16 + 44 + 10 refusals,
+17 refinements degraded to the user's own text). A serviceable model runs on its own
+authorization with no permit consulted; the permit fences only what the budget does not reach
+(budget off, or a role call with no token rates). `RuntimeModelState` and `ResolvedModel` carry
+`live_canary_status` and `lifecycle_status` so both runtimes answer the predicate without another
+query; the status is evidence for lifecycle and routing.
 
 ### 2.2 The authorization — `core/entitlements/entitlement_core/production_budget.py`
 `GenerationSpendAuthorization` (`generation_spend_authorizations`): one per live operation,
@@ -78,14 +85,15 @@ size, credits SETTLED for exactly the held amount) and stamps `VERIFIED_LIVE` on
 (the new base of `LiveCanaryDenied`, `ProductionBudgetExceeded`, `SpendAuthorizationDenied`).
 
 ### 2.5 The model-role runtime (`core/entitlements/entitlement_core/runtime.py`)
-`LiveRoleFence` mirrors the gateway. A verified chat/embedding model gets a `MODEL_ROLE`
-authorization sized by the `TokenCostEngine` estimate and no permit; an unverified one gets the
-permit (plus the breaker hold when the call is priced); a permit-fenced call that settles at a
-`VERIFIED_PROVIDER` or `TOKENS_LIST` figure stamps `VERIFIED_LIVE` via the new
-`record_role_canary_outcome` — a role call closes its loop inside one request, and that is the
-whole loop. `refine_prompt` and `CreativeDirectorService._model_patch` degrade on
-`LiveSpendDenied`, so a tripped breaker degrades exactly like a missing permit (the 2026-08-30
-production 500 cannot come back through the new fence).
+`LiveRoleFence` mirrors the gateway. With the budget on, a serviceable chat/embedding model gets a
+`MODEL_ROLE` authorization sized by the `TokenCostEngine` estimate and no permit; a call the
+platform cannot price (no token rates) or a call with the budget off gets the permit (plus the
+breaker hold when the call is priced); any call that settles at a `VERIFIED_PROVIDER` or
+`TOKENS_LIST` figure stamps `VERIFIED_LIVE` via the new `record_role_canary_outcome` — a role
+call closes its loop inside one request, and that is the whole loop. `refine_prompt` and
+`CreativeDirectorService._model_patch` degrade on `LiveSpendDenied`, so a tripped breaker
+degrades exactly like a missing permit (the 2026-08-30 production 500 cannot come back through
+the new fence).
 
 ### 2.6 Operator surface
 `GET /internal/production-budget` (policy + today's windows), `GET /internal/spend-authorizations`
@@ -99,14 +107,14 @@ downgrade refuses over recorded authorizations); `REQUIRED_SCHEMA_REVISION` move
 Policy parsing and capping; the serviceability predicate; breaker atomicity across both rows,
 replay, settle-below-hold, exactly-at-ceiling; settle-at-quote, release, re-reserve and the
 UTC-day rollover (injected clock); audited idempotent reconciliation; and, on an offline live
-gateway with a PRO workspace: a verified model submits with no permit anywhere and settles at
-the provider figure; an unverified model waits on `LIVE_CANARY_DENIED`, runs under a permit,
-closes its loop, is stamped `VERIFIED_LIVE`, and the next job submits with the permit spent; no
-provider figure settles at the quote; a tripped breaker refuses creation with no job, no credit
-entry and the balance intact; a live job without a quote is refused; a local failure releases and
-the retry re-reserves; an ambiguous failure stays UNCERTAIN and the reconcile endpoint closes it;
-budget-off creates nothing; the director earns the automatic path and then consumes no permit;
-a tripped breaker refuses a director call as a `LiveSpendDenied`.
+gateway with a PRO workspace: a model nobody has canaried submits with no permit anywhere,
+settles at the provider figure and is stamped `VERIFIED_LIVE` by the closed loop; with the
+budget off the same model waits on `LIVE_CANARY_DENIED` until a permit exists; no provider
+figure settles at the quote; a tripped breaker refuses creation with no job, no credit entry and
+the balance intact; a live job without a quote is refused; a local failure releases and the retry
+re-reserves; an ambiguous failure stays UNCERTAIN and the reconcile endpoint closes it; budget-off
+creates nothing; the director runs on the budget with no permit and records the verdict; with the
+budget off it needs a permit; a tripped breaker refuses a director call as a `LiveSpendDenied`.
 
 ---
 
@@ -114,13 +122,14 @@ a tripped breaker refuses a director call as a `LiveSpendDenied`.
 
 1. **Background model calls are paid by the plan's quota** — not credits, not the generation
    price. Reasoning and the one-place hook for changing it: `OPEN_ISSUES.md` §1.18.
-2. **Verification is mechanical and automatic.** A permit-fenced call that closes its loop
-   stamps `VERIFIED_LIVE` itself; the operator's explicit act is issuing the permit. The
-   doctrine in `live_canary.py` ("earned by the whole loop and by nothing else") is unchanged;
-   what changed is that the gateway and the role runtime now apply it, not only the script.
-3. **Off by default.** Deploying this changes nothing until a ceiling is set. A wrong-by-default
-   budget is exactly the hole the feature closes; a zero default that silently halts production
-   after a deploy would be the opposite failure. Neither; the operator opts in.
+2. **Credits are the user's gate; the verdict gates nothing** (operator, later the same day).
+   Any live call that closes its loop stamps `VERIFIED_LIVE` as evidence for lifecycle and
+   routing; the doctrine in `live_canary.py` ("earned by the whole loop and by nothing else") is
+   unchanged, and the gateway and the role runtime now apply it, not only the script. What was
+   reversed is the earlier reading that a model must be verified before paying users may use it.
+3. **Off by default in code, on in production.** With no ceiling the code keeps the old permit
+   rule, so a deploy without env lines changes nothing; production was switched on in this
+   session (§7) because the old rule is the outage.
 4. **Settle at the quote when the provider is silent.** Conservative for the platform (the
    quote is list plus margin), and the only way the breaker's reservations ever drain without
    an operator typing figures in.
@@ -129,11 +138,18 @@ a tripped breaker refuses a director call as a `LiveSpendDenied`.
 
 ## 4. Owed to the operator / unresolved
 
-1. **Merge [PR #39](https://github.com/Ethanwrite/bestshiny/pull/39), set the ceilings and deploy** (`DEPLOYMENT.md` §6). Until then nothing here is live.
-2. Still from the previous handover: the evidence loop (`router_observations` < 20), lifecycle
-   promotion (now: issue one permit per launch model, let the first user call close the loop),
-   the video-generation option choice and the credit-reconciliation decision from 2026-08-30-B §4,
-   and the shared checkout's local `codex/xunhupay-production` branch (another session's).
+1. **Three models cannot be switched on by a switch:** `flow-narwhal-image-internal` and
+   `flow-veo-3.1-internal` have no `FLOW_API_KEY` and no verified price; `wan-3.0-official` is
+   disabled with no verified price. Each needs a credential and/or a sourced price row first.
+2. **What the open gate runs into next** (OPEN_ISSUES §1.18, bottom): Ark/DashScope return hosts
+   unlisted (§2.33 — the first Seedance generation will name the host in its refusal; add it, do
+   not guess), the RunAPI edge gate refusing the low-cost refiner, and `openai/gpt-image-2`
+   blocked by the account.
+3. Still from the previous handover: the evidence loop (`router_observations` < 20), lifecycle
+   promotion (the closed loops now stamp `VERIFIED_LIVE` on their own; `LIVE` remains the admin's
+   transition), the video-generation option choice and the credit-reconciliation decision from
+   2026-08-30-B §4, and the shared checkout's local `codex/xunhupay-production` branch (another
+   session's).
 3. **Residuals, deliberate and documented (§1.18):** the permit still holds its whole budget for a
    media call; negative canary verdicts are still only the script's; an UNCERTAIN authorization
    stops burdening the *next* day's window on its own but waits for a finding itself; the

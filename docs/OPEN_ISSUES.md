@@ -178,12 +178,13 @@ ROUTER_ADMISSION_POLICY=strict
 and recreate the api and worker containers. Only you can say when "mature" is; nothing in
 the code will flip it for you.
 
-### 1.18 The automatic production budget is built and OFF; you set the ceiling
+### 1.18 The automatic production budget: credits are the user's gate, the breaker is the platform's
 
-Added 2026-09-02. The hand-minted `LiveCanaryPermit` is now the fence for a model's **first**
-live call only. Once a permit-fenced call closes its loop (`live_canary_status = VERIFIED_LIVE`
-— a completed generation with its artifact in storage and its credits settled, or a chat/
-embedding call settled at a checkable figure), ordinary traffic on that model runs on:
+Added 2026-09-02; the rule was changed the same day on your instruction — a user who bought
+credits is settled in credits, and no operator permit stands between them and an enabled model.
+In live mode every **serviceable** model — enabled, `live_enabled`, lifecycle not
+DISABLED/BLOCKED, and priced (the quote path already refuses an unpriced model) — runs a user's
+request on:
 
 1. the existing credit reservation (`WorkspaceCreditService.reserve_generation`, unchanged), and
 2. **one single-use spend authorization** created in the same transaction, bound to
@@ -192,8 +193,22 @@ embedding call settled at a checkable figure), ordinary traffic on that model ru
 3. **a daily USD breaker** above every authorization — one platform row and one row per provider
    in `production_budget_ledgers`, reserved by conditional update before any money moves.
 
-Nothing of this is live until you set a ceiling. With the default the code behaves exactly as
-before this change: every live call needs a permit. To turn it on, on the host:
+No `LiveCanaryPermit` is consulted for these calls. The permit is the fence only where the budget
+does not reach: with the budget **disabled** (`PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=0`, the code
+default) every live call still needs one — which is exactly what kept production behind expired
+permits until 2026-09-02 (in 14 days: 16 director turns, 44 prompt-refinement calls and 10
+generations refused with `LiveCanaryDenied`, every refinement degrading to the user's own text) —
+and a role call the platform cannot price (no token rates) can only run under one.
+`live_canary_status` is evidence, not permission: a loop that closes under either fence stamps
+`VERIFIED_LIVE` for lifecycle promotion and routing to read, and it gates nothing.
+
+Which models that opens today (production catalogue, 2026-09-02): all 21 enabled + live-enabled
+models — every chat, embedding, image and video model except the three that cannot be quoted or
+reached (`flow-narwhal-image-internal` and `flow-veo-3.1-internal`: no `FLOW_API_KEY`, unverified
+price; `wan-3.0-official`: disabled, unverified price). Enabling those three is a pricing and
+credential job, not a switch.
+
+To turn the budget on, on the host:
 
 ```
 PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=<usd>           # e.g. 50
@@ -222,9 +237,16 @@ at the counted tokens. If you would rather charge credits, the hook is one place
 **Residuals, deliberate.** An operator permit still holds its whole remaining budget for a media
 call (the 2.43 residual is unchanged; the quote bounds the authorization, not the permit). A
 negative canary verdict (`LIVE_BLOCKED_EXTERNAL`, `CONTRACT_INVALID`) is still written only by
-`scripts/live_canary.py`; the gateway writes the positive one. An UNCERTAIN authorization keeps its
-hold on the day it was taken and stops burdening the next day's window on its own; the authorization
-itself waits for your finding.
+`scripts/live_canary.py`; the gateway and the role runtime write the positive one. An UNCERTAIN
+authorization keeps its hold on the day it was taken and stops burdening the next day's window on
+its own; the authorization itself waits for your finding.
+
+**What the open gate will run into next** (all visible in the same 14 days of production data):
+`PROVIDER_MEDIA_SECURITY_ERROR` ×3 — Ark/DashScope return hosts are still unlisted (§2.33), so a
+Seedance generation completes and bills at the provider and then fails at download, and the
+refusal names the host it saw; `RUNAPI_EDGE_CALL_DENIED` ×5 — the low-cost refiner's RunAPI edge
+path is refused by its own gate, so refinement falls to the OpenRouter fallback model;
+`openai/gpt-image-2` is `LIVE_BLOCKED_EXTERNAL` — the account, not the code.
 
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 

@@ -1367,14 +1367,16 @@ Wan 2.7 T2V, I2V and R2V have each completed a real generation, and one
 
 ### The automatic production budget (2026-09-02)
 
-*Supersedes "every live call needs a permit". The permit is now the fence for a model's first live
-call; this is the fence for every call after it.*
+*Supersedes "every live call needs a permit". A paying user's credits are the user-side gate; this
+is the platform-side one, and it is automatic. The `LiveCanaryPermit` remains only where the budget
+does not reach.*
 
-A hand-minted permit per model per day is the right amount of ceremony for the first real call on a
-model and the wrong amount for the thousandth, and an unquoted media call holding a permit's whole
-remaining budget meant the director's conversation and a user's generation were competing for the
-same operator-minted number. The second fence is automatic and has three parts, all in
-`entitlement_core.production_budget`:
+A hand-minted permit per model was the wrong fence for paying traffic: with no chat or image model
+ever canaried, every director turn, every prompt refinement and every generation on production
+was refused behind expired permits (2026-09-02 data: 16 + 44 + 10 refusals in 14 days), while the
+users' credits sat unused. The rule is now: credits settle the user; the platform bounds its own
+exposure with the three parts below, all in `entitlement_core.production_budget`; the permit is
+consulted only when the budget is disabled or a call cannot be priced.
 
 1. **The authorization.** `GenerationGateway._create_once` creates one `GenerationSpendAuthorization`
    in the same transaction as the workspace credit reservation: bound to workspace + job + provider +
@@ -1394,16 +1396,19 @@ same operator-minted number. The second fence is automatic and has three parts, 
    `PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY` (a provider ceiling never exceeds the platform's; a
    provider without one shares it). A platform ceiling of 0 — the default — turns the whole thing off:
    no rows, no authorizations, the permit rule exactly as it was.
-3. **The verdict.** `production_serviceable()` (`model_registry_core.live_canary`) is the one
-   predicate: `enabled`, `live_enabled`, lifecycle not DISABLED/BLOCKED, and
-   `live_canary_status = VERIFIED_LIVE`. At the paid boundary the gateway runs the authorization
-   alone for a serviceable model and adds the permit otherwise (`LiveGenerationFence`; the
-   authorization records which, as `fence = PRODUCTION | CANARY`). A permit-fenced generation that
-   closes its loop — reached the provider, COMPLETED, artifact registered and readable, credits
-   settled for what was held, the same `CanaryLoop.verdict()` the script applies — stamps
-   `VERIFIED_LIVE` (`LIVE_CANARY_VERDICT_RECORDED`); a permit-fenced role call that settles at a
-   `VERIFIED_PROVIDER` or `TOKENS_LIST` figure does the same (`record_role_canary_outcome`). A
-   capability-contract change still resets the status, which pulls the model back behind a permit.
+3. **The switch, not the verdict.** `production_serviceable()` (`model_registry_core.live_canary`)
+   is the one predicate: `enabled`, `live_enabled`, lifecycle not DISABLED/BLOCKED — the model's
+   own switches, plus the price the quote path already demands. `live_canary_status` is
+   deliberately not a condition. At the paid boundary the gateway runs the authorization alone
+   for a serviceable model and adds the permit only where the budget does not reach
+   (`LiveGenerationFence`; the authorization records which, as `fence = PRODUCTION | CANARY`). A
+   live generation that closes its loop under either fence — reached the provider, COMPLETED,
+   artifact registered and readable, credits settled for what was held, the same
+   `CanaryLoop.verdict()` the script applies — stamps `VERIFIED_LIVE`
+   (`LIVE_CANARY_VERDICT_RECORDED`) as evidence for lifecycle promotion and routing; a role call
+   that settles at a `VERIFIED_PROVIDER` or `TOKENS_LIST` figure does the same
+   (`record_role_canary_outcome`). The verdict is read by the admin surface and the router; it
+   never gates a paying user's request.
 
 Settlement takes the provider's figure when it reports one (`VERIFIED_PROVIDER`), the counted tokens
 at list (`TOKENS_LIST`), or the quote itself (`ESTIMATED_QUOTE`) — most video providers report no

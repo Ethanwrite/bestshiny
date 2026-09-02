@@ -375,13 +375,14 @@ class GenerationGateway:
         """Take every hold this live generation needs, then mark them UNCERTAIN.
 
         The job's spend authorization (created with its credit reservation)
-        is the automatic fence; it is enough on its own when the model has
-        earned ``VERIFIED_LIVE`` and the budget is enabled. Otherwise the
-        operator's ``LiveCanaryPermit`` is required as well, holding its whole
-        remaining budget for the one call exactly as before — the quote bound
-        on the authorization does not loosen the permit. Every hold is taken
-        before any of them is marked UNCERTAIN, so a refused permit or a
-        tripped breaker leaves nothing held.
+        is the automatic fence; it is enough on its own for every serviceable
+        model — enabled, live-enabled, not blocked — while the budget is
+        enabled. The operator's ``LiveCanaryPermit`` is required only where the
+        budget does not reach (budget disabled, or no authorization was
+        created for the job), holding its whole remaining budget for the one
+        call exactly as before. Every hold is taken before any of them is
+        marked UNCERTAIN, so a refused permit or a tripped breaker leaves
+        nothing held.
         """
 
         if self.provider_mode is not ProviderMode.LIVE:
@@ -407,7 +408,6 @@ class GenerationGateway:
                 enabled=state.enabled,
                 live_enabled=state.live_enabled,
                 lifecycle_status=state.lifecycle_status,
-                live_canary_status=state.live_canary_status,
             )
         canary: CanaryReservation | None = None
         if not serviceable:
@@ -601,13 +601,15 @@ class GenerationGateway:
         model: str,
         provider_job_id: str,
     ) -> None:
-        """A permit-fenced generation that closed its loop earns the model VERIFIED_LIVE.
+        """A live generation that closed its loop earns the model VERIFIED_LIVE.
 
         The verdict rule lives in `model_registry_core.live_canary` and is not
         re-decided here: every link — reached the provider, COMPLETED, artifact
         registered and readable, credits settled for exactly what was held —
-        or nothing is written. A generation fenced by the automatic budget
-        alone was not a canary and records nothing.
+        or nothing is written. Both fences count: a permit-fenced canary and a
+        user's generation on the automatic budget are the same evidence about
+        the model. The verdict is evidence for lifecycle and routing, never a
+        gate on paying traffic.
         """
 
         if self.provider_mode is not ProviderMode.LIVE:
@@ -615,7 +617,12 @@ class GenerationGateway:
         key = self._live_canary_operation_key(job_id)
         with self.database.session() as session:
             usage = session.scalar(select(LiveCanaryUsage).where(LiveCanaryUsage.idempotency_key == key))
-            if usage is None:
+            authorization = (
+                self.production_budget.find_operation(key, session=session)
+                if self.production_budget is not None
+                else None
+            )
+            if usage is None and authorization is None:
                 return
             job = session.get(GenerationJob, job_id)
             if job is None:

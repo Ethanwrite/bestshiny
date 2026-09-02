@@ -56,7 +56,7 @@ payment operations, Provider accuracy, or public production reachability.
 - Model live kill switch：Gateway 在排队前与付费调用边界都核对持久模型身份和 `enabled/live_enabled`，最终检查与 Job CAS 同事务；重启不会覆盖管理员禁用状态，请求 metadata 也无法解锁。
 - Asset Registry：逻辑资产与不可变版本覆盖人物、场景、商品、道具等素材；只有显式提升才会改变 canonical 版本，数据库触发器防止跨资产链接、未记录切换和历史改写。
 - Project Style Lock：用户先把 `STYLE` 版本显式提升为 Canonical，再通过真实账号确认一次性锁定到项目。锁定版本拥有不可变的 64 维本地 Style Embedding 与 hash；后续素材库 Canonical 变更不会改写项目锁。所有 Autopilot 镜头自动继承锁定参考图、Prompt 约束及 Adapter style payload，生成结果逐帧计算相似度、低分比例和漂移斜率；缺证据、低相似度或持续漂移不能通过 Candidate Commit 门禁。
-- ModelRoleRuntime：业务模型调用统一按 role 解析 chat/embedding/fact-locked refinement，每次成功或失败都写 `ModelExecutionRecord`；真实模式下，模型首次上线仍须匹配未过期的 `LiveCanaryPermit`，一次结清后即 `VERIFIED_LIVE`，之后每次调用改由按 token 报价的单次消费授权在平台/provider 日预算（熔断）下放行（2026-09-02，`PRODUCTION_BUDGET_*`，默认关闭）。
+- ModelRoleRuntime：业务模型调用统一按 role 解析 chat/embedding/fact-locked refinement，每次成功或失败都写 `ModelExecutionRecord`；真实模式下，只要模型已启用且 `live_enabled`，每次调用由按 token 报价的单次消费授权在平台/provider 日预算（熔断）下放行，不再查 `LiveCanaryPermit`；Permit 只在预算关闭（`PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=0`，代码默认）或调用无法定价时才是围栏（2026-09-02）。
 - Memory/Context：L0/L1/L2 记忆、metadata-first 检索、文本/图片/视频预算装配。Narrative Memory 的 Voyage 路径已收口到 `ModelRoleRuntime → MULTIMODAL_EMBEDDING`，保存维度/输入/向量哈希而不保存审计向量全文；不可用时降级到 SQL 结构化时间线并记录 `MEMORY_VECTOR_DEGRADED`。
 - Evaluation/Retry：结构化质量维度、关键失败、`ACCEPT / RETRY_SAME_MODEL / RETRY_REWRITE_PROMPT / SWITCH_MODEL / REJECT` 与有界重试计划。
 - Metrics/Benchmark/Trace：生产指标、基准测试结果与镜头级生产 trace；自适应路由默认关闭。
@@ -171,7 +171,7 @@ python3 -m http.server 18081 --directory apps/web
 | `GENERATION_POLL_INTERVAL_SECONDS` | `2` 秒，远程生成任务的轮询间隔 | 过低会对 provider 造成忙轮询；过高会延迟完成检测 |
 | `GENERATION_CLAIM_LEASE_SECONDS` | `300` 秒，生成提交/轮询/完成落库的数据库租约 | 必须大于单次轮询与媒体下载超时；不得用于绕过未知付费请求保护 |
 | `FLOW_API_BASE/FLOW_API_KEY/FLOW_PROJECT_ID` | Google Flow 运行配置 | 仅使用用户合法账号、项目与主动授权 |
-| `PROVIDER_MODE` / `ALLOW_LIVE_PROVIDER_CALLS` / `LIVE_PROVIDER_CONFIRMATION` | 默认 Mock/关闭 | 即使三重门开启，真实边界仍必须过围栏：未验证模型要持久 `LiveCanaryPermit`，已验证（`VERIFIED_LIVE`）模型要绑定 workspace+job+provider+model、上限取服务端报价的单次消费授权 |
+| `PROVIDER_MODE` / `ALLOW_LIVE_PROVIDER_CALLS` / `LIVE_PROVIDER_CONFIRMATION` | 默认 Mock/关闭 | 即使三重门开启，真实边界仍必须过围栏：预算开启时，每个已启用的模型走绑定 workspace+job+provider+model、上限取服务端报价的单次消费授权；预算关闭时退回持久 `LiveCanaryPermit` |
 | `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY` / `PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY` | `0`（关闭）/ 空 | 自动生产预算的熔断：全平台与各 provider 每 UTC 日美元上限，按条件更新预留，触顶时创建任务答 503、已建任务 `RETRY_WAIT`；为 0 时行为与只认 Permit 完全一致 |
 | `ALCHEMY_WEBHOOK_SIGNING_KEY` / `ALCHEMY_WEBHOOK_ID` | 校验 Alchemy Delivery 的签名与可选 Webhook 身份 | 只放 Secret Manager；签名必须覆盖未经 JSON 重排的原始 body |
 | `ALCHEMY_NETWORK` / `ALCHEMY_TREASURY_ADDRESS` | `BASE_MAINNET` 与平台 USDC 收款地址 | 地址需与 Alchemy Address Activity 跟踪目标和前端付款目标一致 |
@@ -303,7 +303,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 - 用户上传仅允许验证过的 PNG/JPEG/WebP/MP4/MOV/WebM；网关在 multipart 解析前和流式接收时限制大小，下载设置 `nosniff` 与安全 Content-Disposition。供应商返回的媒体 URL 只允许 HTTPS/已配置主机，逐跳校验 DNS/重定向并拒绝私网、loopback 与云元数据地址。
 - Voyage 不再由业务路径直连；Narrative Memory 通过 `ModelRoleRuntime` 请求 embedding。`voyage-multimodal-3.5` 的结果在类型和持久层都只能是 `ADVISORY`，用于跨模态检索、相似度辅助或证据帧排序；不得输出 identity verdict、状态事实、delta 批准或 commit 授权。不可用时记录 `MEMORY_VECTOR_DEGRADED` 并继续使用结构化 SQL 时间线。
 - 角色状态可视证据只有在同项目、同候选输出素材上由成功的 `VLM_REVIEWER` 执行生成，并显式声明 `CHARACTER_STATE_FACT_OBSERVATION` provenance 时，才可作为 `FACT_OBSERVATION`。Voyage、缺执行记录、绑定了其他素材或低置信证据均 fail closed 到人工复核；高置信不匹配则拒绝。
-- 真实模式下，三重 live 环境门之外，模型首次上线要求 Provider+模型精确匹配的持久 `LiveCanaryPermit`；到期、请求数或成本触顶都是硬停。跨过远程边界后未返回可信账单的用量保持 `UNCERTAIN`。一次 Permit 围栏下的调用闭环（生成：产物入库且积分结清；对话/embedding：按可查证价格结清）即把模型标为 `VERIFIED_LIVE`；此后普通用户请求不再消耗 Permit，而是在积分预占的同一事务里创建绑定 workspace+job+provider+model、上限取服务端报价的单次消费授权，并先按条件更新预留全平台与该 provider 的当日美元账本（`PRODUCTION_BUDGET_*`，默认关闭）。导演等后台模型调用由套餐配额承担，不扣积分、不并入生成价，但同样占用这条熔断（`docs/OPEN_ISSUES.md` §1.18 记录了这个决定）。
+- 真实模式下，用户侧唯一的门是积分：已启用、`live_enabled`、有核实价格的模型，用户请求在积分预占的同一事务里创建绑定 workspace+job+provider+model、上限取服务端报价的单次消费授权，并先按条件更新预留全平台与该 provider 的当日美元账本（`PRODUCTION_BUDGET_*`），**不再查 `LiveCanaryPermit`**。Permit 只在预算关闭（代码默认 0）或调用无法定价时才是围栏——正是"每次调用都要 Permit"的旧规则在 2026-09-02 之前把生产环境全部挡在过期 Permit 后面。调用闭环（生成：产物入库且积分结清；对话/embedding：按可查证价格结清）会把模型标为 `VERIFIED_LIVE`，这只是给生命周期和路由看的证据，不是放行条件。跨过远程边界后未返回可信账单的用量保持 `UNCERTAIN`。导演等后台模型调用由套餐配额承担，不扣积分、不并入生成价，但同样占用这条熔断（`docs/OPEN_ISSUES.md` §1.18 记录了这个决定）。
 - 专用视觉评审器缺失或证据不足时，不会伪装成高置信通过；需要人工确认或返回修复/拒绝决策。
 - 当前 Style Embedding 是可审计的本地确定性 64 维颜色/明度/饱和度/边缘描述符，适合离线约束和回归，不等于已校准的生产视觉模型。候选视频用本地 FFmpeg 抽帧后计算相似度；生产上线前仍需以批准数据校准阈值或接入版本化的学习型风格 encoder。
 - Gateway 对状态未知的付费提交不盲目重发；自动重试使用新幂等键并受次数上限控制。

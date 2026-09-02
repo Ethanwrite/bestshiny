@@ -623,13 +623,14 @@ class ModelRoleRuntime:
     ) -> LiveRoleFence | None:
         """Choose the fence for one live role call.
 
-        A model that has earned ``VERIFIED_LIVE`` runs on its own quote-bound
-        authorization under the platform breaker — no operator permit. One
-        that has not still needs the permit; when the budget is enabled and
-        the call is priced, the breaker is reserved for it as well, so the
-        platform ceiling bounds canary spend too. A call the platform cannot
-        price (no token rates) can only run under a permit, whose whole
-        remaining budget it holds — the conservative shape it always had.
+        A serviceable model — enabled, live-enabled, not blocked — runs on its
+        own token-priced authorization under the platform breaker, with no
+        operator permit. The permit is the fence only where the budget does
+        not reach: the budget disabled, or a call the platform cannot price
+        (no token rates), which holds the permit's whole remaining budget —
+        the conservative shape it always had. When both apply, the breaker is
+        reserved for the permit-fenced call as well, so the platform ceiling
+        bounds canary spend too.
         """
 
         if self.provider_mode is not ProviderMode.LIVE:
@@ -639,13 +640,11 @@ class ModelRoleRuntime:
         authorization: SpendAuthorizationView | None = None
         if budget is not None and budget.enabled and estimated_cost is not None:
             # Resolution in live mode already required `enabled` and
-            # `live_enabled`; the lifecycle and canary verdicts travel on the
-            # resolved model.
+            # `live_enabled`; the lifecycle travels on the resolved model.
             serviceable = production_serviceable(
                 enabled=True,
                 live_enabled=True,
                 lifecycle_status=selected.lifecycle_status,
-                live_canary_status=selected.live_canary_status,
             )
             try:
                 authorization = budget.authorize_operation(
@@ -735,8 +734,10 @@ class ModelRoleRuntime:
                 actual_cost_usd=actual,
                 evidence_reference=evidence,
             )
-            # The permit-fenced call closed its loop at a checkable figure:
-            # the model has earned the automatic path for the next call.
+        if actual is not None:
+            # A live call that closed its loop at a checkable figure is
+            # evidence about the model under either fence: lifecycle promotion
+            # and routing read it. It gates nothing.
             record_role_canary_outcome(
                 self.database,
                 provider=provider,

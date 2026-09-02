@@ -283,12 +283,12 @@ def test_budget_is_off_by_default_and_provider_ceilings_never_exceed_the_platfor
         ProductionBudgetPolicy.parse_provider_limits("=3")
 
 
-def test_production_serviceable_requires_every_switch_and_the_verdict() -> None:
-    base = dict(
-        enabled=True, live_enabled=True, lifecycle_status="CONFIGURED", live_canary_status=VERIFIED_LIVE
-    )
+def test_production_serviceable_is_the_model_switches_and_never_the_verdict() -> None:
+    base = dict(enabled=True, live_enabled=True, lifecycle_status="CONFIGURED")
+    # A model nobody has canaried yet is serviceable: the user's credits are
+    # the gate, and the verdict is evidence, not permission.
     assert production_serviceable(**base) is True
-    assert production_serviceable(**{**base, "live_canary_status": "NOT_RUN"}) is False
+    assert production_serviceable(**{**base, "lifecycle_status": "LIVE"}) is True
     assert production_serviceable(**{**base, "enabled": False}) is False
     assert production_serviceable(**{**base, "live_enabled": False}) is False
     assert production_serviceable(**{**base, "lifecycle_status": "BLOCKED"}) is False
@@ -501,43 +501,31 @@ async def test_verified_model_runs_on_the_budget_and_never_touches_a_permit(
 
 
 @pytest.mark.asyncio
-async def test_unverified_model_needs_a_permit_and_earns_the_automatic_path(
+async def test_uncanaried_model_runs_on_credits_and_the_loop_records_the_verdict(
     tmp_path, monkeypatch, stage_stub_output
 ) -> None:  # type: ignore[no-untyped-def]
+    """No permit anywhere, a model nobody has canaried: the user's generation runs.
+
+    The verdict is written by the closed loop as evidence for lifecycle and
+    routing; it was never what let the job through.
+    """
+
     live, project_id, _workspace_id = _live_container(tmp_path, platform_usd="1.00")
     calls = _stub_happy_provider(live, monkeypatch, stage_stub_output)
     assert _model_status(live) == "NOT_RUN"
 
-    job = _create(live, project_id, "budget-canary")
-    denied = await live.gateway.process(job.id)
-    assert denied.status == "RETRY_WAIT" and denied.error_code == "LIVE_CANARY_DENIED"
-    assert denied.retry_category == RetryCategory.RATE_LIMIT.value
-    assert calls["submit"] == 0
-    # The refused permit left the job's authorization waiting, not consumed.
-    assert _authorizations(live, generation_job_id=job.id)[0].status == "RESERVED"
-
-    permit = live.live_canary.create(
-        provider=PROVIDER,
-        model=MODEL,
-        max_requests=1,
-        max_cost_usd="0.10",
-        expires_at=datetime.now(UTC) + timedelta(minutes=10),
-        purpose="first live call on this model",
-    )
-    _due(live, job.id)
+    job = _create(live, project_id, "budget-uncanaried")
     submitted = await live.gateway.process(job.id)
     assert submitted.status == "SUBMITTED", (submitted.error_code, submitted.error_message)
-    usages = _canary_usages(live, job.id)
-    assert len(usages) == 1 and usages[0].status == "UNCERTAIN"
+    assert calls["submit"] == 1
+    assert _canary_usages(live, job.id) == []
     prepared = _authorizations(live, generation_job_id=job.id)[0]
-    assert prepared.status == "UNCERTAIN" and prepared.fence == FENCE_CANARY
+    assert prepared.status == "UNCERTAIN" and prepared.fence == FENCE_PRODUCTION
 
     _due(live, job.id)
     completed = await live.gateway.process(job.id)
     assert completed.status == "COMPLETED"
-    assert _canary_usages(live, job.id)[0].status == "SETTLED"
     assert _authorizations(live, generation_job_id=job.id)[0].status == "SETTLED"
-    # The loop closed on every link, so the model has earned the automatic path.
     assert _model_status(live) == VERIFIED_LIVE
     with live.database.session() as session:
         events = {
@@ -546,21 +534,36 @@ async def test_unverified_model_needs_a_permit_and_earns_the_automatic_path(
                 select(GenerationEvent).where(GenerationEvent.generation_job_id == job.id)
             )
         }
+        assert session.scalar(select(LiveCanaryPermit)) is None
     assert "LIVE_CANARY_VERDICT_RECORDED" in events
 
-    # The one-request permit is spent. The next user request does not need it.
-    second = _create(live, project_id, "budget-after-verification")
-    submitted_second = await live.gateway.process(second.id)
-    assert submitted_second.status == "SUBMITTED", (
-        submitted_second.error_code,
-        submitted_second.error_message,
+
+@pytest.mark.asyncio
+async def test_budget_off_still_needs_the_permit(tmp_path, monkeypatch, stage_stub_output) -> None:  # type: ignore[no-untyped-def]
+    """With no ceiling set the old rule stands: every live call waits for a permit."""
+
+    live, project_id, _workspace_id = _live_container(tmp_path, platform_usd="0")
+    calls = _stub_happy_provider(live, monkeypatch, stage_stub_output)
+    job = _create(live, project_id, "budget-off-permit")
+    denied = await live.gateway.process(job.id)
+    assert denied.status == "RETRY_WAIT" and denied.error_code == "LIVE_CANARY_DENIED"
+    assert denied.retry_category == RetryCategory.RATE_LIMIT.value
+    assert calls["submit"] == 0
+    assert _authorizations(live, generation_job_id=job.id) == []
+
+    live.live_canary.create(
+        provider=PROVIDER,
+        model=MODEL,
+        max_requests=1,
+        max_cost_usd="0.10",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        purpose="the permit is the fence while the budget is off",
     )
-    assert calls["submit"] == 2
-    assert _canary_usages(live, second.id) == []
-    assert _authorizations(live, generation_job_id=second.id)[0].fence == FENCE_PRODUCTION
-    with live.database.session() as session:
-        stored_permit = session.get(LiveCanaryPermit, permit.id)
-        assert stored_permit is not None and stored_permit.used_requests == 1
+    _due(live, job.id)
+    submitted = await live.gateway.process(job.id)
+    assert submitted.status == "SUBMITTED", (submitted.error_code, submitted.error_message)
+    usages = _canary_usages(live, job.id)
+    assert len(usages) == 1 and usages[0].status == "UNCERTAIN"
 
 
 @pytest.mark.asyncio
@@ -793,60 +796,62 @@ def _live_director_runtime(container, project, policy: ProductionBudgetPolicy): 
 
 
 @pytest.mark.asyncio
-async def test_director_call_earns_the_automatic_path_and_then_consumes_no_permit(container, project) -> None:  # type: ignore[no-untyped-def]
-    runtime, permits, capability, selected = _live_director_runtime(container, project, _policy("1.00"))
+async def test_director_call_runs_on_the_budget_with_no_permit_and_records_the_verdict(
+    container, project
+) -> None:  # type: ignore[no-untyped-def]
+    runtime, _permits, capability, selected = _live_director_runtime(container, project, _policy("1.00"))
     messages = [{"role": "user", "content": "一支30秒的城市天台悬疑广告"}]
 
-    # Unverified and unpermitted: refused before any transport; the breaker
-    # hold taken alongside the refused permit is handed straight back.
-    with pytest.raises(LiveCanaryDenied, match="no active live canary permit"):
-        await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
-    assert capability.call_count == 0
-    first_rows = _authorizations(container)
-    assert [row.status for row in first_rows] == ["RELEASED"]
-
-    permit = permits.create(
-        provider=selected.provider,
-        model=selected.provider_model_id,
-        max_requests=1,
-        max_cost_usd="0.10",
-        expires_at=datetime.now(UTC) + timedelta(minutes=10),
-        purpose="first live director turn",
-    )
     execution = await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
     assert capability.call_count == 1
     with container.database.session() as session:
-        usage = session.scalars(select(LiveCanaryUsage)).one()
-        assert usage.status == "SETTLED" and usage.actual_cost_usd == Decimal("0.000354")
+        assert session.scalar(select(LiveCanaryPermit)) is None
+        assert session.scalar(select(LiveCanaryUsage)) is None
         definition = session.get(ModelDefinition, selected.definition_id)
         assert definition is not None and definition.live_canary_status == VERIFIED_LIVE
         assert "role call settled USD 0.000354" in definition.live_canary_detail
         record = session.get(ModelExecutionRecord, execution.execution_record_id)
         assert record is not None
-        assert record.metadata_json["live_fence"] == FENCE_CANARY
+        assert record.metadata_json["live_fence"] == FENCE_PRODUCTION
         assert record.metadata_json["spend_authorization_id"] is not None
-    canary_rows = [row for row in _authorizations(container) if row.fence == FENCE_CANARY]
-    assert len(canary_rows) == 1
-    assert canary_rows[0].status == "SETTLED"
-    assert canary_rows[0].actual_cost_usd == Decimal("0.000354")
-    assert canary_rows[0].settlement_source == SOURCE_TOKENS_LIST
-    assert canary_rows[0].model_role == ModelRole.DIRECTOR.value
-
-    # The one-request permit is spent; the verified model no longer needs it.
-    execution = await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
-    assert capability.call_count == 2
-    with container.database.session() as session:
-        stored_permit = session.get(LiveCanaryPermit, permit.id)
-        assert stored_permit is not None and stored_permit.used_requests == 1
-        assert len(list(session.scalars(select(LiveCanaryUsage)))) == 1
-        record = session.get(ModelExecutionRecord, execution.execution_record_id)
-        assert record is not None and record.metadata_json["live_fence"] == FENCE_PRODUCTION
         assert record.cost_source == "TOKENS_LIST"
-    production_rows = [row for row in _authorizations(container) if row.fence == FENCE_PRODUCTION]
-    assert len(production_rows) == 1 and production_rows[0].status == "SETTLED"
+    rows = _authorizations(container)
+    assert len(rows) == 1
+    assert rows[0].fence == FENCE_PRODUCTION and rows[0].status == "SETTLED"
+    assert rows[0].actual_cost_usd == Decimal("0.000354")
+    assert rows[0].settlement_source == SOURCE_TOKENS_LIST
+    assert rows[0].model_role == ModelRole.DIRECTOR.value
+
+    await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
+    assert capability.call_count == 2
     platform = _ledger(container, PLATFORM_SCOPE, PLATFORM_SCOPE_KEY)
     assert platform.reserved_usd == Decimal("0.000000")
     assert platform.actual_usd == Decimal("0.000708")
+
+
+@pytest.mark.asyncio
+async def test_director_call_with_the_budget_off_still_needs_a_permit(container, project) -> None:  # type: ignore[no-untyped-def]
+    runtime, permits, capability, selected = _live_director_runtime(container, project, _policy("0"))
+    messages = [{"role": "user", "content": "hello"}]
+    with pytest.raises(LiveCanaryDenied, match="no active live canary permit"):
+        await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
+    assert capability.call_count == 0
+    assert _authorizations(container) == []
+    permits.create(
+        provider=selected.provider,
+        model=selected.provider_model_id,
+        max_requests=1,
+        max_cost_usd="0.10",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        purpose="the permit is the fence while the budget is off",
+    )
+    execution = await runtime.execute_chat(project.id, ModelRole.DIRECTOR, messages=messages)
+    assert capability.call_count == 1
+    with container.database.session() as session:
+        usage = session.scalars(select(LiveCanaryUsage)).one()
+        assert usage.status == "SETTLED"
+        record = session.get(ModelExecutionRecord, execution.execution_record_id)
+        assert record is not None and record.metadata_json["live_fence"] == FENCE_CANARY
 
 
 @pytest.mark.asyncio

@@ -176,7 +176,15 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `34c9323` (`main`, [#39](https://github.com/Ethanwrite/bestshiny/pull/39)
+- **Current release.** `cb316c2` (`main`, [#40](https://github.com/Ethanwrite/bestshiny/pull/40)
+  OpenRouter images send only the parameters the model declares), deployed from the session on
+  2026-09-02 ≈20:55Z with the §4 procedure plus the pre-extraction backups and
+  `DEPLOYED_SHA.prev = 34c9323`; no env change, no migration. Verified: api healthy, `/health`
+  200, all three running image IDs equal the built ones, budget policy still enabled, zero
+  tracebacks. The failed gpt-image-2 job `da3b1a8e` from before it was refunded (1 credit) and
+  its spend authorization released, both audited.
+
+- **Previous release.** `34c9323` (`main`, [#39](https://github.com/Ethanwrite/bestshiny/pull/39)
   the automatic production budget: credits are the user's gate, no canary permit on paying
   traffic), deployed by the operator on 2026-09-02 ≈19:45Z with the §4 procedure plus a
   pre-extraction backup of `.env` and the compose file, `DEPLOYED_SHA.prev = 0f90f0b`, Alembic

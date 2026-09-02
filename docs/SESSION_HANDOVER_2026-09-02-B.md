@@ -17,7 +17,7 @@ before; its §4 items are addressed or restated in §4 below).
 
 | | |
 | --- | --- |
-| Branch | `claude/canary-permit-auto-budget-155706` on `8b4b9eb` (`main`); at the time of writing the work is **staged, not committed** — the commit and the PR are the operator's call |
+| Branch / PR | `claude/canary-permit-auto-budget-155706` on `8b4b9eb` (`main`), commit `c7b1d71`, pushed; **[PR #39](https://github.com/Ethanwrite/bestshiny/pull/39) open against `main`** — not merged, not deployed; the merge is the operator's call |
 | Production | `153.75.95.10`, `DEPLOYED_SHA = 0f90f0b`, `.prev = 9109186`, alembic `0068_xunhupay`, `PROVIDER_MODE=live`, `ROUTER_ADMISSION_POLICY` unset (`cold_start`); router probe still answers `video-router-v3 / CHAMPION_TABLE / seedance` — re-verified read-only this session (§7.1 of the previous handover, done) |
 | Migration head on the branch | `0069_production_budget` (dev/test/production still at `0068` until deploy) |
 | Gates on the branch | see §5 |
@@ -129,7 +129,7 @@ a tripped breaker refuses a director call as a `LiveSpendDenied`.
 
 ## 4. Owed to the operator / unresolved
 
-1. **Set the ceilings and deploy** (`DEPLOYMENT.md` §6). Until then nothing here is live.
+1. **Merge [PR #39](https://github.com/Ethanwrite/bestshiny/pull/39), set the ceilings and deploy** (`DEPLOYMENT.md` §6). Until then nothing here is live.
 2. Still from the previous handover: the evidence loop (`router_observations` < 20), lifecycle
    promotion (now: issue one permit per launch model, let the first user call close the loop),
    the video-generation option choice and the credit-reconciliation decision from 2026-08-30-B §4,

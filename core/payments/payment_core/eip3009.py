@@ -38,6 +38,7 @@ _NONCE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 _TRANSFER_AUTHORIZATION_FUNCTION = (
     "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)"
 )
+_BALANCE_OF_FUNCTION = "balanceOf(address)"
 _AUTHORIZATION_STATE_FUNCTION = "authorizationState(address,bytes32)"
 _ERC1271_FUNCTION = "isValidSignature(bytes32,bytes)"
 _ERC1271_MAGIC_VALUE = "0x1626ba7e"
@@ -205,6 +206,7 @@ class EIP3009RelayerService:
         package = self._packages.get(sku)
         if package is None:
             raise EIP3009Rejected("未知或不可用的支付套餐")
+        self._require_payer_usdc_balance(payer, package.raw_amount_microunits)
         now = utcnow()
         valid_after = max(0, int(now.timestamp()) - 30)
         valid_before = int((now + self.authorization_ttl).timestamp())
@@ -327,6 +329,10 @@ class EIP3009RelayerService:
                 digest = self._message_hash(signable).hex()
                 if digest != authorization.typed_data_hash:
                     raise EIP3009Conflict("支付授权快照已改变")
+                self._require_payer_usdc_balance(
+                    authorization.from_address,
+                    authorization.value_microunits,
+                )
                 self._verify_payer_signature(
                     authorization=authorization,
                     signable=signable,
@@ -894,6 +900,26 @@ class EIP3009RelayerService:
             )
         )
         return self._parse_quantity(result) != 0
+
+    def _require_payer_usdc_balance(self, payer: str, required_microunits: int) -> None:
+        selector = keccak(text=_BALANCE_OF_FUNCTION)[:4]
+        data = selector + encode(["address"], [to_checksum_address(payer)])
+        result = self._rpc(
+            "eth_call",
+            [{"to": self.usdc_contract, "data": "0x" + data.hex()}, "latest"],
+        )
+        balance = self._parse_quantity(result)
+        if balance < required_microunits:
+            current = self._format_usdc(balance)
+            required = self._format_usdc(required_microunits)
+            raise EIP3009Rejected(
+                f"Base USDC 余额不足：当前连接钱包有 {current} USDC，需要 {required} USDC"
+            )
+
+    @classmethod
+    def _format_usdc(cls, microunits: int) -> str:
+        whole, fraction = divmod(microunits, 10**cls.token_decimals)
+        return f"{whole}.{fraction:0{cls.token_decimals}d}".rstrip("0").rstrip(".")
 
     def _transfer_calldata(self, authorization: EIP3009Authorization, signature: str) -> str:
         raw = bytes.fromhex(signature[2:])

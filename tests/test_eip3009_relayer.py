@@ -33,6 +33,7 @@ class FakeBaseRPC:
         self.send_failures = 0
         self.contract_wallets: set[str] = set()
         self.invalid_contract_wallets: set[str] = set()
+        self.usdc_balances: dict[str, int] = {}
 
     def __call__(self, method: str, params: list[Any]) -> Any:
         if method == "eth_chainId":
@@ -60,6 +61,9 @@ class FakeBaseRPC:
                         )
                     ).hex()
                 )
+            if data.startswith("0x" + keccak(text="balanceOf(address)")[:4].hex()):
+                payer = "0x" + data[-40:]
+                return hex(self.usdc_balances.get(payer.lower(), 1_000_000_000))
             if data.startswith("0x" + keccak(text="isValidSignature(bytes32,bytes)")[:4].hex()):
                 wallet = str(params[0].get("to") or "").lower()
                 if wallet in self.invalid_contract_wallets:
@@ -277,6 +281,52 @@ def test_wrong_wallet_signature_is_rejected_before_any_relayer_transaction(tmp_p
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)).status == "PENDING"
         assert session.scalar(select(EIP3009Authorization)).signature_hash is None
+
+
+def test_insufficient_usdc_is_rejected_before_requesting_a_signature(tmp_path) -> None:
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("underfunded-payer")
+    fake.usdc_balances[payer.address.lower()] = 545_686
+
+    response = client.post(
+        "/v1/payments/relayed-checkout",
+        json={
+            "workspace_id": workspace_id,
+            "sku": "starter_20",
+            "from_address": payer.address,
+        },
+        headers=_csrf(client),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Base USDC 余额不足：当前连接钱包有 0.545686 USDC，需要 20 USDC"
+    )
+    with container.database.session() as session:
+        assert session.scalar(select(PaymentOrder)) is None
+        assert session.scalar(select(EIP3009Authorization)) is None
+
+
+def test_balance_is_checked_again_before_relayer_broadcast(tmp_path) -> None:
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer-spent-after-checkout")
+    checkout = _checkout(client, workspace_id, payer)
+    fake.usdc_balances[payer.address.lower()] = 0
+
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit",
+        json={"signature": _signature(payer, checkout["typed_data"])},
+        headers=_csrf(client),
+    )
+
+    assert response.status_code == 422
+    assert "当前连接钱包有 0 USDC，需要 20 USDC" in response.json()["detail"]
+    assert fake.sent_raw == []
+    with container.database.session() as session:
+        assert session.scalar(select(PaymentOrder)).status == "PENDING"
+        assert session.scalar(select(EIP3009Authorization)).status == "PENDING"
 
 
 def test_deployed_erc1271_smart_wallet_signature_is_relayed(tmp_path) -> None:

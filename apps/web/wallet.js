@@ -4,6 +4,7 @@ const API = window.AI_DIRECTOR_API
     : "/api");
 const CSRF_COOKIE_NAME = "ai_director_csrf";
 const DEFAULT_SKU = "creator_50";
+const WALLETCONNECT_PROJECT_KEY = "depay:wallets:wc2:projectId";
 
 const paymentState = {
   user: null,
@@ -134,6 +135,11 @@ function render() {
     ? "Base Mainnet"
     : "Base";
   const relayed = paymentState.config?.relayed_usdc_configured;
+  const qrConfigured = relayed && paymentState.config?.reown_configured;
+  element("walletProviderLabel").textContent = relayed
+    ? "WalletConnect · Base USDC"
+    : "DePay · Base USDC";
+  element("walletSettlement").textContent = relayed ? "BestShiny Relayer" : "DePay";
   element("walletCreditingStatus").textContent = relayed
     || paymentState.config?.depay_dynamic_configured
     ? "Ready"
@@ -144,13 +150,21 @@ function render() {
     : `Any package unlocks Pro permanently and adds its credits. No subscription, no auto-renewal.${relayed ? " No Base ETH is required." : ""}`;
   renderPlans();
   element("payUsdcBtn").textContent = plan
-    ? (isPro ? `Pay ${price}` : `Upgrade — ${price}`)
+    ? (qrConfigured
+      ? `Scan to pay ${price}`
+      : (isPro ? `Pay ${price}` : `Upgrade — ${price}`))
     : "Pay with USDC";
   element("payUsdcBtn").disabled = paymentState.busy
     || !paymentState.workspace
     || !(relayed || paymentState.config?.depay_dynamic_configured)
     || !plan;
-  if (plan && !paymentState.busy && !element("walletStatus").textContent) {
+  const browserPay = element("payBrowserWalletBtn");
+  browserPay.hidden = !(qrConfigured && window.ethereum?.request);
+  browserPay.disabled = paymentState.busy;
+  if (plan
+    && !paymentState.busy
+    && !element("walletStatus").textContent
+    && !element("walletError").textContent) {
     setMessage(`${price} · ${credits} credits`);
   }
 }
@@ -294,10 +308,68 @@ async function createCheckout() {
   }
 }
 
-async function connectBaseWallet() {
+function clearWalletConnectQr() {
+  const host = element("walletConnectQr");
+  host.replaceChildren();
+  host.hidden = true;
+}
+
+async function connectBaseWalletWithQr() {
+  const projectId = String(paymentState.config?.reown_project_id || "").trim();
+  if (!projectId) {
+    throw new Error("QR wallet connection is not configured yet. Set REOWN_PROJECT_ID first.");
+  }
+  localStorage.setItem(WALLETCONNECT_PROJECT_KEY, projectId);
+  const [{ wallets }, { default: QRCodeStyling }] = await Promise.all([
+    import("@depay/web3-wallets"),
+    import("qr-code-styling"),
+  ]);
+  const wallet = new wallets.WalletConnectV2();
+  await wallet.connect({
+    connect: ({ uri }) => {
+      if (!uri) return;
+      const host = element("walletConnectQr");
+      host.replaceChildren();
+      host.hidden = false;
+      new QRCodeStyling({
+        width: 240,
+        height: 240,
+        type: "svg",
+        data: uri,
+        margin: 2,
+        dotsOptions: { color: "#171714", type: "rounded" },
+        backgroundOptions: { color: "#ffffff" },
+        cornersSquareOptions: { color: "#ee2f7b", type: "extra-rounded" },
+        cornersDotOptions: { color: "#171714", type: "dot" },
+      }).append(host);
+      setMessage("Scan this QR code with the wallet that will pay the Base USDC.");
+    },
+  });
+  clearWalletConnectQr();
+  const baseAccountId = (wallet.session?.namespaces?.eip155?.accounts || [])
+    .find((accountId) => String(accountId).toLowerCase().startsWith("eip155:8453:0x"));
+  const account = String(baseAccountId || "").split(":")[2]?.toLowerCase() || "";
+  if (!/^0x[0-9a-f]{40}$/.test(account)) {
+    throw new Error("The scanned wallet did not approve a valid Base Mainnet account.");
+  }
+  paymentState.walletAccount = account;
+  return {
+    account,
+    signTypedData: (typedData) => wallet.signClient.request({
+      topic: wallet.session.topic,
+      chainId: `eip155:${typedData.domain.chainId}`,
+      request: {
+        method: "eth_signTypedData_v4",
+        params: [account, JSON.stringify(typedData)],
+      },
+    }),
+  };
+}
+
+async function connectInjectedBaseWallet() {
   const provider = window.ethereum;
   if (!provider?.request) {
-    throw new Error("A browser wallet is required to sign the gas-sponsored USDC authorization.");
+    throw new Error("No browser wallet was found. Use the WalletConnect QR code instead.");
   }
   try {
     await provider.request({
@@ -321,7 +393,20 @@ async function connectBaseWallet() {
   const account = String(accounts?.[0] || "").toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(account)) throw new Error("The wallet returned an invalid account.");
   paymentState.walletAccount = account;
-  return { provider, account };
+  return {
+    account,
+    signTypedData: (typedData) => provider.request({
+      method: "eth_signTypedData_v4",
+      params: [account, JSON.stringify(typedData)],
+    }),
+  };
+}
+
+async function connectBaseWallet(mode = "qr") {
+  if (mode === "qr" && paymentState.config?.reown_configured) {
+    return connectBaseWalletWithQr();
+  }
+  return connectInjectedBaseWallet();
 }
 
 async function pollRelayedAuthorization(authorizationId) {
@@ -363,14 +448,14 @@ async function pollRelayedAuthorization(authorizationId) {
   }
 }
 
-async function createRelayedCheckout() {
+async function createRelayedCheckout(connectionMode = "qr") {
   const plan = selectedPackage();
   if (!plan) return;
   let checkout = null;
   setBusy(true);
   setMessage("Connect your wallet to authorize the Base USDC payment…");
   try {
-    const { provider, account } = await connectBaseWallet();
+    const { account, signTypedData } = await connectBaseWallet(connectionMode);
     checkout = await api("/v1/payments/relayed-checkout", {
       method: "POST",
       body: JSON.stringify({
@@ -380,12 +465,13 @@ async function createRelayedCheckout() {
       }),
     });
     paymentState.checkout = checkout;
-    setMessage("Review and sign the USDC authorization. No Base ETH will be charged.");
-    const signature = await provider.request({
-      method: "eth_signTypedData_v4",
-      params: [account, JSON.stringify(checkout.typed_data)],
-    });
-    setMessage("Authorization signed — BestShiny is submitting the transfer and paying Gas…");
+    setMessage(
+      `The connected wallet will pay ${checkout.amount_usdc} USDC. Review and sign the authorization; no Base ETH is required.`,
+    );
+    const signature = await signTypedData(checkout.typed_data);
+    setMessage(
+      "Authorization signed. Processing the USDC payment — no further wallet action is required; BestShiny pays the Gas…",
+    );
     const submitted = await api(
       `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/submit`,
       { method: "POST", body: JSON.stringify({ signature }) },
@@ -397,6 +483,7 @@ async function createRelayedCheckout() {
       pollRelayedAuthorization(checkout.id);
     }
   } catch (error) {
+    clearWalletConnectQr();
     if (Number(error?.code) === 4001 || String(error).includes("User rejected")) {
       if (checkout?.id) {
         await api(
@@ -406,7 +493,7 @@ async function createRelayedCheckout() {
       }
       setMessage("Authorization cancelled — nothing was transferred.");
     } else {
-      setMessage("", error.message || String(error));
+      setMessage("Payment was not submitted — no USDC was transferred.", error.message || String(error));
     }
   } finally {
     setBusy(false);
@@ -426,9 +513,11 @@ element("walletBtn").addEventListener("click", async () => {
 element("closeWalletBtn").addEventListener("click", () => {
   window.clearTimeout(paymentState.pollTimer);
   paymentState.pollTimer = null;
+  clearWalletConnectQr();
   element("walletDialog").close();
 });
 element("payUsdcBtn").addEventListener("click", createCheckout);
+element("payBrowserWalletBtn").addEventListener("click", () => createRelayedCheckout("browser"));
 window.addEventListener("ai-director:auth", (event) => {
   initializeForUser(event.detail).catch((error) => setMessage("", error.message));
 });

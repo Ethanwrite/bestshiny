@@ -730,6 +730,10 @@ input[type="file"]::file-selector-button {
 .wallet-balance span { font-size: var(--t-label); color: var(--fg-label); }
 .wallet-balance strong { font-size: var(--t-figure); font-weight: 600; letter-spacing: -.02em; }
 .wallet-offer { margin-top: 14px; padding: 16px; border-radius: var(--radius); background: linear-gradient(150deg, rgba(242, 169, 59, .09), rgba(169, 123, 242, .05)); }
+.wallet-connect-qr { display: flex; align-items: center; justify-content: center; min-height: 264px; margin-bottom: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.wallet-connect-qr[hidden] { display: none; }
+.wallet-connect-qr canvas, .wallet-connect-qr svg { display: block; max-width: 240px; width: 100%; height: auto; }
+.wallet-browser-pay { margin-top: 8px; }
 .wallet-plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
 .wallet-plan { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 14px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-raised); cursor: pointer; text-align: center; transition: border-color .15s, background .15s; }
 .wallet-plan:hover { border-color: var(--accent); }

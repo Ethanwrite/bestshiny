@@ -301,7 +301,7 @@ def test_insufficient_usdc_is_rejected_before_requesting_a_signature(tmp_path) -
 
     assert response.status_code == 422
     assert response.json()["detail"] == (
-        "Base USDC 余额不足：当前连接钱包有 0.545686 USDC，需要 20 USDC"
+        "Insufficient Base USDC balance: connected wallet has 0.545686 USDC; 20 USDC is required"
     )
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)) is None
@@ -322,7 +322,7 @@ def test_balance_is_checked_again_before_relayer_broadcast(tmp_path) -> None:
     )
 
     assert response.status_code == 422
-    assert "当前连接钱包有 0 USDC，需要 20 USDC" in response.json()["detail"]
+    assert "connected wallet has 0 USDC; 20 USDC is required" in response.json()["detail"]
     assert fake.sent_raw == []
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)).status == "PENDING"

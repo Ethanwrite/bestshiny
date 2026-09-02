@@ -191,9 +191,9 @@ class DePayPaymentService:
     ) -> DePayCheckoutResult:
         package = self._packages.get(sku)
         if package is None:
-            raise DePayPayloadError("未知或不可用的支付套餐")
+            raise DePayPayloadError("Unknown or unavailable payment pack")
         if not self.dynamic_configured:
-            raise DePayConfigurationError("DePay 动态配置或签名密钥尚未配置，支付入口已关闭")
+            raise DePayConfigurationError("DePay dynamic configuration or signing keys are missing")
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         now = utcnow()
@@ -203,9 +203,11 @@ class DePayPaymentService:
                 select(Workspace).where(Workspace.id == workspace_id).with_for_update()
             )
             if workspace is None or workspace.status != "ACTIVE":
-                raise DePayPayloadError("工作空间不存在或不可用")
+                raise DePayPayloadError("Workspace not found or unavailable")
             if workspace.plan_tier not in {"FREE", "PRO"}:
-                raise DePayPayloadError(f"当前套餐 {workspace.plan_tier} 不支持该支付入口")
+                raise DePayPayloadError(
+                    f"The {workspace.plan_tier} plan does not support this payment method"
+                )
             purchase_kind = (
                 "UPGRADE_PRO_AND_CREDITS"
                 if workspace.plan_tier == "FREE"

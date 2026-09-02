@@ -878,33 +878,95 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
       </div>
     </dialog>
 
-    <dialog id="walletDialog" class="sheet" aria-labelledby="walletTitle">
-      <div class="sheet-body">
-        <div class="sheet-head">
-          <span id="walletProviderLabel" class="eyebrow">Base USDC</span>
-          <h2 id="walletTitle">Top up credits</h2>
-          <p id="walletDescription">One payment — credits are added the moment it is confirmed. No subscription, no auto-renewal.</p>
+    <dialog id="walletDialog" class="sheet wallet-sheet" aria-labelledby="walletTitle">
+      <div class="sheet-body wallet-shell">
+        <div id="walletPurchaseView">
+          <header class="wallet-hero">
+            <div class="wallet-hero-copy">
+              <span id="walletProviderLabel" class="eyebrow">Fuel your next creation</span>
+              <h2 id="walletTitle">Fuel your next creation</h2>
+              <p id="walletDescription">Choose the right credit pack. Start anytime, upgrade anytime.</p>
+            </div>
+            <div class="wallet-balance">
+              <span>Current credits</span>
+              <strong id="walletCreditBalance">—</strong>
+            </div>
+          </header>
+
+          <section class="wallet-section" aria-labelledby="walletPlansTitle">
+            <div class="wallet-section-head">
+              <div>
+                <span class="eyebrow">Credit packs</span>
+                <h3 id="walletPlansTitle">Choose the right creative capacity</h3>
+              </div>
+              <small>Credits never expire · Added after payment confirmation</small>
+            </div>
+            <div id="walletPlans" class="wallet-plans" role="radiogroup" aria-label="Credit packs"></div>
+          </section>
+
+          <section class="wallet-checkout" aria-labelledby="walletMethodsTitle">
+            <div class="wallet-payment-methods">
+              <span class="eyebrow">Payment method</span>
+              <h3 id="walletMethodsTitle">Choose how to pay</h3>
+              <p>Each channel charges the exact price shown. No currency conversion is implied.</p>
+              <div id="walletMethods" class="wallet-methods" role="radiogroup" aria-label="Payment methods"></div>
+            </div>
+
+            <aside id="walletConfirmation" class="wallet-confirmation" aria-label="Payment confirmation">
+              <span class="eyebrow">Payment confirmation</span>
+              <div class="wallet-confirm-selection">
+                <div>
+                  <small id="walletConfirmPlan">Popular pack</small>
+                  <strong id="walletConfirmPrice">—</strong>
+                </div>
+                <b id="walletConfirmCredits">— Credits</b>
+              </div>
+              <div class="wallet-confirm-facts">
+                <span><small>Channel</small><b id="walletSettlement">Checking</b></span>
+                <span><small>Network</small><b id="walletNetwork">Base</b></span>
+                <span><small>Currency</small><b id="walletCurrency">Native USDC</b></span>
+                <span><small>Crediting</small><b id="walletCreditingStatus">Checking</b></span>
+              </div>
+              <div id="walletConnectQr" class="wallet-connect-qr" aria-label="WalletConnect QR code" hidden></div>
+              <div id="xunhupayQr" class="wallet-connect-qr xunhupay-qr" aria-label="WeChat Pay QR code" hidden></div>
+              <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
+              <p id="walletError" class="sheet-error" role="alert"></p>
+              <button id="payUsdcBtn" class="btn btn-primary btn-full wallet-confirm-button" type="button" disabled>Confirm and pay</button>
+              <button id="payBrowserWalletBtn" class="btn btn-tertiary btn-full wallet-browser-pay" type="button" hidden>Use browser wallet</button>
+              <small class="wallet-safety-note">Each click creates a separate order. Credits are added only after BestShiny confirms payment.</small>
+            </aside>
+          </section>
         </div>
-        <div class="wallet-balance">
-          <span>Workspace balance</span>
-          <strong id="walletCreditBalance">—</strong>
-        </div>
-        <div class="kv-list">
-          <div class="kv"><span>Network</span><b id="walletNetwork">Base</b></div>
-          <div class="kv"><span>Currency</span><b>Native USDC</b></div>
-          <div class="kv"><span>Settlement</span><b id="walletSettlement">Checking</b></div>
-          <div class="kv"><span>Crediting</span><b id="walletCreditingStatus">Checking</b></div>
-        </div>
-        <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
-        <p id="walletError" class="sheet-error" role="alert"></p>
-        <div class="wallet-offer">
-          <div id="walletConnectQr" class="wallet-connect-qr" aria-label="WalletConnect QR code" hidden></div>
-          <div id="walletPlans" class="wallet-plans" role="radiogroup" aria-label="Credit packages"></div>
-          <button id="payUsdcBtn" class="btn btn-primary btn-full" type="button" disabled>Pay with USDC</button>
-          <button id="payBrowserWalletBtn" class="btn btn-tertiary btn-full wallet-browser-pay" type="button" hidden>Use browser wallet instead</button>
-          <small class="field-note">Each attempt starts a fresh order — you can never be charged twice for one click.</small>
-        </div>
-        <div class="sheet-actions">
+
+        <section id="walletSuccessView" class="wallet-success" aria-labelledby="walletSuccessTitle" hidden>
+          <div class="wallet-success-sparkles" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="wallet-success-check" aria-hidden="true">✓</div>
+          <span class="eyebrow">Credits added</span>
+          <h2 id="walletSuccessTitle">Payment successful</h2>
+          <p>Your creative credits are ready. You can continue creating now.</p>
+          <div class="wallet-success-receipt">
+            <span>This top-up</span>
+            <strong id="walletSuccessPlan">—</strong>
+            <b id="walletSuccessAmount">—</b>
+            <small id="walletSuccessCredits">— Credits</small>
+          </div>
+          <div class="wallet-success-balance">
+            <span>Current credits</span>
+            <strong id="walletSuccessBalance">—</strong>
+          </div>
+          <div class="wallet-success-actions">
+            <button id="walletContinueBtn" class="btn btn-primary" type="button" data-empty-action="go-create">Start creating</button>
+            <button id="walletHistoryBtn" class="btn btn-tertiary" type="button">View top-up history</button>
+          </div>
+          <div id="walletHistoryPanel" class="wallet-history" hidden>
+            <div class="wallet-history-head"><strong>Top-up history</strong><button id="walletHistoryCloseBtn" class="btn btn-tertiary" type="button">Back</button></div>
+            <div id="walletHistoryList" class="wallet-history-list"></div>
+          </div>
+        </section>
+
+        <div class="sheet-actions wallet-close-row">
           <button id="closeWalletBtn" class="btn btn-tertiary" type="button">Close</button>
         </div>
       </div>

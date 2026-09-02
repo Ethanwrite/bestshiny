@@ -8,7 +8,8 @@ from types import MappingProxyType
 # Bumping this never rewrites an order that already froze the old value: the
 # snapshot is copied onto the order row at checkout, and settlement reads the
 # row, not this module. Change the packages and the version together.
-PRICING_VERSION = "2026-08-30.v1"
+PRICING_VERSION = "2026-09-01.v2"
+XUNHUPAY_PRICING_VERSION = "2026-09-02.cny.v2"
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,11 @@ class PaymentPackage:
             or self.amount <= 0
             or raw != raw.to_integral_value()
             or self.credits < 1
-            or self.currency != "USDC"
-            or self.provider != "DEPAY"
+            or (self.currency, self.provider) not in {("USDC", "DEPAY"), ("CNY", "XUNHUPAY")}
+            or (
+                self.currency == "CNY"
+                and self.amount * Decimal(100) != (self.amount * Decimal(100)).to_integral_value()
+            )
         ):
             raise ValueError("invalid payment package")
 
@@ -77,13 +81,44 @@ PAYMENT_PACKAGES: Mapping[str, PaymentPackage] = MappingProxyType(
         "creator_50": PaymentPackage(
             sku="creator_50",
             amount=Decimal("50"),
-            credits=5_000,
+            credits=6_000,
             recommended=True,
         ),
         "pro_100": PaymentPackage(
             sku="pro_100",
             amount=Decimal("100"),
             credits=11_000,
+        ),
+    }
+)
+
+
+XUNHUPAY_PACKAGES: Mapping[str, PaymentPackage] = MappingProxyType(
+    {
+        "starter_20": PaymentPackage(
+            sku="starter_20",
+            amount=Decimal("140"),
+            credits=1_800,
+            currency="CNY",
+            provider="XUNHUPAY",
+            pricing_version=XUNHUPAY_PRICING_VERSION,
+        ),
+        "creator_50": PaymentPackage(
+            sku="creator_50",
+            amount=Decimal("450"),
+            credits=6_000,
+            currency="CNY",
+            provider="XUNHUPAY",
+            pricing_version=XUNHUPAY_PRICING_VERSION,
+            recommended=True,
+        ),
+        "pro_100": PaymentPackage(
+            sku="pro_100",
+            amount=Decimal("700"),
+            credits=11_000,
+            currency="CNY",
+            provider="XUNHUPAY",
+            pricing_version=XUNHUPAY_PRICING_VERSION,
         ),
     }
 )

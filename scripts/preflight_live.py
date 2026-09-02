@@ -100,6 +100,20 @@ def _payment(settings: Settings) -> None:
     ]
     for label, ok in depay:
         print(_line(label, READY if ok else BLOCKED, ""))
+    xunhupay = [
+        ("XUNHUPAY_APP_ID", bool(settings.xunhupay_app_id.strip())),
+        ("XUNHUPAY_APP_SECRET", bool(settings.xunhupay_app_secret.strip())),
+        (
+            "XUNHUPAY_GATEWAY_URL",
+            settings.xunhupay_gateway_url.strip().startswith("https://"),
+        ),
+        (
+            "XUNHUPAY_NOTIFY_URL",
+            (settings.xunhupay_notify_url or settings.public_base_url).strip().startswith("https://"),
+        ),
+    ]
+    for label, ok in xunhupay:
+        print(_line(label, READY if ok else BLOCKED, ""))
     relayer = [
         ("RELAYER_ADDRESS", bool(settings.relayer_address.strip())),
         ("RELAYER_PRIVATE_KEY", bool(settings.relayer_private_key.strip())),
@@ -107,7 +121,7 @@ def _payment(settings: Settings) -> None:
     ]
     for label, ok in relayer:
         print(_line(label, READY if ok else BLOCKED, ""))
-    if not all(ok for _label, ok in alchemy + depay + relayer):
+    if not all(ok for _label, ok in alchemy + depay + xunhupay + relayer):
         print(
             "\n  On-chain payment cannot be exercised end to end. Treasury/provider keys and\n"
             "  the Base relayer account must be configured outside the repository."

@@ -202,10 +202,10 @@ class EIP3009RelayerService:
         self._require_configured()
         payer = self._normalize_address(from_address)
         if not payer:
-            raise EIP3009Rejected("付款钱包地址无效")
+            raise EIP3009Rejected("Invalid payer wallet address")
         package = self._packages.get(sku)
         if package is None:
-            raise EIP3009Rejected("未知或不可用的支付套餐")
+            raise EIP3009Rejected("Unknown or unavailable payment pack")
         self._require_payer_usdc_balance(payer, package.raw_amount_microunits)
         now = utcnow()
         valid_after = max(0, int(now.timestamp()) - 30)
@@ -218,9 +218,11 @@ class EIP3009RelayerService:
                 select(Workspace).where(Workspace.id == workspace_id).with_for_update()
             )
             if workspace is None or workspace.status != "ACTIVE":
-                raise EIP3009Rejected("工作空间不存在或不可用")
+                raise EIP3009Rejected("Workspace not found or unavailable")
             if workspace.plan_tier not in {"FREE", "PRO"}:
-                raise EIP3009Rejected(f"当前套餐 {workspace.plan_tier} 不支持该支付入口")
+                raise EIP3009Rejected(
+                    f"The {workspace.plan_tier} plan does not support this payment method"
+                )
             purchase_kind = "UPGRADE_PRO_AND_CREDITS" if workspace.plan_tier == "FREE" else "TOP_UP_CREDITS"
             order = PaymentOrder(
                 workspace_id=workspace.id,
@@ -299,13 +301,13 @@ class EIP3009RelayerService:
     ) -> EIP3009AuthorizationResult:
         self._require_configured()
         if not signature.startswith("0x") or len(signature) < 4 or len(signature) > 16_386:
-            raise EIP3009Rejected("EIP-712 签名格式无效")
+            raise EIP3009Rejected("Invalid EIP-712 signature format")
         try:
             signature_bytes = bytes.fromhex(signature[2:])
         except ValueError as exc:
-            raise EIP3009Rejected("EIP-712 签名格式无效") from exc
+            raise EIP3009Rejected("Invalid EIP-712 signature format") from exc
         if not signature_bytes:
-            raise EIP3009Rejected("EIP-712 签名格式无效")
+            raise EIP3009Rejected("Invalid EIP-712 signature format")
         should_broadcast = False
         with self._submission_lock, self.database.session() as session:
             self._lock_relayer(session)
@@ -323,12 +325,12 @@ class EIP3009RelayerService:
                     order.status = "EXPIRED"
                     return self._result(authorization, order)
                 if authorization.status != "PENDING" or order.status != "PENDING":
-                    raise EIP3009Conflict("支付授权当前不可提交")
+                    raise EIP3009Conflict("Payment authorization cannot be submitted in its current state")
                 typed_data = self._typed_data_from_row(authorization)
                 signable = self._signable_message(typed_data)
                 digest = self._message_hash(signable).hex()
                 if digest != authorization.typed_data_hash:
-                    raise EIP3009Conflict("支付授权快照已改变")
+                    raise EIP3009Conflict("Payment authorization snapshot has changed")
                 self._require_payer_usdc_balance(
                     authorization.from_address,
                     authorization.value_microunits,
@@ -344,7 +346,7 @@ class EIP3009RelayerService:
                 authorization.attempt_count += 1
                 self._require_chain()
                 if self._authorization_used(authorization):
-                    raise EIP3009Conflict("该 USDC authorization nonce 已被使用")
+                    raise EIP3009Conflict("This USDC authorization nonce has already been used")
                 raw_transaction, tx_hash, relayer_nonce = self._prepare_transaction(authorization, signature)
                 # Persist the exact signed transaction before touching the
                 # network. If the process dies after broadcasting, a retry can
@@ -540,7 +542,7 @@ class EIP3009RelayerService:
                 authorization.last_error_code = "USER_CANCELLED"
                 order.status = "CANCELLED"
             elif authorization.status != "CANCELLED":
-                raise EIP3009Conflict("已提交的链上授权不能取消")
+                raise EIP3009Conflict("A submitted on-chain authorization cannot be cancelled")
             return self._result(authorization, order)
 
     def _settle(
@@ -559,7 +561,7 @@ class EIP3009RelayerService:
             if authorization.status == "CONFIRMED":
                 return self._result(authorization, order)
             if authorization.status != "SUBMITTED" or order.status != "SUBMITTED":
-                raise EIP3009Conflict("支付授权状态无法结算")
+                raise EIP3009Conflict("Payment authorization cannot be settled in its current state")
             payment = session.scalar(
                 select(OnchainPayment).where(
                     OnchainPayment.network == self.network,
@@ -748,7 +750,7 @@ class EIP3009RelayerService:
         )
         gas = min(self.max_gas_limit, max(80_000, (estimate * 120 + 99) // 100))
         if estimate > self.max_gas_limit:
-            raise EIP3009RPCError("GAS_LIMIT_EXCEEDED", "授权交易需要的 Gas 超出平台上限")
+            raise EIP3009RPCError("GAS_LIMIT_EXCEEDED", "Authorization gas exceeds the platform limit")
         latest = self._rpc("eth_getBlockByNumber", ["latest", False])
         if not isinstance(latest, dict):
             raise EIP3009RPCError("INVALID_LATEST_BLOCK")
@@ -759,10 +761,10 @@ class EIP3009RelayerService:
             priority = 1_000_000
         max_fee = base_fee * 2 + priority
         if max_fee > self.max_fee_per_gas_wei:
-            raise EIP3009RPCError("GAS_PRICE_TOO_HIGH", "Base Gas 价格超出平台代付上限")
+            raise EIP3009RPCError("GAS_PRICE_TOO_HIGH", "Base gas price exceeds the sponsored limit")
         relayer_balance = self._parse_quantity(self._rpc("eth_getBalance", [self.relayer_address, "latest"]))
         if relayer_balance < gas * max_fee:
-            raise EIP3009RPCError("RELAYER_BALANCE_LOW", "Relayer 的 Base ETH 不足以代付本次 Gas")
+            raise EIP3009RPCError("RELAYER_BALANCE_LOW", "The relayer does not have enough Base ETH")
         transaction = {
             "chainId": self.chain_id,
             "nonce": nonce,
@@ -913,7 +915,8 @@ class EIP3009RelayerService:
             current = self._format_usdc(balance)
             required = self._format_usdc(required_microunits)
             raise EIP3009Rejected(
-                f"Base USDC 余额不足：当前连接钱包有 {current} USDC，需要 {required} USDC"
+                f"Insufficient Base USDC balance: connected wallet has {current} USDC; "
+                f"{required} USDC is required"
             )
 
     @classmethod
@@ -973,18 +976,18 @@ class EIP3009RelayerService:
                     )
                 ).lower()
             except EIP3009RPCError as exc:
-                raise EIP3009Rejected("智能钱包拒绝了 EIP-712 授权签名") from exc
+                raise EIP3009Rejected("Smart wallet rejected the EIP-712 authorization") from exc
             if not result.startswith(_ERC1271_MAGIC_VALUE):
-                raise EIP3009Rejected("智能钱包 EIP-712 授权签名无效")
+                raise EIP3009Rejected("Invalid smart-wallet EIP-712 authorization signature")
             return
         if len(signature_bytes) != 65:
-            raise EIP3009Rejected("普通钱包必须返回 65-byte EIP-712 签名")
+            raise EIP3009Rejected("EOA wallets must return a 65-byte EIP-712 signature")
         try:
             recovered = Account.recover_message(signable, signature=signature).lower()
         except (ValueError, TypeError) as exc:
-            raise EIP3009Rejected("EIP-712 签名无法恢复付款钱包") from exc
+            raise EIP3009Rejected("Could not recover payer wallet from EIP-712 signature") from exc
         if recovered != authorization.from_address:
-            raise EIP3009Rejected("EIP-712 签名钱包与订单不匹配")
+            raise EIP3009Rejected("EIP-712 signer does not match the payment order")
 
     def _typed_data(
         self,
@@ -1064,7 +1067,7 @@ class EIP3009RelayerService:
             statement = statement.with_for_update()
         authorization = session.scalar(statement)
         if authorization is None:
-            raise EIP3009NotFound("支付授权不存在")
+            raise EIP3009NotFound("Payment authorization not found")
         order_statement = select(PaymentOrder).where(
             PaymentOrder.id == authorization.payment_intent_id,
             PaymentOrder.workspace_id == workspace_id,
@@ -1073,7 +1076,7 @@ class EIP3009RelayerService:
             order_statement = order_statement.with_for_update()
         order = session.scalar(order_statement)
         if order is None:
-            raise EIP3009Conflict("支付订单不存在")
+            raise EIP3009Conflict("Payment order not found")
         return authorization, order
 
     def _lock_relayer(self, session: Session) -> None:
@@ -1144,7 +1147,7 @@ class EIP3009RelayerService:
 
     def _require_configured(self) -> None:
         if not self.configured:
-            raise EIP3009ConfigurationError("Base USDC Relayer 尚未配置")
+            raise EIP3009ConfigurationError("Base USDC relayer is not configured")
 
     @staticmethod
     def _normalize_address(value: str) -> str:

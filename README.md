@@ -179,6 +179,8 @@ python3 -m http.server 18081 --directory apps/web
 | `LEGACY_WALLET_PAYMENTS_ENABLED` | 默认 `false` | 旧的自定义金额/钱包绑定 API 仅作兼容代码；公开商业流程不得开启 |
 | `DEPAY_PAYMENT_LINK_URL` / `DEPAY_LINK_ID` | DePay 共享 Base Native USDC Payment Link 及其 ID | 链接必须仅收 Base Native USDC，并与 Treasury 地址一致 |
 | `DEPAY_CALLBACK_PUBLIC_KEY` | DePay 在启用 callback 后生成的 RSA 公钥 | 用于验证原始 body 的 `x-signature`；不要用任意未签名请求入账 |
+| `XUNHUPAY_APP_ID` / `XUNHUPAY_APP_SECRET` | 虎皮椒支付渠道 ID 与服务端签名密钥 | 密钥只放 Secret Manager；下单响应和异步通知都必须验签 |
+| `XUNHUPAY_GATEWAY_URL` / `XUNHUPAY_NOTIFY_URL` | 默认官方 HTTPS 网关；通知地址为 `/v1/payments/xunhupay/notify` | 通知必须公网可达并保持 HTTPS；只有订单号、`OD`、金额和签名全部匹配才入账 |
 | `DEPAY_OFFER_AMOUNT_USDC` / `DEPAY_OFFER_CREDITS` / `DEPAY_OFFER_UPGRADE_PLAN` | 默认 `30` / `3000` / `PRO` | 服务端单一 Offer 事实源；修改时必须同步 DePay 固定金额 Link |
 | `RELAYER_ADDRESS` / `RELAYER_PRIVATE_KEY` | Base EVM Relayer 地址与 32-byte 私钥 | 私钥只放 Secret Manager；启动时强制校验两者匹配，不进入浏览器或数据库 |
 | `BASE_RPC_URL` | Base Mainnet HTTPS JSON-RPC | 启动/提交时校验 chain id `8453`；不得使用不可信 RPC |

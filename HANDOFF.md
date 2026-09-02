@@ -149,8 +149,11 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 > STANDARD-trust — it used to run silently on Flow. Production (plan-enforced) forces
 > STANDARD before resolving and is unaffected; name the pair to run a HERO asset there.
 >
-> **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-B.md`](docs/SESSION_HANDOVER_2026-09-02-B.md)**
-> (the automatic production budget; built and gated, off until an operator sets a ceiling).
+> **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-C.md`](docs/SESSION_HANDOVER_2026-09-02-C.md)**
+> (end of 2026-09-02: budget live in production, the director speaks, deletes; what is owed and how to verify).
+>
+> **Before it: [`docs/SESSION_HANDOVER_2026-09-02-B.md`](docs/SESSION_HANDOVER_2026-09-02-B.md)**
+> (the detailed record of the automatic production budget and the day's three releases).
 >
 > **Before it: [`docs/SESSION_HANDOVER_2026-09-02.md`](docs/SESSION_HANDOVER_2026-09-02.md).**
 > It is the entry point for the 2026-09-01/02 session: scene-champion routing (#36), the

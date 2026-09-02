@@ -142,7 +142,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .admin_routes import register_admin_routes
@@ -869,6 +869,54 @@ def create_app(container: Container | None = None) -> FastAPI:
                 "sequence": item.sequence,
                 "continuity_mode": item.continuity_mode,
             }
+
+    @app.delete("/v1/shots/{shot_id}")
+    def delete_shot(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Delete a shot the user created and has not generated on.
+
+        A shot that has a generation job or a committed take carries paid
+        history (jobs, credits, cost records, decisions) that the ledgers
+        reference; it is refused with the reason rather than orphaning that
+        history. Neighbour links are re-joined so the timeline stays a chain.
+        """
+
+        with container.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise HTTPException(404, "shot not found")
+            scene = session.get(Scene, shot.scene_id)
+            episode = session.get(Episode, scene.episode_id)
+            auth.require_project(principal, episode.project_id, write=True)
+            blockers: list[str] = []
+            if shot.committed_candidate_id:
+                blockers.append("the shot has an approved take")
+            if shot.generation_job_id:
+                blockers.append("the shot has been generated")
+            job_count = session.scalar(
+                select(func.count()).select_from(GenerationJob).where(GenerationJob.shot_id == shot.id)
+            )
+            if job_count and "the shot has been generated" not in blockers:
+                blockers.append(f"{job_count} generation job(s) reference it")
+            if blockers:
+                raise HTTPException(409, "cannot delete this shot: " + "; ".join(blockers))
+            for other in session.scalars(select(Shot).where(Shot.previous_shot_id == shot.id)):
+                other.previous_shot_id = shot.previous_shot_id
+            for other in session.scalars(select(Shot).where(Shot.next_shot_id == shot.id)):
+                other.next_shot_id = shot.next_shot_id
+            session.delete(shot)
+            try:
+                session.flush()
+            except IntegrityError as exc:
+                session.rollback()
+                raise HTTPException(
+                    409,
+                    "cannot delete this shot: it has recorded history (decisions or evidence) "
+                    "that must be kept",
+                ) from exc
+            return {"id": shot_id, "scene_id": scene.id, "deleted": True}
 
     @app.get("/v1/shots/{shot_id}")
     def get_shot(

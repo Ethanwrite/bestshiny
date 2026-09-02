@@ -460,6 +460,19 @@ function switchPage(page) {
 /* ============================================================
    Create page
    ============================================================ */
+// What each medium's routes accept. Image ratios are the OpenRouter Images
+// API's normalized set that Seedream also serves; video keeps the three the
+// video routes are priced for.
+const VIDEO_ASPECT_RATIOS = ["9:16", "16:9", "1:1"];
+const IMAGE_ASPECT_RATIOS = ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"];
+
+function setAspectOptions(ratios) {
+  const select = $("passengerAspect");
+  const current = select.value;
+  select.innerHTML = ratios.map((ratio) => `<option>${ratio}</option>`).join("");
+  select.value = ratios.includes(current) ? current : ratios[0];
+}
+
 function setPassengerMedia(media) {
   state.passengerPrompts[state.passengerMedia] = $("passengerPrompt").value;
   state.passengerMedia = media;
@@ -472,6 +485,11 @@ function setPassengerMedia(media) {
   $("imageTaskGroup").hidden = video;
   $("imageModelGroup").hidden = video;
   $("videoModelGroup").hidden = !video;
+  // Resolution is a video parameter. An image is priced per image and by its
+  // quality level, and the images APIs refuse a video resolution; the ratio
+  // list is the one each medium actually accepts.
+  $("passengerResolutionField").classList.toggle("hidden", !video);
+  setAspectOptions(video ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS);
   $("passengerDurationField").classList.toggle("hidden", !video);
   $("barDurationFact").hidden = !video;
   $("imagePromptActions").classList.toggle("hidden", video);
@@ -1021,7 +1039,8 @@ async function generatePassenger() {
       ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
       asset_criticality: criticality,
       aspect_ratio: aspectRatio,
-      resolution,
+      // Resolution travels only with video; an image job carries none.
+      ...(isImage ? {} : { resolution }),
       reference_asset_ids: reference ? [reference] : [],
       idempotency_key: idempotencyKey,
       estimated_cost: estimatedCost,
@@ -1589,10 +1608,23 @@ async function selectShot(id) {
   $("barShotModel").textContent = simpleLabel(shot.provider);
   $("generateBtn").disabled = false;
   $("generateBtn").textContent = shot.status === "COMMITTED" ? "Regenerate shot" : "Generate shot";
+  // Only a shot with no paid history can be deleted; the server refuses the rest.
+  $("shotDeleteBtn").hidden = Boolean(shot.committed_candidate_id) || ["QUEUED", "GENERATING", "VALIDATING", "COMMITTED"].includes(shot.status);
 
   await loadCandidates();
   await renderShotStage();
   syncOperationsContext();
+}
+
+async function deleteSelectedShot() {
+  const shot = state.shot;
+  if (!shot) return;
+  if (!window.confirm("Delete this shot? Only a shot that has never been generated can be deleted.")) return;
+  await request(`/v1/shots/${shot.id}`, { method: "DELETE" });
+  state.shot = null;
+  $("shotDeleteBtn").hidden = true;
+  if (state.episode?.id) await loadEpisode(state.episode.id);
+  toast("Shot deleted");
 }
 
 /** The current shot carries the page: show the approved take when there is one. */
@@ -2487,10 +2519,26 @@ async function loadCreativeSessions() {
   }
   list.className = "shot-tree";
   list.innerHTML = state.creative.sessions.map((session) => `
-    <button class="tree-shot ${state.creative.session?.session?.id === session.id ? "active" : ""}" data-creative-session="${session.id}" type="button">
-      <span class="tree-shot-label">${escapeHTML(session.title || "Untitled")}</span>
-      <span class="badge">${escapeHTML(CREATIVE_STAGE_LABEL[session.status] || session.status)}</span>
-    </button>`).join("");
+    <div class="tree-shot-row">
+      <button class="tree-shot ${state.creative.session?.session?.id === session.id ? "active" : ""}" data-creative-session="${session.id}" type="button">
+        <span class="tree-shot-label">${escapeHTML(session.title || "Untitled")}</span>
+        <span class="badge">${escapeHTML(CREATIVE_STAGE_LABEL[session.status] || session.status)}</span>
+      </button>
+      ${session.status === "COMPILED" ? "" : `<button class="tree-shot-delete" type="button" data-creative-delete="${session.id}" title="Delete this conversation" aria-label="Delete this conversation">&times;</button>`}
+    </div>`).join("");
+}
+
+async function deleteCreativeSession(id) {
+  const session = state.creative.sessions.find((item) => item.id === id);
+  const title = session?.title || "this conversation";
+  if (!window.confirm(`Delete "${title}"? Its turns and generated visuals stay on record, but it leaves your list.`)) return;
+  await request(`/v1/creative/sessions/${id}`, { method: "DELETE" });
+  if (state.creative.session?.session?.id === id) {
+    state.creative.session = null;
+    renderCreative();
+  }
+  await loadCreativeSessions();
+  toast("Conversation deleted");
 }
 
 async function openCreativeSession(id) {
@@ -2511,17 +2559,32 @@ async function startCreativeSession() {
   await openCreativeSession(started.session_id);
 }
 
+let creativeReplyInFlight = false;
+
 async function sendCreativeReply() {
   const session = state.creative.session;
-  if (!session) return;
-  const content = $("creativeReplyInput").value.trim();
+  if (!session || creativeReplyInFlight) return;
+  const input = $("creativeReplyInput");
+  const content = input.value.trim();
   if (!content) return;
-  $("creativeReplyInput").value = "";
-  await request(`/v1/creative/sessions/${session.session.id}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ content }),
-  });
-  await openCreativeSession(session.session.id);
+  // One turn at a time: a second Enter while the director is thinking used to
+  // post the same message twice (production, 2026-09-02).
+  creativeReplyInFlight = true;
+  input.disabled = true;
+  $("creativeReplyBtn").disabled = true;
+  try {
+    await request(`/v1/creative/sessions/${session.session.id}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    input.value = "";
+    await openCreativeSession(session.session.id);
+  } finally {
+    creativeReplyInFlight = false;
+    input.disabled = false;
+    $("creativeReplyBtn").disabled = false;
+    input.focus();
+  }
 }
 
 function renderCreativeTurns(turns) {
@@ -2967,7 +3030,10 @@ on("creativeLockBibleBtn", "click", guard(creativeLockBible));
 on("creativeProposeBeatsBtn", "click", guard(creativeProposeBeats));
 on("creativeApproveBeatsBtn", "click", guard(creativeApproveBeats));
 on("creativeGoDirectorBtn", "click", guard(creativeOpenInDirector));
+on("shotDeleteBtn", "click", guard(deleteSelectedShot));
 document.addEventListener("click", (event) => {
+  const deleteId = event.target.closest("[data-creative-delete]")?.dataset.creativeDelete;
+  if (deleteId) { guard(deleteCreativeSession)(deleteId); return; }
   const sessionId = event.target.closest("[data-creative-session]")?.dataset.creativeSession;
   if (sessionId) guard(openCreativeSession)(sessionId);
   const episodeId = event.target.closest("[data-episode-chip]")?.dataset.episodeChip;

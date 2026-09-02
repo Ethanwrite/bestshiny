@@ -104,6 +104,30 @@ class SeriesLedger(Protocol):
     ) -> str: ...
 
 
+# How much of the conversation the model sees each turn, and how long its
+# reply may be. Twelve turns is six exchanges: enough to keep a brief
+# coherent, small enough that a long session does not grow the per-turn bill.
+_HISTORY_TURNS = 12
+_REPLY_LIMIT = 1200
+
+_DIRECTOR_SYSTEM_PROMPT = (
+    "You are BestShiny Director, a film and commercial creative director in conversation "
+    "with a client. Every turn you do two things and answer with ONE JSON object "
+    '{"reply": string, "fields": object}. '
+    "reply: your own words to the client, in the client's language (Chinese if they write "
+    "Chinese), warm and concrete, at most about 120 words: say what you understood, offer a "
+    "creative direction when it helps, ask at most two questions about what is still missing, "
+    "and when enough is known say the brief looks ready and invite them to approve it. Never "
+    "repeat a question the client already answered. "
+    "fields: the creative-brief fields you can extract from the whole conversation so far, any "
+    "of: format, logline, duration_seconds, platform, aspect_ratio, tone (list), visual_style "
+    "{medium, palette}, characters (list of {name, role, look}), setting {location, time}, "
+    "product {name, selling_points}, hook, call_to_action, music {mood}, audience. Omit "
+    "anything not stated. The known_fields in the last message are already extracted; only add "
+    "or refine."
+)
+
+
 @dataclass(frozen=True)
 class DirectorReply:
     """One director turn as the UI renders it."""
@@ -155,45 +179,54 @@ class CreativeDirectorService:
 
     # ------------------------------------------------------------ reasoning
     async def _model_patch(
-        self, project_id: str, *, fields: dict[str, Any], text: str
-    ) -> tuple[dict[str, Any], str, list[str]]:
-        """Ask the DIRECTOR role to extract brief fields; degrade loudly.
+        self,
+        project_id: str,
+        *,
+        fields: dict[str, Any],
+        text: str,
+        history: list[dict[str, str]] | None = None,
+        status: str | None = None,
+    ) -> tuple[dict[str, Any], str | None, str, list[str]]:
+        """Ask the DIRECTOR role for its reply and the brief fields; degrade loudly.
 
-        The model's patch passes through the same guarded merge as the rules
-        engine's, so it can fill gaps but never overwrite the user's answers,
-        and a model outage records DETERMINISTIC instead of failing the turn.
+        Two things come back from one call: the director's own words to the
+        user (``reply``), in the user's language, and the structured brief
+        patch. The patch passes through the same guarded merge as the rules
+        engine's, so it can fill gaps but never overwrite the user's answers.
+        Until 2026-09-02 only the patch was used and the user saw one of two
+        fixed English sentences every turn while the model was paid for each
+        of them — "the director is not connected" from the user's chair. A
+        model outage records DETERMINISTIC and the fixed sentence, never a
+        failed turn.
         """
 
         deterministic = self.briefs.extract(text, fields)
         if self.model_roles is None:
-            return deterministic, "DETERMINISTIC", ["MODEL_RUNTIME_NOT_CONFIGURED"]
+            return deterministic, None, "DETERMINISTIC", ["MODEL_RUNTIME_NOT_CONFIGURED"]
         from entitlement_core.canary import LiveCanaryConflict, LiveSpendDenied
         from model_registry_core import ModelRole
         from provider_sdk import ProviderError, ProviderTrustViolation
 
+        messages: list[dict[str, Any]] = [{"role": "system", "content": _DIRECTOR_SYSTEM_PROMPT}]
+        for turn in (history or [])[-_HISTORY_TURNS:]:
+            role = "user" if turn.get("speaker") == "USER" else "assistant"
+            content = str(turn.get("content") or "").strip()
+            if content:
+                messages.append({"role": role, "content": content[:4000]})
+        messages.append(
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"known_fields": fields, "session_status": status, "text": text},
+                    ensure_ascii=False,
+                ),
+            }
+        )
         try:
             execution = await self.model_roles.execute_chat(
                 project_id,
                 ModelRole.DIRECTOR,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract structured creative-brief fields from a user's idea. "
-                            "Answer JSON only, with any of: format, logline, duration_seconds, "
-                            "platform, aspect_ratio, tone (list), visual_style {medium, palette}, "
-                            "characters (list of {name, role, look}), setting {location, time}, "
-                            "product {name, selling_points}, hook, call_to_action, music {mood}, "
-                            "audience. Omit anything the text does not state."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {"known_fields": fields, "text": text}, ensure_ascii=False
-                        ),
-                    },
-                ],
+                messages=messages,
                 parameters={"response_format": {"type": "json_object"}},
             )
             raw = _first_choice_json(execution.response)
@@ -213,12 +246,24 @@ class CreativeDirectorService:
         ) as exc:
             return (
                 deterministic,
+                None,
                 "DETERMINISTIC",
                 ["MODEL_UNAVAILABLE", type(exc).__name__],
             )
-        patch = _sanitize_model_patch(raw)
+        # The new shape is {"reply", "fields"}; a bare field object (the
+        # pre-2026-09-02 contract, and what a terse model may still return)
+        # is accepted as fields with no reply.
+        raw_fields = raw.get("fields") if isinstance(raw.get("fields"), dict) else raw
+        patch = _sanitize_model_patch(raw_fields)
+        reply_value = raw.get("reply")
+        reply = (
+            reply_value.strip()[:_REPLY_LIMIT]
+            if isinstance(reply_value, str) and reply_value.strip()
+            else None
+        )
         merged = self.briefs.merge(deterministic, patch)
-        return merged, "MODEL:DIRECTOR", ["MODEL_EXTRACTION_MERGED"]
+        codes = ["MODEL_EXTRACTION_MERGED"] + (["MODEL_REPLY"] if reply else ["MODEL_NO_REPLY"])
+        return merged, reply, "MODEL:DIRECTOR", codes
 
     # ------------------------------------------------------------- dialogue
     async def start_session(
@@ -282,6 +327,8 @@ class CreativeDirectorService:
             project_id = row.project_id
             fields = self._current_fields(session, row)
             asked = self._asked_codes(session, session_id)
+            history = self._recent_turns(session, session_id)
+            status_before = row.status
             next_sequence = self._next_turn_sequence(session, session_id)
             session.add(
                 CreativeTurn(
@@ -296,8 +343,8 @@ class CreativeDirectorService:
 
         if format_hint:
             fields["format"] = CreativeFormat(format_hint).value
-        patch, reasoner, reason_codes = await self._model_patch(
-            project_id, fields=fields, text=content
+        patch, reply, reasoner, reason_codes = await self._model_patch(
+            project_id, fields=fields, text=content, history=history, status=status_before
         )
         merged = self.briefs.merge(fields, patch)
         format_value = str(merged.get("format") or CreativeFormat.UNSPECIFIED.value)
@@ -334,13 +381,13 @@ class CreativeDirectorService:
             ]
             if analysis.proposable:
                 row.status = CreativeSessionStatus.BRIEF_PROPOSED.value
-                message = (
+                message = reply or (
                     "Here is the creative brief I put together. Review it and approve, "
                     "or tell me what to change."
                 )
             else:
                 row.status = CreativeSessionStatus.CLARIFYING.value
-                message = "A few things would sharpen this a lot:"
+                message = reply or "A few things would sharpen this a lot:"
             session.add(
                 CreativeTurn(
                     session_id=session_id,
@@ -1071,8 +1118,13 @@ class CreativeDirectorService:
                 actions=actions,
             )
 
-    def list_sessions(self, project_id: str) -> list[dict[str, Any]]:
+    def list_sessions(self, project_id: str, *, include_abandoned: bool = False) -> list[dict[str, Any]]:
         with self.database.session() as session:
+            statement = select(CreativeSession).where(CreativeSession.project_id == project_id)
+            if not include_abandoned:
+                statement = statement.where(
+                    CreativeSession.status != CreativeSessionStatus.ABANDONED.value
+                )
             return [
                 {
                     "id": row.id,
@@ -1081,12 +1133,52 @@ class CreativeDirectorService:
                     "format": row.format,
                     "compiled_episode_id": row.compiled_episode_id,
                 }
-                for row in session.scalars(
-                    select(CreativeSession)
-                    .where(CreativeSession.project_id == project_id)
-                    .order_by(CreativeSession.updated_at.desc())
-                )
+                for row in session.scalars(statement.order_by(CreativeSession.updated_at.desc()))
             ]
+
+    def abandon_session(self, session_id: str) -> dict[str, Any]:
+        """Retire a conversation: it leaves the list and stops accepting turns.
+
+        Rows are kept (turns, briefs, anchors and their paid generations are
+        history the ledgers reference); ABANDONED is the one backward
+        transition the lifecycle allows. A compiled session is part of an
+        episode and stays.
+        """
+
+        with self.database.session() as session:
+            row = self._session(session, session_id)
+            if row.status == CreativeSessionStatus.COMPILED.value:
+                raise CreativeSessionConflict(
+                    "a compiled session is part of an episode and cannot be deleted"
+                )
+            row.status = CreativeSessionStatus.ABANDONED.value
+            session.flush()
+            return {"id": row.id, "status": row.status}
+
+    @staticmethod
+    def _recent_turns(session: Any, session_id: str, limit: int = 12) -> list[dict[str, str]]:
+        rows = list(
+            session.scalars(
+                select(CreativeTurn)
+                .where(CreativeTurn.session_id == session_id)
+                .order_by(CreativeTurn.sequence.desc())
+                .limit(limit)
+            )
+        )
+        rows.reverse()
+        turns: list[dict[str, str]] = []
+        for turn in rows:
+            content = turn.content or ""
+            if turn.speaker == "DIRECTOR" and turn.questions_json:
+                asked = "\n".join(
+                    f"- {question.get('question')}"
+                    for question in turn.questions_json
+                    if question.get("question")
+                )
+                if asked:
+                    content = f"{content}\n{asked}"
+            turns.append({"speaker": turn.speaker, "content": content})
+        return turns
 
     # -------------------------------------------------------------- helpers
     @staticmethod

@@ -459,3 +459,117 @@ def test_session_rows_are_the_audit_of_everything_that_happened(container, proje
         assert row is not None and row.workspace_id == project.workspace_id
         actions = list(session.scalars(select(CreativeAction)))
         assert all(action.status in {"EXECUTED", "FAILED"} for action in actions)
+
+
+# --- 2026-09-02: the director speaks, remembers, and can be dismissed ------
+
+
+class _TalkingReasoner:
+    """A DIRECTOR model that answers with its own words plus a field patch."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def execute_chat(self, project_id, role, *, messages, parameters=None):  # type: ignore[no-untyped-def]
+        del project_id, role, parameters
+        self.calls.append(list(messages))
+        turn = len(self.calls)
+        payload = {
+            "reply": f"明白了，这是第{turn}轮：我们把天台的雨夜做成冷暖对撞的悬疑短剧。",
+            "fields": {"tone": ["suspense"], "setting": {"location": "rooftop", "time": "night"}},
+        }
+        import json as _json
+
+        content = _json.dumps(payload, ensure_ascii=False)
+        response = {"choices": [{"message": {"content": content}}]}
+        return type("Execution", (), {"response": response})()
+
+
+def test_the_directors_reply_is_the_models_words_and_it_sees_the_conversation(container, project):
+    reasoner = _TalkingReasoner()
+    container.creative_director.model_roles = reasoner
+    with _client(container) as client:
+        started = _start(client, project.id, VAGUE_IDEA)
+        assert started["reasoner"] == "MODEL:DIRECTOR"
+        assert started["message"].startswith("明白了，这是第1轮")
+        session_id = started["session_id"]
+        second = client.post(
+            f"/v1/creative/sessions/{session_id}/messages", json={"content": "主角叫雨桐，30秒竖屏"}
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["message"].startswith("明白了，这是第2轮")
+        view = client.get(f"/v1/creative/sessions/{session_id}").json()
+    director_turns = [turn for turn in view["turns"] if turn["speaker"] == "DIRECTOR"]
+    assert len(director_turns) == 2
+    assert director_turns[0]["content"].startswith("明白了，这是第1轮：")
+    assert director_turns[1]["content"].startswith("明白了，这是第2轮：")
+    # The second call carried the first exchange as conversation, not only the
+    # latest message: system, user(idea), assistant(reply 1), user(latest).
+    roles = [message["role"] for message in reasoner.calls[1]]
+    assert roles[0] == "system" and roles[-1] == "user"
+    assert "assistant" in roles and roles.count("user") >= 2
+    assert "明白了，这是第1轮" in reasoner.calls[1][roles.index("assistant")]["content"]
+
+
+def test_a_bare_field_object_from_the_model_still_works_without_a_reply(container, project):
+    class _TerseReasoner:
+        async def execute_chat(self, project_id, role, *, messages, parameters=None):  # type: ignore[no-untyped-def]
+            return type(
+                "Execution",
+                (),
+                {"response": {"choices": [{"message": {"content": '{"tone": ["warm"]}'}}]}},
+            )()
+
+    container.creative_director.model_roles = _TerseReasoner()
+    with _client(container) as client:
+        started = _start(client, project.id, VAGUE_IDEA)
+    assert started["reasoner"] == "MODEL:DIRECTOR"
+    assert started["message"] == "A few things would sharpen this a lot:"
+
+
+def test_typing_an_approval_approves_the_proposed_brief(container, project):
+    with _client(container) as client:
+        started = _start(client, project.id, RICH_IDEA)
+        assert started["status"] == "BRIEF_PROPOSED"
+        session_id = started["session_id"]
+        approved = client.post(f"/v1/creative/sessions/{session_id}/messages", json={"content": "批准。"})
+        assert approved.status_code == 200, approved.text
+        body = approved.json()
+        assert body["reasoner"] == "APPROVAL"
+        assert body["approved_revision"] == started["brief_revision"]
+        view = client.get(f"/v1/creative/sessions/{session_id}").json()
+    assert view["session"]["status"] == "VISUALS_IN_PROGRESS"
+    assert view["brief"]["status"] == "APPROVED"
+
+
+def test_a_conditional_approval_is_a_turn_not_an_approval(container, project):
+    with _client(container) as client:
+        started = _start(client, project.id, RICH_IDEA)
+        session_id = started["session_id"]
+        reply = client.post(
+            f"/v1/creative/sessions/{session_id}/messages",
+            json={"content": "批准，但把主角改成男生"},
+        )
+        assert reply.status_code == 200
+        assert reply.json()["reasoner"] != "APPROVAL"
+        view = client.get(f"/v1/creative/sessions/{session_id}").json()
+    assert view["session"]["status"] in {"BRIEF_PROPOSED", "CLARIFYING"}
+
+
+def test_a_deleted_session_leaves_the_list_and_stops_taking_turns(container, project):
+    with _client(container) as client:
+        first = _start(client, project.id, VAGUE_IDEA)["session_id"]
+        second = _start(client, project.id, RICH_IDEA)["session_id"]
+        listed = client.get("/v1/creative/sessions", params={"project_id": project.id}).json()
+        assert {item["id"] for item in listed} == {first, second}
+        deleted = client.delete(f"/v1/creative/sessions/{first}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json() == {"id": first, "status": "ABANDONED"}
+        listed = client.get("/v1/creative/sessions", params={"project_id": project.id}).json()
+        assert [item["id"] for item in listed] == [second]
+        # Still readable as history, closed for dialogue.
+        assert client.get(f"/v1/creative/sessions/{first}").json()["session"]["status"] == "ABANDONED"
+        refused = client.post(f"/v1/creative/sessions/{first}/messages", json={"content": "还在吗"})
+        assert refused.status_code == 409
+        assert client.delete(f"/v1/creative/sessions/{first}").status_code == 200
+        assert client.delete("/v1/creative/sessions/nope").status_code == 404

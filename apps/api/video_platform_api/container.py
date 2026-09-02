@@ -22,6 +22,8 @@ from entitlement_core import (
     GenerationAdmissionService,
     LiveCanaryPermitService,
     ModelRoleRuntime,
+    ProductionBudgetPolicy,
+    ProductionBudgetService,
     WorkspaceCreditService,
     WorkspaceModelResolver,
 )
@@ -168,6 +170,7 @@ class Container:
     workspace_models: WorkspaceModelResolver
     model_roles: ModelRoleRuntime
     live_canary: LiveCanaryPermitService
+    production_budget: ProductionBudgetService
     generation_admission: GenerationAdmissionService
     workspace_credits: WorkspaceCreditService
     alchemy_webhooks: AlchemyUSDCWebhookService
@@ -508,6 +511,11 @@ def build_container(settings: Settings | None = None) -> Container:
 
     workspace_models = WorkspaceModelResolver(database, model_infrastructure)
     live_canary = LiveCanaryPermitService(database)
+    # The automatic production budget. Off until an operator sets a platform
+    # ceiling; then every verified model's live call runs on a quote-bound
+    # authorization under the daily platform/provider breaker instead of a
+    # hand-minted permit.
+    production_budget = ProductionBudgetService(database, ProductionBudgetPolicy.from_settings(settings))
     model_roles = ModelRoleRuntime(
         database,
         workspace_models,
@@ -518,6 +526,7 @@ def build_container(settings: Settings | None = None) -> Container:
         # chat/embedding holds and settlements from the canonical list rates,
         # so a multi-request permit stops degrading into a one-call permit.
         token_costs=TokenCostEngine(database),
+        production_budget=production_budget,
     )
     live_gate_ready = (
         settings.provider_mode == "live"
@@ -731,6 +740,7 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_mode=settings.provider_mode,
         flow_affinity=flow_affinity,
         live_canary=live_canary,
+        production_budget=production_budget,
     )
     production = ProductionEngine(database)
     skills = SkillRegistry(settings.skills_root)
@@ -955,6 +965,7 @@ def build_container(settings: Settings | None = None) -> Container:
         workspace_models=workspace_models,
         model_roles=model_roles,
         live_canary=live_canary,
+        production_budget=production_budget,
         generation_admission=generation_admission,
         workspace_credits=workspace_credits,
         alchemy_webhooks=alchemy_webhooks,

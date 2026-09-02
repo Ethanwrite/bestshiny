@@ -149,7 +149,10 @@ Architecture truth lives in [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md)
 > STANDARD-trust — it used to run silently on Flow. Production (plan-enforced) forces
 > STANDARD before resolving and is unaffected; name the pair to run a HERO asset there.
 >
-> **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02.md`](docs/SESSION_HANDOVER_2026-09-02.md).**
+> **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-B.md`](docs/SESSION_HANDOVER_2026-09-02-B.md)**
+> (the automatic production budget; built and gated, off until an operator sets a ceiling).
+>
+> **Before it: [`docs/SESSION_HANDOVER_2026-09-02.md`](docs/SESSION_HANDOVER_2026-09-02.md).**
 > It is the entry point for the 2026-09-01/02 session: scene-champion routing (#36), the
 > cold-start admission policy (#37), the XunHuPay merge (#38), two production deploys and
 > the detour between them, what the operator decided, what is still owed, and how to

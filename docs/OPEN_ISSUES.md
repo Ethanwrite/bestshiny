@@ -165,7 +165,9 @@ lifecycle is `DISABLED` or `BLOCKED`, so the first real calls can produce the ev
 later ranks models — your instruction, because with the previous LIVE-only rule the router
 had no routable model in production at all (every video row is `CONFIGURED`). The gates are
 untouched: capability, mode, duration, resolution and reference bounds still exclude, the
-quote still precedes submission, and every live generation still needs a `LiveCanaryPermit`.
+quote still precedes submission, and every live generation is still fenced — by a
+`LiveCanaryPermit` until the model has earned `VERIFIED_LIVE`, and by its own quote-bound
+spend authorization under the production budget afterwards (§1.18).
 
 When the catalogue has earned its lifecycle states, set on the host:
 
@@ -175,6 +177,54 @@ ROUTER_ADMISSION_POLICY=strict
 
 and recreate the api and worker containers. Only you can say when "mature" is; nothing in
 the code will flip it for you.
+
+### 1.18 The automatic production budget is built and OFF; you set the ceiling
+
+Added 2026-09-02. The hand-minted `LiveCanaryPermit` is now the fence for a model's **first**
+live call only. Once a permit-fenced call closes its loop (`live_canary_status = VERIFIED_LIVE`
+— a completed generation with its artifact in storage and its credits settled, or a chat/
+embedding call settled at a checkable figure), ordinary traffic on that model runs on:
+
+1. the existing credit reservation (`WorkspaceCreditService.reserve_generation`, unchanged), and
+2. **one single-use spend authorization** created in the same transaction, bound to
+   workspace + job + provider + model, whose USD ceiling is the server quote
+   (`generation_spend_authorizations`), and
+3. **a daily USD breaker** above every authorization — one platform row and one row per provider
+   in `production_budget_ledgers`, reserved by conditional update before any money moves.
+
+Nothing of this is live until you set a ceiling. With the default the code behaves exactly as
+before this change: every live call needs a permit. To turn it on, on the host:
+
+```
+PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=<usd>           # e.g. 50
+PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY=seedance=30,openrouter=30,wan=20   # optional; ≤ platform
+```
+
+and recreate api + worker. A tripped breaker answers **503** at job creation (nothing held), and
+`RETRY_WAIT` / `PRODUCTION_BUDGET_EXCEEDED` for a job already created (it waits for the window to
+roll at UTC midnight). `GET /internal/production-budget` shows the ceilings and today's rows;
+`GET /internal/spend-authorizations` lists holds; `POST /internal/spend-authorizations/{id}/reconcile`
+closes an UNCERTAIN one with a finding, audited — independent of the credit reconciliation, because
+"refund the user" and "the platform still paid" are two facts.
+
+**Decision recorded, yours to overturn — who pays for the director and the other background
+model calls.** Three options were on the table: fold them into the generation price, charge
+separate credits, or cover them from the plan's quota. Chosen: **the plan's quota.** The FREE plan
+already meters them (`FREE_PLAN_MAX_DIRECTOR_TURNS`, `FREE_PLAN_MAX_PROMPT_OPTIMIZATIONS`); PRO and
+ENTERPRISE include them. A director turn settles at about USD 0.0004, one credit is USD 0.01, and a
+director conversation may never reach a generation, so per-turn credits would charge 25× the cost for
+a call the user cannot see and folding it into the generation price would charge for calls that
+never produce one. What bounds the platform's exposure is the same authorization + breaker: every
+live role call reserves its token-priced estimate under the platform and provider rows and settles
+at the counted tokens. If you would rather charge credits, the hook is one place — the
+`MODEL_ROLE` authorization already carries the settled figure per call.
+
+**Residuals, deliberate.** An operator permit still holds its whole remaining budget for a media
+call (the 2.43 residual is unchanged; the quote bounds the authorization, not the permit). A
+negative canary verdict (`LIVE_BLOCKED_EXTERNAL`, `CONTRACT_INVALID`) is still written only by
+`scripts/live_canary.py`; the gateway writes the positive one. An UNCERTAIN authorization keeps its
+hold on the day it was taken and stops burdening the next day's window on its own; the authorization
+itself waits for your finding.
 
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 
@@ -412,6 +462,7 @@ has not purchased has the same 50 — which is the more urgent half of this deci
 | 2.37 | **Adopted generation output keeps its `staging/generation/…` key for ever, so the staging listing grows with the media plane.** Added 2026-08-28, deliberately: adopting the staged object in place is what makes a rolled-back completion leave *only* recyclable staging objects, with no copy step to crash inside. The cost is that `sweep_generation_staging` lists every adopted object on every run and keeps them as `kept_referenced` — correctness is untouched (the sweep is chunked, so kept keys cannot starve deletable ones), but at large media volumes the hourly listing gets linearly slower. If it ever matters, the options are a date-partitioned key scheme the sweeper can skip wholesale, or a post-adoption promotion job that moves objects to content-addressed keys and updates the row — the second reintroduces a two-step mutation and should not be done casually. | `services/media-service/media_service/staging.py` |
 | 2.38 | **The creative director's model path has only been exercised through its degradation.** `CreativeDirectorService` and `EpisodeContinuationService` call `ModelRoleRuntime.execute_chat(DIRECTOR)` for brief extraction and beat enrichment, and every offline test runs in mock mode where that call fails and the deterministic rules engine answers instead — recorded as `reasoner=DETERMINISTIC` with reason codes, which is the designed degradation, and it means the model-enriched path (JSON parsing, `_sanitize_model_patch` bounds, summary merging) has never seen a real model reply. The sanitizer only fills empty structured fields and never overwrites a user answer, so the blast radius of a bad reply is bounded by construction; still, run one live DIRECTOR-role call before presenting model-drafted briefs as a product surface. | `core/creative-director/creative_director_core/service.py` |
 | 2.43 | **Fixed 2026-08-30 — live-canary permits are no longer one-call permits (E2E audit C5, §4.1).** The 2026-08-30 live run proved three compounding defects: an unquoted call held the permit's entire remaining budget, chat costs never settled (Ark reports token counts, never `usage.cost`, so `_actual_cost` returned None and `model_execution_records` kept `actual_cost_usd NULL, cost_source UNKNOWN` beside exact counts), and EXHAUSTED stayed terminal even after the hold settled to ~$0 — so a director conversation needed one permit per turn and a refine needed 2–3. Now: `TokenCostEngine` (cost_core) prices holds (character-bound input + output-token cap, margined, floored) and settlements (counted tokens, `cost_source=TOKENS_LIST`) from the dated `model_pricing_profiles` token rows; `settle`/`reconcile_uncertain` re-derive ACTIVE when freed budget leaves capacity on an unexpired permit with requests remaining; a Gateway canary refusal schedules `RETRY_WAIT` (RATE_LIMIT, pre-submit, attempt not burned) like `NO_ACCOUNT`, so minting a permit un-blocks the waiting job, while the UNCERTAIN/SETTLED-resubmission refusal stays terminal; `refine_prompt` degrades to `local_safe_fallback` on the denial (§4.2) and the route refunds the FREE deep-optimization unit on a degraded result. **Residuals, deliberate:** a model with no token pricing row keeps the whole-budget hold and its usage stays UNCERTAIN rather than settling at an invented figure, and the media-generation path still holds the whole budget per job (its quote is not trusted at the canary boundary) — recovery-on-settlement is what makes multi-request media permits usable. Pinned by `tests/test_canary_economics.py`. | `core/cost/cost_core/tokens.py`, `core/entitlements/entitlement_core/canary.py`, `core/entitlements/entitlement_core/runtime.py`, `services/generation-gateway/generation_gateway/gateway.py` |
+| 2.44 | **Fixed 2026-09-02 — verified models no longer consume a canary permit; spend is fenced by a quote-bound authorization under a daily breaker (§1.18).** Before: every live generation and every director turn needed an operator-minted `LiveCanaryPermit`, an unquoted media call held the permit's whole remaining budget, and "how much can the platform lose today" had no answer at all. Now `GenerationGateway._create_once` creates one `GenerationSpendAuthorization` in the same transaction as the credit reservation (workspace + job + provider + model, `max_cost_usd` = the server quote passed as `quoted_cost_usd` from admission — never `request.cost_estimate`), reserving the platform and provider rows of `production_budget_ledgers` by conditional update; at the paid boundary `_reserve_live_generation_fence` runs the authorization alone when `production_serviceable()` holds (`enabled`, `live_enabled`, lifecycle not DISABLED/BLOCKED, `live_canary_status = VERIFIED_LIVE`) and adds the permit otherwise; settlement takes the provider figure (`VERIFIED_PROVIDER`) or the quote (`ESTIMATED_QUOTE`) and hands the hold back; a permit-fenced generation that closes its loop stamps `VERIFIED_LIVE` through the same `CanaryLoop.verdict()` the script uses (`LIVE_CANARY_VERDICT_RECORDED`), and a permit-fenced role call that settles at a priced figure does the same (`record_role_canary_outcome`). `ModelRoleRuntime` mirrors the gateway with `LiveRoleFence`. Every degrade path that caught `LiveCanaryDenied` now catches `LiveSpendDenied`, the base both fences raise. Off by default (`PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=0`): with no ceiling nothing is created and the permit rule is exactly what it was. Migration `0069_production_budget`. Pinned by `tests/test_production_budget.py`. | `core/entitlements/entitlement_core/production_budget.py`, `core/model-registry/model_registry_core/live_canary.py`, `services/generation-gateway/generation_gateway/gateway.py`, `core/entitlements/entitlement_core/runtime.py` |
 | 2.39 | **The visual bible's version lock is service-enforced, not database-enforced.** A LOCKED `visual_bibles` row is immutable by `CreativeDirectorService` contract (refusal paths tested; superseding requires a new version and a new approval), but unlike `project_style_locks` there is no append-only trigger behind it, so raw SQL or a future careless writer could edit a locked row without an error. Same enforcement tier as the character-state CAS projection; promote to triggers if the bible ever becomes an input to billing or QA verdicts rather than a planning artefact. | `packages/domain/production_domain/models.py` |
 
 ## 3. Incomplete work

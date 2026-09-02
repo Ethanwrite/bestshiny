@@ -110,7 +110,7 @@ a live Provider result. The authoritative evidence narrative is
 
 ## Live evidence
 
-- [x] A matching durable `LiveCanaryPermit` is required at model and media live-call boundaries.
+- [x] A matching durable `LiveCanaryPermit` is required at model and media live-call boundaries — for a model's first live call; a model that has earned `VERIFIED_LIVE` runs on a quote-bound spend authorization under the daily production budget instead *(2026-09-02; off until `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY` is set; `tests/test_production_budget.py`)*.
 - [x] Permit expiry, Provider/model match, idempotency, request ceiling and cost ceiling hard-stop offline tests exist.
 - [x] Every billable model carries a sourced price, or is refused a paid route. *(2026-08-26 — `model_pricing_profiles`; `pricing_status` derived from it at boot; live mode raises `PricingUnverified` rather than quoting a placeholder.)*
 - [x] Each canary is bounded by its own `max_requests=1` permit under a global cost ceiling, one attempt, no automatic retry.

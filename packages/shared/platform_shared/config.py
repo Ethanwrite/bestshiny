@@ -124,6 +124,17 @@ class Settings(BaseSettings):
     # reference bound, the per-request quote, or the live-canary permit that
     # every live generation still needs at the gateway.
     router_admission_policy: Literal["cold_start", "strict"] = "cold_start"
+    # The automatic production budget: the breaker above every verified
+    # model's quote-bound spend authorization, per UTC day. 0 (the default)
+    # keeps it off — every live call then needs an operator's LiveCanaryPermit
+    # exactly as before, so deploying the code changes nothing until an
+    # operator sets a ceiling. A model earns the automatic path by closing one
+    # permit-fenced canary loop (`live_canary_status = VERIFIED_LIVE`).
+    production_budget_platform_usd_per_day: Decimal = Decimal("0")
+    # Reviewed "provider=usd" pairs, comma-separated (e.g. "seedance=40,
+    # openrouter=25"). A provider without its own ceiling shares the platform
+    # ceiling; a provider ceiling never exceeds what the platform row allows.
+    production_budget_provider_usd_per_day: str = ""
     allow_live_provider_calls: bool = False
     live_provider_confirmation: str = ""
     provider_http_timeout_seconds: float = 120

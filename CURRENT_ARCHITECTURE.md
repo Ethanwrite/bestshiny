@@ -788,9 +788,11 @@ enabled, router-enabled model of a configured provider except `DISABLED`/`BLOCKE
 *ranking* while nothing has evidence yet rather than deciding who is eligible for a first call. Operator decision
 2026-09-02, for the platform's early life; the switch back is one environment line. The policy relaxes nothing
 else: every capability gate, duration/resolution/reference bound and mode fact above still applies, the
-per-request quote and reservation still happen before submission, and every live generation still needs a
-`LiveCanaryPermit` at the gateway (`_reserve_live_generation_canary` holds the permit's remaining budget for the
-one call) — the cost ceiling that caught a 2s/480p request being billed at a provider's 5s/1080p defaults.
+per-request quote and reservation still happen before submission, and every live generation is still fenced at
+the gateway (`_reserve_live_generation_fence`): by a `LiveCanaryPermit` holding its whole remaining budget for
+the one call until the model has earned `VERIFIED_LIVE`, and by the job's own quote-bound spend authorization under
+the daily production budget afterwards (see "The automatic production budget" under Live-call safety) — the cost
+ceiling that caught a 2s/480p request being billed at a provider's 5s/1080p defaults.
 
 **Selection is champion-first, not open argmax.** The request is read as one evidence scenario via the same
 `router_scenario()` the production posterior groups by, and the hand-authored table in
@@ -1291,6 +1293,8 @@ Phase III introduces these durable evidence rows:
 | `DecisionOutcomeRecord` | shot features, continuity, generation policy, provider/model, candidate, QA, user outcome and cost |
 | `RunAPIBenchmark` | edge task hash, fact-lock/fallback, latency, quality, actual cost and optional acceptance |
 | `LiveCanaryPermit` / `LiveCanaryUsage` | bounded live authorization and each reserved/uncertain/settled operation |
+| `GenerationSpendAuthorization` | one single-use USD authorization per live operation — workspace + job + provider + model, ceiling = server quote — RESERVED/UNCERTAIN/SETTLED/RELEASED with its settlement provenance |
+| `ProductionBudgetLedger` | one UTC-day spend window per breaker scope (the platform, each provider): limit, reserved, actual |
 | `RouterObservation` | one generation attempt with its conditions and every observed outcome, for the offline posterior |
 | `RouterPosterior` | one saved cell of one offline posterior run, immutable per `run_id` |
 | `RouterReplayRun` | one historical replay with its verdict — the evidence the LCB flag's precondition rests on |
@@ -1360,6 +1364,64 @@ Canary status is no longer a static list here. It is a column —
 refusing to quote what is not priced" below. Known spend is **no longer USD 0**:
 Wan 2.7 T2V, I2V and R2V have each completed a real generation, and one
 `openai/gpt-image-2` attempt was refused by the provider's router before billing.
+
+### The automatic production budget (2026-09-02)
+
+*Supersedes "every live call needs a permit". The permit is now the fence for a model's first live
+call; this is the fence for every call after it.*
+
+A hand-minted permit per model per day is the right amount of ceremony for the first real call on a
+model and the wrong amount for the thousandth, and an unquoted media call holding a permit's whole
+remaining budget meant the director's conversation and a user's generation were competing for the
+same operator-minted number. The second fence is automatic and has three parts, all in
+`entitlement_core.production_budget`:
+
+1. **The authorization.** `GenerationGateway._create_once` creates one `GenerationSpendAuthorization`
+   in the same transaction as the workspace credit reservation: bound to workspace + job + provider +
+   model, single-use (`operation_key` = `generation:<job_id>`, unique per job), with `max_cost_usd`
+   equal to the **server quote** — passed as `quoted_cost_usd` from the admission result by every
+   route, never read from `GenerationRequest.cost_estimate`. A live job with no server quote is
+   refused (`SpendAuthorizationDenied`, 409), because a ceiling nobody quoted is not a ceiling. Role
+   calls (director, refiner, embeddings) get one per call from `ModelRoleRuntime`, sized by the
+   `TokenCostEngine` estimate.
+2. **The breaker.** Two `ProductionBudgetLedger` rows per UTC day — `PLATFORM/platform` and
+   `PROVIDER/<name>` — are reserved by conditional update (`reserved + actual + amount <= limit`,
+   platform first then provider, one lock order) before the authorization row exists. A refusal is
+   `ProductionBudgetExceeded`: **503** at job creation with nothing held (credits roll back with it),
+   `RETRY_WAIT` / `PRODUCTION_BUDGET_EXCEEDED` for a job that reaches the boundary after its
+   authorization was released by a local failure and must reserve again. Ceilings come from
+   `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY` and the `provider=usd` pairs in
+   `PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY` (a provider ceiling never exceeds the platform's; a
+   provider without one shares it). A platform ceiling of 0 — the default — turns the whole thing off:
+   no rows, no authorizations, the permit rule exactly as it was.
+3. **The verdict.** `production_serviceable()` (`model_registry_core.live_canary`) is the one
+   predicate: `enabled`, `live_enabled`, lifecycle not DISABLED/BLOCKED, and
+   `live_canary_status = VERIFIED_LIVE`. At the paid boundary the gateway runs the authorization
+   alone for a serviceable model and adds the permit otherwise (`LiveGenerationFence`; the
+   authorization records which, as `fence = PRODUCTION | CANARY`). A permit-fenced generation that
+   closes its loop — reached the provider, COMPLETED, artifact registered and readable, credits
+   settled for what was held, the same `CanaryLoop.verdict()` the script applies — stamps
+   `VERIFIED_LIVE` (`LIVE_CANARY_VERDICT_RECORDED`); a permit-fenced role call that settles at a
+   `VERIFIED_PROVIDER` or `TOKENS_LIST` figure does the same (`record_role_canary_outcome`). A
+   capability-contract change still resets the status, which pulls the model back behind a permit.
+
+Settlement takes the provider's figure when it reports one (`VERIFIED_PROVIDER`), the counted tokens
+at list (`TOKENS_LIST`), or the quote itself (`ESTIMATED_QUOTE`) — most video providers report no
+cost in the poll result, and a breaker that waited for one would hold every finished generation's
+reservation until an operator typed it in; the quote is list price plus the service margin, so it
+never understates exposure. A settled figure above the ceiling is recorded and announced
+(`SPEND_QUOTE_OVERRUN`): the fence held, the price table did not. A conclusively local failure
+releases the hold with evidence; an ambiguous one leaves the authorization UNCERTAIN for
+`POST /internal/spend-authorizations/{id}/reconcile` (`SETTLE_ACTUAL_COST` or
+`RELEASE_NO_REMOTE_CHARGE`, idempotent, audited as `SPEND_AUTHORIZATION_RECONCILED`) — deliberately
+independent of the credit reconciliation, because "refund the user" and "the platform still paid"
+are two facts. `GET /internal/production-budget` reports the ceilings and today's rows;
+`GET /internal/spend-authorizations` lists holds by job, workspace, provider or status.
+
+Both fences raise `LiveSpendDenied`; every path that degraded on a refused permit (the director's
+turn, prompt refinement, the gateway's `RETRY_WAIT`) catches that base and degrades the same way on
+a tripped breaker. Who pays for the background model calls is a recorded product decision
+(`docs/OPEN_ISSUES.md` §1.18): the plan's quota, not credits and not the generation price.
 
 ### What a permit is worth is what it can still cost
 

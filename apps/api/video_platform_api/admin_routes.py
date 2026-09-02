@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from model_registry_core import production_serviceable
 from production_domain.models import (
     AdminAuditLog,
     AdminCreditAdjustment,
@@ -233,6 +234,15 @@ def _model_view(model: ModelDefinition, profile: ModelCapabilityProfile | None) 
         # closed live loop. Conflating them would let a reviewed model read as
         # production-proven, which is the one thing this column exists to stop.
         "live_canary_status": model.live_canary_status,
+        # Whether ordinary live traffic runs on the automatic production budget
+        # (quote-bound authorization under the platform breaker) instead of an
+        # operator's LiveCanaryPermit. Earned by one closed canary loop.
+        "production_serviceable": production_serviceable(
+            enabled=model.enabled,
+            live_enabled=model.live_enabled,
+            lifecycle_status=model.lifecycle_status,
+            live_canary_status=model.live_canary_status,
+        ),
         "live_canary_detail": model.live_canary_detail,
         "health": "UNKNOWN",
     }

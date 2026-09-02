@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from platform_database import Database
 from production_domain.models import ModelDefinition, utcnow
@@ -194,6 +195,86 @@ def record_canary_outcome(
         )
 
 
+# Cost provenances that count as a settled, priced live call for a chat or
+# embedding model. ESTIMATED and UNKNOWN are not evidence that money moved for
+# a figure anyone can check, so they earn nothing.
+_ROLE_SETTLEMENT_SOURCES = frozenset({"VERIFIED_PROVIDER", "TOKENS_LIST"})
+
+
+def production_serviceable(
+    *,
+    enabled: bool,
+    live_enabled: bool,
+    lifecycle_status: str,
+    live_canary_status: str,
+) -> bool:
+    """Whether ordinary traffic may run this model on the automatic production budget.
+
+    The first live call on a model is an operator's decision, taken by issuing
+    a `LiveCanaryPermit`; once that call has closed its loop the model reads
+    `VERIFIED_LIVE`, and from then on user requests are fenced by their own
+    quote-bound spend authorization and the platform breaker instead of a
+    hand-minted permit. Every switch that can turn a model off still applies:
+    a disabled, blocked or live-disabled model is not serviceable whatever its
+    canary history says, and a capability-contract change resets the canary
+    status, which pulls the model back behind a permit.
+    """
+
+    return bool(
+        enabled
+        and live_enabled
+        and lifecycle_status not in {"DISABLED", "BLOCKED"}
+        and live_canary_status == VERIFIED_LIVE
+    )
+
+
+def record_role_canary_outcome(
+    database: Database,
+    *,
+    provider: str,
+    model: str,
+    cost_usd: Decimal,
+    cost_source: str,
+    evidence_reference: str,
+    observed_at: datetime | None = None,
+) -> CanaryRecord | None:
+    """Stamp `VERIFIED_LIVE` for a chat or embedding model whose permit call settled.
+
+    A media generation closes its loop across several boundaries; a role call
+    closes it inside one request. The whole loop here is: the request reached
+    the provider, a response came back, and the usage settled at a figure with
+    a checkable provenance — the provider's own cost or counted tokens at the
+    dated list rate. Anything less (no counts, no rates, an estimate) earns
+    nothing, exactly as a generation whose artifact never landed earns nothing.
+    """
+
+    if cost_source not in _ROLE_SETTLEMENT_SOURCES:
+        return None
+    stamped_at = observed_at or utcnow()
+    detail = f"role call settled USD {cost_usd} ({cost_source}) · {evidence_reference}"[:_DETAIL_LIMIT]
+    with database.session() as session:
+        row = session.scalar(
+            select(ModelDefinition).where(
+                ModelDefinition.provider == provider,
+                ModelDefinition.provider_model_id == model,
+            )
+        )
+        if row is None:
+            return None
+        previous = row.live_canary_status
+        row.live_canary_status = VERIFIED_LIVE
+        row.live_canary_detail = detail
+        row.last_live_test_at = stamped_at
+        row.last_verified_at = stamped_at
+        return CanaryRecord(
+            logical_name=row.logical_name,
+            previous_status=previous,
+            status=VERIFIED_LIVE,
+            detail=detail,
+            observed_at=stamped_at,
+        )
+
+
 __all__ = [
     "CONTRACT_INVALID",
     "CanaryLoop",
@@ -201,5 +282,7 @@ __all__ = [
     "LIVE_BLOCKED_EXTERNAL",
     "NOT_RUN",
     "VERIFIED_LIVE",
+    "production_serviceable",
     "record_canary_outcome",
+    "record_role_canary_outcome",
 ]

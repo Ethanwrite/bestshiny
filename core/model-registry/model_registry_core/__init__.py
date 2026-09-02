@@ -13,7 +13,9 @@ from .live_canary import (
     VERIFIED_LIVE,
     CanaryLoop,
     CanaryRecord,
+    production_serviceable,
     record_canary_outcome,
+    record_role_canary_outcome,
 )
 from .registry import CapabilityObservationConflict, ModelCapabilityRegistry
 from .router import VideoModelRouter
@@ -49,7 +51,9 @@ __all__ = [
     "LIVE_BLOCKED_EXTERNAL",
     "NOT_RUN",
     "VERIFIED_LIVE",
+    "production_serviceable",
     "record_canary_outcome",
+    "record_role_canary_outcome",
     "ModelBindingKind",
     "CapabilityObservationConflict",
     "ModelCandidate",

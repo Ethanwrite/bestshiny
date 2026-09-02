@@ -26,7 +26,18 @@ _CANARY_RECONCILIATION_NAMESPACE = uuid5(
 )
 
 
-class LiveCanaryDenied(RuntimeError):
+class LiveSpendDenied(RuntimeError):
+    """A live spending fence refused the call before any money could move.
+
+    Both fences raise it: the operator's `LiveCanaryPermit` for a model that
+    has not yet earned `VERIFIED_LIVE`, and the automatic production budget
+    for one that has. Callers that degrade on a refused canary (the director's
+    turn, prompt refinement, the gateway's RETRY_WAIT) catch this base, so a
+    tripped breaker degrades the same way a missing permit does.
+    """
+
+
+class LiveCanaryDenied(LiveSpendDenied):
     pass
 
 
@@ -836,4 +847,5 @@ __all__ = [
     "LiveCanaryConflict",
     "LiveCanaryDenied",
     "LiveCanaryPermitService",
+    "LiveSpendDenied",
 ]

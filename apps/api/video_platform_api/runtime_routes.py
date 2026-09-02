@@ -14,7 +14,11 @@ from entitlement_core import (
     InsufficientWorkspaceCredits,
     LiveCanaryConflict,
     PlanEntitlementDenied,
+    ProductionBudgetExceeded,
+    SpendAuthorizationConflict,
+    SpendAuthorizationDenied,
     WorkspaceCreditConflict,
+    authorization_dict,
 )
 from evaluation_core import (
     EvaluationEvidence,
@@ -618,8 +622,13 @@ def register_runtime_routes(
                 body,
                 estimated_credits=estimate.credits,
                 pricing_version=container.credit_pricing.version,
+                quoted_cost_usd=estimate.estimated_total_usd,
             )
         except IdempotencyConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ProductionBudgetExceeded as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except SpendAuthorizationDenied as exc:
             raise HTTPException(409, str(exc)) from exc
         except InsufficientWorkspaceCredits as exc:
             # 402, not 403. Now that every plan is charged, "your plan does not
@@ -1243,6 +1252,70 @@ def register_runtime_routes(
             "action": result.action,
             "audit_decision_id": result.audit_decision_id,
             "replayed": result.replayed,
+        }
+
+    @internal_router.get("/internal/production-budget")
+    def production_budget_snapshot():
+        """The operator's ceilings and this window's platform and provider rows."""
+
+        return container.production_budget.snapshot()
+
+    @internal_router.get("/internal/spend-authorizations")
+    def list_spend_authorizations(
+        generation_job_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        operation_key: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        workspace_id: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+        provider: Annotated[str | None, Query(min_length=1, max_length=80)] = None,
+        status: Annotated[
+            Literal["RESERVED", "UNCERTAIN", "SETTLED", "RELEASED"] | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ):
+        items = container.production_budget.list_authorizations(
+            generation_job_id=generation_job_id,
+            operation_key=operation_key,
+            workspace_id=workspace_id,
+            provider=provider,
+            status=status,
+            limit=limit,
+        )
+        return {"limit": limit, "authorizations": [authorization_dict(item) for item in items]}
+
+    @internal_router.post("/internal/spend-authorizations/{authorization_id}/reconcile")
+    def reconcile_spend_authorization(
+        authorization_id: str,
+        body: ProviderBudgetReconcileRequest,
+        idempotency_key: Annotated[
+            str | None,
+            Header(alias="Idempotency-Key"),
+        ] = None,
+    ):
+        """Close an UNCERTAIN spend authorization with an operator's finding, audited."""
+
+        if not idempotency_key:
+            raise HTTPException(400, "Idempotency-Key is required")
+        try:
+            authorization, audit_decision_id, replayed = container.production_budget.reconcile_uncertain(
+                authorization_id,
+                action=body.action,
+                actual_cost_usd=body.actual_cost_usd,
+                idempotency_key=idempotency_key,
+                reason=body.reason,
+                evidence_reference=body.evidence_reference,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except SpendAuthorizationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "authorization": authorization_dict(authorization),
+            "action": body.action,
+            "audit_decision_id": audit_decision_id,
+            "replayed": replayed,
+            "budget": container.production_budget.snapshot(),
         }
 
     @internal_router.get("/internal/benchmarks")

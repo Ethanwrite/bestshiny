@@ -189,6 +189,23 @@ something else happens to reload it — the renewal succeeds and the site still 
   Seedance, start+end frame → Wan 2.7). Set `ROUTER_ADMISSION_POLICY=strict` in `.env` and
   recreate api + worker when the catalogue has earned its lifecycle states.
 
+- **Next release carries migration `0069_production_budget`** (two new tables, no data
+  movement, refuses to downgrade over recorded authorizations) and the automatic production
+  budget, which is **off until `.env` names a ceiling**:
+
+  ```
+  PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=50
+  PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY=seedance=30,openrouter=30,wan=20
+  ```
+
+  With those unset the deployed behaviour is unchanged: every live call needs a
+  `LiveCanaryPermit`. With them set, a model that has earned `VERIFIED_LIVE` (today only
+  `alibaba/wan-3.0`) runs user traffic on a quote-bound spend authorization under the daily
+  breaker and consumes no permit; every other model still needs one until its first
+  permit-fenced call closes its loop, which now stamps the verdict itself. Verify after the
+  deploy with `GET /internal/production-budget` (policy `enabled`, today's rows) — see
+  `docs/OPEN_ISSUES.md` §1.18 for what each field means and what a 503 at job creation is.
+
   **How that day went, because it will recur.** `2090992` (#36) was deployed at 09:48Z with
   `.prev = 89e1126` (the `codex/sponsored-usdc-walletconnect` tip, tree-identical to #35's
   squash `48f62d6`, proven with an empty `git diff` before extraction). About 47 minutes

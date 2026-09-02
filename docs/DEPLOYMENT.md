@@ -176,19 +176,31 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `2090992` (`main`, [#36](https://github.com/Ethanwrite/bestshiny/pull/36)),
-  deployed 2026-09-02, Alembic `0067_eip3009_relayer` (no migration in that release) —
-  scene-champion video routing (v3), the catalogue endpoints and the explicit Auto
-  contract. `DEPLOYED_SHA.prev` is `89e1126`, the `codex/sponsored-usdc-walletconnect` tip
-  whose tree is identical to `main`'s #35 squash (`48f62d6`) — proven with an empty
-  `git diff` before extraction, which is the check to repeat whenever the running SHA is
-  not a `main` commit. Verified post-deploy: all three containers on the rebuilt image IDs,
-  api healthy, public `/health` 200, the new bundle served. **Found during that deploy:**
-  every video model row is `lifecycle_status = CONFIGURED`, so with `PROVIDER_MODE=live` the
-  automatic router had no routable model at all (pre-existing; passenger Auto/named video
-  resolves roles with `require_live=False` and was unaffected). The cold-start admission
-  policy (`ROUTER_ADMISSION_POLICY`, default `cold_start`; `strict` restores LIVE-only
-  routing) is the answer, and it ships with the release after this one.
+- **Current release.** `0f90f0b` (`main`, [#38](https://github.com/Ethanwrite/bestshiny/pull/38)
+  XunHuPay checkout on top of [#37](https://github.com/Ethanwrite/bestshiny/pull/37) cold-start
+  routing admission and [#36](https://github.com/Ethanwrite/bestshiny/pull/36) scene-champion
+  routing), deployed 2026-09-02 14:29Z, Alembic `0068_xunhupay`. `DEPLOYED_SHA.prev` is
+  `9109186`. Verified post-deploy: api and worker on the rebuilt image IDs, `web` recreated
+  by hand after `up -d` skipped it (third time on record — check every container's running
+  image ID against the built one, every deploy), api healthy, public `/health` and homepage
+  200, zero tracebacks. `ROUTER_ADMISSION_POLICY` is not set on the host, so the code
+  default `cold_start` applies, and `POST /internal/router/video` answers `200` with
+  `video-router-v3` / `CHAMPION_TABLE` for the first time in production (plain shot →
+  Seedance, start+end frame → Wan 2.7). Set `ROUTER_ADMISSION_POLICY=strict` in `.env` and
+  recreate api + worker when the catalogue has earned its lifecycle states.
+
+  **How that day went, because it will recur.** `2090992` (#36) was deployed at 09:48Z with
+  `.prev = 89e1126` (the `codex/sponsored-usdc-walletconnect` tip, tree-identical to #35's
+  squash `48f62d6`, proven with an empty `git diff` before extraction). About 47 minutes
+  later another session deployed the **unmerged** `codex/xunhupay-production` tip
+  `9109186` directly, migrated production to `0068`, and rewrote `.prev` back to `89e1126`.
+  That left `main` undeployable — its head migration was `0067`, the api refuses an unknown
+  revision, and shipping it would have removed the payment feature — which was caught only by
+  `git diff --name-status <DEPLOYED_SHA> <candidate>` before extraction. Resolution: open a
+  PR for the branch (#38), gate the merged tree on both engines (which surfaced a
+  PostgreSQL-only `create_all` idempotency bug on `main` since #35, fixed in #38), merge,
+  then deploy `main`. **Run that diff before every extraction, and never deploy a commit
+  that is not on `main` without recording why.**
   Earlier: `8b92639` (#23, 2026-08-30, FREE gates + rebrand); `7e80d5a` #22 and `f758a9c`
   were deployed between #19 and #23 without this line moving — `DEPLOYED_SHA` was right
   throughout, this document was behind, which is exactly the failure mode the paragraph

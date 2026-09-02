@@ -885,3 +885,49 @@ async def test_every_image_in_a_batch_becomes_its_own_candidate(
 
     events = {event.event_type for event in container.gateway.events(job.id)}
     assert "MEDIA_BATCH_SIBLINGS_REGISTERED" in events
+
+
+@pytest.mark.asyncio
+async def test_the_gateways_priced_resolution_never_reaches_the_images_api() -> None:
+    """`resolution` is stated on every job so the bill matches the quote (gateway
+    `_submit`); it is a video parameter, and gpt-image-2's descriptor lists no
+    `resolution`, `size`, `output_format` or `seed`. They are dropped before the
+    paid call instead of being sent for the provider to refuse after it."""
+
+    provider, transport = _provider()
+    await provider.generate_image(
+        {
+            "model": GPT_IMAGE_2,
+            "prompt": "a lantern-lit alley after rain",
+            "resolution": "720p",
+            "size": "1024x1024",
+            "output_format": "png",
+            "seed": 7,
+            "quality": "low",
+            "aspect_ratio": "1:1",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert set(body) == {"model", "prompt", "quality", "aspect_ratio"}
+
+
+@pytest.mark.asyncio
+async def test_an_operator_declared_model_keeps_the_generic_field_set() -> None:
+    transport = MockProviderTransport({("POST", "/images"): _image_response()})
+    provider = OpenRouterProvider(transport=transport, image_model_envelopes="vendor/image-x=4:2")
+    await provider.generate_image(
+        {
+            "model": "vendor/image-x",
+            "prompt": "one declared model",
+            "resolution": "1080p",
+            "quality": "low",
+        },
+        account_id="",
+        worker_id="",
+    )
+    body = transport.requests[0].json_body
+    assert body is not None
+    assert body["resolution"] == "1080p"

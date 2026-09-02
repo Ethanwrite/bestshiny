@@ -136,6 +136,27 @@ budget off it needs a permit; a tripped breaker refuses a director call as a `Li
 
 ---
 
+### 2.8 After the deploy: three reported blockers, re-read from the data (2026-09-02, late)
+- **"Seedance return host"** — already fixed before this session: the host
+  `*.tos-cn-beijing.volces.com` is in `PROVIDER_MEDIA_ALLOWED_HOSTS` on the host, read from a real
+  job; the three 2026-08-30 `PROVIDER_MEDIA_SECURITY_ERROR` failures were "image MIME type does not
+  match its filename" (Ark serves JPEG from paths named `.png`), fixed the same day in
+  `download_provider_output_to_staging`. Nothing to change; the DashScope return host (§2.33) is
+  still the one unread.
+- **RunAPI** — `ALLOW_RUNAPI_EDGE_CALLS=false` on the host was the whole story
+  (`RUNAPI_EDGE_CALL_DENIED` ×5). Set to `true`, api + worker recreated.
+- **`openai/gpt-image-2`** — never reached the adapter on production (every job died at the
+  permit); the one recorded provider answer (dev) was OpenRouter's "All providers have been ignored
+  … /settings/privacy" — the account's data policy, since cleared by the operator (the account now
+  lists the single OpenAI endpoint, status 0). While checking the adapter against
+  `GET /api/v1/images/models` one real defect surfaced: the gateway states `resolution` on every
+  job for pricing, and `IMAGE_REQUEST_FIELDS` forwarded it to `POST /images`, where gpt-image-2
+  declares no such parameter. `OpenRouterImageEnvelope.parameters` now lists what the descriptor
+  declares (`n`, `aspect_ratio`, `quality`, `background`, `input_references`,
+  `output_compression`) and `generate_image` drops the rest before the paid call;
+  operator-declared envelopes keep the generic set. `tests/test_openrouter_image_generation.py`
+  pins both. Unproven until one real gpt-image-2 generation runs on the new tree.
+
 ## 4. Owed to the operator / unresolved
 
 1. **Three models cannot be switched on by a switch:** `flow-narwhal-image-internal` and
@@ -178,7 +199,7 @@ Run from the worktree root on the main checkout's venv, the long halves detached
 | --- | --- |
 | `main` | `34c9323` (#39 squash) |
 | Dev stack (`ai-director-platform`, this worktree) | api, worker and web rebuilt from `34c9323`'s tree and recreated; dev database at `0069_production_budget`; dev `.env` carries `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=10` and `PRODUCTION_BUDGET_PROVIDER_USD_PER_DAY=seedance=5,openrouter=5,wan=5` (dev runs `PROVIDER_MODE=live`, so these bound real dev spend); `GET /internal/production-budget` answers `enabled: true` |
-| Production | **still `0f90f0b` / `0068_xunhupay`** when this was written. The deploy of `34c9323` — `DEPLOYMENT.md` §4 with a pre-extraction backup of `.env` and the compose file, `DEPLOYED_SHA.prev`, and one appended env line `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=200` — was prepared and **refused twice by the Claude Code auto-mode permission classifier** (scp + ssh that modifies the host). The operator was given the exact command and the choice to allow it or run it; see the session transcript. Until it runs, production is behind expired permits exactly as §1.18 describes |
+| Production | **`34c9323` deployed by the operator on 2026-09-02 ≈19:45Z** (the auto-mode permission classifier had refused the scp + ssh twice from this session, so the operator ran the documented command). Verified afterwards: `DEPLOYED_SHA = 34c9323`, `.prev = 0f90f0b`, alembic `0069_production_budget`, `GET /health` 200, api/worker/web running image IDs equal the built ones, `GET /internal/production-budget` `enabled: true` with the platform row at 200 USD/day and no per-provider ceiling. Then `ALLOW_RUNAPI_EDGE_CALLS=true` set and api + worker recreated (healthy). No job, model call or spend authorization had run on the new tree at the time of writing — the first real director turn, refinement and generation are the operator's next click |
 | Verification to run after the deploy | `DEPLOYED_SHA` = `34c9323`; `alembic current` = `0069_production_budget`; every container's running image ID equals the built one (web has been skipped by `up -d` three times); `GET /health` 200; `POST /internal/router/video` still `CHAMPION_TABLE`; `GET /internal/production-budget` `enabled: true` with the platform row at 200; `select count(*) from model_definitions where enabled and live_enabled and lifecycle_status not in ('DISABLED','BLOCKED')` = 21; then one real director turn and one real generation, and watch for the Seedance host refusal (§4.2) |
 
 ## 6. Gotchas this session paid for

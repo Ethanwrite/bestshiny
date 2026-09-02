@@ -60,6 +60,15 @@ VIDEO_REFERENCE_ALIASES = {
 # is the documented request schema; every internal field — tenancy, routing,
 # accounting, idempotency, style embeddings, canonical shot spec — stays inside
 # the platform.
+
+# Gateway-resolved reference URLs, in the order the model should see them.
+# They become `input_references` entries; the start frame leads because an edit
+# is anchored on it.
+IMAGE_REFERENCE_SOURCES = ("start_frame_url", "end_frame_url", "reference_urls")
+
+MAX_IMAGE_OUTPUT_BYTES = 32 * 1024 * 1024
+
+
 IMAGE_REQUEST_FIELDS = frozenset(
     {
         "model",
@@ -77,13 +86,6 @@ IMAGE_REQUEST_FIELDS = frozenset(
     }
 )
 
-# Gateway-resolved reference URLs, in the order the model should see them.
-# They become `input_references` entries; the start frame leads because an edit
-# is anchored on it.
-IMAGE_REFERENCE_SOURCES = ("start_frame_url", "end_frame_url", "reference_urls")
-
-MAX_IMAGE_OUTPUT_BYTES = 32 * 1024 * 1024
-
 
 @dataclass(frozen=True)
 class OpenRouterImageEnvelope:
@@ -100,6 +102,12 @@ class OpenRouterImageEnvelope:
     aspect_ratios: frozenset[str]
     qualities: frozenset[str]
     backgrounds: frozenset[str]
+    #: The request parameters the model's descriptor declares. The gateway
+    #: states `resolution` on every job so the bill matches the quote, and the
+    #: generic field list forwarded it to `POST /images`, which gpt-image-2 does
+    #: not accept; a parameter the descriptor does not list is dropped before
+    #: the paid call rather than sent for the provider to refuse after it.
+    parameters: frozenset[str] = frozenset(IMAGE_REQUEST_FIELDS)
 
 
 # The Image API normalizes these three enums across providers, so an
@@ -122,6 +130,12 @@ IMAGE_MODEL_ENVELOPES: dict[str, OpenRouterImageEnvelope] = {
         qualities=IMAGE_QUALITIES,
         # gpt-image-2 does not offer a transparent background.
         backgrounds=frozenset({"auto", "opaque"}),
+        # `supported_parameters` of GET /api/v1/images/models, re-read from the
+        # production account on 2026-09-02: no `size`, `resolution`,
+        # `output_format` or `seed` for this model.
+        parameters=frozenset(
+            {"n", "aspect_ratio", "quality", "background", "input_references", "output_compression"}
+        ),
     ),
 }
 
@@ -321,6 +335,9 @@ class OpenRouterProvider(
         else:
             payload.pop("input_references", None)
         _assert_within_envelope(model, payload, references, envelope)
+        for field_name in list(payload):
+            if field_name not in {"model", "prompt"} and field_name not in envelope.parameters:
+                payload.pop(field_name)
         data = await self.client.request("POST", "/images", json_body=payload, submitted=True)
         outputs = _image_outputs(data)
         job_id = str(data.get("id") or f"{model}:{data.get('created') or ''}").strip() or model

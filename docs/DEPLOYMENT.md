@@ -176,7 +176,19 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `0f90f0b` (`main`, [#38](https://github.com/Ethanwrite/bestshiny/pull/38)
+- **Current release.** `34c9323` (`main`, [#39](https://github.com/Ethanwrite/bestshiny/pull/39)
+  the automatic production budget: credits are the user's gate, no canary permit on paying
+  traffic), deployed by the operator on 2026-09-02 ≈19:45Z with the §4 procedure plus a
+  pre-extraction backup of `.env` and the compose file, `DEPLOYED_SHA.prev = 0f90f0b`, Alembic
+  `0069_production_budget` (applied by the api container's own `alembic upgrade head`), and
+  one appended `.env` line `PRODUCTION_BUDGET_PLATFORM_USD_PER_DAY=200` (platform breaker;
+  no per-provider ceiling). Verified after: api healthy, `GET /health` 200, api/worker/web
+  running image IDs equal the built ones, `GET /internal/production-budget` `enabled: true`
+  with the platform row at 200. Then `ALLOW_RUNAPI_EDGE_CALLS=true` was set and api + worker
+  recreated (the low-cost prompt refiner's RunAPI path had been refused by its own gate; the
+  `runapi` provider budget row is 10 USD, unused).
+
+- **Previous release.** `0f90f0b` (`main`, [#38](https://github.com/Ethanwrite/bestshiny/pull/38)
   XunHuPay checkout on top of [#37](https://github.com/Ethanwrite/bestshiny/pull/37) cold-start
   routing admission and [#36](https://github.com/Ethanwrite/bestshiny/pull/36) scene-champion
   routing), deployed 2026-09-02 14:29Z, Alembic `0068_xunhupay`. `DEPLOYED_SHA.prev` is

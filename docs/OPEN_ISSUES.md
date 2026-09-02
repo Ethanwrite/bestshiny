@@ -241,12 +241,25 @@ negative canary verdict (`LIVE_BLOCKED_EXTERNAL`, `CONTRACT_INVALID`) is still w
 authorization keeps its hold on the day it was taken and stops burdening the next day's window on
 its own; the authorization itself waits for your finding.
 
-**What the open gate will run into next** (all visible in the same 14 days of production data):
-`PROVIDER_MEDIA_SECURITY_ERROR` ×3 — Ark/DashScope return hosts are still unlisted (§2.33), so a
-Seedance generation completes and bills at the provider and then fails at download, and the
-refusal names the host it saw; `RUNAPI_EDGE_CALL_DENIED` ×5 — the low-cost refiner's RunAPI edge
-path is refused by its own gate, so refinement falls to the OpenRouter fallback model;
-`openai/gpt-image-2` is `LIVE_BLOCKED_EXTERNAL` — the account, not the code.
+**What the open gate runs into next — re-read from the data on 2026-09-02, after the deploy.**
+The three `PROVIDER_MEDIA_SECURITY_ERROR` failures (Seedream images, 2026-08-30) were **not** the
+return-host fence: the host `*.tos-cn-beijing.volces.com` was already listed, read from a real
+job, and the message was "image MIME type does not match its filename" — Ark serves JPEG from
+paths the platform had named `.png`. That was fixed the same day (`download_provider_output_to_staging`
+renames the staged file from the response's MIME type before validating the bytes), and the fix
+is in the deployed tree; the DashScope (Wan 2.7) return host is the one still unread (§2.33).
+`RUNAPI_EDGE_CALL_DENIED` ×5 was `ALLOW_RUNAPI_EDGE_CALLS=false` on the host — set to `true` and
+api + worker recreated after the deploy; the `runapi` budget row is 10 USD, unused. For
+`openai/gpt-image-2` every production job died at the permit, and the one recorded provider
+answer (dev, 2026-08-26/29) was OpenRouter's "All providers have been ignored … /settings/privacy"
+— the account's data-policy setting excluding the single OpenAI endpoint, not the adapter. The
+account now lists that endpoint as available (`GET /models/openai/gpt-image-2/endpoints`, 1
+endpoint, status 0) and the operator reports direct calls work; one adapter defect was found
+while checking: the gateway injects `resolution` into every job for pricing and
+`IMAGE_REQUEST_FIELDS` forwarded it to `POST /images`, which gpt-image-2 does not accept
+(`GET /images/models` lists `aspect_ratio`, `quality`, `background`, `n`, `input_references`,
+`output_compression` only). Fixed by filtering the image payload to the model's declared
+parameters. The first real gpt-image-2 generation on the new tree is the proof either way.
 
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 

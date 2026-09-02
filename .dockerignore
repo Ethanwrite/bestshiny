@@ -12,6 +12,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .playwright-cli/
+.claude/
+.worktrees/
 
 /data/
 /output/

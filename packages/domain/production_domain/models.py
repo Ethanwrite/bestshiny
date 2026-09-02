@@ -739,7 +739,7 @@ class WalletBindingChallenge(Base, TimestampMixin):
 
 
 class OnchainPaymentIntent(Base, TimestampMixin):
-    """Server-priced Base USDC purchase, frozen at creation.
+    """Server-priced payment order, frozen at creation.
 
     The `sku`/`amount`/`currency`/`credits`/`pricing_version`/`provider` columns
     are the immutable commercial snapshot: settlement validates the paid amount
@@ -751,7 +751,7 @@ class OnchainPaymentIntent(Base, TimestampMixin):
     __tablename__ = "onchain_payment_intents"
     __table_args__ = (
         UniqueConstraint("transaction_hash", name="uq_onchain_payment_intent_transaction_hash"),
-        CheckConstraint("chain_id > 0", name="ck_payment_intent_chain_positive"),
+        CheckConstraint("chain_id IS NULL OR chain_id > 0", name="ck_payment_intent_chain_positive"),
         CheckConstraint("raw_amount_microunits > 0", name="ck_payment_intent_amount_positive"),
         CheckConstraint("credits > 0", name="ck_payment_intent_credits_positive"),
         CheckConstraint("amount > 0", name="ck_payment_intent_snapshot_amount_positive"),
@@ -769,10 +769,10 @@ class OnchainPaymentIntent(Base, TimestampMixin):
         ForeignKey("workspace_wallet_bindings.id", ondelete="RESTRICT"), index=True
     )
     network: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
-    chain_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    chain_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     from_address: Mapped[str | None] = mapped_column(String(42), index=True)
-    to_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
-    token_address: Mapped[str] = mapped_column(String(42), index=True, nullable=False)
+    to_address: Mapped[str | None] = mapped_column(String(42), index=True)
+    token_address: Mapped[str | None] = mapped_column(String(42), index=True)
     sku: Mapped[str] = mapped_column(
         String(80), default="legacy_direct", server_default="'legacy_direct'", nullable=False
     )
@@ -800,6 +800,76 @@ class OnchainPaymentIntent(Base, TimestampMixin):
 
 # The payment services speak in orders, not intents. Same table, same rows.
 PaymentOrder = OnchainPaymentIntent
+
+
+class XunhuPayCheckoutSession(Base, TimestampMixin):
+    """One server-priced CNY checkout created with the XunHuPay gateway."""
+
+    __tablename__ = "xunhupay_checkout_sessions"
+    __table_args__ = (
+        UniqueConstraint("payment_order_id", name="uq_xunhupay_checkout_payment_order"),
+        UniqueConstraint("trade_order_id", name="uq_xunhupay_checkout_trade_order"),
+        CheckConstraint("credits_granted >= 0", name="ck_xunhupay_checkout_credits_nonnegative"),
+        CheckConstraint(
+            "status IN ('PENDING', 'PAID', 'EXPIRED', 'CANCELLED', 'RECONCILIATION_REQUIRED')",
+            name="ck_xunhupay_checkout_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    payment_order_id: Mapped[str] = mapped_column(
+        ForeignKey("onchain_payment_intents.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    trade_order_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    gateway_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    checkout_url: Mapped[str | None] = mapped_column(Text)
+    qrcode_url: Mapped[str | None] = mapped_column(Text)
+    credits_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class XunhuPaySettlement(Base):
+    """Immutable authenticated XunHuPay payment fact used to post the credit ledger."""
+
+    __tablename__ = "xunhupay_settlements"
+    __table_args__ = (
+        UniqueConstraint("payment_order_id", name="uq_xunhupay_settlement_payment_order"),
+        UniqueConstraint("transaction_id", name="uq_xunhupay_settlement_transaction"),
+        UniqueConstraint("open_order_id", name="uq_xunhupay_settlement_open_order"),
+        CheckConstraint("amount > 0", name="ck_xunhupay_settlement_amount_positive"),
+        CheckConstraint("credits_granted >= 0", name="ck_xunhupay_settlement_credits_nonnegative"),
+        CheckConstraint("length(payload_hash) = 64", name="ck_xunhupay_settlement_payload_hash"),
+        CheckConstraint(
+            "status IN ('CREDITED', 'RECONCILIATION_REQUIRED')",
+            name="ck_xunhupay_settlement_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    checkout_session_id: Mapped[str] = mapped_column(
+        ForeignKey("xunhupay_checkout_sessions.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    payment_order_id: Mapped[str] = mapped_column(
+        ForeignKey("onchain_payment_intents.id", ondelete="RESTRICT"), index=True, nullable=False
+    )
+    transaction_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    open_order_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(20), default="CNY", nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    credits_granted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), index=True, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True, nullable=False
+    )
 
 
 class OnchainPayment(Base, TimestampMixin):
@@ -855,16 +925,24 @@ class WorkspaceCreditLedgerEntry(Base):
         CheckConstraint("balance_after >= 0", name="ck_workspace_credit_ledger_after_nonnegative"),
         CheckConstraint("direction IN ('CREDIT', 'DEBIT')", name="ck_workspace_credit_ledger_direction"),
         CheckConstraint(
-            "entry_type IN ('USDC_PURCHASE', 'USDC_REORG_REVERSAL')",
+            "entry_type IN ('USDC_PURCHASE', 'USDC_REORG_REVERSAL', 'CNY_PURCHASE')",
             name="ck_workspace_credit_ledger_entry_type",
+        ),
+        CheckConstraint(
+            "(payment_id IS NOT NULL AND xunhupay_settlement_id IS NULL) OR "
+            "(payment_id IS NULL AND xunhupay_settlement_id IS NOT NULL)",
+            name="ck_workspace_credit_ledger_payment_source",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     workspace_id: Mapped[str] = mapped_column(
         ForeignKey("workspaces.id", ondelete="RESTRICT"), index=True, nullable=False
     )
-    payment_id: Mapped[str] = mapped_column(
-        ForeignKey("onchain_payments.id", ondelete="RESTRICT"), index=True, nullable=False
+    payment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("onchain_payments.id", ondelete="RESTRICT"), index=True
+    )
+    xunhupay_settlement_id: Mapped[str | None] = mapped_column(
+        ForeignKey("xunhupay_settlements.id", ondelete="RESTRICT"), index=True
     )
     related_entry_id: Mapped[str | None] = mapped_column(
         ForeignKey("workspace_credit_ledger_entries.id", ondelete="RESTRICT"), index=True
@@ -877,7 +955,7 @@ class WorkspaceCreditLedgerEntry(Base):
     balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(20), default="USDC", nullable=False)
     raw_amount_microunits: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    chain_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    chain_id: Mapped[int | None] = mapped_column(BigInteger)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True, nullable=False
@@ -5310,6 +5388,7 @@ def _install_payment_ledger_integrity_ddl() -> None:
     for table_name in (
         "alchemy_webhook_deliveries",
         "depay_webhook_deliveries",
+        "xunhupay_settlements",
         "workspace_credit_ledger_entries",
     ):
         for operation in ("UPDATE", "DELETE"):
@@ -5340,6 +5419,7 @@ def _install_payment_ledger_integrity_ddl() -> None:
     for table_name in (
         "alchemy_webhook_deliveries",
         "depay_webhook_deliveries",
+        "xunhupay_settlements",
         "workspace_credit_ledger_entries",
     ):
         event.listen(

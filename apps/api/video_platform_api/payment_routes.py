@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from payment_core import (
@@ -15,14 +16,20 @@ from payment_core import (
     WalletPaymentConflict,
     WalletPaymentNotFound,
     WalletPaymentRejected,
+    XunhuPayAuthenticationError,
+    XunhuPayConfigurationError,
+    XunhuPayConflict,
+    XunhuPayGatewayError,
+    XunhuPayPayloadError,
 )
 from production_domain.models import (
     DePayCheckoutSession,
     OnchainPaymentIntent,
     Workspace,
     WorkspaceWalletBinding,
+    XunhuPayCheckoutSession,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 
 from .auth import AuthPrincipal, AuthService
@@ -54,15 +61,37 @@ class CheckoutRequest(BaseModel):
     Amount, currency and credits are server-owned and never accepted here.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     workspace_id: str = Field(min_length=1, max_length=36)
-    sku: str = Field(min_length=1, max_length=80)
+    provider: Literal["depay", "xunhupay"] = "depay"
+    plan_id: str | None = Field(default=None, min_length=1, max_length=80)
+    # Compatibility for older BestShiny clients. New clients send `plan_id`;
+    # either spelling selects only a server-owned catalogue row.
+    sku: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> CheckoutRequest:
+        if self.plan_id and self.sku and self.plan_id != self.sku:
+            raise ValueError("plan_id and sku must match")
+        if not self.plan_id and not self.sku:
+            raise ValueError("plan_id is required")
+        return self
+
+    @property
+    def selected_plan_id(self) -> str:
+        return self.plan_id or self.sku or ""
 
 
 class DePayCheckoutRequest(BaseModel):
     sku: str = Field(min_length=1, max_length=80)
 
 
-class RelayedCheckoutRequest(CheckoutRequest):
+class RelayedCheckoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str = Field(min_length=1, max_length=36)
+    sku: str = Field(min_length=1, max_length=80)
     from_address: str = Field(min_length=42, max_length=42)
 
 
@@ -110,7 +139,7 @@ def _intent_view(intent: OnchainPaymentIntent) -> dict[str, object]:
 def register_payment_routes(app: FastAPI, container: Container, auth: AuthService) -> None:
     def require_legacy_wallet_payments() -> None:
         if not container.settings.legacy_wallet_payments_enabled:
-            raise HTTPException(410, "旧钱包支付入口已停用，请使用固定 DePay Offer")
+            raise HTTPException(410, "Legacy wallet payments are disabled; use a fixed payment pack")
 
     @app.get("/v1/payments/config")
     def payment_config(principal: AuthPrincipal = Depends(auth.current_user)):  # noqa: B008
@@ -118,6 +147,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         settings = container.settings
         service = container.wallet_payments
         depay = container.depay_payments
+        xunhupay = container.xunhupay_payments
         relayer = container.eip3009_relayer
         return {
             "reown_project_id": settings.reown_project_id,
@@ -139,6 +169,22 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             "depay_dynamic_configured": depay.dynamic_configured,
             "depay_integration_id": depay.integration_id,
             "payment_packages": (relayer.package_views() if relayer.configured else depay.package_views()),
+            "xunhupay_configured": xunhupay.configured,
+            "xunhupay_packages": xunhupay.package_views(),
+            "payment_methods": [
+                {
+                    "provider": "xunhupay",
+                    "label": "WeChat Pay",
+                    "detail": "XunHuPay",
+                    "configured": xunhupay.configured,
+                },
+                {
+                    "provider": "depay",
+                    "label": "USDC",
+                    "detail": "DePay",
+                    "configured": bool(relayer.configured or depay.dynamic_configured),
+                },
+            ],
         }
 
     @app.get("/v1/workspaces/{workspace_id}/billing")
@@ -150,7 +196,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         with container.database.session() as session:
             workspace = session.get(Workspace, workspace_id)
             if workspace is None:
-                raise HTTPException(404, "工作空间不存在")
+                raise HTTPException(404, "Workspace not found")
             bindings = list(
                 session.scalars(
                     select(WorkspaceWalletBinding)
@@ -166,10 +212,49 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 "wallet_bindings": [_binding_view(binding) for binding in bindings],
             }
 
+    @app.get("/v1/workspaces/{workspace_id}/payments/history")
+    def payment_history(
+        workspace_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        with container.database.session() as session:
+            orders = list(
+                session.scalars(
+                    select(OnchainPaymentIntent)
+                    .where(
+                        OnchainPaymentIntent.workspace_id == workspace_id,
+                        OnchainPaymentIntent.provider.in_(
+                            ("DEPAY", "EIP3009_RELAYER", "XUNHUPAY")
+                        ),
+                    )
+                    .order_by(OnchainPaymentIntent.created_at.desc())
+                    .limit(20)
+                )
+            )
+            return {
+                "items": [
+                    {
+                        "id": order.id,
+                        "plan_id": order.sku,
+                        "provider": (
+                            "xunhupay" if order.provider == "XUNHUPAY" else "depay"
+                        ),
+                        "amount": f"{Decimal(order.amount):.2f}",
+                        "currency": order.currency,
+                        "credits": order.credits,
+                        "status": order.status,
+                        "created_at": order.created_at,
+                        "paid_at": order.paid_at,
+                    }
+                    for order in orders
+                ]
+            }
+
     def _open_checkout(workspace_id: str, sku: str, principal: AuthPrincipal):
         auth.require_workspace(principal, workspace_id)
         if principal.development_bypass:
-            raise HTTPException(403, "DePay 充值需要真实登录账户")
+            raise HTTPException(403, "DePay top-ups require a signed-in account")
         try:
             checkout = container.depay_payments.create_checkout(
                 workspace_id=workspace_id,
@@ -200,7 +285,58 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         body: CheckoutRequest,
         principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
     ):
-        return _open_checkout(body.workspace_id, body.sku, principal)
+        if body.provider == "depay":
+            return _open_checkout(body.workspace_id, body.selected_plan_id, principal)
+        auth.require_workspace(principal, body.workspace_id)
+        if principal.development_bypass:
+            raise HTTPException(403, "WeChat Pay top-ups require a signed-in account")
+        try:
+            checkout = container.xunhupay_payments.create_checkout(
+                workspace_id=body.workspace_id,
+                user_id=principal.user_id,
+                plan_id=body.selected_plan_id,
+            )
+        except XunhuPayConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except XunhuPayPayloadError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except XunhuPayAuthenticationError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except XunhuPayGatewayError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except XunhuPayConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {
+            "id": checkout.checkout_id,
+            "provider": "xunhupay",
+            "plan_id": checkout.plan_id,
+            "amount": checkout.amount_cny,
+            "currency": checkout.currency,
+            "credits": checkout.credits,
+            "purchase_kind": checkout.purchase_kind,
+            "url": checkout.checkout_url,
+            "url_qrcode": checkout.qrcode_url,
+            "expires_at": checkout.expires_at,
+        }
+
+    @app.post("/v1/payments/xunhupay/notify")
+    async def receive_xunhupay_notification(request: Request):
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            raise HTTPException(415, "XunHuPay notifications must use form encoding")
+        raw_body = await request.body()
+        try:
+            container.xunhupay_payments.handle_notification(raw_body)
+        except XunhuPayConfigurationError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except XunhuPayAuthenticationError as exc:
+            raise HTTPException(401, str(exc)) from exc
+        except XunhuPayPayloadError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except XunhuPayConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        # XunHuPay retries unless the response body is exactly this token.
+        return Response(content="success", media_type="text/plain")
 
     def _relayer_error(exc: Exception) -> HTTPException:
         if isinstance(exc, EIP3009ConfigurationError):
@@ -213,7 +349,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             return HTTPException(422, str(exc))
         if isinstance(exc, EIP3009RPCError):
             return HTTPException(503, {"code": exc.code, "message": str(exc)})
-        return HTTPException(500, "Base USDC Relayer 发生未知错误")
+        return HTTPException(500, "An unknown Base USDC relayer error occurred")
 
     @app.post("/v1/payments/relayed-checkout", status_code=201)
     def create_relayed_checkout(
@@ -222,7 +358,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
     ):
         auth.require_workspace(principal, body.workspace_id)
         if principal.development_bypass:
-            raise HTTPException(403, "Gas 代付充值需要真实登录账户")
+            raise HTTPException(403, "Gas-sponsored top-ups require a signed-in account")
         try:
             checkout = container.eip3009_relayer.prepare_checkout(
                 workspace_id=body.workspace_id,
@@ -381,7 +517,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 )
             )
             if checkout is None:
-                raise HTTPException(404, "DePay 充值会话不存在")
+                raise HTTPException(404, "DePay checkout not found")
             intent = (
                 session.get(OnchainPaymentIntent, checkout.payment_intent_id)
                 if checkout.payment_intent_id
@@ -404,6 +540,39 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 "paid_at": checkout.paid_at,
             }
 
+    @app.get("/v1/workspaces/{workspace_id}/xunhupay-checkouts/{checkout_id}")
+    def get_xunhupay_checkout(
+        workspace_id: str,
+        checkout_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),  # noqa: B008
+    ):
+        auth.require_workspace(principal, workspace_id)
+        with container.database.session() as session:
+            checkout = session.scalar(
+                select(XunhuPayCheckoutSession).where(
+                    XunhuPayCheckoutSession.id == checkout_id,
+                    XunhuPayCheckoutSession.workspace_id == workspace_id,
+                )
+            )
+            if checkout is None:
+                raise HTTPException(404, "XunHuPay checkout not found")
+            order = session.get(OnchainPaymentIntent, checkout.payment_order_id)
+            return {
+                "id": checkout.id,
+                "provider": "xunhupay",
+                "status": checkout.status,
+                "plan_id": order.sku if order else None,
+                "amount": f"{Decimal(order.amount):.2f}" if order else None,
+                "currency": order.currency if order else "CNY",
+                "credits": order.credits if order else None,
+                "purchase_kind": (order.metadata_json or {}).get("purchase_kind") if order else None,
+                "credits_granted": checkout.credits_granted,
+                "url": checkout.checkout_url,
+                "url_qrcode": checkout.qrcode_url,
+                "expires_at": checkout.expires_at,
+                "paid_at": checkout.paid_at,
+            }
+
     @app.post("/v1/workspaces/{workspace_id}/wallet-bindings/challenge")
     def issue_wallet_challenge(
         workspace_id: str,
@@ -414,7 +583,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         require_legacy_wallet_payments()
         auth.require_workspace(principal, workspace_id, admin=True)
         if principal.development_bypass:
-            raise HTTPException(403, "钱包绑定需要真实登录账户")
+            raise HTTPException(403, "Wallet binding requires a signed-in account")
         origin = request.headers.get("origin") or container.settings.public_base_url
         try:
             challenge = container.wallet_payments.issue_challenge(
@@ -445,7 +614,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         require_legacy_wallet_payments()
         auth.require_workspace(principal, workspace_id, admin=True)
         if principal.development_bypass:
-            raise HTTPException(403, "钱包绑定需要真实登录账户")
+            raise HTTPException(403, "Wallet binding requires a signed-in account")
         try:
             binding = container.wallet_payments.verify_challenge(
                 workspace_id=workspace_id,
@@ -471,7 +640,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
         auth.require_workspace(principal, workspace_id, admin=True)
         microunits_decimal = body.amount_usdc * Decimal(1_000_000)
         if microunits_decimal != microunits_decimal.to_integral_value():
-            raise HTTPException(422, "USDC 金额最多支持 6 位小数")
+            raise HTTPException(422, "USDC amounts support at most 6 decimal places")
         try:
             intent = container.wallet_payments.create_intent(
                 workspace_id=workspace_id,
@@ -540,5 +709,5 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
                 )
             )
             if intent is None:
-                raise HTTPException(404, "支付请求不存在")
+                raise HTTPException(404, "Payment request not found")
             return _intent_view(intent)

@@ -7,7 +7,13 @@ from .alchemy import (
     AlchemyWebhookPayloadError,
     AlchemyWebhookResult,
 )
-from .catalog import PAYMENT_PACKAGES, PRICING_VERSION, PaymentPackage
+from .catalog import (
+    PAYMENT_PACKAGES,
+    PRICING_VERSION,
+    XUNHUPAY_PACKAGES,
+    XUNHUPAY_PRICING_VERSION,
+    PaymentPackage,
+)
 from .depay import (
     DePayAuthenticationError,
     DePayCheckoutResult,
@@ -38,12 +44,25 @@ from .wallets import (
     WalletPaymentRejected,
     WalletPaymentService,
 )
+from .xunhupay import (
+    XunhuPayAuthenticationError,
+    XunhuPayCheckoutResult,
+    XunhuPayConfigurationError,
+    XunhuPayConflict,
+    XunhuPayError,
+    XunhuPayGatewayError,
+    XunhuPayNotificationResult,
+    XunhuPayPayloadError,
+    XunhuPayPaymentService,
+)
 
 __all__ = [
     "BASE_NETWORKS",
     "PAYMENT_PACKAGES",
     "PRICING_VERSION",
     "PaymentPackage",
+    "XUNHUPAY_PACKAGES",
+    "XUNHUPAY_PRICING_VERSION",
     "AlchemyUSDCWebhookService",
     "AlchemyWebhookAuthenticationError",
     "AlchemyWebhookConfigurationError",
@@ -74,4 +93,13 @@ __all__ = [
     "WalletPaymentNotFound",
     "WalletPaymentRejected",
     "WalletPaymentService",
+    "XunhuPayAuthenticationError",
+    "XunhuPayCheckoutResult",
+    "XunhuPayConfigurationError",
+    "XunhuPayConflict",
+    "XunhuPayError",
+    "XunhuPayGatewayError",
+    "XunhuPayNotificationResult",
+    "XunhuPayPayloadError",
+    "XunhuPayPaymentService",
 ]

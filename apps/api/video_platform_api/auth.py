@@ -48,6 +48,9 @@ CSRF_EXEMPT_PATHS = frozenset(
         "/api/auth/login",
         "/api/auth/password-reset/request",
         "/api/auth/password-reset/confirm",
+        # Provider-to-provider callback authenticated by the XunHuPay body
+        # signature. It never uses a browser session or CSRF token.
+        "/v1/payments/xunhupay/notify",
     }
 )
 PASSWORD_RESET_TTL = timedelta(minutes=30)

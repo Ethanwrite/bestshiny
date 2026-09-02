@@ -188,7 +188,7 @@ def test_three_packages_are_server_owned_and_creator_50_is_recommended(tmp_path)
         {"sku": "starter_20", "amount": "20.00", "currency": "USDC",
          "credits": 1_800, "recommended": False},
         {"sku": "creator_50", "amount": "50.00", "currency": "USDC",
-         "credits": 5_000, "recommended": True},
+         "credits": 6_000, "recommended": True},
         {"sku": "pro_100", "amount": "100.00", "currency": "USDC",
          "credits": 11_000, "recommended": False},
     ]
@@ -199,7 +199,7 @@ def test_three_packages_are_server_owned_and_creator_50_is_recommended(tmp_path)
 
 def test_every_tier_credits_exactly_its_snapshot(tmp_path) -> None:
     for index, (sku, amount, credits) in enumerate(
-        (("starter_20", "20.0", 1_800), ("creator_50", "50.0", 5_000), ("pro_100", "100.0", 11_000))
+        (("starter_20", "20.0", 1_800), ("creator_50", "50.0", 6_000), ("pro_100", "100.0", 11_000))
     ):
         private, public = _keys()
         container = _container(tmp_path / f"tier{index}", public)
@@ -224,7 +224,7 @@ def test_every_tier_credits_exactly_its_snapshot(tmp_path) -> None:
             assert order is not None and order.status == "PAID"
             assert order.sku == sku and order.provider == "DEPAY" and order.currency == "USDC"
             assert order.amount == Decimal(amount)
-            assert order.pricing_version == "2026-08-30.v1"
+            assert order.pricing_version == "2026-09-01.v2"
             assert len(ledger) == 1
             assert ledger[0].metadata_json["sku"] == sku
 
@@ -248,12 +248,12 @@ def test_finalized_commitment_settles_like_confirmed(tmp_path) -> None:
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"] == "CREDITED"
-    assert response.json()["credits_granted"] == 5_000
+    assert response.json()["credits_granted"] == 6_000
 
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         checkout_row = session.scalar(select(DePayCheckoutSession))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         assert checkout_row is not None and checkout_row.status == "PAID"
 
 
@@ -278,21 +278,20 @@ def test_client_cannot_set_amount_or_credits(tmp_path) -> None:
     container = _container(tmp_path, public)
     client, workspace_id = _registered(container)
 
-    checkout, _token, order_ref = _create_checkout(
-        client,
-        container,
-        workspace_id,
-        "starter_20",
-        amount="1",
-        amount_usdc="1",
-        credits=999_999,
+    response = client.post(
+        "/v1/payments/checkout",
+        json={
+            "workspace_id": workspace_id,
+            "sku": "starter_20",
+            "amount": "1",
+            "amount_usdc": "1",
+            "credits": 999_999,
+        },
+        headers=_csrf(client),
     )
-    assert checkout["amount_usdc"] == "20.00"
-    assert checkout["credits"] == 1_800
+    assert response.status_code == 422
     with container.database.session() as session:
-        order = session.get(PaymentOrder, order_ref)
-        assert order is not None
-        assert order.raw_amount_microunits == 20_000_000 and order.credits == 1_800
+        assert session.scalar(select(PaymentOrder)) is None
 
     unknown = client.post(
         "/v1/payments/checkout",
@@ -383,7 +382,7 @@ def test_duplicate_callbacks_produce_exactly_one_fulfillment(tmp_path) -> None:
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
         deliveries = list(session.scalars(select(DePayWebhookDelivery)))
         payments = list(session.scalars(select(OnchainPayment)))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         assert len(ledger) == 1 and len(deliveries) == 1 and len(payments) == 1
 
 
@@ -394,7 +393,7 @@ def test_historical_order_settles_against_its_own_snapshot_after_repricing(tmp_p
     _checkout, token, order_ref = _create_checkout(client, container, workspace_id)
 
     # The catalogue is repriced after the order was placed. The order keeps its
-    # own terms: 50 USDC for 5,000 credits, not 80 USDC for 2,000.
+    # own terms: 50 USDC for 6,000 credits, not 80 USDC for 2,000.
     repriced = DePayPaymentService(
         container.database,
         payment_link_url=LINK_URL,
@@ -415,16 +414,16 @@ def test_historical_order_settles_against_its_own_snapshot_after_repricing(tmp_p
     raw, signature = _signed(private, _callback_payload(token, order_ref))
     result = repriced.handle_callback(raw, signature)
     assert result.result == "CREDITED"
-    assert result.credits_granted == 5_000
+    assert result.credits_granted == 6_000
 
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         order = session.get(PaymentOrder, order_ref)
         ledger = session.scalar(select(WorkspaceCreditLedgerEntry))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         assert order is not None and order.amount == Decimal("50")
-        assert order.credits == 5_000 and order.pricing_version == "2026-08-30.v1"
-        assert ledger is not None and ledger.metadata_json["pricing_version"] == "2026-08-30.v1"
+        assert order.credits == 6_000 and order.pricing_version == "2026-09-01.v2"
+        assert ledger is not None and ledger.metadata_json["pricing_version"] == "2026-09-01.v2"
 
 
 def test_callback_refuses_wrong_amount_network_token_or_treasury(tmp_path) -> None:
@@ -560,7 +559,7 @@ def test_checkout_fails_closed_without_callback_or_dynamic_config_keys(tmp_path)
             headers=_csrf(client),
         )
         assert response.status_code == 503
-        assert "支付入口已关闭" in response.json()["detail"]
+        assert "dynamic configuration or signing keys are missing" in response.json()["detail"]
         with container.database.session() as session:
             assert session.scalar(select(PaymentOrder)) is None
 
@@ -592,7 +591,7 @@ def test_a_lapsed_window_does_not_strand_a_settled_payment(tmp_path) -> None:
     assert response.json()["result"] == "CREDITED"
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         assert len(list(session.scalars(select(WorkspaceCreditLedgerEntry)))) == 1
 
 
@@ -691,11 +690,11 @@ def test_a_transfer_alchemy_already_credited_is_not_credited_twice(tmp_path) -> 
         payment = session.scalar(select(OnchainPayment))
         checkout_row = session.get(DePayCheckoutSession, checkout["id"])
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         assert len(ledger) == 1
         assert payment is not None and payment.status == "CREDITED"
         assert checkout_row is not None and checkout_row.status == "PAID"
-        assert checkout_row.credits_granted == 5_000
+        assert checkout_row.credits_granted == 6_000
 
 
 def test_a_managed_integration_callback_shape_settles(tmp_path) -> None:
@@ -716,7 +715,7 @@ def test_a_managed_integration_callback_shape_settles(tmp_path) -> None:
 
     response = _post_callback(container, private, managed)
     assert response.status_code == 200, response.text
-    assert response.json()["credits_granted"] == 5_000
+    assert response.json()["credits_granted"] == 6_000
 
     foreign_container = _container(tmp_path / "foreign", public)
     foreign_client, foreign_workspace = _registered(foreign_container)
@@ -774,11 +773,11 @@ def test_a_callback_that_states_no_commitment_still_settles(tmp_path) -> None:
     response = _post_callback(container, private, payload)
     assert response.status_code == 200, response.text
     assert response.json()["result"] == "CREDITED"
-    assert response.json()["credits_granted"] == 5_000
+    assert response.json()["credits_granted"] == 6_000
     with container.database.session() as session:
         workspace = session.get(Workspace, workspace_id)
         delivery = session.scalar(select(DePayWebhookDelivery))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         # The receipt records that the level was unstated rather than claiming
         # a confirmation level DePay never gave.
         assert delivery is not None
@@ -848,7 +847,7 @@ def test_the_provider_fee_is_absorbed_but_a_short_payment_is_not(tmp_path) -> No
             workspace = session.get(Workspace, workspace_id)
             ledger = session.scalar(select(WorkspaceCreditLedgerEntry))
             if expected == "CREDITED":
-                assert workspace is not None and workspace.credit_balance == 5_050
+                assert workspace is not None and workspace.credit_balance == 6_050
                 assert ledger is not None
                 # The ledger records what was ordered and what actually landed,
                 # so the fee is visible rather than silently absorbed.
@@ -916,7 +915,7 @@ def test_a_quarantined_transaction_can_still_be_recovered(tmp_path) -> None:
     second = _post_callback(container, private, payload)
     assert second.status_code == 200, second.text
     assert second.json()["result"] == "CREDITED"
-    assert second.json()["credits_granted"] == 5_000
+    assert second.json()["credits_granted"] == 6_000
 
     # And it stays exactly-once from there. The receipt still reads
     # RECONCILIATION_REQUIRED, so settlement re-runs rather than replaying a
@@ -930,14 +929,14 @@ def test_a_quarantined_transaction_can_still_be_recovered(tmp_path) -> None:
         workspace = session.get(Workspace, workspace_id)
         deliveries = list(session.scalars(select(DePayWebhookDelivery)))
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
-        assert workspace is not None and workspace.credit_balance == 5_050
+        assert workspace is not None and workspace.credit_balance == 6_050
         # The receipt is append-only, in the database and not just by
         # convention, so it still records the first outcome. The ledger entry
         # is what records the recovery.
         assert len(deliveries) == 1
         assert deliveries[0].result == "RECONCILIATION_REQUIRED"
         assert len(ledger) == 1
-        assert ledger[0].credits == 5_000
+        assert ledger[0].credits == 6_000
 
 
 def test_the_delivery_receipt_really_is_append_only(tmp_path) -> None:

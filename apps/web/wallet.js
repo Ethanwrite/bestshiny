@@ -5,6 +5,45 @@ const API = window.AI_DIRECTOR_API
 const CSRF_COOKIE_NAME = "ai_director_csrf";
 const DEFAULT_SKU = "creator_50";
 const WALLETCONNECT_PROJECT_KEY = "depay:wallets:wc2:projectId";
+const PLAN_CONTENT = {
+  starter_20: {
+    name: "Essential",
+    kicker: "Full experience",
+    description: "A complete creative workflow for occasional image and video projects.",
+    features: [
+      "Unlock paid creation tools",
+      "Use higher-quality creation tiers",
+      "Ideal for personal work and concept tests",
+      "Credits never expire",
+    ],
+    cta: "Choose Essential",
+  },
+  creator_50: {
+    name: "Most Popular",
+    kicker: "Creator choice",
+    badge: "Recommended",
+    description: "More room to create regularly, explore ideas, and iterate with confidence.",
+    features: [
+      "Everything in Essential",
+      "Built for ongoing image and video work",
+      "More versions, experiments, and iterations",
+      "Ideal for shorts, ads, and content creators",
+    ],
+    cta: "Choose recommended pack",
+  },
+  pro_100: {
+    name: "Professional",
+    kicker: "Production ready",
+    description: "Made for real creative projects, so your momentum never runs out of credits.",
+    features: [
+      "Everything in Most Popular",
+      "Designed for frequent image and video work",
+      "Supports complete production workflows",
+      "Ideal for professionals and commercial projects",
+    ],
+    cta: "Choose Professional",
+  },
+};
 
 const paymentState = {
   user: null,
@@ -14,16 +53,54 @@ const paymentState = {
   checkout: null,
   walletAccount: "",
   selectedSku: DEFAULT_SKU,
+  selectedProvider: "xunhupay",
   pollTimer: null,
   unmountWidget: null,
+  balanceAnimation: null,
   busy: false,
 };
 
 const element = (id) => document.getElementById(id);
 const humanStatus = (status = "") => String(status).replaceAll("_", " ").toLowerCase();
-const packages = () => paymentState.config?.payment_packages || [];
+const packages = () => (paymentState.selectedProvider === "xunhupay"
+  ? paymentState.config?.xunhupay_packages
+  : paymentState.config?.payment_packages) || [];
+const packageFor = (provider, sku) => {
+  const source = provider === "xunhupay"
+    ? paymentState.config?.xunhupay_packages
+    : paymentState.config?.payment_packages;
+  return (source || []).find((plan) => plan.sku === sku) || null;
+};
+const paymentMethods = () => {
+  const configured = paymentState.config?.payment_methods || [];
+  const fromApi = (provider) => configured.find((method) => method.provider === provider);
+  return [
+    fromApi("xunhupay") || {
+      provider: "xunhupay",
+      configured: Boolean(paymentState.config?.xunhupay_configured),
+    },
+    fromApi("depay") || {
+      provider: "depay",
+      configured: Boolean(
+        paymentState.config?.relayed_usdc_configured
+        || paymentState.config?.depay_dynamic_configured,
+      ),
+    },
+  ];
+};
 const selectedPackage = () =>
   packages().find((plan) => plan.sku === paymentState.selectedSku) || null;
+const selectedMethod = () => paymentMethods()
+  .find((method) => method.provider === paymentState.selectedProvider) || null;
+
+function formatPrice(plan) {
+  if (!plan) return "—";
+  const amount = Number(plan.amount);
+  if (!Number.isFinite(amount)) return "—";
+  return plan.currency === "CNY"
+    ? `¥${amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}`
+    : `${amount.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC`;
+}
 
 function cookieValue(name) {
   const prefix = `${encodeURIComponent(name)}=`;
@@ -72,53 +149,170 @@ function setBusy(value) {
 
 function renderPlans() {
   const host = element("walletPlans");
-  const available = packages();
-  if (!available.length) {
+  const planIds = [...new Set([
+    ...(paymentState.config?.payment_packages || []).map((plan) => plan.sku),
+    ...(paymentState.config?.xunhupay_packages || []).map((plan) => plan.sku),
+  ])];
+  if (!planIds.length) {
     host.replaceChildren();
     return;
   }
   if (!selectedPackage()) {
-    const fallback = available.find((plan) => plan.recommended) || available[0];
-    paymentState.selectedSku = fallback.sku;
+    paymentState.selectedSku = planIds.includes(DEFAULT_SKU) ? DEFAULT_SKU : planIds[0];
   }
-  host.replaceChildren(...available.map((plan) => {
-    const card = document.createElement("button");
-    card.type = "button";
+  host.replaceChildren(...planIds.map((sku) => {
+    const usdcPlan = packageFor("depay", sku);
+    const cnyPlan = packageFor("xunhupay", sku);
+    const plan = usdcPlan || cnyPlan;
+    const copy = PLAN_CONTENT[sku] || {
+      name: sku,
+      kicker: "Credit pack",
+      description: "Add credits for your next creation.",
+      features: ["Credits never expire"],
+      cta: "Choose pack",
+    };
+    const card = document.createElement("article");
     card.className = "wallet-plan";
     card.role = "radio";
-    card.dataset.sku = plan.sku;
-    const chosen = plan.sku === paymentState.selectedSku;
+    card.tabIndex = 0;
+    card.dataset.sku = sku;
+    const chosen = sku === paymentState.selectedSku;
     card.setAttribute("aria-checked", String(chosen));
     if (chosen) card.classList.add("is-selected");
-    if (plan.recommended) card.classList.add("is-recommended");
+    if (copy.badge) card.classList.add("is-recommended");
 
-    const price = document.createElement("strong");
-    price.className = "wallet-plan-price";
-    price.textContent = `${Math.round(Number(plan.amount))} USDC`;
-    const credits = document.createElement("span");
-    credits.className = "wallet-plan-credits";
-    credits.textContent = `${Number(plan.credits).toLocaleString()} credits`;
-    card.append(price, credits);
-    if (plan.recommended) {
+    const kicker = document.createElement("div");
+    kicker.className = "wallet-plan-kicker";
+    const kickerText = document.createElement("span");
+    kickerText.textContent = copy.kicker;
+    kicker.append(kickerText);
+    if (copy.badge) {
       const badge = document.createElement("em");
       badge.className = "wallet-plan-badge";
-      badge.textContent = "Recommended";
-      card.append(badge);
+      badge.textContent = copy.badge;
+      kicker.append(badge);
     }
-    card.addEventListener("click", () => {
-      paymentState.selectedSku = plan.sku;
-      render();
+    const name = document.createElement("h4");
+    name.textContent = copy.name;
+    const credits = document.createElement("span");
+    credits.className = "wallet-plan-credits";
+    credits.textContent = `${Number(plan?.credits || 0).toLocaleString()} Credits`;
+
+    const prices = document.createElement("div");
+    prices.className = "wallet-plan-prices";
+    [
+      ["depay", "USDC", usdcPlan],
+      ["xunhupay", "WeChat Pay", cnyPlan],
+    ].forEach(([provider, labelText, providerPlan]) => {
+      const price = document.createElement("span");
+      price.className = "wallet-plan-price";
+      if (paymentState.selectedProvider === provider) price.classList.add("is-active");
+      const label = document.createElement("small");
+      label.textContent = labelText;
+      const value = document.createElement("strong");
+      value.textContent = providerPlan ? formatPrice(providerPlan) : "Unavailable";
+      price.append(label, value);
+      prices.append(price);
     });
+
+    const description = document.createElement("p");
+    description.className = "wallet-plan-desc";
+    description.textContent = copy.description;
+    const features = document.createElement("ul");
+    features.className = "wallet-plan-features";
+    copy.features.forEach((feature) => {
+      const item = document.createElement("li");
+      item.textContent = feature;
+      features.append(item);
+    });
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "btn btn-secondary wallet-plan-cta";
+    action.textContent = chosen ? "Selected" : copy.cta;
+    const select = () => {
+      paymentState.selectedSku = sku;
+      setMessage();
+      render();
+    };
+    action.addEventListener("click", (event) => {
+      event.stopPropagation();
+      select();
+    });
+    card.addEventListener("click", select);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        select();
+      }
+    });
+    card.append(kicker, name, credits, prices, description, features, action);
     return card;
   }));
 }
 
+function renderMethods() {
+  const host = element("walletMethods");
+  const methods = paymentMethods();
+  if (!methods.length) {
+    host.replaceChildren();
+    return;
+  }
+  if (!selectedMethod()?.configured) {
+    paymentState.selectedProvider = methods.find((method) => method.configured)?.provider
+      || methods[0].provider;
+  }
+  host.replaceChildren(...methods.map((method) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wallet-method";
+    button.role = "radio";
+    button.dataset.provider = method.provider;
+    const chosen = method.provider === paymentState.selectedProvider;
+    button.setAttribute("aria-checked", String(chosen));
+    if (chosen) button.classList.add("is-selected");
+    button.disabled = !method.configured || paymentState.busy;
+    const icon = document.createElement("span");
+    icon.className = "wallet-method-icon";
+    icon.textContent = method.provider === "xunhupay" ? "W" : "◈";
+    const label = document.createElement("span");
+    label.className = "wallet-method-label";
+    const title = document.createElement("strong");
+    title.textContent = method.provider === "xunhupay" ? "WeChat Pay" : "USDC payment";
+    const detail = document.createElement("small");
+    detail.textContent = method.provider === "xunhupay"
+      ? "Scan with WeChat for a quick, convenient payment."
+      : "Pay with a digital wallet. Credits are added after confirmation.";
+    label.append(title, detail);
+    const state = document.createElement("span");
+    state.className = "wallet-method-state";
+    const methodPlan = packageFor(method.provider, paymentState.selectedSku);
+    state.textContent = method.configured && methodPlan ? formatPrice(methodPlan) : "Unavailable";
+    button.append(icon, label, state);
+    button.addEventListener("click", () => {
+      paymentState.selectedProvider = method.provider;
+      clearWalletConnectQr();
+      clearXunhuPayQr();
+      render();
+    });
+    return button;
+  }));
+}
+
 function render() {
+  const methods = paymentMethods();
+  const activeMethod = methods.find(
+    (method) => method.provider === paymentState.selectedProvider && method.configured,
+  );
+  if (!activeMethod) {
+    paymentState.selectedProvider = methods.find((method) => method.configured)?.provider
+      || paymentState.selectedProvider;
+  }
   const plan = selectedPackage();
   const isPro = paymentState.billing?.plan_tier === "PRO"
     || paymentState.workspace?.plan_tier === "PRO";
   const credits = Number(plan?.credits || 0).toLocaleString();
-  const price = plan ? `${Math.round(Number(plan.amount))} USDC` : "—";
+  const price = formatPrice(plan);
+  const isXunhuPay = paymentState.selectedProvider === "xunhupay";
 
   // The top bar trigger is a credits pill with its own markup: update the
   // number inside it, never the button's text content.
@@ -131,41 +325,49 @@ function render() {
   element("walletCreditBalance").textContent = paymentState.billing
     ? `${paymentState.billing.credit_balance.toLocaleString()} credits`
     : "—";
-  element("walletNetwork").textContent = paymentState.config?.network === "BASE_MAINNET"
-    ? "Base Mainnet"
-    : "Base";
+  element("walletNetwork").textContent = isXunhuPay
+    ? "XunHuPay"
+    : (paymentState.config?.network === "BASE_MAINNET" ? "Base Mainnet" : "Base");
+  element("walletCurrency").textContent = isXunhuPay ? "CNY" : "Native USDC";
   const relayed = paymentState.config?.relayed_usdc_configured;
   const qrConfigured = relayed && paymentState.config?.reown_configured;
-  element("walletProviderLabel").textContent = relayed
-    ? "WalletConnect · Base USDC"
-    : "DePay · Base USDC";
-  element("walletSettlement").textContent = relayed ? "BestShiny Relayer" : "DePay";
-  element("walletCreditingStatus").textContent = relayed
-    || paymentState.config?.depay_dynamic_configured
-    ? "Ready"
-    : "Not configured yet";
-  element("walletTitle").textContent = isPro ? "Top up credits" : "Upgrade to Pro";
-  element("walletDescription").textContent = isPro
-    ? `Pick a package — credits are added when the Base USDC transfer confirms.${relayed ? " Network fees are sponsored." : ""}`
-    : `Any package unlocks Pro permanently and adds its credits. No subscription, no auto-renewal.${relayed ? " No Base ETH is required." : ""}`;
+  element("walletProviderLabel").textContent = "Fuel your next creation";
+  element("walletSettlement").textContent = isXunhuPay
+    ? "WeChat Pay"
+    : (relayed ? "USDC · BestShiny Relayer" : "USDC · DePay");
+  element("walletCreditingStatus").textContent = (isXunhuPay
+    ? paymentState.config?.xunhupay_configured
+    : relayed || paymentState.config?.depay_dynamic_configured)
+    ? "Automatic"
+    : "Unavailable";
+  element("walletTitle").textContent = "Fuel your next creation";
+  element("walletDescription").textContent = "Choose the right credit pack. Start anytime, upgrade anytime.";
+  renderMethods();
   renderPlans();
+  const copy = PLAN_CONTENT[paymentState.selectedSku] || { name: paymentState.selectedSku };
+  element("walletConfirmPlan").textContent = `${copy.name}${isPro ? " top-up" : " · Unlock paid creation"}`;
+  element("walletConfirmPrice").textContent = price;
+  element("walletConfirmCredits").textContent = `${credits} Credits`;
   element("payUsdcBtn").textContent = plan
-    ? (qrConfigured
-      ? `Scan to pay ${price}`
-      : (isPro ? `Pay ${price}` : `Upgrade — ${price}`))
-    : "Pay with USDC";
+    ? (isXunhuPay
+      ? `Confirm and pay ${price} with WeChat`
+      : qrConfigured
+      ? `Confirm and scan to pay ${price}`
+      : `Confirm and pay ${price}`)
+    : "Choose a credit pack";
   element("payUsdcBtn").disabled = paymentState.busy
     || !paymentState.workspace
-    || !(relayed || paymentState.config?.depay_dynamic_configured)
+    || !selectedMethod()?.configured
     || !plan;
   const browserPay = element("payBrowserWalletBtn");
-  browserPay.hidden = !(qrConfigured && window.ethereum?.request);
+  browserPay.hidden = isXunhuPay || !(qrConfigured && window.ethereum?.request);
   browserPay.disabled = paymentState.busy;
+  element("walletConfirmation").classList.toggle("is-confirming", paymentState.busy);
   if (plan
     && !paymentState.busy
     && !element("walletStatus").textContent
     && !element("walletError").textContent) {
-    setMessage(`${price} · ${credits} credits`);
+    setMessage("Confirm your pack and payment method to continue.");
   }
 }
 
@@ -176,12 +378,131 @@ async function refreshBilling() {
   render();
 }
 
+function resetWalletView() {
+  element("walletPurchaseView").hidden = false;
+  element("walletSuccessView").hidden = true;
+  element("walletSuccessView").classList.remove("is-animating");
+  element("walletHistoryPanel").hidden = true;
+  element("walletHistoryList").replaceChildren();
+}
+
+function animateCreditBalance(fromBalance, toBalance) {
+  if (paymentState.balanceAnimation) cancelAnimationFrame(paymentState.balanceAnimation);
+  const start = Number.isFinite(Number(fromBalance)) ? Number(fromBalance) : Number(toBalance);
+  const end = Number(toBalance);
+  const duration = 760;
+  const startedAt = performance.now();
+  const successBalance = element("walletSuccessBalance");
+  successBalance.classList.remove("is-counting");
+  void successBalance.offsetWidth;
+  successBalance.classList.add("is-counting");
+
+  const paint = (value) => {
+    const formatted = Math.round(value).toLocaleString();
+    element("walletSuccessBalance").textContent = `${formatted} Credits`;
+    element("walletCreditBalance").textContent = `${formatted} Credits`;
+    const topBalance = element("creditsAmount");
+    if (topBalance) topBalance.textContent = `${formatted} credits`;
+  };
+  const tick = (now) => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = 1 - ((1 - progress) ** 3);
+    paint(start + ((end - start) * eased));
+    if (progress < 1) paymentState.balanceAnimation = requestAnimationFrame(tick);
+    else paymentState.balanceAnimation = null;
+  };
+  paymentState.balanceAnimation = requestAnimationFrame(tick);
+}
+
+function showPaymentSuccess(payment, balanceBefore) {
+  finishWidget();
+  clearWalletConnectQr();
+  clearXunhuPayQr();
+  setMessage();
+  const provider = payment.provider || paymentState.selectedProvider;
+  const planId = payment.plan_id || payment.sku || paymentState.checkout?.plan_id
+    || paymentState.checkout?.sku || paymentState.selectedSku;
+  const copy = PLAN_CONTENT[planId] || { name: planId };
+  const plan = packageFor(provider, planId);
+  const amount = payment.amount ?? payment.amount_usdc ?? plan?.amount;
+  const currency = payment.currency || plan?.currency || (provider === "xunhupay" ? "CNY" : "USDC");
+  const credits = Number(payment.credits_granted ?? payment.credits ?? plan?.credits ?? 0);
+  const providerLabel = provider === "xunhupay" ? "WeChat Pay" : "USDC payment";
+
+  element("walletSuccessPlan").textContent = `${copy.name} pack`;
+  element("walletSuccessAmount").textContent = `${providerLabel} · ${formatPrice({ amount, currency })}`;
+  element("walletSuccessCredits").textContent = `+${credits.toLocaleString()} Credits`;
+  element("walletPurchaseView").hidden = true;
+  const success = element("walletSuccessView");
+  success.hidden = false;
+  success.classList.remove("is-animating");
+  void success.offsetWidth;
+  success.classList.add("is-animating");
+  element("walletHistoryPanel").hidden = true;
+  animateCreditBalance(balanceBefore, paymentState.billing?.credit_balance || balanceBefore);
+}
+
+async function showPaymentHistory() {
+  if (!paymentState.workspace) return;
+  const panel = element("walletHistoryPanel");
+  const list = element("walletHistoryList");
+  panel.hidden = false;
+  list.replaceChildren();
+  const loading = document.createElement("div");
+  loading.className = "wallet-history-empty";
+  loading.textContent = "Loading top-up history…";
+  list.append(loading);
+  element("walletHistoryBtn").disabled = true;
+  try {
+    const response = await api(`/v1/workspaces/${paymentState.workspace.id}/payments/history`);
+    list.replaceChildren();
+    if (!response.items?.length) {
+      const empty = document.createElement("div");
+      empty.className = "wallet-history-empty";
+      empty.textContent = "No top-ups yet.";
+      list.append(empty);
+      return;
+    }
+    response.items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "wallet-history-row";
+      const title = document.createElement("strong");
+      const copy = PLAN_CONTENT[item.plan_id] || { name: item.plan_id };
+      title.textContent = `${copy.name} pack · ${item.provider === "xunhupay" ? "WeChat Pay" : "USDC payment"}`;
+      const amount = document.createElement("b");
+      amount.textContent = formatPrice(item);
+      const detail = document.createElement("small");
+      const status = ({ PAID: "Credited", PENDING: "Pending", CANCELLED: "Cancelled", EXPIRED: "Expired", RECONCILIATION_REQUIRED: "Reconciling" })[item.status] || humanStatus(item.status);
+      detail.textContent = `${Number(item.credits).toLocaleString()} Credits · ${status}`;
+      const date = document.createElement("small");
+      date.textContent = new Date(item.paid_at || item.created_at).toLocaleString("en-US", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      row.append(title, amount, detail, date);
+      list.append(row);
+    });
+  } catch (error) {
+    list.replaceChildren();
+    const failed = document.createElement("div");
+    failed.className = "wallet-history-empty";
+    failed.textContent = error.message;
+    list.append(failed);
+  } finally {
+    element("walletHistoryBtn").disabled = false;
+  }
+}
+
 async function initializeForUser(user) {
   window.clearTimeout(paymentState.pollTimer);
   paymentState.pollTimer = null;
   paymentState.user = user;
   paymentState.workspace = chooseWorkspace(user);
   paymentState.checkout = null;
+  resetWalletView();
   if (!user || !paymentState.workspace) {
     paymentState.billing = null;
     render();
@@ -189,9 +510,13 @@ async function initializeForUser(user) {
   }
   try {
     paymentState.config = await api("/v1/payments/config");
+    paymentState.selectedProvider = paymentState.config.xunhupay_configured
+      ? "xunhupay"
+      : "depay";
     await refreshBilling();
     if (!(paymentState.config.relayed_usdc_configured
-      || paymentState.config.depay_dynamic_configured)) {
+      || paymentState.config.depay_dynamic_configured
+      || paymentState.config.xunhupay_configured)) {
       setMessage("Card and wallet payments are not switched on yet.");
     }
   } catch (error) {
@@ -225,7 +550,7 @@ async function pollCheckout(checkoutId) {
       `/v1/workspaces/${paymentState.workspace.id}/depay-checkouts/${checkoutId}`,
     );
     if (checkout.status === "PAID") {
-      finishWidget();
+      const balanceBefore = paymentState.billing?.credit_balance || 0;
       await refreshBilling();
       window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
         detail: {
@@ -233,11 +558,7 @@ async function pollCheckout(checkoutId) {
           planTier: paymentState.billing.plan_tier,
         },
       }));
-      setMessage(
-        checkout.purchase_kind === "UPGRADE_PRO_AND_CREDITS"
-          ? `Pro unlocked. ${checkout.credits_granted.toLocaleString()} credits posted.`
-          : `${checkout.credits_granted.toLocaleString()} credits posted.`,
-      );
+      showPaymentSuccess({ ...checkout, provider: "depay" }, balanceBefore);
       return;
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
@@ -252,6 +573,9 @@ async function pollCheckout(checkoutId) {
 }
 
 async function createCheckout() {
+  if (paymentState.selectedProvider === "xunhupay") {
+    return createXunhuPayCheckout();
+  }
   if (paymentState.config?.relayed_usdc_configured) {
     return createRelayedCheckout();
   }
@@ -267,7 +591,8 @@ async function createCheckout() {
       method: "POST",
       body: JSON.stringify({
         workspace_id: paymentState.workspace.id,
-        sku: plan.sku,
+        provider: "depay",
+        plan_id: plan.sku,
       }),
     });
     paymentState.checkout = checkout;
@@ -303,6 +628,98 @@ async function createCheckout() {
     } else {
       setMessage("", error.message || String(error));
     }
+  } finally {
+    setBusy(false);
+  }
+}
+
+function clearXunhuPayQr() {
+  const host = element("xunhupayQr");
+  host.replaceChildren();
+  host.hidden = true;
+}
+
+function showXunhuPayCheckout(checkout) {
+  const host = element("xunhupayQr");
+  host.replaceChildren();
+  if (checkout.url_qrcode) {
+    const image = document.createElement("img");
+    image.src = checkout.url_qrcode;
+    image.alt = `Scan to pay ${formatPrice(checkout)}`;
+    image.referrerPolicy = "no-referrer";
+    host.append(image);
+  }
+  if (checkout.url) {
+    const link = document.createElement("a");
+    link.className = "btn btn-secondary xunhupay-open";
+    link.href = checkout.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Open mobile payment page";
+    host.append(link);
+  }
+  host.hidden = host.childElementCount === 0;
+}
+
+async function pollXunhuPayCheckout(checkoutId) {
+  window.clearTimeout(paymentState.pollTimer);
+  try {
+    const checkout = await api(
+      `/v1/workspaces/${paymentState.workspace.id}/xunhupay-checkouts/${checkoutId}`,
+    );
+    if (checkout.status === "PAID") {
+      clearXunhuPayQr();
+      const balanceBefore = paymentState.billing?.credit_balance || 0;
+      await refreshBilling();
+      window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
+        detail: {
+          workspaceId: paymentState.workspace.id,
+          planTier: paymentState.billing.plan_tier,
+        },
+      }));
+      showPaymentSuccess({ ...checkout, provider: "xunhupay" }, balanceBefore);
+      return;
+    }
+    if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
+      clearXunhuPayQr();
+      setMessage("", `This payment needs attention (${humanStatus(checkout.status)}). No credits were added.`);
+      return;
+    }
+    paymentState.pollTimer = window.setTimeout(
+      () => pollXunhuPayCheckout(checkoutId),
+      3000,
+    );
+  } catch (error) {
+    setMessage("Waiting for XunHuPay confirmation…", error.message);
+    paymentState.pollTimer = window.setTimeout(
+      () => pollXunhuPayCheckout(checkoutId),
+      5000,
+    );
+  }
+}
+
+async function createXunhuPayCheckout() {
+  const plan = selectedPackage();
+  if (!plan) return;
+  setBusy(true);
+  clearWalletConnectQr();
+  clearXunhuPayQr();
+  setMessage("Creating your WeChat Pay order…");
+  try {
+    const checkout = await api("/v1/payments/checkout", {
+      method: "POST",
+      body: JSON.stringify({
+        workspace_id: paymentState.workspace.id,
+        provider: "xunhupay",
+        plan_id: plan.sku,
+      }),
+    });
+    paymentState.checkout = checkout;
+    showXunhuPayCheckout(checkout);
+    setMessage(`Complete the ${formatPrice(checkout)} payment. Credits are added only after confirmation.`);
+    pollXunhuPayCheckout(checkout.id);
+  } catch (error) {
+    setMessage("", error.message || String(error));
   } finally {
     setBusy(false);
   }
@@ -417,6 +834,7 @@ async function pollRelayedAuthorization(authorizationId) {
       { method: "POST", body: "{}" },
     );
     if (result.status === "CONFIRMED") {
+      const balanceBefore = paymentState.billing?.credit_balance || 0;
       await refreshBilling();
       window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
         detail: {
@@ -424,10 +842,15 @@ async function pollRelayedAuthorization(authorizationId) {
           planTier: paymentState.billing.plan_tier,
         },
       }));
-      setMessage(
-        paymentState.checkout?.purchase_kind === "UPGRADE_PRO_AND_CREDITS"
-          ? `Pro unlocked. ${result.credits_granted.toLocaleString()} credits posted.`
-          : `${result.credits_granted.toLocaleString()} credits posted.`,
+      showPaymentSuccess(
+        {
+          ...paymentState.checkout,
+          ...result,
+          provider: "depay",
+          amount: paymentState.checkout?.amount_usdc,
+          currency: "USDC",
+        },
+        balanceBefore,
       );
       return;
     }
@@ -508,13 +931,24 @@ element("walletBtn").addEventListener("click", async () => {
       setMessage("", error.message);
     }
   }
+  resetWalletView();
   if (!element("walletDialog").open) element("walletDialog").showModal();
 });
 element("closeWalletBtn").addEventListener("click", () => {
   window.clearTimeout(paymentState.pollTimer);
   paymentState.pollTimer = null;
   clearWalletConnectQr();
+  clearXunhuPayQr();
+  resetWalletView();
   element("walletDialog").close();
+});
+element("walletContinueBtn").addEventListener("click", () => {
+  resetWalletView();
+  element("walletDialog").close();
+});
+element("walletHistoryBtn").addEventListener("click", showPaymentHistory);
+element("walletHistoryCloseBtn").addEventListener("click", () => {
+  element("walletHistoryPanel").hidden = true;
 });
 element("payUsdcBtn").addEventListener("click", createCheckout);
 element("payBrowserWalletBtn").addEventListener("click", () => createRelayedCheckout("browser"));

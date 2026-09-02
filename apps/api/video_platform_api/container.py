@@ -64,6 +64,7 @@ from payment_core import (
     DePayPaymentService,
     EIP3009RelayerService,
     WalletPaymentService,
+    XunhuPayPaymentService,
 )
 from platform_database import Database
 from platform_shared import (
@@ -172,6 +173,7 @@ class Container:
     alchemy_webhooks: AlchemyUSDCWebhookService
     wallet_payments: WalletPaymentService
     depay_payments: DePayPaymentService
+    xunhupay_payments: XunhuPayPaymentService
     eip3009_relayer: EIP3009RelayerService
     video_router: VideoModelRouter
     video_adapters: VideoAdapterRegistry
@@ -289,6 +291,17 @@ def build_container(settings: Settings | None = None) -> Container:
         treasury_address=settings.alchemy_treasury_address,
         max_provider_fee_bps=settings.depay_max_provider_fee_bps,
         checkout_ttl_minutes=settings.depay_checkout_ttl_minutes,
+    )
+    xunhupay_payments = XunhuPayPaymentService(
+        database,
+        app_id=settings.xunhupay_app_id,
+        app_secret=settings.xunhupay_app_secret,
+        gateway_url=settings.xunhupay_gateway_url,
+        public_base_url=settings.public_base_url,
+        notify_url=settings.xunhupay_notify_url,
+        return_url=settings.xunhupay_return_url,
+        checkout_ttl_minutes=settings.xunhupay_checkout_ttl_minutes,
+        timeout_seconds=settings.xunhupay_timeout_seconds,
     )
     eip3009_relayer = EIP3009RelayerService(
         database,
@@ -933,6 +946,7 @@ def build_container(settings: Settings | None = None) -> Container:
         alchemy_webhooks=alchemy_webhooks,
         wallet_payments=wallet_payments,
         depay_payments=depay_payments,
+        xunhupay_payments=xunhupay_payments,
         eip3009_relayer=eip3009_relayer,
         video_router=video_router,
         video_adapters=video_adapters,

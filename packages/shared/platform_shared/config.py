@@ -249,6 +249,15 @@ class Settings(BaseSettings):
     # shortfall up to this allowance against the order snapshot; beyond it the
     # payment is a mismatch, not a fee. 200 bps = 2%.
     depay_max_provider_fee_bps: int = 200
+    # XunHuPay (虎皮椒) CNY checkout. The app secret is server-only and signs
+    # both outbound orders and inbound asynchronous notifications.
+    xunhupay_app_id: str = ""
+    xunhupay_app_secret: str = ""
+    xunhupay_gateway_url: str = "https://api.xunhupay.com/payment/do.html"
+    xunhupay_notify_url: str = ""
+    xunhupay_return_url: str = ""
+    xunhupay_checkout_ttl_minutes: int = 30
+    xunhupay_timeout_seconds: int = 15
     # Base USDC EIP-3009 relay. The browser signs typed authorization data;
     # only the relayer key reaches the server and pays Base ETH gas.
     relayer_address: str = ""

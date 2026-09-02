@@ -201,6 +201,20 @@ class Container:
         return self.prompts
 
 
+def router_requires_live_lifecycle(settings: Settings) -> bool:
+    """Whether the automatic video router may only pick LIVE/DEGRADED models.
+
+    Only live mode has anything to gate on. There, ``strict`` is the original
+    behaviour — a model earns routing by earning a verified canary — and
+    ``cold_start`` (the phase policy) lets every enabled model of a configured
+    provider be routed to, so the first real calls can produce the evidence
+    that later ranks them. The per-request quote and the live-canary permit at
+    the gateway are unaffected by either answer.
+    """
+
+    return settings.provider_mode == "live" and settings.router_admission_policy == "strict"
+
+
 def build_container(settings: Settings | None = None) -> Container:
     settings = settings or Settings()
     if settings.deployment_environment == "production":
@@ -774,7 +788,7 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     video_router = VideoModelRouter(
         model_registry,
-        require_live_lifecycle=settings.provider_mode == "live",
+        require_live_lifecycle=router_requires_live_lifecycle(settings),
         # The hand-authored scene_type -> champion table. Loading fails closed:
         # a container without a valid table does not fall back to open scoring,
         # because a silent policy reversion is the failure the table prevents.

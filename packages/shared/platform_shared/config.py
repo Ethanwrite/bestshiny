@@ -112,6 +112,18 @@ class Settings(BaseSettings):
     # seconds. Undeclared models are rejected instead of silently degrading.
     flow_video_model_keys: str = ""
     provider_mode: Literal["mock", "recorded", "live"] = "mock"
+    # Which models the automatic video router may pick from in live mode.
+    # "strict": only LIVE/DEGRADED lifecycle — a model must have earned a
+    # verified canary before it can be routed to. "cold_start": every enabled,
+    # router-enabled model of a configured provider except DISABLED/BLOCKED,
+    # so evidence decides the *ranking* while nothing has evidence yet, rather
+    # than deciding who is eligible for a first call. Deliberately the phase
+    # policy for the platform's early life (operator decision 2026-09-02);
+    # switch to "strict" once the catalogue has earned its lifecycle states.
+    # Neither policy relaxes a capability gate, a duration/resolution/
+    # reference bound, the per-request quote, or the live-canary permit that
+    # every live generation still needs at the gateway.
+    router_admission_policy: Literal["cold_start", "strict"] = "cold_start"
     allow_live_provider_calls: bool = False
     live_provider_confirmation: str = ""
     provider_http_timeout_seconds: float = 120

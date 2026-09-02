@@ -781,6 +781,17 @@ dropped silently: it is returned in `RouterDecision.rejected` as a `RejectedMode
 gate is what keeps a champion honest: without it the `first_last_frame` table entry pinned Wan 2.7 onto
 reference-images-plus-end-frame shots its R2V mode cannot carry, a pick the adapter refused on every attempt.
 
+**Admission is a phase policy, separate from the gates.** `ROUTER_ADMISSION_POLICY` (default `cold_start`)
+decides which lifecycle states the router may pick from in live mode: `strict` admits only `LIVE`/`DEGRADED` —
+a model must have earned a verified canary before it can be routed to — while `cold_start` admits every
+enabled, router-enabled model of a configured provider except `DISABLED`/`BLOCKED`, so that evidence decides the
+*ranking* while nothing has evidence yet rather than deciding who is eligible for a first call. Operator decision
+2026-09-02, for the platform's early life; the switch back is one environment line. The policy relaxes nothing
+else: every capability gate, duration/resolution/reference bound and mode fact above still applies, the
+per-request quote and reservation still happen before submission, and every live generation still needs a
+`LiveCanaryPermit` at the gateway (`_reserve_live_generation_canary` holds the permit's remaining budget for the
+one call) — the cost ceiling that caught a 2s/480p request being billed at a provider's 5s/1080p defaults.
+
 **Selection is champion-first, not open argmax.** The request is read as one evidence scenario via the same
 `router_scenario()` the production posterior groups by, and the hand-authored table in
 `config/model-registry/scene-champions.json` (`scene-champions-v1`, loaded fail-closed at container build,

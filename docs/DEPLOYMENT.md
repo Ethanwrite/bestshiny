@@ -176,13 +176,18 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `cb316c2` (`main`, [#40](https://github.com/Ethanwrite/bestshiny/pull/40)
-  OpenRouter images send only the parameters the model declares), deployed from the session on
-  2026-09-02 ≈20:55Z with the §4 procedure plus the pre-extraction backups and
-  `DEPLOYED_SHA.prev = 34c9323`; no env change, no migration. Verified: api healthy, `/health`
-  200, all three running image IDs equal the built ones, budget policy still enabled, zero
-  tracebacks. The failed gpt-image-2 job `da3b1a8e` from before it was refunded (1 credit) and
-  its spend authorization released, both audited.
+- **Current release.** `86987c3` (`main`, [#41](https://github.com/Ethanwrite/bestshiny/pull/41)
+  the director answers in its own words, images stop carrying video parameters, conversations
+  and never-generated shots can be deleted), deployed from the session on 2026-09-02 ≈21:25Z
+  with the §4 procedure plus the pre-extraction backups and `DEPLOYED_SHA.prev = cb316c2`; no
+  env change, no migration (still `0069_production_budget`). Verified: api healthy, `/health`
+  200, web 200, all three running image IDs equal the built ones, compose file unchanged,
+  budget policy enabled, zero tracebacks. The dev stack was rebuilt from the same tree.
+
+- **Earlier the same day.** `cb316c2` ([#40](https://github.com/Ethanwrite/bestshiny/pull/40)
+  OpenRouter images send only the parameters the model declares), deployed ≈20:55Z, `.prev =
+  34c9323`, no env change, no migration. The failed gpt-image-2 job `da3b1a8e` from before it
+  was refunded (1 credit) and its spend authorization released, both audited.
 
 - **Previous release.** `34c9323` (`main`, [#39](https://github.com/Ethanwrite/bestshiny/pull/39)
   the automatic production budget: credits are the user's gate, no canary permit on paying

@@ -5426,7 +5426,12 @@ def _install_payment_ledger_integrity_ddl() -> None:
             anchor,
             "after_create",
             DDL(
-                f"CREATE TRIGGER trg_{table_name}_append_only BEFORE UPDATE OR DELETE ON {table_name} "
+                # OR REPLACE, like every other metadata-level trigger in this module:
+                # a metadata `after_create` fires on every create_all, including one
+                # against an already-built throwaway schema, and PostgreSQL refuses a
+                # second plain CREATE TRIGGER with DuplicateObject.
+                f"CREATE OR REPLACE TRIGGER trg_{table_name}_append_only "
+                f"BEFORE UPDATE OR DELETE ON {table_name} "
                 "FOR EACH ROW EXECUTE FUNCTION enforce_payment_ledger_append_only()"
             ).execute_if(dialect="postgresql"),
         )

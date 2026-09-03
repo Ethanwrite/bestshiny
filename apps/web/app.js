@@ -49,7 +49,7 @@ function restoreSubmissions() {
 const state = {
   projects: [], project: null, episode: null, shot: null, candidates: [], characters: [],
   episodes: [],               // rich strip rows from /v1/projects/{id}/episodes
-  creative: { sessions: [], session: null },
+  creative: { sessions: [], session: null, beatEdits: {}, editingBrief: false, editingScreenplay: false, revealedTurn: null, revealedScreenplay: null, thinking: null },
   continuation: { mode: "CONTINUOUS", view: null },
   selectedCharacterId: null, page: "create", passengerMedia: "image", passengerOriginal: null,
   passengerPrompts: { image: "", video: "" }, passengerJobs: { image: null, video: null },
@@ -246,7 +246,16 @@ async function request(path, options = {}) {
   if (!response.ok) {
     const detail = await response.json().catch(() => ({ detail: response.statusText }));
     if (response.status === 401 && !path.startsWith("/api/auth/")) lockAuth();
-    throw new Error(detail.detail || `Request failed (${response.status})`);
+    // The creative director answers refusals with {message, reason_code, ...};
+    // other routes with a plain string. Both become a readable error.
+    const body = detail.detail;
+    const message = body && typeof body === "object"
+      ? (body.message || JSON.stringify(body))
+      : (body || `Request failed (${response.status})`);
+    const error = new Error(message);
+    error.status = response.status;
+    error.detail = body;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -476,6 +485,9 @@ function switchPage(page) {
   }
   if (page === "ai-director" && state.project) {
     loadCreativeSessions().catch((error) => toast(error.message));
+    syncCreativePolling();
+  } else {
+    stopCreativePolling();
   }
 }
 
@@ -1926,7 +1938,9 @@ async function renderShotStage() {
     shotFrame.className = `shot-stage ${generating ? "is-generating" : "is-empty"}`;
     // Shot candidates arrive as a SET with no per-candidate signal, so the
     // bar here is always indeterminate: no number, no aria-valuenow, no
-    // claim about how far along it is.
+    // claim about how far along it is. The count of active variants is real
+    // signal though, so it still gets a line.
+    const active = state.candidates.filter((candidate) => ["QUEUED", "RUNNING", "GENERATING", "VALIDATING"].includes(candidate.status)).length;
     stage.innerHTML = generating
       ? `
       <div class="canvas-generating">
@@ -1935,7 +1949,7 @@ async function renderShotStage() {
         <p class="gen-title" role="status">Shooting this shot</p>
         <div class="gen-track is-indeterminate" role="progressbar" aria-label="Generation progress"
              aria-valuemin="0" aria-valuemax="100"><i class="gen-fill"></i></div>
-        <p class="gen-note">Variants appear below as each one comes back. Nothing is approved until you approve it.</p>
+        <p class="gen-note">${active} variant${active === 1 ? "" : "s"} rendering. Nothing is approved until you approve it.</p>
       </div>`
       : `
       <div class="empty-block">
@@ -2872,10 +2886,39 @@ async function confirmPasswordReset(event) {
    ============================================================ */
 const CREATIVE_STAGE_LABEL = {
   INTAKE: "Idea", CLARIFYING: "Clarifying", BRIEF_PROPOSED: "Brief proposed",
-  BRIEF_APPROVED: "Brief approved", VISUALS_IN_PROGRESS: "Key visuals",
+  BRIEF_APPROVED: "Brief approved", SCREENPLAY_PROPOSED: "Screenplay drafted",
+  SCREENPLAY_APPROVED: "Screenplay approved", VISUALS_IN_PROGRESS: "Key visuals",
   BIBLE_PROPOSED: "Bible drafted", BIBLE_LOCKED: "Bible locked",
   BEATS_PROPOSED: "Beats proposed", COMPILED: "Shots built", ABANDONED: "Abandoned",
 };
+const CREATIVE_FORMATS = [
+  "SHORT_DRAMA", "ADVERTISEMENT", "PRODUCT_SHOWCASE", "SOCIAL_SHORT", "MUSIC_VISUAL",
+  "FASHION_LOOKBOOK", "BEAUTY_TUTORIAL", "CONCEPT_FILM",
+];
+const CREATIVE_ASPECTS = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"];
+const PROVENANCE_LABEL = {
+  USER_STATED: ["you said", "is-user"], USER_EDIT: ["you edited", "is-user"],
+  ASSUMPTION_ACCEPTED: ["accepted assumption", "is-user"],
+  MODEL_INFERRED: ["director assumed", "is-assumed"], DEFAULT: ["default", "is-assumed"],
+};
+const QUESTION_LABEL = {
+  UNASKED: "not asked yet", ASKED: "asked, unanswered", ANSWERED: "answered",
+  SKIPPED_BY_USER: "skipped by you", ASSUMPTION_ACCEPTED: "assumption accepted",
+};
+const REASONER_LABEL = (reasoner) => {
+  if (!reasoner) return "";
+  if (reasoner === "DETERMINISTIC") return "rules engine (director model unavailable)";
+  if (reasoner.startsWith("MODEL:")) return "director model";
+  if (reasoner === "USER_EDIT") return "your edit";
+  return reasoner.toLowerCase();
+};
+// Key visuals poll with backoff: 3s, 5s, 8s, 13s, 20s, then every 30s, for at most 15 minutes.
+const CREATIVE_POLL_STEPS_MS = [3000, 5000, 8000, 13000, 20000, 30000];
+const CREATIVE_POLL_BUDGET_MS = 15 * 60 * 1000;
+let creativePoll = null;
+let creativeReplyInFlight = false;
+
+function creativeSessionId() { return state.creative.session?.session?.id || null; }
 
 async function loadCreativeSessions() {
   if (!state.project) return;
@@ -2901,7 +2944,7 @@ async function loadCreativeSessions() {
   list.className = "shot-tree";
   list.innerHTML = state.creative.sessions.map((session) => `
     <div class="tree-shot-row">
-      <button class="tree-shot ${state.creative.session?.session?.id === session.id ? "active" : ""}" data-creative-session="${session.id}" type="button">
+      <button class="tree-shot ${creativeSessionId() === session.id ? "active" : ""}" data-creative-session="${session.id}" type="button">
         <span class="tree-shot-label">${escapeHTML(session.title || "Untitled")}</span>
         <span class="badge">${escapeHTML(CREATIVE_STAGE_LABEL[session.status] || session.status)}</span>
       </button>
@@ -2914,8 +2957,10 @@ async function deleteCreativeSession(id) {
   const title = session?.title || "this conversation";
   if (!window.confirm(`Delete "${title}"? Its turns and generated visuals stay on record, but it leaves your list.`)) return;
   await request(`/v1/creative/sessions/${id}`, { method: "DELETE" });
-  if (state.creative.session?.session?.id === id) {
+  if (creativeSessionId() === id) {
+    stopCreativePolling();
     state.creative.session = null;
+    state.creative.beatEdits = {};
     renderCreative();
   }
   await loadCreativeSessions();
@@ -2923,24 +2968,65 @@ async function deleteCreativeSession(id) {
 }
 
 async function openCreativeSession(id) {
+  if (creativeSessionId() !== id) {
+    // A different session: forget in-progress edits and any running poll, and
+    // do not replay the typewriter over a conversation that already happened.
+    stopCreativePolling();
+    state.creative.beatEdits = {};
+    state.creative.editingBrief = false;
+    state.creative.editingScreenplay = false;
+    state.creative.revealedTurn = null;
+    state.creative.revealedScreenplay = null;
+  }
   state.creative.session = await request(`/v1/creative/sessions/${id}`);
+  if (state.creative.revealedTurn === null) {
+    // First paint of a session: everything before now is history.
+    const lastDirector = [...(state.creative.session.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
+    state.creative.revealedTurn = lastDirector ? lastDirector.sequence : 0;
+    state.creative.revealedScreenplay = state.creative.session.screenplay?.id || null;
+  }
   renderCreative();
   await loadCreativeSessions();
+  syncCreativePolling();
 }
 
 async function startCreativeSession() {
   if (!state.project) { toast("Create a project first"); return; }
   const idea = $("creativeIdeaInput").value.trim();
   if (!idea) { toast("Tell the director what you want to make"); return; }
-  const started = await request("/v1/creative/sessions", {
-    method: "POST",
-    body: JSON.stringify({ project_id: state.project.id, idea }),
-  });
+  const button = $("creativeStartBtn");
+  button.disabled = true;
+  button.textContent = "The director is thinking…";
+  let started;
+  try {
+    started = await request("/v1/creative/sessions", {
+      method: "POST",
+      body: JSON.stringify({ project_id: state.project.id, idea, client_turn_id: newClientTurnId() }),
+    });
+  } finally {
+    button.disabled = false;
+    button.textContent = "Start with BestShiny Director";
+  }
   $("creativeIdeaInput").value = "";
+  reportDirectorReply(started);
+  state.creative.revealedTurn = 0; // reveal the director's first words as they arrive
+  state.creative.revealedScreenplay = null;
   await openCreativeSession(started.session_id);
 }
 
-let creativeReplyInFlight = false;
+function newClientTurnId() {
+  return (window.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+function reportDirectorReply(reply) {
+  if (!reply) return;
+  if (reply.reasoner === "DETERMINISTIC") {
+    const codes = (reply.reason_codes || []).filter((code) => code !== "SKILL_LOADED").join(", ");
+    toast(`The director model was unavailable (${codes}); the rules engine answered.${reply.retryable ? " You can send again." : ""}`);
+  } else if (reply.reasoner === "APPROVAL_BLOCKED") {
+    toast(reply.message);
+  }
+}
 
 async function sendCreativeReply() {
   const session = state.creative.session;
@@ -2948,18 +3034,26 @@ async function sendCreativeReply() {
   const input = $("creativeReplyInput");
   const content = input.value.trim();
   if (!content) return;
-  // One turn at a time: a second Enter while the director is thinking used to
-  // post the same message twice (production, 2026-09-02).
+  // One turn at a time, and one idempotency key per attempt: a retried send
+  // replays the recorded reply instead of paying for a second one.
   creativeReplyInFlight = true;
   input.disabled = true;
   $("creativeReplyBtn").disabled = true;
+  input.value = "";
+  showCreativeThinking(content, "The director is thinking");
   try {
-    await request(`/v1/creative/sessions/${session.session.id}/messages`, {
+    const reply = await request(`/v1/creative/sessions/${session.session.id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, client_turn_id: newClientTurnId() }),
     });
-    input.value = "";
+    state.creative.thinking = null; // the reply is in; the real turns replace the placeholder
+    reportDirectorReply(reply);
     await openCreativeSession(session.session.id);
+  } catch (error) {
+    input.value = content; // nothing landed; give the words back
+    state.creative.thinking = null;
+    renderCreative();
+    throw error;
   } finally {
     creativeReplyInFlight = false;
     input.disabled = false;
@@ -2968,30 +3062,471 @@ async function sendCreativeReply() {
   }
 }
 
+/* ---- polling ------------------------------------------------------ */
+function stopCreativePolling() {
+  if (creativePoll) {
+    window.clearTimeout(creativePoll.timer);
+    creativePoll = null;
+  }
+}
+
+function syncCreativePolling() {
+  const view = state.creative.session;
+  const generating = (view?.anchors || []).some((anchor) => anchor.status === "GENERATING");
+  if (view && generating && state.page === "ai-director" && view.session.status === "VISUALS_IN_PROGRESS") {
+    if (!creativePoll || creativePoll.sessionId !== view.session.id) startCreativePolling(view.session.id);
+  } else {
+    stopCreativePolling();
+  }
+}
+
+function startCreativePolling(sessionId) {
+  stopCreativePolling();
+  const poll = { sessionId, attempt: 0, startedAt: Date.now(), timer: null };
+  creativePoll = poll;
+  const schedule = () => {
+    const delay = CREATIVE_POLL_STEPS_MS[Math.min(poll.attempt, CREATIVE_POLL_STEPS_MS.length - 1)];
+    poll.attempt += 1;
+    poll.timer = window.setTimeout(tick, delay);
+  };
+  const tick = async () => {
+    if (creativePoll !== poll) return;
+    // Leaving the page or switching sessions ends the poll; a terminal state
+    // or an unrecoverable error ends it below.
+    if (state.page !== "ai-director" || creativeSessionId() !== sessionId) { stopCreativePolling(); return; }
+    let synced;
+    try {
+      synced = await request(`/v1/creative/sessions/${sessionId}/visuals/sync`, { method: "POST", body: "{}" });
+    } catch (error) {
+      stopCreativePolling();
+      toast(`Key visual sync stopped: ${error.message}`);
+      return;
+    }
+    if (creativePoll !== poll) return;
+    const view = await request(`/v1/creative/sessions/${sessionId}`).catch(() => null);
+    if (creativePoll !== poll) return;
+    if (view) { state.creative.session = view; renderCreative(); }
+    const generating = (synced.anchors || []).some((anchor) => anchor.status === "GENERATING");
+    if (!generating) {
+      stopCreativePolling();
+      renderCreative();
+      if (synced.can_propose_bible) toast("Key visuals are ready. Draft the visual bible when you like.");
+      else if (synced.failed) toast(`${synced.failed} key visual(s) failed. Retry them, or skip an optional one.`);
+      return;
+    }
+    if (Date.now() - poll.startedAt > CREATIVE_POLL_BUDGET_MS) {
+      stopCreativePolling();
+      renderCreative();
+      toast("Key visuals are taking a while; use Refresh visuals to keep checking.");
+      return;
+    }
+    schedule();
+  };
+  schedule();
+  renderCreative();
+}
+
+/* ---- rendering ---------------------------------------------------- */
+function provChip(record) {
+  if (!record) return "";
+  const [label, cls] = PROVENANCE_LABEL[record.source] || [String(record.source || "").toLowerCase(), ""];
+  return `<span class="prov-chip ${cls}" title="${escapeHTML(record.evidence || "")}">${escapeHTML(label)}</span>`;
+}
+
+/** Show the user's words at once and a thinking director underneath, before the server answers. */
+function showCreativeThinking(userText, label) {
+  const newest = [...(state.creative.session?.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
+  // The bubble lives until a director turn newer than the one on screen arrives.
+  state.creative.thinking = { userText, label, sinceTurn: newest ? newest.sequence : 0 };
+  renderCreative();
+}
+
+const TYPEWRITER_MIN_MS = 12;
+const TYPEWRITER_MAX_MS = 28;
+let typewriterToken = 0;
+
+/** Reveal `text` into `node` a few characters at a time; a newer reveal cancels an older one. */
+function typewrite(node, text, onDone) {
+  const token = ++typewriterToken;
+  node.textContent = "";
+  node.classList.add("typing-caret");
+  let index = 0;
+  const step = () => {
+    if (token !== typewriterToken || !node.isConnected) return;
+    // Chunks of one to three characters read like tokens arriving, without taking a minute per paragraph.
+    const chunk = text.length > 600 ? 4 : text.length > 240 ? 2 : 1;
+    index = Math.min(text.length, index + chunk);
+    node.textContent = text.slice(0, index);
+    const turns = $("creativeTurns");
+    if (turns) turns.scrollTop = turns.scrollHeight;
+    if (index < text.length) {
+      const pause = /[。！？.!?\n]/.test(text[index - 1]) ? TYPEWRITER_MAX_MS * 6 : TYPEWRITER_MIN_MS + Math.random() * (TYPEWRITER_MAX_MS - TYPEWRITER_MIN_MS);
+      window.setTimeout(step, pause);
+    } else {
+      node.classList.remove("typing-caret");
+      if (onDone) onDone();
+    }
+  };
+  step();
+}
+
+/** Stagger the appearance of a container's direct children. */
+function revealSequentially(container, stepMs = 140) {
+  [...container.children].forEach((child, index) => {
+    child.classList.add("reveal-item");
+    child.style.setProperty("--reveal-delay", `${Math.min(index * stepMs, 4000)}ms`);
+  });
+}
+
 function renderCreativeTurns(turns) {
   return turns.map((turn) => {
     const questions = (turn.questions || []).map((question) =>
       `<li>${escapeHTML(question.question)}</li>`).join("");
-    return `<div class="creative-turn is-${turn.speaker.toLowerCase()}">
+    const meta = [];
+    if (turn.speaker === "DIRECTOR") {
+      meta.push(REASONER_LABEL(turn.reasoner));
+      const codes = (turn.reason_codes || []).filter((code) => !["SKILL_LOADED", "MODEL_REPLY", "MODEL_OPERATIONS_APPLIED"].includes(code));
+      if (codes.length) meta.push(codes.join(", "));
+      if (turn.context?.compressed) meta.push("earlier turns condensed");
+    }
+    const notes = (turn.result?.creative_notes || []).map((note) => `<li><i>${escapeHTML(note)}</i></li>`).join("");
+    const pendingReveal = turn.speaker === "DIRECTOR" && state.creative.revealedTurn !== null && turn.sequence > state.creative.revealedTurn;
+    return `<div class="creative-turn is-${turn.speaker.toLowerCase()}" data-turn-sequence="${turn.sequence}" ${pendingReveal ? 'data-reveal="pending"' : ""}>
       <b>${turn.speaker === "USER" ? "You" : "Director"}</b>
-      <p>${escapeHTML(turn.content)}</p>
-      ${questions ? `<ul>${questions}</ul>` : ""}
+      <p data-turn-text>${pendingReveal ? "" : escapeHTML(turn.content)}</p>
+      <div data-turn-extras ${pendingReveal ? "hidden" : ""}>
+        ${questions ? `<ul>${questions}</ul>` : ""}
+        ${notes ? `<ul>${notes}</ul>` : ""}
+        ${meta.length ? `<small class="mono">${escapeHTML(meta.join(" · "))}</small>` : ""}
+      </div>
     </div>`;
-  }).join("");
+  }).join("") + renderThinkingBubble();
+}
+
+function renderThinkingBubble() {
+  const thinking = state.creative.thinking;
+  if (!thinking) return "";
+  return `${thinking.userText ? `<div class="creative-turn is-user"><b>You</b><p>${escapeHTML(thinking.userText)}</p></div>` : ""}
+    <div class="creative-turn is-director is-thinking"><b>Director</b>
+      <p>${escapeHTML(thinking.label)} <span class="thinking-dots"><span></span><span></span><span></span></span></p></div>`;
+}
+
+/** After a render: type out the director turns that arrived since the last reveal. */
+function animateNewDirectorTurns(view) {
+  const pending = [...document.querySelectorAll('#creativeTurns [data-reveal="pending"]')];
+  if (!pending.length) return;
+  const turns = view.turns || [];
+  const revealNext = (index) => {
+    const node = pending[index];
+    if (!node) return;
+    const sequence = Number(node.dataset.turnSequence);
+    const turn = turns.find((item) => item.sequence === sequence);
+    if (!turn) return;
+    const textNode = node.querySelector("[data-turn-text]");
+    typewrite(textNode, turn.content, () => {
+      const extras = node.querySelector("[data-turn-extras]");
+      if (extras) extras.hidden = false;
+      node.removeAttribute("data-reveal");
+      state.creative.revealedTurn = Math.max(state.creative.revealedTurn || 0, sequence);
+      const turnsBox = $("creativeTurns");
+      if (turnsBox) turnsBox.scrollTop = turnsBox.scrollHeight;
+      revealNext(index + 1);
+    });
+  };
+  revealNext(0);
 }
 
 const CREATIVE_BRIEF_ROWS = [
-  ["Format", (fields) => fields.format],
-  ["Core idea", (fields) => fields.logline],
-  ["Duration", (fields) => fields.duration_seconds ? `${fields.duration_seconds}s` : null],
-  ["Aspect", (fields) => fields.aspect_ratio],
-  ["Platform", (fields) => fields.platform],
-  ["Look", (fields) => fields.visual_style?.medium],
-  ["Tone", (fields) => (fields.tone || []).join(", ") || null],
-  ["Characters", (fields) => (fields.characters || []).map((character) => character.name).join(", ") || null],
-  ["Setting", (fields) => fields.setting?.location],
-  ["Product", (fields) => fields.product?.name],
+  ["Format", "format", (fields) => fields.format],
+  ["Core idea", "logline", (fields) => fields.logline],
+  ["Duration", "duration_seconds", (fields) => fields.duration_seconds ? `${fields.duration_seconds}s` : null],
+  ["Aspect", "aspect_ratio", (fields) => fields.aspect_ratio],
+  ["Platform", "platform", (fields) => fields.platform],
+  ["Look", "visual_style.medium", (fields) => fields.visual_style?.medium],
+  ["Palette", "visual_style.palette", (fields) => fields.visual_style?.palette],
+  ["Tone", "tone", (fields) => (fields.tone || []).join(", ") || null],
+  ["Setting", "setting.location", (fields) => fields.setting?.location],
+  ["Time", "setting.time", (fields) => fields.setting?.time],
+  ["Product", "product.name", (fields) => fields.product?.name],
+  ["Selling points", "product.selling_points", (fields) => (fields.product?.selling_points || []).join(", ") || null],
+  ["Music", "music.mood", (fields) => fields.music?.mood],
+  ["Hook", "hook", (fields) => fields.hook],
+  ["Call to action", "call_to_action", (fields) => fields.call_to_action],
+  ["Audience", "audience", (fields) => fields.audience],
 ];
+
+const normalizeName = (value) => String(value || "").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+
+function renderBriefFields(brief) {
+  const fields = brief.fields || {};
+  const provenance = brief.provenance || {};
+  const rows = CREATIVE_BRIEF_ROWS
+    .map(([label, path, read]) => [label, path, read(fields)])
+    .filter(([, , value]) => value)
+    .map(([label, path, value]) =>
+      `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}${provChip(provenance[path])}</b></div>`);
+  const cast = (fields.characters || []).map((member) => {
+    const detail = [member.role, member.look].filter(Boolean).join(" — ");
+    return `<div class="kv"><span>Character</span><b>${escapeHTML(member.name)}${detail ? ` <small>${escapeHTML(detail)}</small>` : ""}${provChip(provenance[`characters/${normalizeName(member.name)}`])}</b></div>`;
+  });
+  return rows.concat(cast).join("") || "<p class='empty-inline'>Nothing captured yet.</p>";
+}
+
+function renderBriefEditor(brief) {
+  const fields = brief.fields || {};
+  const text = (label, path, value, extra = "") =>
+    `<label${extra}>${label}<input data-brief-path="${path}" value="${escapeHTML(value ?? "")}" /></label>`;
+  const select = (label, path, options, value) =>
+    `<label>${label}<select data-brief-path="${path}"><option value="">—</option>${options.map((option) =>
+      `<option value="${option}" ${option === value ? "selected" : ""}>${option}</option>`).join("")}</select></label>`;
+  const cast = (fields.characters || []).map((member, index) => `
+    <div class="creative-cast-row" data-cast-row="${index}">
+      <input data-cast-field="name" placeholder="Name" value="${escapeHTML(member.name || "")}" />
+      <input data-cast-field="role" placeholder="Role" value="${escapeHTML(member.role || "")}" />
+      <input data-cast-field="look" placeholder="Look (wardrobe, hair, distinguishing marks)" value="${escapeHTML(member.look || "")}" />
+      <button class="btn btn-tertiary" type="button" data-cast-remove="${index}" title="Remove">&times;</button>
+    </div>`).join("");
+  return [
+    select("Format", "format", CREATIVE_FORMATS, fields.format),
+    `<label class="span-2">Core idea<textarea data-brief-path="logline" rows="2">${escapeHTML(fields.logline || "")}</textarea></label>`,
+    text("Duration (seconds)", "duration_seconds", fields.duration_seconds),
+    select("Aspect", "aspect_ratio", CREATIVE_ASPECTS, fields.aspect_ratio),
+    text("Platform", "platform", fields.platform),
+    text("Look / medium", "visual_style.medium", fields.visual_style?.medium),
+    text("Palette", "visual_style.palette", fields.visual_style?.palette),
+    text("Tone (comma separated)", "tone", (fields.tone || []).join(", ")),
+    text("Location", "setting.location", fields.setting?.location),
+    text("Time of day", "setting.time", fields.setting?.time),
+    text("Product", "product.name", fields.product?.name),
+    text("Selling points (comma separated)", "product.selling_points", (fields.product?.selling_points || []).join(", ")),
+    text("Music mood", "music.mood", fields.music?.mood),
+    text("Hook", "hook", fields.hook),
+    text("Call to action", "call_to_action", fields.call_to_action),
+    text("Audience", "audience", fields.audience),
+    `<div class="creative-cast"><b>Characters</b>${cast}<div><button class="btn btn-tertiary" type="button" data-cast-add="1">Add character</button></div></div>`,
+  ].join("");
+}
+
+function readPath(fields, path) {
+  return path.split(".").reduce((node, part) => (node && typeof node === "object" ? node[part] : undefined), fields);
+}
+
+function collectBriefOperations(brief) {
+  const fields = brief.fields || {};
+  const editor = $("creativeBriefEditor");
+  const operations = [];
+  const listPaths = new Set(["tone", "product.selling_points"]);
+  editor.querySelectorAll("[data-brief-path]").forEach((node) => {
+    const path = node.dataset.briefPath;
+    const raw = node.value.trim();
+    const before = readPath(fields, path);
+    let after = raw;
+    if (listPaths.has(path)) after = raw ? raw.split(/[,，、;；/]+/).map((item) => item.trim()).filter(Boolean) : [];
+    if (path === "duration_seconds") after = raw ? Number(raw) : null;
+    const hadValue = Array.isArray(before) ? before.length > 0 : before !== undefined && before !== null && before !== "";
+    const hasValue = Array.isArray(after) ? after.length > 0 : after !== null && after !== "";
+    const same = JSON.stringify(Array.isArray(after) ? after : after) === JSON.stringify(before);
+    if (!hadValue && hasValue) operations.push({ op: "SET", path, value: after, confidence: "USER_STATED", evidence: "brief editor" });
+    else if (hadValue && !hasValue) operations.push({ op: "REMOVE", path, confidence: "USER_STATED", evidence: "brief editor" });
+    else if (hadValue && hasValue && !same) operations.push({ op: "REPLACE", path, value: after, confidence: "USER_STATED", evidence: "brief editor" });
+  });
+  const beforeCast = new Map((fields.characters || []).map((member) => [normalizeName(member.name), member]));
+  const seen = new Set();
+  editor.querySelectorAll("[data-cast-row]").forEach((row) => {
+    const member = {};
+    row.querySelectorAll("[data-cast-field]").forEach((node) => { if (node.value.trim()) member[node.dataset.castField] = node.value.trim(); });
+    if (!member.name) return;
+    const key = normalizeName(member.name);
+    seen.add(key);
+    const previous = beforeCast.get(key);
+    const changed = !previous || ["role", "look"].some((field) => (previous[field] || "") !== (member[field] || ""));
+    if (changed) operations.push({ op: "UPSERT", path: "characters", value: member, confidence: "USER_STATED", evidence: "brief editor" });
+  });
+  beforeCast.forEach((member, key) => {
+    if (!seen.has(key)) operations.push({ op: "REMOVE", path: "characters", value: { name: member.name }, confidence: "USER_STATED", evidence: "brief editor" });
+  });
+  return operations;
+}
+
+function renderQuestions(view) {
+  const brief = view.brief;
+  const status = view.session.status;
+  const states = brief?.question_states || {};
+  const blocking = new Map((brief?.blocking || []).map((item) => [item.code, item]));
+  const lastQuestions = new Map();
+  (view.turns || []).forEach((turn) => (turn.questions || []).forEach((question) => lastQuestions.set(question.code, question.question)));
+  const editable = ["CLARIFYING", "BRIEF_PROPOSED"].includes(status);
+  const rows = (brief?.completeness?.gaps || [])
+    .filter((gap) => gap.weight >= 3 || blocking.has(gap.code))
+    .map((gap) => {
+      const state = states[gap.code] || {};
+      const block = blocking.get(gap.code);
+      const assumed = block?.assumed_value ?? state.assumed_value;
+      const label = lastQuestions.get(gap.code) || gap.code.replace(/_/g, " ").toLowerCase();
+      const buttons = [];
+      if (editable && assumed !== undefined && assumed !== null && block) {
+        buttons.push(`<button class="btn btn-secondary" type="button" data-question-accept="${gap.code}">Accept: ${escapeHTML(typeof assumed === "object" ? JSON.stringify(assumed) : String(assumed))}</button>`);
+      }
+      if (editable && !block && !["SKIPPED_BY_USER", "ASSUMPTION_ACCEPTED", "ANSWERED"].includes(state.status)) {
+        buttons.push(`<button class="btn btn-tertiary" type="button" data-question-skip="${gap.code}">Skip</button>`);
+      }
+      return `<div class="creative-question">
+        <span><b>${escapeHTML(label)}</b> · ${escapeHTML(QUESTION_LABEL[state.status] || "not asked yet")}${block ? ` <span class="prov-chip is-required">required</span>` : ""}</span>
+        ${buttons.join("")}
+      </div>`;
+    });
+  return rows.join("");
+}
+
+function renderAssumptions(brief) {
+  const assumptions = brief?.assumptions || [];
+  if (!assumptions.length) return "";
+  const items = assumptions.map((item) => {
+    const [label, cls] = PROVENANCE_LABEL[item.source] || [item.source, ""];
+    const value = typeof item.value === "object" ? JSON.stringify(item.value) : String(item.value);
+    return `<div class="creative-question"><span><b>${escapeHTML(item.path)}</b> = ${escapeHTML(value)} <span class="prov-chip ${cls}">${escapeHTML(label)}</span></span></div>`;
+  });
+  return `<div class="creative-notice is-warning"><b>Assumptions awaiting your confirmation</b>These values were not stated by you. Approving confirms them; edit the brief to change them.</div>${items.join("")}`;
+}
+
+function renderScreenplay(view) {
+  const screenplay = view.screenplay;
+  if (!screenplay) return "<p class='empty-inline'>The director has not written the screenplay yet.</p>";
+  const content = screenplay.content || {};
+  const treatment = content.treatment || {};
+  const hook = treatment.hook || {};
+  const list = (items) => (items || []).length ? `<ul>${items.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul>` : "<p class='empty-inline'>—</p>";
+  const characters = (content.characters || []).map((character) => {
+    const relationships = (character.relationships || []).map((rel) => `${rel.with}: ${rel.relation}`).join("; ");
+    return `<li><b>${escapeHTML(character.name)}</b>${character.role ? ` (${escapeHTML(character.role)})` : ""}${character.look ? ` — ${escapeHTML(character.look)}` : ""}${character.wants ? ` · wants ${escapeHTML(character.wants)}` : ""}${relationships ? ` · ${escapeHTML(relationships)}` : ""}</li>`;
+  }).join("");
+  const scenes = (content.scenes || []).map((scene) =>
+    `<li><b>${escapeHTML(scene.key)}</b>: ${escapeHTML(scene.location)} — ${escapeHTML(scene.time)}${scene.description ? ` · ${escapeHTML(scene.description)}` : ""}</li>`).join("");
+  const beats = (content.beats || []).map((beat) => {
+    const shots = (beat.shots || []).map((shot) => {
+      const primary = shot.dialogue
+        ? `<b>${escapeHTML(shot.dialogue.speaker)}:</b> ${escapeHTML(shot.dialogue.text)}`
+        : `<b>${escapeHTML(shot.action.actor)}</b> ${escapeHTML(shot.action.verb.replace("_", " "))}${shot.action.object ? ` ${escapeHTML(shot.action.object)}` : ""}${shot.action.target ? ` → ${escapeHTML(shot.action.target)}` : ""}${shot.action.description ? ` <small>${escapeHTML(shot.action.description)}</small>` : ""}`;
+      const states = [shot.start_state ? `start: ${shot.start_state}` : "", shot.end_state ? `end: ${shot.end_state}` : "", shot.gaze_target ? `gaze: ${shot.gaze_target}` : ""].filter(Boolean).join(" · ");
+      const obligations = (shot.continuity_obligations || []).join("; ");
+      return `<div class="creative-shot"><span class="mono">#${shot.sequence} ${escapeHTML(shot.shot_type)} ${shot.duration}s</span><div>${primary}${states ? `<small>${escapeHTML(states)}</small>` : ""}${obligations ? `<small>continuity: ${escapeHTML(obligations)}</small>` : ""}</div></div>`;
+    }).join("");
+    return `<div class="creative-beat"><b>${beat.sequence} · ${escapeHTML(beat.intent)}</b><p>${escapeHTML(beat.summary || "")}${beat.emotional_beat ? ` <i>(${escapeHTML(beat.emotional_beat)})</i>` : ""}</p><small>scene ${escapeHTML(beat.scene_key)} · ${(beat.characters || []).map(escapeHTML).join(", ")}</small>${shots}</div>`;
+  }).join("");
+  const claims = (content.product_claims || []).map((claim) => `${claim.claim}${claim.must_preserve ? " (must preserve)" : ""}`);
+  const obligations = (content.obligations || []).map((item) => `${item.key}: ${item.promise} [${item.category}]`);
+  const revisions = (view.screenplays || []).map((item) =>
+    `r${item.revision} · ${item.status.toLowerCase()} · ${REASONER_LABEL(item.reasoner)}`).join(" | ");
+  return `
+    <h4>Treatment</h4>
+    <p><b>${escapeHTML(treatment.title || "Untitled")}</b></p>
+    <p data-premise="${escapeHTML(treatment.premise || "")}">${escapeHTML(treatment.premise || "")}</p>
+    ${hook.opening_question ? `<p><b>Hook:</b> ${escapeHTML(hook.opening_question)}${hook.promise ? ` — ${escapeHTML(hook.promise)}` : ""}${hook.audience_feeling ? ` <i>(${escapeHTML(hook.audience_feeling)})</i>` : ""}</p>` : ""}
+    ${treatment.audience_expectation ? `<p><b>Audience expects:</b> ${escapeHTML(treatment.audience_expectation)}</p>` : ""}
+    ${treatment.visual_direction ? `<p><b>Visual direction:</b> ${escapeHTML(treatment.visual_direction)}</p>` : ""}
+    ${treatment.tone_direction ? `<p><b>Tone:</b> ${escapeHTML(treatment.tone_direction)}</p>` : ""}
+    ${treatment.ending ? `<p><b>Ending:</b> ${escapeHTML(treatment.ending)}</p>` : ""}
+    <h4>Locked facts (invariants)</h4>${list(content.invariants)}
+    <h4>Open to exploration (variables)</h4>${list(content.variables)}
+    <h4>Characters &amp; relationships</h4><ul>${characters}</ul>
+    <h4>Scenes</h4><ul>${scenes}</ul>
+    <h4>Beats, dialogue &amp; shots</h4>${beats}
+    ${claims.length ? `<h4>Product claims</h4>${list(claims)}` : ""}
+    ${(content.required_copy || []).length ? `<h4>Copy that must survive</h4>${list(content.required_copy)}` : ""}
+    ${obligations.length ? `<h4>Continuity obligations opened</h4>${list(obligations)}` : ""}
+    ${(content.unresolved || []).length ? `<h4>Unresolved creative choices</h4>${list(content.unresolved)}` : ""}
+    <h4>Script as compiled</h4><pre class="mono" style="white-space:pre-wrap;font-size:11px">${escapeHTML(screenplay.script_text || "")}</pre>
+    <div class="creative-revisions">Revisions: ${escapeHTML(revisions)}${screenplay.skill_version ? ` · skill ${escapeHTML(screenplay.skill_version)}` : ""}</div>`;
+}
+
+function renderAnchors(view) {
+  const anchors = view.anchors || [];
+  const status = view.session.status;
+  const actionable = ["VISUALS_IN_PROGRESS", "BIBLE_PROPOSED"].includes(status);
+  return anchors.map((anchor) => {
+    const buttons = [];
+    if (actionable && anchor.status === "FAILED") {
+      buttons.push(`<button class="btn btn-tertiary" type="button" data-anchor-retry="${anchor.id}">Retry</button>`);
+      if (!anchor.required) buttons.push(`<button class="btn btn-tertiary" type="button" data-anchor-skip="${anchor.id}">Skip</button>`);
+    }
+    if (actionable && ["READY", "FAILED", "SKIPPED"].includes(anchor.status)) {
+      // Before the lock the user decides what each character, scene or plate looks like.
+      buttons.push(`<button class="btn btn-tertiary" type="button" data-anchor-regenerate="${anchor.id}" title="Ask for a different image, with your direction">Regenerate</button>`);
+      buttons.push(`<button class="btn btn-tertiary" type="button" data-anchor-replace="${anchor.id}" title="Upload your own image for this visual">Use my image</button>`);
+    }
+    const thumbClass = anchor.status === "GENERATING" ? " is-generating" : anchor.status === "FAILED" ? " is-failed" : "";
+    const thumbLabel = anchor.status === "READY" ? "…" : anchor.status === "GENERATING" ? "Rendering…" : escapeHTML(simpleLabel(anchor.status) || anchor.status);
+    const detail = [
+      anchor.kind.toLowerCase(), `v${anchor.version}`,
+      anchor.required ? "required" : "optional",
+      anchor.failure_code ? `failed: ${anchor.failure_code}` : "",
+      anchor.skip_reason ? `skipped: ${anchor.skip_reason}` : "",
+    ].filter(Boolean).join(" · ");
+    return `
+      <figure class="asset-card" data-anchor-asset="${anchor.media_asset_id || ""}">
+        <div class="asset-thumb empty-state${thumbClass}" data-surface="dark" data-anchor-thumb="${anchor.id}">${thumbLabel}</div>
+        <figcaption>
+          <b>${escapeHTML(anchor.title)}</b>
+          <small>${escapeHTML(detail)}</small>
+          ${buttons.length ? `<div class="anchor-actions">${buttons.join("")}</div>` : ""}
+        </figcaption>
+      </figure>`;
+  }).join("");
+}
+
+function renderBeats(view) {
+  const beats = view.beats || [];
+  const editable = view.session.status === "BEATS_PROPOSED";
+  const edits = state.creative.beatEdits || {};
+  if (!beats.length) return "<p class='empty-inline'>No beats drafted yet.</p>";
+  return beats.map((beat) => {
+    const shots = (beat.shots || []).map((shot, index) => {
+      const edit = edits[beat.sequence]?.[index] || {};
+      const primary = shot.dialogue !== null && shot.dialogue !== undefined
+        ? `<b>${escapeHTML(shot.speaker || "")}:</b> ${escapeHTML(edit.dialogue ?? shot.dialogue)}`
+        : `${escapeHTML(shot.action)}${(edit.description ?? shot.description) ? ` <small>${escapeHTML(edit.description ?? shot.description)}</small>` : ""}`;
+      const editor = editable ? `<div class="creative-beat-edit">
+          ${shot.dialogue !== null && shot.dialogue !== undefined
+            ? `<input data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="dialogue" value="${escapeHTML(edit.dialogue ?? shot.dialogue)}" placeholder="Line" />`
+            : `<input data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="description" value="${escapeHTML(edit.description ?? shot.description ?? "")}" placeholder="Staging note" />`}
+          ${shot.dialogue !== null && shot.dialogue !== undefined ? "<span></span>" : `<select data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="shot_type">${["WIDE", "MEDIUM", "CLOSE", "CLOSE_UP", "EXTREME_CLOSE_UP", "INSERT", "OVER_SHOULDER", "TWO_SHOT"].map((type) => `<option ${(edit.shot_type ?? shot.shot_type) === type ? "selected" : ""}>${type}</option>`).join("")}</select>`}
+          <input type="number" min="1" max="15" step="0.5" data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="duration" value="${escapeHTML(String(edit.duration ?? shot.duration))}" />
+        </div>` : "";
+      return `<div class="creative-shot"><span class="mono">#${index + 1} ${escapeHTML(edit.shot_type ?? shot.shot_type)} ${edit.duration ?? shot.duration}s</span><div>${primary}${shot.start_state ? `<small>${escapeHTML(`${shot.start_state} → ${shot.end_state || ""}`)}</small>` : ""}${editor}</div></div>`;
+    }).join("");
+    return `<div class="creative-beat">
+        <b>${beat.sequence} · ${escapeHTML(beat.intent)}</b>
+        <p>${escapeHTML(beat.summary || "")}</p>
+        <small>${escapeHTML(beat.location || "")} · ${escapeHTML(beat.time || "")} · ${(beat.shots || []).length} shot(s)</small>
+        ${shots}
+      </div>`;
+  }).join("");
+}
+
+function collectEditedBeats(view) {
+  const edits = state.creative.beatEdits || {};
+  return (view.beats || []).map((beat) => ({
+    ...beat,
+    shots: (beat.shots || []).map((shot, index) => {
+      const edit = edits[beat.sequence]?.[index];
+      if (!edit) return shot;
+      const merged = { ...shot };
+      if (edit.dialogue !== undefined && shot.dialogue !== null) merged.dialogue = edit.dialogue;
+      if (edit.description !== undefined) merged.description = edit.description;
+      if (edit.shot_type !== undefined) merged.shot_type = edit.shot_type;
+      if (edit.duration !== undefined) merged.duration = Number(edit.duration);
+      return merged;
+    }),
+  }));
+}
+
+function setNotice(id, html, kind = "") {
+  const node = $(id);
+  if (!node) return;
+  node.hidden = !html;
+  node.className = `creative-notice ${kind}`.trim();
+  node.innerHTML = html || "";
+}
 
 function renderCreative() {
   const view = state.creative.session;
@@ -3001,27 +3536,100 @@ function renderCreative() {
   if (!hasSession) {
     $("creativeStageCrumb").textContent = "No session";
     $("creativeStageChip").textContent = "Idea";
+    document.querySelectorAll("[data-creative-stage], [data-creative-meta]").forEach((node) => { node.textContent = "—"; });
     return;
   }
   const status = view.session.status;
   $("creativeStageCrumb").textContent = view.session.title || "Session";
   $("creativeStageChip").textContent = CREATIVE_STAGE_LABEL[status] || status;
+  // The thinking bubble goes away as soon as a newer director turn exists (or
+  // when nothing is in flight any more).
+  if (state.creative.thinking) {
+    const newest = [...(view.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
+    const since = state.creative.thinking.sinceTurn;
+    if ((since !== undefined && newest && newest.sequence > since) || (!creativeReplyInFlight && !state.creative.drafting)) {
+      state.creative.thinking = null;
+    }
+  }
   $("creativeTurns").innerHTML = renderCreativeTurns(view.turns);
   $("creativeTurns").scrollTop = $("creativeTurns").scrollHeight;
-  $("creativeReplyRow").hidden = status === "COMPILED" || status === "ABANDONED";
+  animateNewDirectorTurns(view);
+  $("creativeReplyRow").hidden = !["INTAKE", "CLARIFYING", "BRIEF_PROPOSED"].includes(status);
 
   // Brief card
   const brief = view.brief;
-  const briefVisible = Boolean(brief) && status !== "COMPILED";
-  $("creativeBriefCard").hidden = !briefVisible;
-  if (briefVisible) {
-    $("creativeBriefStatus").textContent = simpleLabel(brief.status);
-    $("creativeBriefFields").innerHTML = CREATIVE_BRIEF_ROWS
-      .map(([label, read]) => [label, read(brief.fields)])
-      .filter(([, value]) => value)
-      .map(([label, value]) => `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`)
-      .join("");
-    $("creativeApproveBriefBtn").hidden = !["CLARIFYING", "BRIEF_PROPOSED"].includes(status);
+  const briefStage = ["INTAKE", "CLARIFYING", "BRIEF_PROPOSED"].includes(status);
+  $("creativeBriefCard").hidden = !brief || status === "COMPILED";
+  if (brief) {
+    $("creativeBriefStatus").textContent = brief.status === "APPROVED" ? "Approved" : (status === "CLARIFYING" ? "Clarifying" : "Proposed");
+    const editing = Boolean(state.creative.editingBrief) && briefStage;
+    $("creativeBriefFields").hidden = editing;
+    $("creativeBriefFields").innerHTML = renderBriefFields(brief);
+    $("creativeBriefEditor").hidden = !editing;
+    if (editing && !$("creativeBriefEditor").innerHTML) $("creativeBriefEditor").innerHTML = renderBriefEditor(brief);
+    $("creativeQuestions").innerHTML = briefStage && !editing ? renderQuestions(view) : "";
+    $("creativeAssumptions").innerHTML = briefStage && !editing ? renderAssumptions(brief) : "";
+    const blocking = brief.blocking || [];
+    if (briefStage && status === "CLARIFYING") {
+      setNotice("creativeBriefNotice", `<b>Still clarifying</b>${blocking.length ? `Required before approval: ${escapeHTML(blocking.map((item) => item.code).join(", "))}. Answer the director, or accept its assumption where offered.` : "Answer the open questions above, or skip the optional ones."}`, "is-warning");
+    } else if (briefStage) {
+      setNotice("creativeBriefNotice", "");
+    } else {
+      setNotice("creativeBriefNotice", `<b>Approved</b>This brief is frozen; the director writes from it.`);
+    }
+    $("creativeEditBriefBtn").hidden = !briefStage || editing;
+    $("creativeSaveBriefBtn").hidden = !editing;
+    $("creativeCancelBriefBtn").hidden = !editing;
+    const hasAssumptions = (brief.assumptions || []).length > 0;
+    $("creativeAcceptAssumptionsLabel").hidden = !(status === "BRIEF_PROPOSED" && hasAssumptions && !editing);
+    const approve = $("creativeApproveBriefBtn");
+    approve.hidden = !briefStage || editing;
+    // The backend refuses anyway; the button only says so up front.
+    approve.disabled = status !== "BRIEF_PROPOSED" || blocking.length > 0;
+    approve.title = status !== "BRIEF_PROPOSED" ? "The brief is still being clarified" : "";
+  }
+
+  // Screenplay card
+  const screenplay = view.screenplay;
+  const screenplayStage = ["BRIEF_APPROVED", "SCREENPLAY_PROPOSED"].includes(status);
+  $("creativeScreenplayCard").hidden = !(screenplay || screenplayStage);
+  if (screenplay || screenplayStage) {
+    $("creativeScreenplayStatus").textContent = screenplay ? `r${screenplay.revision} · ${simpleLabel(screenplay.status) || screenplay.status}` : "Drafting";
+    const editing = Boolean(state.creative.editingScreenplay) && status === "SCREENPLAY_PROPOSED";
+    $("creativeScreenplayBody").hidden = editing;
+    if (state.creative.drafting) {
+      $("creativeScreenplayBody").innerHTML = `<div class="creative-turn is-director is-thinking"><b>Director</b><p>${escapeHTML(state.creative.drafting)} <span class="thinking-dots"><span></span><span></span><span></span></span></p></div>`;
+    } else {
+      $("creativeScreenplayBody").innerHTML = renderScreenplay(view);
+      if (screenplay && screenplay.id !== state.creative.revealedScreenplay) {
+        // A screenplay that just arrived unfolds: the premise is typed out, then every section and beat slides in.
+        state.creative.revealedScreenplay = screenplay.id;
+        const body = $("creativeScreenplayBody");
+        revealSequentially(body, 120);
+        const premise = body.querySelector("[data-premise]");
+        if (premise) typewrite(premise, premise.dataset.premise || "");
+      }
+    }
+    $("creativeScreenplayEditor").hidden = !editing;
+    if (editing && !$("creativeScreenplayJson").value) {
+      $("creativeScreenplayJson").value = JSON.stringify(screenplay?.content || {}, null, 2);
+    }
+    if (screenplay?.deterministic) {
+      const codes = (screenplay.reason_codes || []).filter((code) => !["SKILL_LOADED", "DETERMINISTIC_FALLBACK"].includes(code)).join(", ");
+      setNotice("creativeScreenplayNotice", `<b>Deterministic scaffold — not the director's writing</b>The director model was unavailable (${escapeHTML(codes)}). Every line is a placeholder. Redraft with the director, or approve knowing this.`, "is-error");
+    } else if (screenplay?.reasoner === "USER_EDIT") {
+      setNotice("creativeScreenplayNotice", `<b>Your revision</b>This revision was edited by you from r${screenplay.parent_revision ?? "?"}.`);
+    } else if (screenplay) {
+      setNotice("creativeScreenplayNotice", (screenplay.content?.unresolved || []).length ? `<b>Unresolved choices</b>The director left ${screenplay.content.unresolved.length} creative choice(s) open; see the list below.` : "");
+    } else {
+      setNotice("creativeScreenplayNotice", `<b>Drafting</b>The director is writing the treatment and screenplay from the approved brief.`, "is-warning");
+    }
+    $("creativeRedraftBtn").hidden = !screenplayStage;
+    $("creativeEditScreenplayBtn").hidden = status !== "SCREENPLAY_PROPOSED" || editing;
+    $("creativeSaveScreenplayBtn").hidden = !editing;
+    $("creativeCancelScreenplayBtn").hidden = !editing;
+    $("creativeAcceptDeterministicLabel").hidden = !(status === "SCREENPLAY_PROPOSED" && screenplay?.deterministic && !editing);
+    $("creativeApproveScreenplayBtn").hidden = status !== "SCREENPLAY_PROPOSED" || editing;
   }
 
   // Key visuals card
@@ -3031,15 +3639,11 @@ function renderCreative() {
   if (visualsVisible) {
     const ready = anchors.filter((anchor) => anchor.status === "READY").length;
     const failed = anchors.filter((anchor) => anchor.status === "FAILED").length;
-    $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}`;
-    $("creativeAnchorGrid").innerHTML = anchors.map((anchor) => `
-      <figure class="asset-card" data-anchor-asset="${anchor.media_asset_id || ""}">
-        <div class="asset-thumb empty-state" data-surface="dark" data-anchor-thumb="${anchor.id}">${anchor.status === "READY" ? "…" : escapeHTML(simpleLabel(anchor.status))}</div>
-        <figcaption>
-          <b>${escapeHTML(anchor.title)}</b>
-          <small>${escapeHTML(simpleLabel(anchor.kind))}${anchor.failure_code ? ` · ${escapeHTML(sentenceCase(humanizeCode(anchor.failure_code)))}` : ""}</small>
-        </figcaption>
-      </figure>`).join("");
+    const skipped = anchors.filter((anchor) => anchor.status === "SKIPPED").length;
+    const generating = anchors.some((anchor) => anchor.status === "GENERATING");
+    const polling = Boolean(creativePoll && creativePoll.sessionId === view.session.id);
+    $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${polling ? " · auto-refreshing" : ""}`;
+    $("creativeAnchorGrid").innerHTML = renderAnchors(view);
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
       const media = await resolveAssetThumbnail(anchor.media_asset_id).catch(() => null);
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
@@ -3048,70 +3652,208 @@ function renderCreative() {
         cell.innerHTML = `<img src="${escapeHTML(media.url)}" alt="" loading="lazy" />`;
       }
     });
-    const terminal = anchors.every((anchor) => ["READY", "FAILED"].includes(anchor.status));
-    $("creativeRetryVisualsBtn").hidden = !failed;
-    $("creativeProposeBibleBtn").disabled = !(terminal && ready > 0) || ["BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status);
+    const requiredNotReady = anchors.filter((anchor) => anchor.required && anchor.status !== "READY");
+    const optionalOpen = anchors.filter((anchor) => !anchor.required && !["READY", "SKIPPED"].includes(anchor.status));
+    const canPropose = !requiredNotReady.length && !optionalOpen.length;
+    if (status === "VISUALS_IN_PROGRESS") {
+      if (generating) setNotice("creativeVisualsNotice", `<b>Generating</b>${polling ? "This page refreshes on its own while visuals render." : "Use Refresh visuals to check progress."}`);
+      else if (requiredNotReady.length) setNotice("creativeVisualsNotice", `<b>Required visuals not ready</b>${escapeHTML(requiredNotReady.map((anchor) => `${anchor.title} (${anchor.status.toLowerCase()})`).join(", "))}. Retry them; required visuals cannot be skipped.`, "is-error");
+      else if (optionalOpen.length) setNotice("creativeVisualsNotice", `<b>Optional visuals pending</b>Retry or skip: ${escapeHTML(optionalOpen.map((anchor) => anchor.title).join(", "))}.`, "is-warning");
+      else setNotice("creativeVisualsNotice", `<b>Ready</b>Every required visual is ready. Draft the visual bible.`);
+    } else {
+      setNotice("creativeVisualsNotice", "");
+    }
+    $("creativeRetryVisualsBtn").hidden = !failed || !["VISUALS_IN_PROGRESS", "BIBLE_PROPOSED"].includes(status);
+    $("creativeProposeBibleBtn").disabled = !canPropose || !["VISUALS_IN_PROGRESS", "BIBLE_PROPOSED"].includes(status);
   }
 
   // Bible card
   const bible = view.bible;
   $("creativeBibleCard").hidden = !bible;
   if (bible) {
-    $("creativeBibleStatus").textContent = simpleLabel(bible.status);
+    $("creativeBibleStatus").textContent = simpleLabel(bible.status) || bible.status;
     const content = bible.content || {};
+    const lineage = bible.lineage || {};
     $("creativeBibleContent").innerHTML = [
       ["Version", `v${bible.version}`],
       ["Look", content.style?.medium || content.rules?.medium],
       ["Palette", content.rules?.palette],
+      ["Visual direction", content.visual_direction],
       ["Aspect", content.aspect_ratio],
-      ["Anchors", (content.anchors || []).filter((anchor) => anchor.media_asset_id).length + " bound"],
+      ["Screenplay", content.screenplay_revision ? `r${content.screenplay_revision}` : null],
+      ["Anchors", `${(content.anchors || []).filter((anchor) => anchor.media_asset_id).length} bound, ${(content.anchors || []).filter((anchor) => anchor.status === "SKIPPED").length} skipped`],
       ["Locked", bible.locked_at ? new Date(bible.locked_at).toLocaleString() : "not yet"],
     ].filter(([, value]) => value).map(([label, value]) =>
       `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`).join("");
+    const identities = Object.entries(lineage.identities || {});
+    $("creativeBibleLineage").innerHTML = [
+      ["Lock status", lineage.lock_status || "NOT_LOCKED"],
+      ["Style lock", lineage.style_lock_id ? `${lineage.style_inherited ? "inherited from the project" : "created"} · ${lineage.style_lock_id.slice(0, 8)}` : null],
+      ["Character identities", identities.length ? identities.map(([key, entry]) => `${key.replace("character:", "")} v${entry.identity_version}`).join(", ") : null],
+    ].filter(([, value]) => value).map(([label, value]) =>
+      `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`).join("");
+    if (lineage.lock_status === "FAILED") {
+      setNotice("creativeBibleNotice", `<b>Lock failed — compilation is blocked</b>${escapeHTML(lineage.error || "unknown error")} (${escapeHTML(lineage.error_type || "")}). Fix the cause and approve again; completed identities are kept.`, "is-error");
+    } else if (bible.status === "LOCKED") {
+      setNotice("creativeBibleNotice", `<b>Locked</b>Identities and style are bound through the platform's own locks.`);
+    } else {
+      setNotice("creativeBibleNotice", "");
+    }
     $("creativeLockBibleBtn").hidden = bible.status !== "DRAFT";
+    $("creativeLockBibleBtn").textContent = lineage.lock_status === "FAILED" ? "Retry lock" : "Approve & lock this version";
   }
 
   // Beats card
-  const beats = view.beats || [];
   $("creativeBeatsCard").hidden = !["BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status);
   $("creativeProposeBeatsBtn").hidden = status !== "BIBLE_LOCKED";
   $("creativeApproveBeatsBtn").hidden = status !== "BEATS_PROPOSED";
-  if (beats.length) {
-    $("creativeBeatsStatus").textContent = simpleLabel(beats[0].status || "PROPOSED");
-    $("creativeBeatList").innerHTML = beats.map((beat) => `
-      <div class="creative-beat">
-        <b>${beat.sequence} · ${escapeHTML(beat.intent)}</b>
-        <p>${escapeHTML(beat.summary || "")}</p>
-        <small>${escapeHTML(beat.location || "")} · ${(beat.shots || []).length} shot(s)</small>
-      </div>`).join("");
-  } else {
-    $("creativeBeatList").innerHTML = "<p class='empty-inline'>No beats drafted yet.</p>";
-  }
+  const beats = view.beats || [];
+  $("creativeBeatsStatus").textContent = beats.length ? (simpleLabel(beats[0].status) || beats[0].status) : "Waiting";
+  $("creativeBeatList").innerHTML = renderBeats(view);
 
   $("creativeGoDirectorBtn").hidden = status !== "COMPILED";
 
   // Inspector stage list
+  const afterBrief = !["INTAKE", "CLARIFYING", "BRIEF_PROPOSED"].includes(status);
   const stages = {
-    brief: ["BRIEF_APPROVED", "VISUALS_IN_PROGRESS", "BIBLE_PROPOSED", "BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status) ? "Approved" : (brief ? "Proposed" : "—"),
+    brief: afterBrief ? "Approved" : (brief ? (status === "BRIEF_PROPOSED" ? "Proposed" : "Clarifying") : "—"),
+    screenplay: screenplay ? (screenplay.status === "APPROVED" ? `Approved r${screenplay.revision}` : `${screenplay.deterministic ? "Scaffold" : "Draft"} r${screenplay.revision}`) : "—",
     visuals: anchors.length ? `${anchors.filter((anchor) => anchor.status === "READY").length}/${anchors.length}` : "—",
-    bible: bible ? simpleLabel(bible.status) : "—",
+    bible: bible ? (simpleLabel(bible.status) || bible.status) : "—",
     beats: status === "COMPILED" ? "Shots built" : (beats.length ? "Proposed" : "—"),
   };
   document.querySelectorAll("[data-creative-stage]").forEach((node) => {
     node.textContent = stages[node.dataset.creativeStage] || "—";
   });
+  const lastDirector = [...(view.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
+  const openQuestions = Object.values(brief?.question_states || {}).filter((item) => ["ASKED", "SKIPPED_BY_USER"].includes(item.status)).length;
+  const meta = {
+    reasoner: lastDirector ? REASONER_LABEL(lastDirector.reasoner) : "—",
+    skill: lastDirector?.skill_version || (lastDirector ? "not loaded" : "—"),
+    open: brief ? String(openQuestions) : "—",
+    assumptions: brief ? String((brief.assumptions || []).length) : "—",
+  };
+  document.querySelectorAll("[data-creative-meta]").forEach((node) => {
+    node.textContent = meta[node.dataset.creativeMeta] || "—";
+  });
 }
 
+/* ---- actions ------------------------------------------------------ */
 async function creativeApproveBrief() {
   const view = state.creative.session;
   if (!view?.brief) return;
-  const result = await request(`/v1/creative/sessions/${view.session.id}/brief/approve`, {
+  const accept = $("creativeAcceptAssumptions")?.checked === true;
+  state.creative.drafting = "The director is writing the treatment and screenplay";
+  state.creative.thinking = { userText: "", label: "Brief approved. Writing the screenplay", sinceTurn: Number.MAX_SAFE_INTEGER };
+  $("creativeScreenplayCard").hidden = false;
+  renderCreative();
+  let result;
+  try {
+    result = await request(`/v1/creative/sessions/${view.session.id}/brief/approve`, {
+      method: "POST",
+      body: JSON.stringify({ revision: view.brief.revision, accept_assumptions: accept }),
+    });
+  } finally {
+    state.creative.drafting = null;
+    state.creative.thinking = null;
+  }
+  if (result.screenplay?.deterministic) toast("Brief approved. The director model was unavailable, so a labelled scaffold was drafted — redraft or approve it knowingly.");
+  else if (result.screenplay) toast("Brief approved. The director has drafted the treatment and screenplay.");
+  else toast(`Brief approved. ${result.screenplay_error?.message || ""}`);
+  await openCreativeSession(view.session.id);
+}
+
+function creativeToggleBriefEditor(open) {
+  state.creative.editingBrief = open;
+  $("creativeBriefEditor").innerHTML = "";
+  renderCreative();
+}
+
+async function creativeSaveBrief() {
+  const view = state.creative.session;
+  if (!view?.brief) return;
+  const operations = collectBriefOperations(view.brief);
+  if (!operations.length) { creativeToggleBriefEditor(false); return; }
+  const result = await request(`/v1/creative/sessions/${view.session.id}/brief/edit`, {
     method: "POST",
-    body: JSON.stringify({ revision: view.brief.revision }),
+    body: JSON.stringify({ operations }),
+  });
+  const rejected = result.rejected || [];
+  if (rejected.length) toast(`${rejected.length} change(s) were not accepted: ${rejected.map((item) => `${item.path} (${item.reason})`).join(", ")}`);
+  else toast(`Brief updated (revision ${result.revision}).`);
+  state.creative.editingBrief = false;
+  $("creativeBriefEditor").innerHTML = "";
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeResolveQuestion(code, action) {
+  const view = state.creative.session;
+  if (!view) return;
+  const result = await request(`/v1/creative/sessions/${view.session.id}/brief/questions`, {
+    method: "POST",
+    body: JSON.stringify({ code, action }),
+  });
+  toast(action === "SKIP" ? `Skipped ${code.toLowerCase()}; a default was assumed where one exists.` : `Assumption accepted for ${code.toLowerCase()} (revision ${result.revision}).`);
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeRedraftScreenplay() {
+  const view = state.creative.session;
+  if (!view) return;
+  const notes = window.prompt("Anything the director should change in the rewrite? (leave empty to redraft as is)", "") ?? null;
+  if (notes === null) return;
+  state.creative.drafting = notes ? "The director is rewriting the screenplay with your notes" : "The director is redrafting the screenplay";
+  renderCreative();
+  let result;
+  try {
+    result = await request(`/v1/creative/sessions/${view.session.id}/screenplay/propose`, {
+      method: "POST",
+      body: JSON.stringify({ notes }),
+    });
+  } finally {
+    state.creative.drafting = null;
+  }
+  toast(result.deterministic ? "The director model was unavailable; a labelled scaffold was drafted instead." : `Screenplay redrafted (revision ${result.revision}).`);
+  await openCreativeSession(view.session.id);
+}
+
+function creativeToggleScreenplayEditor(open) {
+  state.creative.editingScreenplay = open;
+  $("creativeScreenplayJson").value = "";
+  renderCreative();
+}
+
+async function creativeSaveScreenplay() {
+  const view = state.creative.session;
+  if (!view?.screenplay) return;
+  let content;
+  try {
+    content = JSON.parse($("creativeScreenplayJson").value);
+  } catch (error) {
+    toast(`The screenplay is not valid JSON: ${error.message}`);
+    return;
+  }
+  const result = await request(`/v1/creative/sessions/${view.session.id}/screenplay/edit`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+  toast(`Saved as screenplay revision ${result.revision}.`);
+  state.creative.editingScreenplay = false;
+  $("creativeScreenplayJson").value = "";
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeApproveScreenplay() {
+  const view = state.creative.session;
+  if (!view?.screenplay) return;
+  const accept = $("creativeAcceptDeterministic")?.checked === true;
+  const result = await request(`/v1/creative/sessions/${view.session.id}/screenplay/approve`, {
+    method: "POST",
+    body: JSON.stringify({ revision: view.screenplay.revision, accept_deterministic: accept }),
   });
   const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
   if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
-  else toast("Brief approved. Your key visuals are being created now.");
+  else toast(`Screenplay approved. ${(result.executions || []).length} key visual(s) are being generated.`);
   await openCreativeSession(view.session.id);
 }
 
@@ -3125,8 +3867,78 @@ async function creativeSyncVisuals() {
 async function creativeRetryVisuals() {
   const view = state.creative.session;
   if (!view) return;
-  await request(`/v1/creative/sessions/${view.session.id}/visuals/execute`, { method: "POST", body: "{}" });
+  const result = await request(`/v1/creative/sessions/${view.session.id}/visuals/execute`, { method: "POST", body: "{}" });
+  const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
+  if (failed.length) toast(`${failed.length} key visual(s) still could not start: ${failed[0].error}`);
   await openCreativeSession(view.session.id);
+}
+
+async function creativeSkipAnchor(anchorId) {
+  const view = state.creative.session;
+  if (!view) return;
+  const anchor = (view.anchors || []).find((item) => item.id === anchorId);
+  const reason = window.prompt(`Skip "${anchor?.title || "this visual"}"? Say why (recorded on the session):`, "") ?? null;
+  if (reason === null) return;
+  await request(`/v1/creative/sessions/${view.session.id}/visuals/anchors/${anchorId}/skip`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+  await openCreativeSession(view.session.id);
+}
+
+async function creativeRegenerateAnchor(anchorId) {
+  const view = state.creative.session;
+  if (!view) return;
+  const anchor = (view.anchors || []).find((item) => item.id === anchorId);
+  const direction = window.prompt(`How should "${anchor?.title || "this visual"}" look instead? Your direction is kept with the new version.`, "") ?? null;
+  if (direction === null) return;
+  const result = await request(`/v1/creative/sessions/${view.session.id}/visuals/anchors/${anchorId}/regenerate`, {
+    method: "POST",
+    body: JSON.stringify({ direction }),
+  });
+  const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
+  if (failed.length) toast(`The new version could not start: ${failed[0].error}`);
+  else toast(`Version ${result.anchor.version} of ${result.anchor.title} is being generated.`);
+  await openCreativeSession(view.session.id);
+}
+
+const ANCHOR_UPLOAD_TYPE = { CHARACTER: "CHARACTER_REFERENCE", SCENE: "LOCATION_REFERENCE", PROP: "PROP_REFERENCE" };
+
+function creativeReplaceAnchor(anchorId) {
+  const view = state.creative.session;
+  if (!view) return;
+  const anchor = (view.anchors || []).find((item) => item.id === anchorId);
+  if (!anchor) return;
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = "image/*";
+  picker.addEventListener("change", () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    guard(async () => {
+      toast(`Uploading your image for ${anchor.title}…`);
+      const form = new FormData();
+      form.append("project_id", state.project.id);
+      form.append("asset_type", ANCHOR_UPLOAD_TYPE[anchor.kind] || "REFERENCE");
+      form.append("file", file);
+      if (anchor.character_id) form.append("character_id", anchor.character_id);
+      const upload = await fetch(`${API}/v1/assets`, {
+        method: "POST", body: form, credentials: "include", headers: csrfHeaders("POST"),
+      });
+      if (!upload.ok) {
+        const detail = await upload.json().catch(() => ({}));
+        throw new Error(typeof detail.detail === "string" ? detail.detail : "Image upload failed");
+      }
+      const media = await upload.json();
+      const result = await request(`/v1/creative/sessions/${view.session.id}/visuals/anchors/${anchorId}/replace`, {
+        method: "POST",
+        body: JSON.stringify({ media_asset_id: media.id }),
+      });
+      toast(`${result.anchor.title} now uses your image (version ${result.anchor.version}).`);
+      await openCreativeSession(view.session.id);
+    })();
+  });
+  picker.click();
 }
 
 async function creativeProposeBible() {
@@ -3139,17 +3951,19 @@ async function creativeProposeBible() {
 async function creativeLockBible() {
   const view = state.creative.session;
   if (!view?.bible) return;
-  await request(`/v1/creative/sessions/${view.session.id}/bible/approve`, {
+  const result = await request(`/v1/creative/sessions/${view.session.id}/bible/approve`, {
     method: "POST",
     body: JSON.stringify({ version: view.bible.version }),
   });
-  toast("Visual bible locked. This version is now immutable.");
+  const identities = Object.keys(result.lineage?.identities || {}).length;
+  toast(`Visual bible locked: ${identities} character identit${identities === 1 ? "y" : "ies"} and the project style${result.lineage?.style_inherited ? " (inherited)" : ""} are bound.`);
   await openCreativeSession(view.session.id);
 }
 
 async function creativeProposeBeats() {
   const view = state.creative.session;
   if (!view) return;
+  state.creative.beatEdits = {};
   await request(`/v1/creative/sessions/${view.session.id}/beats/propose`, { method: "POST", body: "{}" });
   await openCreativeSession(view.session.id);
 }
@@ -3157,11 +3971,13 @@ async function creativeProposeBeats() {
 async function creativeApproveBeats() {
   const view = state.creative.session;
   if (!view) return;
+  const edited = collectEditedBeats(view);
   const result = await request(`/v1/creative/sessions/${view.session.id}/beats/approve`, {
     method: "POST",
-    body: JSON.stringify({ plan_revision: view.session.beat_revision }),
+    body: JSON.stringify({ plan_revision: view.session.beat_revision, beats: edited }),
   });
-  toast(`Built ${result.shot_ids.length} shots. Continue in Director.`);
+  state.creative.beatEdits = {};
+  toast(`Built ${result.shot_ids.length} shots from screenplay revision ${result.screenplay_revision}. Continue in Director.`);
   await openCreativeSession(view.session.id);
   await selectProject(state.project.id);
   if (result.episode_id) await loadEpisode(result.episode_id);
@@ -3171,6 +3987,16 @@ async function creativeOpenInDirector() {
   const view = state.creative.session;
   switchPage("director");
   if (view?.session?.compiled_episode_id) await loadEpisode(view.session.compiled_episode_id);
+}
+
+function creativeRecordBeatEdit(node) {
+  const beat = node.dataset.beat;
+  const shot = Number(node.dataset.shot);
+  const field = node.dataset.shotField;
+  if (!beat || Number.isNaN(shot) || !field) return;
+  const edits = state.creative.beatEdits || (state.creative.beatEdits = {});
+  const beatEdits = edits[beat] || (edits[beat] = {});
+  beatEdits[shot] = { ...(beatEdits[shot] || {}), [field]: node.value };
 }
 
 /* ============================================================
@@ -3546,6 +4372,14 @@ on("creativeRefreshBtn", "click", guard(async () => {
   else await loadCreativeSessions();
 }));
 on("creativeApproveBriefBtn", "click", guard(creativeApproveBrief));
+on("creativeEditBriefBtn", "click", () => creativeToggleBriefEditor(true));
+on("creativeCancelBriefBtn", "click", () => creativeToggleBriefEditor(false));
+on("creativeSaveBriefBtn", "click", guard(creativeSaveBrief));
+on("creativeRedraftBtn", "click", guard(creativeRedraftScreenplay));
+on("creativeEditScreenplayBtn", "click", () => creativeToggleScreenplayEditor(true));
+on("creativeCancelScreenplayBtn", "click", () => creativeToggleScreenplayEditor(false));
+on("creativeSaveScreenplayBtn", "click", guard(creativeSaveScreenplay));
+on("creativeApproveScreenplayBtn", "click", guard(creativeApproveScreenplay));
 on("creativeSyncVisualsBtn", "click", guard(creativeSyncVisuals));
 on("creativeRetryVisualsBtn", "click", guard(creativeRetryVisuals));
 on("creativeProposeBibleBtn", "click", guard(creativeProposeBible));
@@ -3553,12 +4387,43 @@ on("creativeLockBibleBtn", "click", guard(creativeLockBible));
 on("creativeProposeBeatsBtn", "click", guard(creativeProposeBeats));
 on("creativeApproveBeatsBtn", "click", guard(creativeApproveBeats));
 on("creativeGoDirectorBtn", "click", guard(creativeOpenInDirector));
+on("creativeBeatList", "input", (event) => {
+  if (event.target.matches("[data-shot-field]")) creativeRecordBeatEdit(event.target);
+});
+on("creativeBeatList", "change", (event) => {
+  if (event.target.matches("[data-shot-field]")) creativeRecordBeatEdit(event.target);
+});
+on("creativeBriefEditor", "click", (event) => {
+  const remove = event.target.closest("[data-cast-remove]");
+  if (remove) { remove.closest("[data-cast-row]")?.remove(); return; }
+  if (event.target.closest("[data-cast-add]")) {
+    const cast = $("creativeBriefEditor").querySelector(".creative-cast");
+    const index = cast.querySelectorAll("[data-cast-row]").length;
+    const row = document.createElement("div");
+    row.className = "creative-cast-row";
+    row.dataset.castRow = String(index);
+    row.innerHTML = `<input data-cast-field="name" placeholder="Name" /><input data-cast-field="role" placeholder="Role" /><input data-cast-field="look" placeholder="Look" /><button class="btn btn-tertiary" type="button" data-cast-remove="${index}" title="Remove">&times;</button>`;
+    cast.insertBefore(row, cast.lastElementChild);
+  }
+});
+window.addEventListener("pagehide", stopCreativePolling);
 on("shotDeleteBtn", "click", guard(deleteSelectedShot));
 document.addEventListener("click", (event) => {
   const deleteId = event.target.closest("[data-creative-delete]")?.dataset.creativeDelete;
   if (deleteId) { guard(deleteCreativeSession)(deleteId); return; }
   const sessionId = event.target.closest("[data-creative-session]")?.dataset.creativeSession;
   if (sessionId) guard(openCreativeSession)(sessionId);
+  const skipAnchor = event.target.closest("[data-anchor-skip]")?.dataset.anchorSkip;
+  if (skipAnchor) { guard(creativeSkipAnchor)(skipAnchor); return; }
+  const regenerateAnchor = event.target.closest("[data-anchor-regenerate]")?.dataset.anchorRegenerate;
+  if (regenerateAnchor) { guard(creativeRegenerateAnchor)(regenerateAnchor); return; }
+  const replaceAnchor = event.target.closest("[data-anchor-replace]")?.dataset.anchorReplace;
+  if (replaceAnchor) { creativeReplaceAnchor(replaceAnchor); return; }
+  if (event.target.closest("[data-anchor-retry]")) { guard(creativeRetryVisuals)(); return; }
+  const acceptCode = event.target.closest("[data-question-accept]")?.dataset.questionAccept;
+  if (acceptCode) { guard(creativeResolveQuestion)(acceptCode, "ACCEPT_ASSUMPTION"); return; }
+  const skipCode = event.target.closest("[data-question-skip]")?.dataset.questionSkip;
+  if (skipCode) { guard(creativeResolveQuestion)(skipCode, "SKIP"); return; }
   const episodeId = event.target.closest("[data-episode-chip]")?.dataset.episodeChip;
   if (episodeId) guard(loadEpisode)(episodeId);
 });

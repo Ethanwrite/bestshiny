@@ -6,6 +6,10 @@ same admission -> credit reservation -> visual runtime -> gateway path as
 ``POST /v1/images/generations`` - one paid boundary, no second engine - and
 every execution outcome is written back onto the action row, so the audit of
 what the director caused to happen is complete whether it succeeded or not.
+Every approval constraint (a clarifying brief, an unanswered critical field,
+an unconfirmed assumption, a deterministic screenplay, a key visual that is
+not ready, an incomplete lock) is enforced by the service and surfaced here
+as a 409 with a reason code - never by a hidden button.
 """
 
 from __future__ import annotations
@@ -50,10 +54,12 @@ class CreativeSessionCreate(BaseModel):
     idea: str = Field(min_length=1, max_length=8000)
     format: str | None = None
     title: str = ""
+    client_turn_id: str | None = Field(default=None, max_length=120)
 
 
 class CreativeMessage(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    client_turn_id: str | None = Field(default=None, max_length=120)
 
 
 _APPROVAL_PHRASES = frozenset(
@@ -63,6 +69,42 @@ _APPROVAL_PHRASES = frozenset(
 
 class BriefApprove(BaseModel):
     revision: int = Field(ge=1)
+    accept_assumptions: bool = False
+
+
+class BriefEdit(BaseModel):
+    operations: list[dict[str, Any]] = Field(min_length=1, max_length=40)
+
+
+class QuestionResolve(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    action: str = Field(pattern="^(ACCEPT_ASSUMPTION|SKIP)$")
+    value: Any = None
+
+
+class ScreenplayPropose(BaseModel):
+    notes: str = Field(default="", max_length=4000)
+
+
+class ScreenplayEdit(BaseModel):
+    content: dict[str, Any]
+
+
+class ScreenplayApprove(BaseModel):
+    revision: int = Field(ge=1)
+    accept_deterministic: bool = False
+
+
+class AnchorSkip(BaseModel):
+    reason: str = Field(default="", max_length=240)
+
+
+class AnchorRegenerate(BaseModel):
+    direction: str = Field(default="", max_length=600)
+
+
+class AnchorReplace(BaseModel):
+    media_asset_id: str = Field(min_length=1, max_length=36)
 
 
 class BibleApprove(BaseModel):
@@ -88,6 +130,10 @@ class ContinuationConfirm(BaseModel):
     beats: list[dict[str, Any]] | None = None
 
 
+def _conflict(exc: CreativeSessionConflict) -> HTTPException:
+    return HTTPException(409, exc.as_detail())
+
+
 def register_creative_routes(
     app: FastAPI,
     container: Container,
@@ -100,6 +146,14 @@ def register_creative_routes(
         """Only an unmistakable one-word approval; anything with conditions is a turn."""
 
         return content.strip().strip("。.!！ ").lower() in _APPROVAL_PHRASES
+
+    def _actor(principal: AuthPrincipal) -> str:
+        return principal.user_id or "development"
+
+    def _actor_user_id(principal: AuthPrincipal) -> str | None:
+        """A real user id, or None under the development bypass (no User row exists)."""
+
+        return None if principal.development_bypass else principal.user_id
 
     def _require_session(principal: AuthPrincipal, session_id: str, *, write: bool = False) -> str:
         with container.database.session() as session:
@@ -165,7 +219,7 @@ def register_creative_routes(
                 job, replayed = container.visual_runtime.submit(
                     admitted.request,
                     mode="PASSENGER_SEAT",
-                    prompt_version="creative-key-visual-v1",
+                    prompt_version="creative-key-visual-v2",
                     estimated_credits=admitted.estimate.credits,
                     pricing_version=container.credit_pricing.version,
                     quoted_cost_usd=admitted.estimate.estimated_total_usd,
@@ -187,7 +241,13 @@ def register_creative_routes(
                     result={"error": str(exc), "error_type": type(exc).__name__},
                 )
                 results.append(
-                    {"action_id": action["id"], "status": "FAILED", "error": str(exc)}
+                    {
+                        "action_id": action["id"],
+                        "anchor_id": payload.get("anchor_id"),
+                        "status": "FAILED",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
                 )
                 continue
             creative.record_action_result(
@@ -202,12 +262,35 @@ def register_creative_routes(
             results.append(
                 {
                     "action_id": action["id"],
+                    "anchor_id": payload.get("anchor_id"),
                     "status": "EXECUTED",
                     "job_id": job.id,
                     "estimated_credits": admitted.estimate.credits,
                 }
             )
         return results
+
+    def _state_view(session_id: str) -> dict[str, Any]:
+        state = creative.session_state(session_id)
+        return {
+            "session": state.session,
+            "brief": state.brief,
+            "turns": state.turns,
+            "anchors": state.anchors,
+            "bible": state.bible,
+            "beats": state.beats,
+            "actions": state.actions,
+            "screenplay": state.screenplay,
+            "screenplays": state.screenplays,
+        }
+
+    async def _draft_screenplay(session_id: str, principal: AuthPrincipal) -> dict[str, Any]:
+        """Brief approval hands straight to the director's writing desk."""
+
+        try:
+            return {"screenplay": await creative.propose_screenplay(session_id, actor=_actor(principal))}
+        except CreativeSessionConflict as exc:
+            return {"screenplay": None, "screenplay_error": exc.as_detail()}
 
     # ------------------------------------------------------ creative director
     @app.post("/v1/creative/sessions", status_code=201)
@@ -223,20 +306,15 @@ def register_creative_routes(
                 workspace_id=project.workspace_id,
                 format_hint=body.format,
                 title=body.title,
+                client_turn_id=body.client_turn_id,
             )
         except CreativeTurnLimitReached as exc:
-            raise HTTPException(403, str(exc)) from exc
+            raise HTTPException(403, exc.as_detail()) from exc
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        return {
-            "session_id": reply.session_id,
-            "status": reply.status,
-            "message": reply.message,
-            "questions": reply.questions,
-            "brief_revision": reply.brief_revision,
-            "proposable": reply.proposable,
-            "reasoner": reply.reasoner,
-        }
+        return reply.as_json()
 
     @app.get("/v1/creative/sessions")
     def list_creative_sessions(
@@ -252,16 +330,7 @@ def register_creative_routes(
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
         _require_session(principal, session_id)
-        state = creative.session_state(session_id)
-        return {
-            "session": state.session,
-            "brief": state.brief,
-            "turns": state.turns,
-            "anchors": state.anchors,
-            "bible": state.bible,
-            "beats": state.beats,
-            "actions": state.actions,
-        }
+        return _state_view(session_id)
 
     @app.delete("/v1/creative/sessions/{session_id}")
     def delete_creative_session(
@@ -274,7 +343,7 @@ def register_creative_routes(
         try:
             return creative.abandon_session(session_id)
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -284,67 +353,171 @@ def register_creative_routes(
         body: CreativeMessage,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        project_id = _require_session(principal, session_id, write=True)
+        _require_session(principal, session_id, write=True)
         if _is_approval(body.content):
             # "批准" typed into the chat means the same thing as the Approve
-            # button. Before this it was a new turn that re-proposed the same
-            # brief with the same sentence (production, 2026-09-02).
+            # button, under the same constraints: a blocked approval is
+            # answered with what blocks it, not with a paid model turn.
             current = creative.session_state(session_id)
             brief = current.brief or {}
             if current.session.get("status") == "BRIEF_PROPOSED" and brief.get("revision"):
                 revision = int(brief["revision"])
                 try:
-                    actions = creative.approve_brief(
-                        session_id, revision=revision, actor=principal.user_id or "development"
+                    approved = creative.approve_brief(
+                        session_id, revision=revision, actor=_actor(principal)
                     )
                 except CreativeSessionConflict as exc:
-                    raise HTTPException(409, str(exc)) from exc
-                executions = _execute_visual_actions(principal, session_id, project_id)
+                    detail = exc.as_detail()
+                    return {
+                        "session_id": session_id,
+                        "status": current.session.get("status"),
+                        "message": str(exc),
+                        "questions": [],
+                        "brief_revision": revision,
+                        "proposable": True,
+                        "reasoner": "APPROVAL_BLOCKED",
+                        "reason_codes": [detail.get("reason_code") or "APPROVAL_BLOCKED"],
+                        "assumptions": detail.get("assumptions") or brief.get("assumptions") or [],
+                        "blocking": detail.get("blocking") or brief.get("blocking") or [],
+                        "creative_notes": [],
+                        "retryable": False,
+                        "turn_sequence": 0,
+                        "replayed": False,
+                    }
+                drafted = await _draft_screenplay(session_id, principal)
                 return {
-                    "status": "VISUALS_IN_PROGRESS",
-                    "message": "Brief approved. The key visuals are being generated.",
+                    "session_id": session_id,
+                    "status": creative.session_state(session_id).session.get("status"),
+                    "message": "Brief approved. The director is writing the screenplay.",
                     "questions": [],
-                    "brief_revision": revision,
+                    "brief_revision": approved["revision"],
                     "proposable": False,
                     "reasoner": "APPROVAL",
-                    "approved_revision": revision,
-                    "actions": actions,
-                    "executions": executions,
+                    "reason_codes": ["BRIEF_APPROVED"],
+                    "assumptions": [],
+                    "blocking": [],
+                    "creative_notes": [],
+                    "retryable": False,
+                    "turn_sequence": 0,
+                    "replayed": False,
+                    "approved_revision": approved["revision"],
+                    **drafted,
                 }
         try:
-            reply = await creative.post_message(session_id, body.content)
+            reply = await creative.post_message(
+                session_id, body.content, client_turn_id=body.client_turn_id
+            )
         except CreativeTurnLimitReached as exc:
-            raise HTTPException(403, str(exc)) from exc
+            raise HTTPException(403, exc.as_detail()) from exc
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
-        return {
-            "status": reply.status,
-            "message": reply.message,
-            "questions": reply.questions,
-            "brief_revision": reply.brief_revision,
-            "proposable": reply.proposable,
-            "reasoner": reply.reasoner,
-        }
+        return reply.as_json()
+
+    @app.post("/v1/creative/sessions/{session_id}/brief/edit")
+    def edit_creative_brief(
+        session_id: str,
+        body: BriefEdit,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.edit_brief(session_id, body.operations, actor=_actor(principal))
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/creative/sessions/{session_id}/brief/questions")
+    def resolve_creative_question(
+        session_id: str,
+        body: QuestionResolve,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.resolve_question(
+                session_id, code=body.code, action=body.action, value=body.value, actor=_actor(principal)
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/brief/approve")
-    def approve_creative_brief(
+    async def approve_creative_brief(
         session_id: str,
         body: BriefApprove,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        project_id = _require_session(principal, session_id, write=True)
+        _require_session(principal, session_id, write=True)
         try:
-            actions = creative.approve_brief(
-                session_id, revision=body.revision, actor=principal.user_id or "development"
+            approved = creative.approve_brief(
+                session_id,
+                revision=body.revision,
+                actor=_actor(principal),
+                accept_assumptions=body.accept_assumptions,
             )
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        drafted = await _draft_screenplay(session_id, principal)
+        return {"approved_revision": approved["revision"], "brief": approved, **drafted}
+
+    @app.post("/v1/creative/sessions/{session_id}/screenplay/propose")
+    async def propose_creative_screenplay(
+        session_id: str,
+        body: ScreenplayPropose | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        _require_session(principal, session_id, write=True)
+        try:
+            return await creative.propose_screenplay(
+                session_id, notes=(body.notes if body else ""), actor=_actor(principal)
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+
+    @app.post("/v1/creative/sessions/{session_id}/screenplay/edit")
+    def edit_creative_screenplay(
+        session_id: str,
+        body: ScreenplayEdit,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.edit_screenplay(session_id, body.content, actor=_actor(principal))
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/creative/sessions/{session_id}/screenplay/approve")
+    def approve_creative_screenplay(
+        session_id: str,
+        body: ScreenplayApprove,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        project_id = _require_session(principal, session_id, write=True)
+        try:
+            approved = creative.approve_screenplay(
+                session_id,
+                revision=body.revision,
+                actor=_actor(principal),
+                accept_deterministic=body.accept_deterministic,
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         executions = _execute_visual_actions(principal, session_id, project_id)
-        return {"approved_revision": body.revision, "actions": actions, "executions": executions}
+        return {**approved, "executions": executions}
 
     @app.post("/v1/creative/sessions/{session_id}/visuals/execute")
     def execute_creative_visuals(
@@ -362,6 +535,63 @@ def register_creative_routes(
         _require_session(principal, session_id, write=True)
         return creative.sync_visuals(session_id)
 
+    @app.post("/v1/creative/sessions/{session_id}/visuals/anchors/{anchor_id}/skip")
+    def skip_creative_anchor(
+        session_id: str,
+        anchor_id: str,
+        body: AnchorSkip | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.skip_anchor(
+                session_id, anchor_id, reason=(body.reason if body else ""), actor=_actor(principal)
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/v1/creative/sessions/{session_id}/visuals/anchors/{anchor_id}/regenerate")
+    def regenerate_creative_anchor(
+        session_id: str,
+        anchor_id: str,
+        body: AnchorRegenerate | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """A new version of one key visual with the user's direction, generated anew."""
+
+        project_id = _require_session(principal, session_id, write=True)
+        try:
+            result = creative.regenerate_anchor(
+                session_id, anchor_id, direction=(body.direction if body else ""), actor=_actor(principal)
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        executions = _execute_visual_actions(principal, session_id, project_id)
+        return {**result, "executions": executions}
+
+    @app.post("/v1/creative/sessions/{session_id}/visuals/anchors/{anchor_id}/replace")
+    def replace_creative_anchor(
+        session_id: str,
+        anchor_id: str,
+        body: AnchorReplace,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Bind the user's own uploaded image as a new version of one key visual."""
+
+        _require_session(principal, session_id, write=True)
+        try:
+            return creative.replace_anchor_image(
+                session_id, anchor_id, media_asset_id=body.media_asset_id, actor=_actor(principal)
+            )
+        except CreativeSessionConflict as exc:
+            raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @app.post("/v1/creative/sessions/{session_id}/bible/propose")
     def propose_visual_bible(
         session_id: str,
@@ -371,7 +601,7 @@ def register_creative_routes(
         try:
             return creative.propose_bible(session_id)
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/bible/approve")
     def approve_visual_bible(
@@ -382,10 +612,13 @@ def register_creative_routes(
         _require_session(principal, session_id, write=True)
         try:
             return creative.approve_bible(
-                session_id, version=body.version, actor=principal.user_id or "development"
+                session_id,
+                version=body.version,
+                actor=_actor(principal),
+                actor_user_id=_actor_user_id(principal),
             )
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -398,7 +631,7 @@ def register_creative_routes(
         try:
             return {"beats": creative.propose_beats(session_id)}
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/beats/approve")
     def approve_creative_beats(
@@ -411,16 +644,31 @@ def register_creative_routes(
             return creative.approve_beats(
                 session_id,
                 plan_revision=body.plan_revision,
-                actor=principal.user_id or "development",
+                actor=_actor(principal),
                 episode_title=body.episode_title,
                 edited_beats=body.beats,
             )
         except CreativeSessionConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            raise _conflict(exc) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/v1/creative/shots/{shot_id}/lineage")
+    def creative_shot_lineage(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        try:
+            lineage = creative.shot_lineage(shot_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if lineage.get("project_id"):
+            auth.require_project(principal, lineage["project_id"])
+        return lineage
 
     # --------------------------------------------------- series and episodes
     @app.get("/v1/projects/{project_id}/episodes")

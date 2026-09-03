@@ -41,6 +41,7 @@ from provider_sdk import (
     ProviderSubmission,
 )
 from provider_sdk.transport import MockProviderTransport, ProviderHttpRequest, ProviderHttpResponse
+from voyage_provider import VoyageProvider
 
 
 @pytest.fixture
@@ -2018,3 +2019,58 @@ async def test_openrouter_video_wire_carries_the_vendor_id_never_the_logical_nam
     # The internal name must not appear anywhere in the body, not merely in the
     # model field — a logical name smuggled through metadata is the same defect.
     assert logical_name not in json.dumps(sent.json_body)
+
+
+# --- 10. Voyage multimodal embeddings use the official input contract -------
+
+
+@pytest.mark.asyncio
+async def test_voyage_official_adapter_translates_interleaved_multimodal_input() -> None:
+    transport = MockProviderTransport(
+        {
+            ("POST", "/v1/multimodalembeddings"): ProviderHttpResponse(
+                200,
+                {
+                    "data": [{"embedding": [0.5, -0.5]}],
+                    "model": "voyage-multimodal-3.5",
+                    "usage": {"text_tokens": 4, "image_pixels": 4096, "total_tokens": 12},
+                },
+            )
+        }
+    )
+    provider = VoyageProvider(transport=transport)
+
+    response = await provider.create_embeddings(
+        model="voyage-multimodal-3.5",
+        inputs=[
+            {
+                "content": [
+                    {"type": "text", "text": "blue cinematic frame"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                    {"type": "image_url", "image_url": "https://example.com/frame.png"},
+                ]
+            }
+        ],
+        parameters={"dimensions": 512, "input_type": "document"},
+    )
+
+    assert response["model"] == "voyage-multimodal-3.5"
+    sent = transport.requests[0]
+    assert (sent.method, sent.path) == ("POST", "/v1/multimodalembeddings")
+    assert sent.json_body == {
+        "model": "voyage-multimodal-3.5",
+        "inputs": [
+            {
+                "content": [
+                    {"type": "text", "text": "blue cinematic frame"},
+                    {"type": "image_base64", "image_base64": "data:image/png;base64,AAAA"},
+                    {"type": "image_url", "image_url": "https://example.com/frame.png"},
+                ]
+            }
+        ],
+        "input_type": "document",
+        "truncation": True,
+    }

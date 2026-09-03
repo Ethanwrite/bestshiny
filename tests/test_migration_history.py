@@ -17,6 +17,12 @@ from platform_database import (
     SchemaRevisionMismatch,
 )
 from platform_shared import Settings
+from production_domain.models import (
+    ModelCapabilityProfile,
+    ModelDefinition,
+    ModelPricingProfile,
+    ModelRoleBinding,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 from video_platform_api.container import build_container
 
@@ -182,6 +188,88 @@ def test_explicit_database_identifiers_fit_postgresql_limit() -> None:
         source = source_path.read_text(encoding="utf-8")
         identifiers = re.findall(r'["\']((?:fk|uq|ix|ck)_[A-Za-z0-9_]+)["\']', source)
         assert all(len(identifier) <= 63 for identifier in identifiers), source_path
+
+
+def test_0071_moves_multimodal_embedding_to_official_voyage(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    database_url = f"sqlite:///{tmp_path / 'voyage-migration.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    command.upgrade(config, "0070_creative_director_screenplay")
+
+    database = Database(database_url)
+    with database.session() as session:
+        old = ModelDefinition(
+            logical_name="voyage-multimodal-3.5-openrouter",
+            provider="openrouter",
+            provider_model_id="voyageai/voyage-multimodal-3.5",
+            modality="multimodal_embedding",
+            capabilities=["multimodal_embedding"],
+            quality_tier="PREMIUM",
+            cost_class="STANDARD",
+            provider_trust_level="PRODUCTION",
+            criticality_allowed=["STANDARD"],
+            enabled=True,
+            live_enabled=True,
+            pricing_status="VERIFIED",
+        )
+        session.add(old)
+        session.flush()
+        session.add(
+            ModelCapabilityProfile(
+                model_definition_id=old.id,
+                profile_version="legacy-openrouter-v1",
+                supported_operations=["multimodal_embedding"],
+                provider_metadata={"adapter": "openrouter"},
+            )
+        )
+        session.add(
+            ModelRoleBinding(
+                role="MULTIMODAL_EMBEDDING",
+                plan_tier="ALL",
+                model_definition_id=old.id,
+            )
+        )
+    database.engine.dispose()
+
+    command.upgrade(config, "head")
+
+    database = Database(database_url)
+    with database.session() as session:
+        old = session.scalar(
+            sa.select(ModelDefinition).where(
+                ModelDefinition.logical_name == "voyage-multimodal-3.5-openrouter"
+            )
+        )
+        official = session.scalar(
+            sa.select(ModelDefinition).where(
+                ModelDefinition.logical_name == "voyage-multimodal-3.5-official"
+            )
+        )
+        assert old is not None and (old.enabled, old.live_enabled) == (False, False)
+        assert official is not None
+        assert (official.provider, official.provider_model_id) == (
+            "voyage",
+            "voyage-multimodal-3.5",
+        )
+        assert (official.enabled, official.live_enabled) == (True, True)
+        binding = session.scalar(
+            sa.select(ModelRoleBinding).where(ModelRoleBinding.role == "MULTIMODAL_EMBEDDING")
+        )
+        assert binding is not None and binding.model_definition_id == official.id
+        profile = session.get(ModelCapabilityProfile, official.id)
+        assert profile is not None and profile.provider_metadata["adapter"] == "voyage"
+        pricing = list(
+            session.scalars(
+                sa.select(ModelPricingProfile).where(
+                    ModelPricingProfile.provider == "voyage",
+                    ModelPricingProfile.provider_model_id == "voyage-multimodal-3.5",
+                )
+            )
+        )
+        assert {row.input_mode for row in pricing} == {"input_tokens", "image_input"}
+        assert all("docs.voyageai.com" in row.source_url for row in pricing)
+    database.engine.dispose()
 
 
 def test_empty_sqlite_upgrades_to_head_and_matches_metadata(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

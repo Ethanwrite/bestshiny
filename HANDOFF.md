@@ -11,7 +11,12 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
 `0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
-> **Next session: start with [`docs/RC_HANDOFF_2026-08-29.md`](docs/RC_HANDOFF_2026-08-29.md).**
+> **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
+> (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
+> `0070_creative_director_screenplay`); production state is in
+> [`docs/SESSION_HANDOVER_2026-09-02-C.md`](docs/SESSION_HANDOVER_2026-09-02-C.md).
+>
+> Older: start with [`docs/RC_HANDOFF_2026-08-29.md`](docs/RC_HANDOFF_2026-08-29.md).**
 > It carries the branch/gate state, the unfinished-work list, and the one thing this document
 > does not: why the live canary sweep has not run, and why neither money nor a code change can
 > unblock it from this machine.

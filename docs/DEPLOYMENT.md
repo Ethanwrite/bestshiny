@@ -176,7 +176,30 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `86987c3` (`main`, [#41](https://github.com/Ethanwrite/bestshiny/pull/41)
+- **Current release.** `aa8d5d3` (branch `claude/bestshiny-director-workflow-1a6b59`), deployed
+  2026-09-03 with the §4 backup/build/recreate procedure. Migration
+  `0071_voyage_official_provider` moved `MULTIMODAL_EMBEDDING` from the retired
+  `openrouter / voyageai/voyage-multimodal-3.5` definition to
+  `voyage / voyage-multimodal-3.5`, registered the official
+  `/v1/multimodalembeddings` adapter and official token/pixel list prices. The production
+  Voyage credential was replaced without entering the repository. A real text+PNG call through
+  `ModelRoleRuntime` succeeded: execution `cc9782d5-6b10-4a97-af63-59bf6947f66f`, 512-dimensional
+  `EmbeddingEvidence` `d5db874d-b31a-4333-a9f7-11da531de5fc`; provider usage reported 18 text
+  tokens and 50,176 image pixels. API/worker/web and PostgreSQL were healthy after the deploy.
+
+- **Previous release.** `c3b184b` (branch `claude/bestshiny-director-workflow-1a6b59`, the
+  director-writes overhaul; PR against `main` opened right after the deploy), deployed from the
+  session on 2026-09-03 ≈01:08Z with the §4 procedure run as a `nohup` script on the host (log
+  `/opt/bestshiny/deploy-c3b184b….log`), pre-extraction backups of `.env` and the compose file
+  (`*.bak-20260903-010808`) plus `bestshiny-backup`, `DEPLOYED_SHA.prev = 86987c3`, web
+  force-recreated. **Migration `0070_creative_director_screenplay`** applied by the api container's
+  own `alembic upgrade head`; no env change. Verified: api healthy, `/health` 200, web 200, 19
+  creative routes (screenplay + lineage present), all three running image IDs equal the built
+  ones, compose file unchanged, zero tracebacks, budget windows at 200 USD/day. Note: production
+  runs a branch commit until the PR merges — once it does, redeploy from `main` (or record the
+  squash SHA) so `DEPLOYED_SHA` names a commit that survives branch cleanup.
+
+- **Previous release (2026-09-02).** `86987c3` (`main`, [#41](https://github.com/Ethanwrite/bestshiny/pull/41)
   the director answers in its own words, images stop carrying video parameters, conversations
   and never-generated shots can be deleted), deployed from the session on 2026-09-02 ≈21:25Z
   with the §4 procedure plus the pre-extraction backups and `DEPLOYED_SHA.prev = cb316c2`; no

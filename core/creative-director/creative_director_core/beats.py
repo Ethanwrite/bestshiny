@@ -35,6 +35,10 @@ _VERBS: dict[str, tuple[str, str]] = {
     "sit": ("{name}坐下", "{name} sits"),
     "stand": ("{name}站起", "{name} stands"),
     "open": ("{name}打开{prop}", "{name} opens the {prop}"),
+    "close": ("{name}关上{prop}", "{name} closes the {prop}"),
+    "exit": ("{name}离开{place}", "{name} leaves the {place}"),
+    "push": ("{name}推{prop}", "{name} pushes the {prop}"),
+    "pull": ("{name}拉{prop}", "{name} pulls the {prop}"),
 }
 
 _EXTERIOR_CUES = (
@@ -104,6 +108,12 @@ def _is_cjk(value: str) -> bool:
     return bool(_CJK.search(value))
 
 
+def is_cjk(value: str) -> bool:
+    """Whether the name is written in CJK, which selects the Chinese line templates."""
+
+    return _is_cjk(value)
+
+
 def action_line(name: str, verb: str, *, prop: str = "", target: str = "", place: str = "") -> str:
     chinese, english = _VERBS[verb]
     template = chinese if _is_cjk(name) else english
@@ -111,6 +121,10 @@ def action_line(name: str, verb: str, *, prop: str = "", target: str = "", place
     if not _is_cjk(name) and place_value[:1].isupper():
         # "enters the Tokyo" is not English; proper nouns drop the article.
         template = template.replace("the {place}", "{place}")
+    if not _is_cjk(name) and (prop or "")[:1].isupper():
+        template = template.replace("the {prop}", "{prop}")
+    if not _is_cjk(name) and (target or "")[:1].isupper():
+        template = template.replace("the {target}", "{target}")
     return template.format(
         name=name, prop=prop or "phone", target=target or "door", place=place_value
     )

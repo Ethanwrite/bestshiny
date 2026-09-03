@@ -74,7 +74,7 @@ payment operations, Provider accuracy, or public production reachability.
 - Media：内容字节按 SHA-256 共享，镜头/候选来源链保持独立；供应商媒体上传带并发 claim、租约和付费边界 fencing，本地与 S3/R2/MinIO 存储共用同一注册表。工作空间存储已按真实 `size_bytes` 执行原子 reserve/settle/release，不确定结果保留 hold 而不盲目释放。
 - 批量候选原子性（2026-08-28）：供应商产物先验证、再写入确定性 staging key（`staging/generation/{job}/{attempt}/{index}`），随后由**单个数据库事务**创建 sibling candidates、MediaAsset 与 job 绑定并完成结算；finalize 由完成栅栏保证幂等，重放不产生重复候选。事务失败只留下可回收的 staging 对象，由 TTL 清扫器（worker 定时 + `POST /internal/maintenance/generation-staging`）在「任务已终态且无 MediaAsset 引用」时回收；不再预创建空的 `CREATED` sibling 候选，历史遗留空行由 `scripts/retire_empty_candidates.py` 一次性审计并安全退役（状态置 `RETIRED`，非删除）。
 - Workbench：注册/登录遮罩、自主创作/智能导演双模式、中文画面描述优化、人物主参考 v1/v2 重新提交、场景/产品/道具通用版本上传及指定镜头重做入口；界面只显示通俗说法，内部合同和模型指令默认收起。
-- Create with AI Director：有状态创意导演（`creative_sessions` 等 7 张表）。用户只给模糊需求，导演按「缺口分析」只问真正缺失的高价值问题（无固定问卷、已问不重复），产出结构化 CreativeBrief（逐版本追加、批准后冻结）→ 关键视觉（`GENERATE_KEY_VISUAL` 结构化 action，由 API 层走与 `/v1/images/generations` 完全相同的 admission/积分/Router/Gateway 路径执行，幂等可重试）→ VisualBible（批准即版本锁定，LOCKED 版本不可变，改动只能新开版本再批准）→ BeatPlan/ShotIntent（结构化节拍与镜头意图，批准时派生成合规剧本行，交给现有 NarrativeCompiler 编译成真实场景/镜头，并把 cliffhanger 写成 `narrative_obligations`）。创意导演自身不持有任何 Provider 客户端；模型推理走 `ModelRoleRuntime(DIRECTOR)`，不可用时降级为确定性规则引擎并在 turn 上记录 `reasoner=DETERMINISTIC` 与原因码，绝不静默。
+- Create with BestShiny Director：有状态创意导演（`creative_sessions` 等 9 张表，迁移 `0053`/`0070`）。DIRECTOR 模型以 `skills/director/SKILL.md` 为 system prompt（每轮记录 Skill 版本与内容哈希），看到完整对话、结构化 Brief、逐字段来源与问题状态，输出显式的 SET/REPLACE/UPSERT/REMOVE/KEEP 操作——推断永远不能覆盖用户已确认的事实，用户可以纠正地点/时长/风格、补充造型、增删角色，也可直接编辑 Brief。问题有明确状态（UNASKED/ASKED/ANSWERED/SKIPPED_BY_USER/ASSUMPTION_ACCEPTED）：CLARIFYING 不能批准，CRITICAL 字段必须回答或明确接受假设，假设必须确认；后端强制执行。Brief 批准后由模型撰写版本化的 Treatment + 剧本（角色关系、场景、Beats、完整对白、单一动作 ShotIntent、起止状态、连续性义务、产品声明），用户可重写/编辑/批准精确版本；固定模板只在模型不可用时作为显式 DETERMINISTIC 降级出现并需明确确认。关键视觉由 Brief+剧本共同派生、按内容版本化，仍走与 `/v1/images/generations` 相同的 admission/积分/Router/Gateway 路径；必需锚点全部 READY 才能提出 VisualBible；批准 Bible 时经 `CharacterIdentityService` 与 `ProjectStyleService` 产生真实的角色身份版本与风格锁定（失败阻止编译）；只有批准的剧本版本交给现有 NarrativeCompiler，每个镜头带 lineage。一轮对话是一个事务：模型异常不留孤立 turn、不消耗 FREE 次数；`client_turn_id` 幂等重放。
 - Series → Episodes → 下一集：`POST /v1/episodes/{id}/continuations` 先从既有系统汇出 **EpisodeContinuationContext** 快照（上集结尾镜头与输出状态、尾帧、角色状态 head、剧集账本 facts/披露/未了 obligations、道具/服装、画风锁、已锁 VisualBible），并按五类连续性逐类判定：narrative/character/visual 恒继承；scene/frame 仅 `CONTINUOUS` 继承，`TIME_JUMP`/`LOCATION_CHANGE`（如「三天后，东京」）一律 RESET。确认后经同一 NarrativeCompiler 编译，再把集间边界接上：跨集 `previous_shot_id` + 经时间线引擎写入的 `TimelineTransition`；CONTINUOUS 额外声明 `STATE_INHERITANCE` 依赖并传播已提交状态，Frame Anchor Planner 据此把上集尾帧接为下集首镜首帧（`CROSS_SCENE_CONTINUOUS` 同地点扩展）；跳跃则当场经 `reconcile_transition` 完成 reconciliation，不留 stale、不继承旧场景/灯光/尾帧。上集被续接后禁止整集重编译（双向 loudly 拒绝）。前端 Director 侧新增 Episodes 条：`EP01 Completed / EP02 Draft / + Create next episode`。
 
 ## One-command start (Docker)
@@ -242,12 +242,16 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/v1/workspaces/{workspace_id}/depay-checkouts` | 为已登录工作空间创建 DePay 充值会话与带上下文的共享链接 |
 | `GET` | `/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}` | 查询充值会话状态供 Web 轮询 |
 | `POST` | `/api/passenger/generate` | 乘客模式提交图片/视频任务 |
-| `POST/GET` | `/v1/creative/sessions`、`/v1/creative/sessions/{id}` | 创建/查看创意导演会话（模糊想法起步） |
-| `POST` | `/v1/creative/sessions/{id}/messages` | 与创意导演对话；只回问缺失的高价值问题 |
-| `POST` | `/v1/creative/sessions/{id}/brief/approve` | 冻结 CreativeBrief 并经现有图片链路生成关键视觉 |
-| `POST` | `/v1/creative/sessions/{id}/visuals/execute`、`/visuals/sync` | 重试失败的关键视觉 / 绑定已完成产物 |
-| `POST` | `/v1/creative/sessions/{id}/bible/propose`、`/bible/approve` | 起草 / 版本锁定 VisualBible |
-| `POST` | `/v1/creative/sessions/{id}/beats/propose`、`/beats/approve` | 起草节拍 / 批准并编译为真实场景与镜头 |
+| `POST/GET` | `/v1/creative/sessions`、`/v1/creative/sessions/{id}` | 创建/查看创意导演会话（含 Brief 来源、问题状态、剧本版本、锚点、Bible lineage） |
+| `POST` | `/v1/creative/sessions/{id}/messages` | 与创意导演对话（Director Skill + 完整上下文；`client_turn_id` 幂等） |
+| `POST` | `/v1/creative/sessions/{id}/brief/edit`、`/brief/questions` | 直接编辑 Brief（同一套 revision/provenance）/ 接受假设或跳过问题 |
+| `POST` | `/v1/creative/sessions/{id}/brief/approve` | 冻结 CreativeBrief（后端强制：非 CLARIFYING、CRITICAL 已解决、假设已确认），并让导演起草剧本 |
+| `POST` | `/v1/creative/sessions/{id}/screenplay/propose`、`/screenplay/edit`、`/screenplay/approve` | 模型（重）写剧本 / 用户编辑成新版本 / 批准精确版本并派生、生成关键视觉 |
+| `POST` | `/v1/creative/sessions/{id}/visuals/execute`、`/visuals/sync`、`/visuals/anchors/{anchor_id}/skip` | 重试失败的关键视觉 / 绑定已完成产物 / 明确跳过可选锚点 |
+| `POST` | `/v1/creative/sessions/{id}/visuals/anchors/{anchor_id}/regenerate`、`/replace` | 锁定前更换人物/场景图：带用户方向重新生成新版本 / 绑定用户自己上传的图片（旧版本 SUPERSEDED，草稿 Bible 作废） |
+| `POST` | `/v1/creative/sessions/{id}/bible/propose`、`/bible/approve` | 起草 VisualBible（必需锚点须 READY）/ 锁定并产生 CharacterIdentityVersion 与 ProjectStyleLock |
+| `POST` | `/v1/creative/sessions/{id}/beats/propose`、`/beats/approve` | 从批准剧本派生节拍 / 批准（含用户编辑）并编译为真实场景与镜头 |
+| `GET` | `/v1/creative/shots/{shot_id}/lineage` | 镜头回溯：Brief、剧本版本、Bible、锚点、身份版本、风格锁 |
 | `GET` | `/v1/projects/{project_id}/episodes` | 剧集条：逐集 `display_status`、镜头进度与续集状态 |
 | `POST` | `/v1/episodes/{episode_id}/continuations` | 计算 EpisodeContinuationContext 并提案下一集 |
 | `GET/POST` | `/v1/continuations/{id}`、`/v1/continuations/{id}/confirm` | 查看 / 确认续集并接续集间连续性 |

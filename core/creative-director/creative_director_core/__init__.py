@@ -1,12 +1,27 @@
 from .beats import BeatPlanner, render_script
-from .brief import BriefAnalysis, BriefEngine, GapReport
+from .brief import BriefAnalysis, BriefEngine, GapReport, apply_operations
+from .director_context import build_screenplay_messages, build_turn_messages
 from .schemas import (
     ANCHOR_PROMPT_VERSION,
     BRIEF_FIELD_SPECS,
     FORMAT_DEFAULTS,
     BriefFieldSpec,
+    BriefOperation,
+    BriefOperationKind,
+    DirectorTurnResult,
     FieldWeight,
+    ProvenanceSource,
+    QuestionStatus,
+    ReasonCode,
+    Screenplay,
     StructuredActionKind,
+)
+from .screenplay import (
+    ScreenplayInvalid,
+    beats_from_screenplay,
+    derive_anchor_specs,
+    deterministic_screenplay,
+    validate_screenplay,
 )
 from .service import (
     CreativeDirectorService,
@@ -24,13 +39,28 @@ __all__ = [
     "BriefAnalysis",
     "BriefEngine",
     "BriefFieldSpec",
+    "BriefOperation",
+    "BriefOperationKind",
     "CreativeDirectorService",
     "CreativeSessionConflict",
     "CreativeSessionState",
     "CreativeTurnLimitReached",
     "DirectorReply",
+    "DirectorTurnResult",
     "FieldWeight",
     "GapReport",
+    "ProvenanceSource",
+    "QuestionStatus",
+    "ReasonCode",
+    "Screenplay",
+    "ScreenplayInvalid",
     "StructuredActionKind",
+    "apply_operations",
+    "beats_from_screenplay",
+    "build_screenplay_messages",
+    "build_turn_messages",
+    "derive_anchor_specs",
+    "deterministic_screenplay",
     "render_script",
+    "validate_screenplay",
 ]

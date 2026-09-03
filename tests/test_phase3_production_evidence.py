@@ -98,7 +98,7 @@ def test_business_code_cannot_call_voyage_directly(container) -> None:  # type: 
 async def test_model_role_runtime_embedding(container, project) -> None:  # type: ignore[no-untyped-def]
     providers = ProviderCapabilityCatalog()
     providers.register(
-        "openrouter",
+        "voyage",
         _FixtureEmbeddingCapability(),
         {ProviderCapability.EMBEDDINGS.value},
     )
@@ -111,8 +111,8 @@ async def test_model_role_runtime_embedding(container, project) -> None:  # type
 
     execution = await runtime.execute_embeddings(project.id, inputs="Lin Jin continuity state")
 
-    assert execution.resolved_model.provider == "openrouter"
-    assert execution.resolved_model.provider_model_id == "voyageai/voyage-multimodal-3.5"
+    assert execution.resolved_model.provider == "voyage"
+    assert execution.resolved_model.provider_model_id == "voyage-multimodal-3.5"
     assert len(execution.response["data"][0]["embedding"]) == 256
     with container.database.session() as session:
         record = session.scalar(
@@ -133,7 +133,7 @@ async def test_model_role_runtime_embedding(container, project) -> None:  # type
 def test_model_role_embedding_returns_project_scoped_provenance(container, project) -> None:  # type: ignore[no-untyped-def]
     providers = ProviderCapabilityCatalog()
     providers.register(
-        "openrouter",
+        "voyage",
         _FixtureEmbeddingCapability(),
         {ProviderCapability.EMBEDDINGS.value},
     )
@@ -152,8 +152,8 @@ def test_model_role_embedding_returns_project_scoped_provenance(container, proje
     )
 
     assert len(embedded.values) == 256
-    assert embedded.provenance.provider == "openrouter"
-    assert embedded.provenance.model == "voyageai/voyage-multimodal-3.5"
+    assert embedded.provenance.provider == "voyage"
+    assert embedded.provenance.model == "voyage-multimodal-3.5"
     assert embedded.provenance.input_type == "document"
     with container.database.session() as session:
         evidence = session.scalar(select(EmbeddingEvidence).where(EmbeddingEvidence.project_id == project.id))
@@ -166,7 +166,7 @@ def test_model_role_embedding_rejects_unverified_direct_video_url(container, pro
     capability = _FixtureEmbeddingCapability()
     providers = ProviderCapabilityCatalog()
     providers.register(
-        "openrouter",
+        "voyage",
         capability,
         {ProviderCapability.EMBEDDINGS.value},
     )

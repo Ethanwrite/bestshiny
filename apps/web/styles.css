@@ -1374,6 +1374,13 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
   background: radial-gradient(110% 90% at 50% 34%, rgba(242, 169, 59, .06), transparent 62%), var(--bg-1);
   color: var(--fg-meta);
 }
+/* A visual rendering: a moving sheen instead of a static word. Failed reads
+   as the one status colour that means failure everywhere else, not a
+   one-off hex the rest of the amber/status law doesn't know about. */
+.asset-thumb.is-generating { background: linear-gradient(110deg, var(--bg-2) 30%, var(--line-strong) 50%, var(--bg-2) 70%); background-size: 240% 100%; animation: sheen 1.6s linear infinite; color: var(--fg-body); }
+.asset-thumb.is-failed { box-shadow: inset 0 0 0 1px var(--danger); color: var(--danger); }
+.asset-card .anchor-actions { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.asset-card .anchor-actions .btn { padding: 2px 8px; font-size: 11px; height: 24px; }
 
 /* ============================================================
    Productions page
@@ -2177,3 +2184,56 @@ body.public-route .sheet-actions { padding-top: 0; border-top: 0; }
   }
   .gen-bloom { opacity: .7; transform: scale(.96); }
 }
+
+/* ============================================================
+   The BestShiny Director conversation UI (#42): provenance chips,
+   the question/assumption editor, the screenplay panel and its
+   reveal/thinking animation. `.asset-grid`/`.asset-card`/`.asset-thumb`
+   stay defined once, near line 1357 — see the note there. Every colour
+   below is a token from §5's amber/status law, not the hex literals
+   #42 shipped with: prov-chip's three states map to --ok / --warn /
+   --danger exactly as the admin console's DEGRADED split does, and the
+   thinking dots / typing caret use --brand-mark (a thin amber mark),
+   not the fill-only --brand, for the same 3:1-on-light reason as
+   every other small amber accent in this file. */
+.creative-notice { border: 1px solid var(--line-strong); border-left: 3px solid var(--brand); border-radius: 6px; padding: 8px 10px; font-size: 12px; color: var(--fg-body); margin-bottom: 10px; }
+.creative-notice.is-warning { border-left-color: var(--warn); }
+.creative-notice.is-error { border-left-color: var(--danger); }
+.creative-notice b { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 2px; }
+.prov-chip { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; background: var(--line-faint); color: var(--fg-meta); vertical-align: middle; }
+.prov-chip.is-user { background: var(--ok-wash); color: var(--ok); }
+.prov-chip.is-assumed { background: var(--warn-wash); color: var(--warn); }
+.prov-chip.is-required { background: var(--danger-wash); color: var(--danger); }
+.creative-questions, .creative-assumptions { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.creative-question { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; padding: 6px 8px; border: 1px dashed var(--line-strong); border-radius: 6px; }
+.creative-question span { flex: 1 1 200px; color: var(--fg-body); }
+.creative-question .btn { padding: 2px 8px; font-size: 11px; }
+.creative-editor { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
+.creative-editor label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--fg-label); }
+.creative-editor label.span-2 { grid-column: 1 / -1; }
+.creative-editor input, .creative-editor select, .creative-editor textarea { font-size: 13px; }
+.creative-editor .creative-cast { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.creative-cast-row { display: grid; grid-template-columns: 1fr 1fr 2fr auto; gap: 6px; align-items: center; }
+.check-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-body); }
+.creative-screenplay h4 { margin: 10px 0 4px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-label); }
+.creative-screenplay p { margin: 2px 0; font-size: 13px; color: var(--fg-body); }
+.creative-screenplay ul { margin: 2px 0 6px; padding-left: 18px; font-size: 13px; }
+.creative-shot { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; padding: 4px 0; border-top: 1px solid var(--line-faint); font-size: 13px; }
+.creative-shot small { display: block; color: var(--fg-meta); font-size: 11px; }
+.creative-shot .mono { font-size: 11px; color: var(--fg-meta); white-space: nowrap; }
+.creative-beat-edit { display: grid; grid-template-columns: 2fr 1fr 80px; gap: 6px; margin-top: 4px; }
+.creative-beat-edit input, .creative-beat-edit select { font-size: 12px; }
+#creativeScreenplayJson { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.creative-revisions { font-size: 11px; color: var(--fg-meta); margin-top: 6px; }
+
+/* The director thinking: three pulsing dots, then the words arrive one by one. */
+.creative-turn.is-thinking p { color: var(--fg-meta); font-style: italic; }
+.thinking-dots span { display: inline-block; width: 5px; height: 5px; margin: 0 1px; border-radius: 50%; background: var(--brand-mark); animation: thinking 1.2s ease-in-out infinite; }
+.thinking-dots span:nth-child(2) { animation-delay: .2s; }
+.thinking-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes thinking { 0%, 80%, 100% { opacity: .2; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+.typing-caret::after { content: "▍"; color: var(--brand-mark); animation: pulse .8s ease-in-out infinite; margin-left: 1px; }
+/* Sections and beats of a fresh screenplay slide in one after another. */
+.reveal-item { opacity: 0; transform: translateY(6px); animation: reveal .35s ease forwards; animation-delay: var(--reveal-delay, 0ms); }
+@keyframes reveal { to { opacity: 1; transform: translateY(0); } }
+@keyframes sheen { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }

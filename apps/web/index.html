@@ -788,6 +788,14 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <button id="reconcileJobBtn" class="btn btn-secondary" type="button" disabled hidden>Recheck credits</button>
               </div>
               <p class="field-note">A retry reuses the same submission, so you are never charged twice for it.</p>
+              <!-- The one destructive action on this page. Kept apart from the
+                   recovery buttons above so it is never the neighbour of
+                   "Try again". -->
+              <div class="group group-danger">
+                <div class="group-head"><h3>Remove</h3></div>
+                <button id="deleteJobBtn" class="btn btn-danger btn-full" type="button" disabled>Delete creation</button>
+                <p class="field-note">Deleting takes this creation out of your project for good. Credits you have already used are not returned.</p>
+              </div>
               <details class="disclosure">
                 <summary>What happened</summary>
                 <div id="generationEvents" class="event-list empty-state">Nothing loaded yet</div>
@@ -936,6 +944,24 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <label id="adminReasonField">Reason<textarea id="adminReason" minlength="8" maxlength="500" required></textarea></label>
         <div class="admin-confirm-actions"><button class="btn btn-tertiary" value="cancel">Cancel</button><button id="adminConfirmSubmit" class="btn btn-danger" value="default">Confirm</button></div>
       </form>
+    </dialog>
+
+    <dialog id="deleteCreationDialog" class="sheet" aria-labelledby="deleteCreationTitle" aria-describedby="deleteCreationDescription">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="deleteCreationTitle">Delete this creation?</h2>
+          <p id="deleteCreationDescription">This takes it out of your project for good. Credits you have already used are not returned.</p>
+        </div>
+        <div id="deleteCreationSummary" class="output-box"></div>
+        <!-- Only shown when the creation is still being made: it says, in the
+             user's terms, that it will be stopped first. -->
+        <p id="deleteCreationRunningNote" class="field-note" hidden>This one is still being made. We will stop it first, then delete it.</p>
+        <p id="deleteCreationError" class="sheet-error"></p>
+        <div class="sheet-actions">
+          <button id="cancelDeleteCreationBtn" class="btn btn-tertiary" type="button">Keep it</button>
+          <button id="confirmDeleteCreationBtn" class="btn btn-danger" type="button">Delete creation</button>
+        </div>
+      </div>
     </dialog>
 
     <dialog id="passwordResetDialog" class="sheet" aria-labelledby="passwordResetTitle">

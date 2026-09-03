@@ -257,6 +257,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET/POST` | `/v1/continuations/{id}`、`/v1/continuations/{id}/confirm` | 查看 / 确认续集并接续集间连续性 |
 | `POST` | `/v1/shots/{shot_id}/generate` | 自动导演生成镜头候选 |
 | `GET` | `/v1/generations/{job_id}` | 查询生成任务 |
+| `DELETE` | `/v1/generations/{job_id}` | 从 Productions 移除一次创作：软删除（`deleted_at`/`deleted_by`），不退款、不改动任何已产生的额度流水、结算、执行、成本与证据记录；仍在进行的会先安全取消，提交状态未确认的返回 409（先 Recheck credits）；重复调用返回成功。独占的媒体在事务提交后由异步清理回收 |
 | `POST` | `/api/generations/{job_id}/promote` | 把完成结果新增为资产版本，并可显式提升为 canonical |
 | `POST` | `/v1/shots/{shot_id}/candidates/{candidate_id}/human-review` | 对需要人工确认且没有硬失败的候选填写理由并显式确认；仍需另行采用 |
 | `POST` | `/v1/characters/{character_id}/narrative-state/initialize` | 从已采用镜头建立人工显式确认的角色叙事状态 v1 |

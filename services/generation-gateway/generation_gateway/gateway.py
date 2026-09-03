@@ -1113,6 +1113,10 @@ class GenerationGateway:
             job = session.get(GenerationJob, job_id)
             if not job:
                 raise LookupError("generation job not found")
+            if job.deleted_at is not None:
+                # A deleted creation has no future. Reads as absent rather
+                # than unsafe: to its owner it no longer exists.
+                raise LookupError("generation job not found")
             if job.status == JobStatus.COMPLETED.value:
                 return job
             if job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
@@ -3883,7 +3887,10 @@ class GenerationGateway:
                                 GenerationJob.claim_expires_at <= now,
                             ),
                         ),
-                    )
+                    ),
+                    # A creation deleted while the worker was down is not
+                    # brought back to life by the restart that follows.
+                    GenerationJob.deleted_at.is_(None),
                 )
             ).all()
             for job in jobs:

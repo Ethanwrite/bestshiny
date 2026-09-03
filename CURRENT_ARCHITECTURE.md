@@ -237,6 +237,51 @@ renewal, user-wallet binding or per-order unique amount. Alchemy remains an inde
 it attaches canonical log evidence and can post append-only reorg reversal entries when the available balance permits;
 otherwise the payment becomes `RECONCILIATION_REQUIRED`. Real-wallet payment evidence remains outside this checkpoint.
 
+## Removing a creation, without rewriting what it cost
+
+A creation (one row of `generation_jobs`) is what the credit ledger entries, the reservation settlements, the
+provider execution records, the cost rows, the billing evidence and the audit log all point at. Removing one from
+Productions is therefore never a row delete: `DELETE /v1/generations/{job_id}` stamps `deleted_at`/`deleted_by`, and
+the row and every record hanging off it stay exactly as written. Nothing is refunded, settled or reversed by the
+deletion itself.
+
+```text
+DELETE /v1/generations/{id}
+-> workspace fence (the creation's own project; a named project must match)
+-> already stamped?            -> success, unchanged            (idempotent)
+-> submission unconfirmed?     -> 409, stays visible            (its charge is unknown)
+-> nothing in flight?          -> stamp
+-> otherwise                   -> the same cancel the Cancel action performs, then stamp
+-> commit, and queue creation_media_cleanups
+-> [after the transaction] sweep: reclaim storage this creation alone owned
+```
+
+What the stamp is worth depends on everything reading it. `GET /v1/generations` excludes it, so the Productions
+list, the four state counts, the session panel and the project total all fall together; the per-creation route and
+retry/cancel/reconcile answer `404`; the worker's job pickup and its restart recovery both skip it, so a row that
+slipped into a runnable state can never spend money for a creation the user no longer has. Deletion is what the
+listing reads — not status — which is why a provider result that lands *during* the stop, or after it, does not
+bring the creation back. The admin console and the production-evidence surfaces are unchanged: to an operator the
+history is still there.
+
+An unconfirmed submission is the one refusal. Its charge is unknown and the work may still be running, so hiding it
+would hide a bill nobody could settle; the recheck that unblocks Cancel unblocks deletion.
+
+Object storage cannot join a database transaction — a bucket call inside the deletion would either hold the
+transaction open across a network round trip or, when the bucket is briefly unreachable, roll back a deletion the
+user already saw succeed. The deletion therefore commits with a `creation_media_cleanups` row, and
+`sweep_creation_media_cleanup` (worker interval `CREATION_MEDIA_CLEANUP_INTERVAL_SECONDS`, and
+`POST /internal/maintenance/creation-media` on demand) does the storage work afterwards: claimed per row under a
+lease, retried under a doubling backoff, `FAILED` only after its attempts are exhausted and then re-drivable by id.
+
+The queue points at the creation, not at an asset id captured at deletion time, so the sweep resolves the
+creation's *current* output when it runs and collects a result that arrived late. Before anything is deleted every
+foreign key into `media_assets` is checked — shots, characters, locations and props, saved project assets, other
+live creations, style checks, quality reviews, project memory, story references — and a single holder closes the
+row as `KEPT_SHARED` with that holder named. The storage key is checked separately, because content addressing can
+put one object behind several rows. The asset row itself always survives as the anchor its `RESTRICT` foreign keys
+and evidence trail need; what changes is a record that its bytes are gone.
+
 ## Authentication, tenancy and storage
 
 Authentication provides email/password registration and login, PBKDF2-SHA256 password hashing, hashed durable

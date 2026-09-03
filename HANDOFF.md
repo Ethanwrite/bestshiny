@@ -11,6 +11,20 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
 `0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
+> **2026-09-03 · branch `claude/production-creation-deletion-f848a1` — deleting a creation.**
+> Alembic head moves to `0072_creation_soft_delete`. `DELETE /v1/generations/{job_id}` removes a creation
+> from Productions by stamping `deleted_at`/`deleted_by`: no row is deleted, nothing is refunded, and no
+> credit ledger entry, reservation settlement, provider execution record, cost row, billing evidence or audit
+> entry is rewritten. In-flight work is stopped through the same cancellation the Cancel action performs; an
+> unconfirmed submission is refused with `409` because its charge is unknown. The listing, the state counts,
+> the per-creation route, retry/cancel/reconcile, the worker's job pickup and its restart recovery all read
+> the stamp, so a provider result that lands during or after the stop cannot bring the creation back. Media
+> the creation alone owned is reclaimed *after* the transaction commits, through `creation_media_cleanups`
+> and `sweep_creation_media_cleanup` (`CREATION_MEDIA_CLEANUP_INTERVAL_SECONDS`,
+> `POST /internal/maintenance/creation-media`), retried under a backoff; anything a shot, character, saved
+> asset or another live creation still references is kept and the holder recorded. Architecture:
+> `CURRENT_ARCHITECTURE.md` § "Removing a creation, without rewriting what it cost". Residual: OPEN_ISSUES 3.8.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
 > `0070_creative_director_screenplay`); production state is in

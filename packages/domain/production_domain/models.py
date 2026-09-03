@@ -2640,6 +2640,16 @@ class GenerationJob(Base, TimestampMixin):
             sqlite_where=text("provider = 'google_flow' AND provider_job_id IS NOT NULL"),
             postgresql_where=text("provider = 'google_flow' AND provider_job_id IS NOT NULL"),
         ),
+        # The Productions listing: a project's live creations, newest first.
+        # Partial, so a project whose history is mostly deleted still reads
+        # its remaining creations out of an index the size of what is left.
+        Index(
+            "ix_generation_jobs_project_live",
+            "project_id",
+            "created_at",
+            sqlite_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
@@ -2680,6 +2690,73 @@ class GenerationJob(Base, TimestampMixin):
         Boolean, default=False, server_default=false(), nullable=False
     )
     quoted_credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    # Removal from the user's project is a soft delete, always. The row is the
+    # anchor every financial and evidential record points at — credit ledger
+    # entries, reservation settlements, provider execution records, cost rows,
+    # billing evidence and the audit log all carry its id — so erasing it
+    # would either orphan or destroy paid history. Setting these two columns
+    # takes the creation out of every user-facing surface while leaving that
+    # history exactly as it was written.
+    #
+    # Nothing ever clears them: a provider completion that lands after the
+    # deletion still writes its status and output, and the creation stays
+    # gone, which is what keeps a cancelled-then-finished job from
+    # reappearing in Productions.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    #: The user who removed it. Deliberately not a foreign key: this column is
+    #: added to a table that already exists, and SQLite can only acquire a new
+    #: foreign key by rebuilding the whole table — a rebuild this one, with its
+    #: partial indexes and check constraints, does not deserve for an
+    #: attribution field. It is written from the authenticated principal and is
+    #: null only for the development bypass, which has no user row.
+    deleted_by: Mapped[str | None] = mapped_column(String(36), index=True)
+
+
+class CreationMediaCleanup(Base, TimestampMixin):
+    """Work queue for reclaiming the media of a deleted creation.
+
+    Object storage lives outside the database transaction, so it cannot join
+    it: a bucket call inside the deletion would either hold the transaction
+    open across a network round trip or, worse, roll the deletion back when
+    the bucket is briefly unreachable. The deletion therefore commits with a
+    row here, and a sweeper does the storage work afterwards — retried under
+    a backoff until the object is genuinely gone.
+
+    The queue points at the *creation*, not at an asset id captured at
+    deletion time, so a provider result that lands after the deletion is
+    still collected: the sweep re-reads the creation's current output when it
+    runs. An asset anything else references is never deleted; the row is
+    closed as ``KEPT_SHARED`` instead.
+    """
+
+    __tablename__ = "creation_media_cleanups"
+    __table_args__ = (
+        UniqueConstraint("generation_job_id", name="uq_creation_media_cleanup_job"),
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'DONE', 'KEPT_SHARED', 'FAILED')",
+            name="ck_creation_media_cleanup_status",
+        ),
+        Index("ix_creation_media_cleanup_due", "status", "next_attempt_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    generation_job_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    #: Resolved when the sweep runs, not when the creation is deleted.
+    media_asset_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="PENDING", server_default="PENDING", nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    claim_id: Mapped[str | None] = mapped_column(String(36))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    detail_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class GenerationIdempotency(Base, TimestampMixin):

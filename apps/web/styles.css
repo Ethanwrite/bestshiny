@@ -1392,11 +1392,40 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
 
 .job-list { display: grid; gap: 10px; align-content: start; }
 .job-list.empty-state { display: flex; border-radius: var(--radius-l); background: var(--bg-2); border: 1px solid var(--line); min-height: 320px; }
+/* A row is a card that opens the creation PLUS its own menu. The two cannot be
+   one control — a button inside a button is not a tree the browser will build —
+   so the card keeps its role and the menu sits beside it, anchored to the row. */
+.job-row { position: relative; display: flex; align-items: stretch; }
 .job-card {
   display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 14px; align-items: center;
   padding: 14px 16px; width: 100%; text-align: left; cursor: pointer;
   font-family: inherit;
 }
+/* Room at the right edge for the menu, so a long cost never runs under it. */
+.job-row > .job-card { padding-right: 52px; }
+.job-menu {
+  position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border-radius: var(--radius-s);
+  border: 1px solid transparent; background: transparent; color: var(--fg-meta);
+  font-family: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.job-menu:hover, .job-menu[aria-expanded="true"] {
+  background: var(--bg-0); border-color: var(--line); color: var(--fg);
+}
+.job-menu-panel {
+  position: absolute; top: calc(50% + 18px); right: 10px; z-index: 30;
+  min-width: 172px; padding: 5px; border-radius: var(--radius);
+  background: var(--bg-2); border: 1px solid var(--line); box-shadow: var(--shadow-3);
+}
+.job-menu-panel button {
+  display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--radius-s);
+  background: transparent; color: var(--fg); font-family: inherit; font-size: 13px;
+  text-align: left; cursor: pointer;
+}
+.job-menu-panel button:hover { background: var(--bg-0); }
+.job-menu-panel button.is-danger { color: var(--danger); }
+.job-menu-panel button.is-danger:hover { background: var(--danger-wash); }
 .job-rail { width: 3px; height: 34px; border-radius: 2px; background: var(--neutral); }
 .job-rail.is-ok { background: var(--ok); }
 .job-rail.is-running { background: var(--brand-mark); }

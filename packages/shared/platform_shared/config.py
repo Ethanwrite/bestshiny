@@ -181,6 +181,17 @@ class Settings(BaseSettings):
     # How long one sweeper's claim on a row stays exclusive before a crashed
     # sweep becomes re-claimable by another worker.
     rendition_gc_lease_seconds: int = 600
+    # Reclaiming the media of a deleted creation. Object storage cannot join
+    # the deletion's transaction, so the deletion queues the work and this
+    # sweep does it afterwards, retried under a backoff. 0 disables the worker
+    # sweep; `POST /internal/maintenance/creation-media` still runs it.
+    creation_media_cleanup_interval_seconds: int = 300
+    creation_media_cleanup_limit: int = 50
+    creation_media_cleanup_lease_seconds: int = 600
+    # Attempts before a row stops retrying on its own and waits for an
+    # operator, and the first backoff step (doubling, capped at an hour).
+    creation_media_cleanup_max_attempts: int = 10
+    creation_media_cleanup_backoff_seconds: int = 60
     # Asynchronous full-content verification of directly uploaded media.
     # 0 disables the worker sweep (the internal endpoint still works).
     media_verification_interval_seconds: int = 60

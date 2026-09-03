@@ -3,6 +3,13 @@ const API = window.AI_DIRECTOR_API
     ? "http://127.0.0.1:18080"
     : "/api");
 const CSRF_COOKIE_NAME = "ai_director_csrf";
+// Same 32px stroke style as app.js's ICON_FRAME / ICON_PROJECT / ICON_ALERT —
+// the two modules never share code, so the glyph is redrawn here to match.
+const ICON_RECEIPT = `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <path d="M8 3.5h16v25l-3-2-3 2-3-2-3 2-3-2-3 2v-25a2.7 2.7 0 0 1 2.7-2.7Z" transform="translate(1.6 0)"
+        stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M12.4 11h9.2M12.4 15.8h9.2M12.4 20.6h5.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".6"/>
+</svg>`;
 const DEFAULT_SKU = "creator_50";
 const WALLETCONNECT_PROJECT_KEY = "depay:wallets:wc2:projectId";
 const PLAN_CONTENT = {
@@ -11,8 +18,8 @@ const PLAN_CONTENT = {
     kicker: "Full experience",
     description: "A complete creative workflow for occasional image and video projects.",
     features: [
-      "Unlock paid creation tools",
-      "Use higher-quality creation tiers",
+      "Unlock the paid quality levels",
+      "Create with Shinier and Shiniest",
       "Ideal for personal work and concept tests",
       "Credits never expire",
     ],
@@ -44,6 +51,20 @@ const PLAN_CONTENT = {
     cta: "Choose Professional",
   },
 };
+
+// Every way a payment can end without credits, said in words. Three call sites
+// used to print the raw settlement enum ("reconciliation required") straight at
+// a paying customer, each with a different promise after it. The reason varies;
+// the promise does not, so the promise is written exactly once.
+const PAYMENT_FAILURE = {
+  EXPIRED: "This payment expired before it was confirmed.",
+  CANCELLED: "This payment was cancelled.",
+  FAILED: "This payment did not go through.",
+  RECONCILIATION_REQUIRED: "We could not confirm this payment automatically.",
+};
+const failureReason = (status) => PAYMENT_FAILURE[status] || "This payment did not complete.";
+const paymentFailureMessage = (status) => `${failureReason(status)} No credits were added.`
+  + " If money left your wallet, contact us and we will restore it.";
 
 const paymentState = {
   user: null,
@@ -160,6 +181,22 @@ function renderPlans() {
   if (!selectedPackage()) {
     paymentState.selectedSku = planIds.includes(DEFAULT_SKU) ? DEFAULT_SKU : planIds[0];
   }
+  // The plan cards are a radio group, so they are ONE tab stop: only the
+  // checked card is tabbable and the arrows move between the cards inside it.
+  // Choosing a card re-renders the whole group, which destroys the card the
+  // user was standing on — so focus has to be put back on the new one by hand.
+  const focusPlanCard = (sku) => {
+    [...host.children].find((node) => node.dataset.sku === sku)?.focus();
+  };
+  const movePlanSelection = (step) => {
+    const from = Math.max(0, planIds.indexOf(paymentState.selectedSku));
+    const to = planIds[(from + step + planIds.length) % planIds.length];
+    if (!to) return;
+    paymentState.selectedSku = to;
+    setMessage();
+    render();
+    focusPlanCard(to);
+  };
   host.replaceChildren(...planIds.map((sku) => {
     const usdcPlan = packageFor("depay", sku);
     const cnyPlan = packageFor("xunhupay", sku);
@@ -174,9 +211,9 @@ function renderPlans() {
     const card = document.createElement("article");
     card.className = "wallet-plan";
     card.role = "radio";
-    card.tabIndex = 0;
     card.dataset.sku = sku;
     const chosen = sku === paymentState.selectedSku;
+    card.tabIndex = chosen ? 0 : -1;
     card.setAttribute("aria-checked", String(chosen));
     if (chosen) card.classList.add("is-selected");
     if (copy.badge) card.classList.add("is-recommended");
@@ -243,7 +280,12 @@ function renderPlans() {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         select();
+        return;
       }
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+      if (!step) return;
+      event.preventDefault();
+      movePlanSelection(step);
     });
     card.append(kicker, name, credits, prices, description, features, action);
     return card;
@@ -326,15 +368,15 @@ function render() {
     ? `${paymentState.billing.credit_balance.toLocaleString()} credits`
     : "—";
   element("walletNetwork").textContent = isXunhuPay
-    ? "XunHuPay"
+    ? "WeChat"
     : (paymentState.config?.network === "BASE_MAINNET" ? "Base Mainnet" : "Base");
   element("walletCurrency").textContent = isXunhuPay ? "CNY" : "Native USDC";
   const relayed = paymentState.config?.relayed_usdc_configured;
   const qrConfigured = relayed && paymentState.config?.reown_configured;
   element("walletProviderLabel").textContent = "Fuel your next creation";
-  element("walletSettlement").textContent = isXunhuPay
-    ? "WeChat Pay"
-    : (relayed ? "USDC · BestShiny Relayer" : "USDC · DePay");
+  // The Channel fact names what the customer is paying WITH, not which of our
+  // two USDC integrations happens to be wired up — that distinction is ours.
+  element("walletSettlement").textContent = isXunhuPay ? "WeChat Pay" : "USDC wallet";
   element("walletCreditingStatus").textContent = (isXunhuPay
     ? paymentState.config?.xunhupay_configured
     : relayed || paymentState.config?.depay_dynamic_configured)
@@ -345,7 +387,7 @@ function render() {
   renderMethods();
   renderPlans();
   const copy = PLAN_CONTENT[paymentState.selectedSku] || { name: paymentState.selectedSku };
-  element("walletConfirmPlan").textContent = `${copy.name}${isPro ? " top-up" : " · Unlock paid creation"}`;
+  element("walletConfirmPlan").textContent = `${copy.name}${isPro ? " top-up" : " · Upgrades you to Pro"}`;
   element("walletConfirmPrice").textContent = price;
   element("walletConfirmCredits").textContent = `${credits} Credits`;
   element("payUsdcBtn").textContent = plan
@@ -384,6 +426,32 @@ function resetWalletView() {
   element("walletSuccessView").classList.remove("is-animating");
   element("walletHistoryPanel").hidden = true;
   element("walletHistoryList").replaceChildren();
+}
+
+/** Spec §11 row 20: an empty history is not a dead end — "See the plans"
+ *  swaps back to the purchase view (out of the success/history views this
+ *  panel can only be reached from) and scrolls the pack grid into frame. */
+function walletEmptyBlock() {
+  const block = document.createElement("div");
+  block.className = "empty-block is-compact";
+  const icon = document.createElement("span");
+  icon.className = "empty-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = ICON_RECEIPT;
+  const headline = document.createElement("strong");
+  headline.textContent = "No top-ups yet";
+  const body = document.createElement("p");
+  body.textContent = "Your receipts appear here the moment a payment settles.";
+  const cta = document.createElement("button");
+  cta.type = "button";
+  cta.className = "btn btn-tertiary";
+  cta.textContent = "See the plans";
+  cta.addEventListener("click", () => {
+    resetWalletView();
+    element("walletPlans").scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+  block.append(icon, headline, body, cta);
+  return block;
 }
 
 function animateCreditBalance(fromBalance, toBalance) {
@@ -457,10 +525,7 @@ async function showPaymentHistory() {
     const response = await api(`/v1/workspaces/${paymentState.workspace.id}/payments/history`);
     list.replaceChildren();
     if (!response.items?.length) {
-      const empty = document.createElement("div");
-      empty.className = "wallet-history-empty";
-      empty.textContent = "No top-ups yet.";
-      list.append(empty);
+      list.append(walletEmptyBlock());
       return;
     }
     response.items.forEach((item) => {
@@ -517,7 +582,7 @@ async function initializeForUser(user) {
     if (!(paymentState.config.relayed_usdc_configured
       || paymentState.config.depay_dynamic_configured
       || paymentState.config.xunhupay_configured)) {
-      setMessage("Card and wallet payments are not switched on yet.");
+      setMessage("Payments are not switched on yet. Nothing can be topped up right now.");
     }
   } catch (error) {
     setMessage("", error.message);
@@ -563,7 +628,7 @@ async function pollCheckout(checkoutId) {
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
       finishWidget();
-      setMessage("", `This payment did not complete (${humanStatus(checkout.status)}). Our team can restore it.`);
+      setMessage("", paymentFailureMessage(checkout.status));
       return;
     }
     paymentState.pollTimer = window.setTimeout(() => pollCheckout(checkoutId), 3000);
@@ -682,7 +747,7 @@ async function pollXunhuPayCheckout(checkoutId) {
     }
     if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
       clearXunhuPayQr();
-      setMessage("", `This payment needs attention (${humanStatus(checkout.status)}). No credits were added.`);
+      setMessage("", paymentFailureMessage(checkout.status));
       return;
     }
     paymentState.pollTimer = window.setTimeout(
@@ -690,7 +755,7 @@ async function pollXunhuPayCheckout(checkoutId) {
       3000,
     );
   } catch (error) {
-    setMessage("Waiting for XunHuPay confirmation…", error.message);
+    setMessage("Waiting for WeChat Pay to confirm…", error.message);
     paymentState.pollTimer = window.setTimeout(
       () => pollXunhuPayCheckout(checkoutId),
       5000,
@@ -734,7 +799,9 @@ function clearWalletConnectQr() {
 async function connectBaseWalletWithQr() {
   const projectId = String(paymentState.config?.reown_project_id || "").trim();
   if (!projectId) {
-    throw new Error("QR wallet connection is not configured yet. Set REOWN_PROJECT_ID first.");
+    // The missing setting is REOWN_PROJECT_ID, but an env-var name is an
+    // operator's problem: the customer gets the two routes that still work.
+    throw new Error("Paying by QR code is not available right now. Use a browser wallet, or pay with WeChat Pay.");
   }
   localStorage.setItem(WALLETCONNECT_PROJECT_KEY, projectId);
   const [{ wallets }, { default: QRCodeStyling }] = await Promise.all([
@@ -754,10 +821,15 @@ async function connectBaseWalletWithQr() {
         type: "svg",
         data: uri,
         margin: 2,
-        dotsOptions: { color: "#171714", type: "rounded" },
+        // Hard-coded on purpose, and the one place in the product where that is
+        // correct: a QR code is read by a camera, not by a person, so it must
+        // stay high-contrast dark-on-white whatever the surface around it does.
+        // The corner squares are amber ink (--brand-text's value), not the old
+        // magenta, which matched nothing anywhere in BestShiny.
+        dotsOptions: { color: "#16181D", type: "rounded" },
         backgroundOptions: { color: "#ffffff" },
-        cornersSquareOptions: { color: "#ee2f7b", type: "extra-rounded" },
-        cornersDotOptions: { color: "#171714", type: "dot" },
+        cornersSquareOptions: { color: "#8A5606", type: "extra-rounded" },
+        cornersDotOptions: { color: "#16181D", type: "dot" },
       }).append(host);
       setMessage("Scan this QR code with the wallet that will pay the Base USDC.");
     },
@@ -786,7 +858,7 @@ async function connectBaseWalletWithQr() {
 async function connectInjectedBaseWallet() {
   const provider = window.ethereum;
   if (!provider?.request) {
-    throw new Error("No browser wallet was found. Use the WalletConnect QR code instead.");
+    throw new Error("No browser wallet was found. Use the QR code instead.");
   }
   try {
     await provider.request({
@@ -855,7 +927,7 @@ async function pollRelayedAuthorization(authorizationId) {
       return;
     }
     if (["FAILED", "EXPIRED", "RECONCILIATION_REQUIRED"].includes(result.status)) {
-      setMessage("", `This payment did not complete (${humanStatus(result.status)}).`);
+      setMessage("", paymentFailureMessage(result.status));
       return;
     }
     paymentState.pollTimer = window.setTimeout(
@@ -893,7 +965,7 @@ async function createRelayedCheckout(connectionMode = "qr") {
     );
     const signature = await signTypedData(checkout.typed_data);
     setMessage(
-      "Authorization signed. Processing the USDC payment — no further wallet action is required; BestShiny pays the Gas…",
+      "Authorization signed. Processing the USDC payment — no further wallet action is needed, and BestShiny covers the network fee.",
     );
     const submitted = await api(
       `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/submit`,

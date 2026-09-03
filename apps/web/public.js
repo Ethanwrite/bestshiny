@@ -42,7 +42,7 @@ const workspaceShot = () => `
     </div>
     <div class="pub-shot-bottom">
       <div class="pub-shot-fact"><span>Duration</span><b id="pubShotDuration">4.0s</b></div>
-      <div class="pub-shot-fact"><span>Model</span><b id="pubShotModel">Auto · Veo</b></div>
+      <div class="pub-shot-fact"><span>Model</span><b id="pubShotModel">Auto · Shiniest Motion</b></div>
       <div class="pub-shot-fact"><span>Resolution</span><b>1080p</b></div>
       <div class="pub-shot-fact"><span>Estimated</span><b>18 credits</b></div>
       <span class="pub-shot-generate" id="pubShotCta">Generate shot</span>
@@ -441,10 +441,10 @@ let demoTimer = null;
 const DEMO = [
   { caption: "SCRIPT · PARSING SCENE 01", model: "—", duration: "—", cta: "Break into shots" },
   { caption: "SCENE 01 · EXT. AWNING — NIGHT", model: "—", duration: "—", cta: "Build shot list" },
-  { caption: "SHOT 01 · 9:16 · READY", model: "Auto · Veo", duration: "4.0s", cta: "Generate shot" },
-  { caption: "SHOT 01 · 9:16 · GENERATING", model: "Veo", duration: "4.0s", cta: "Generating…" },
-  { caption: "SHOT 01 · 3 VARIANTS · REVIEW", model: "Veo", duration: "4.0s", cta: "Review variants" },
-  { caption: "SHOT 01 · APPROVED — IN TIMELINE", model: "Veo", duration: "4.0s", cta: "Approved" },
+  { caption: "SHOT 01 · 9:16 · READY", model: "Auto · Shiniest Motion", duration: "4.0s", cta: "Generate shot" },
+  { caption: "SHOT 01 · 9:16 · GENERATING", model: "Shiniest Motion", duration: "4.0s", cta: "Generating…" },
+  { caption: "SHOT 01 · 3 VARIANTS · REVIEW", model: "Shiniest Motion", duration: "4.0s", cta: "Review variants" },
+  { caption: "SHOT 01 · APPROVED — IN TIMELINE", model: "Shiniest Motion", duration: "4.0s", cta: "Approved" },
 ];
 
 function stopDemo() {

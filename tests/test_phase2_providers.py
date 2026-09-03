@@ -1252,11 +1252,14 @@ async def test_model_role_runtime_executes_chat_and_embeddings_and_logs_decision
 ) -> None:
     provider = FakeRoleProvider()
     catalog = ProviderCapabilityCatalog()
-    catalog.register(
-        "openrouter",
-        provider,
-        {ProviderCapability.CHAT.value, ProviderCapability.EMBEDDINGS.value},
-    )
+    # Two capabilities, two providers. `0071` moved MULTIMODAL_EMBEDDING off
+    # OpenRouter's generic `/embeddings` — which takes strings and cannot carry
+    # Voyage's interleaved text/image input — onto the official Voyage API, so
+    # chat and embeddings no longer resolve to the same client. Registering one
+    # provider under both capabilities would let this test pass while the role
+    # runtime asked the catalogue for a client the container never registers.
+    catalog.register("openrouter", provider, {ProviderCapability.CHAT.value})
+    catalog.register("voyage", provider, {ProviderCapability.EMBEDDINGS.value})
     runtime = ModelRoleRuntime(container.database, container.workspace_models, catalog)
 
     chat = await runtime.execute_chat(
@@ -1268,6 +1271,11 @@ async def test_model_role_runtime_executes_chat_and_embeddings_and_logs_decision
 
     assert chat.resolved_model.provider == "openrouter"
     assert chat.capability is ProviderCapability.CHAT
+    # The split itself is the assertion: a future binding change that quietly
+    # sent embeddings somewhere else would be caught here rather than at the
+    # catalogue lookup.
+    assert embedding.resolved_model.provider == "voyage"
+    assert embedding.resolved_model.provider_model_id == "voyage-multimodal-3.5"
     assert embedding.capability is ProviderCapability.EMBEDDINGS
     assert embedding.response["data"][0]["embedding"] == [0.25, 0.75]
     with container.database.session() as session:

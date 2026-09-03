@@ -88,7 +88,7 @@ const guard = (fn) => (...args) => Promise.resolve()
 
 const simpleLabel = (value) => ({
   NEW: "Queued", RESERVED: "Reserved", DRAFT: "Draft", PLANNED: "Planned", READY: "Ready",
-  COMPILED: "Compiled", ACTION: "Action", DIALOGUE: "Dialogue", MEDIUM: "Medium",
+  COMPILED: "Shots built", ACTION: "Action", DIALOGUE: "Dialogue", MEDIUM: "Medium",
   CLOSE_UP: "Close-up", WIDE: "Wide", EXTREME_CLOSE_UP: "Extreme close-up",
   COMMERCIAL_HERO: "Commercial hero",
   QUEUED: "Queued", SUBMITTED: "Submitted", RUNNING: "Generating", RETRY_WAIT: "Waiting to retry",
@@ -98,10 +98,10 @@ const simpleLabel = (value) => ({
   PASS: "Passed", SOFT_FAIL: "Needs a fix", HARD_FAIL: "Rejected",
   USER_REVIEW_REQUIRED: "Needs your review", COMMITTED: "Approved", REJECTED: "Not used",
   FAILED: "Failed",
-  NONE: "Standalone", PREVIOUS_END_FRAME: "From previous end frame",
-  REFERENCE_FRAME: "From reference frame",
-  HARD_CONTINUITY: "Hard continuity", HYBRID: "End frame + reference",
-  RE_ANCHOR: "Re-anchor character and scene",
+  NONE: "Fresh start", PREVIOUS_END_FRAME: "Carries the last frame",
+  REFERENCE_FRAME: "Carries a reference frame",
+  HARD_CONTINUITY: "Must match exactly", HYBRID: "Last frame + reference",
+  RE_ANCHOR: "Re-establishes character and location",
   IN_PRODUCTION: "In production", PROPOSED: "Proposed", APPROVED: "Approved",
   LOCKED: "Locked", SUPERSEDED: "Superseded", PENDING: "Pending",
   CAMERA_AXIS_CHANGE: "Crosses the axis", SCENE_CHANGE: "Scene changes",
@@ -113,49 +113,64 @@ const simpleLabel = (value) => ({
   ACTION_CHAIN_CONTINUES: "Action continues",
   USABLE_END_FRAME: "Previous end frame is usable",
   MODERATE_CAMERA_OR_BLOCKING_CHANGE: "Camera or blocking moved",
-  TEXT_TO_VIDEO: "Text to video", IMAGE_TO_VIDEO: "Image to video",
-  CONTINUE_I2V: "Continue from previous frame", CONTINUE_V2V: "Continue from previous clip",
-  HYBRID_REFERENCE: "End frame with reference",
-  REANCHOR_CHARACTER: "Re-anchor character", REANCHOR_SCENE: "Re-anchor scene",
-  REANCHOR_FULL: "Re-anchor character and scene",
-  START_END_FRAME: "Start and end frame", REFERENCE_TO_VIDEO: "Reference to video",
+  // "What this shot is built from" — the answer to a question the user asked,
+  // not the name of a pipeline. TEXT_TO_VIDEO etc. stay the wire values.
+  TEXT_TO_VIDEO: "Your words", IMAGE_TO_VIDEO: "A still image",
+  CONTINUE_I2V: "The last frame", CONTINUE_V2V: "The last clip",
+  HYBRID_REFERENCE: "The last frame plus a reference",
+  REANCHOR_CHARACTER: "A fresh look at the character", REANCHOR_SCENE: "A fresh look at the location",
+  REANCHOR_FULL: "A fresh look at character and location",
+  START_END_FRAME: "A first and last frame", REFERENCE_TO_VIDEO: "Your references",
+  // How an episode opens onto the one before it ([data-continuation-mode]).
+  CONTINUOUS: "Continues the scene", TIME_JUMP: "Time jump", LOCATION_CHANGE: "New location",
   portrait: "Portrait", beauty_fashion: "Beauty & fashion", product: "Product",
   commercial: "Commercial", scene_concept: "Scene concept",
   reference_character_regeneration: "Identity preserving",
   CHARACTER: "Character", SCENE: "Scene", PRODUCT: "Product", PROP: "Prop", WARDROBE: "Wardrobe",
   VEHICLE: "Vehicle", CREATURE: "Creature", VOICE: "Voice", STYLE: "Style", REFERENCE: "Reference",
-  google_flow: "Google Flow", seedance: "Seedance", veo_official: "Veo", grok: "Grok",
-  kling: "Kling", runway: "Runway", omni: "Omni", wan: "Wan",
+  LOCATION: "Location", KEY_FRAME: "Key frame",
 }[value] || value || "—");
 
-/** Public names for the models the platform runs. Raw provider model IDs
- *  and version hashes are backend facts; the UI only ever shows these. */
+/** "identity drift" -> "Identity drift". De-cased enums read as a sentence,
+ *  never as SHOUTED_CODE, on any surface a creator sees. */
+const sentenceCase = (text = "") => (text ? text.charAt(0).toUpperCase() + text.slice(1) : "");
+
+/** Public names for the models the platform runs. Raw provider model IDs and
+ *  version hashes are backend facts; the UI only ever shows these. The video
+ *  rows are BestShiny route names on purpose — no vendor, no version number —
+ *  so the catalogue reads as one product instead of a list of other people's
+ *  brands. A route with no row here falls back to "BestShiny model", which is
+ *  why a test asserts every user_visible video model id has a key. */
 const MODEL_LABELS = {
+  // Images.
   "doubao-seedream-5-0-260128": "Shiny",
   "NARWHAL": "Shinier",
   "openai/gpt-image-2": "Shiniest",
-  "doubao-seedance-2-5-260628": "Seedance Cinema",
-  "kwaivgi/kling-v3.0-std": "Kling Standard",
-  "kwaivgi/kling-v3.0-pro": "Kling Pro",
-  "x-ai/grok-imagine-video": "Grok Imagine",
-  "google/veo-3.1": "Veo Quality",
-  "google/veo-3.1-fast": "Veo Fast",
-  "google/veo-3.1-lite": "Veo Lite",
-  "alibaba/wan-3.0": "Wan 3.0",
-  "wan2.7-t2v-2026-06-12": "Wan Motion",
-  "wan-2.7": "Wan Motion",
-  "flow-veo-3.1": "Flow Cinema",
+  // Video.
+  "doubao-seedance-2-5-260628": "Shiny Motion · Cinematic",
+  "x-ai/grok-imagine-video": "Shiny Motion · Stylised",
+  "google/veo-3.1-lite": "Shiny Motion · Draft",
+  "google/veo-3.1-fast": "Shinier Motion · Fast",
+  "kwaivgi/kling-v3.0-std": "Shinier Motion · Continuity",
+  "alibaba/wan-3.0": "Shinier Motion · Long take",
+  "wan2.7-t2v-2026-06-12": "Shinier Motion · Long take",
+  "wan-2.7": "Shinier Motion · Long take",
+  "google/veo-3.1": "Shiniest Motion · Cinematic",
+  "kwaivgi/kling-v3.0-pro": "Shiniest Motion · Continuity",
+  "flow-veo-3.1": "Shiniest Motion · Studio",
 };
-const friendlyModel = (modelId) => MODEL_LABELS[modelId] || (modelId ? "Studio model" : "—");
+const friendlyModel = (modelId) => MODEL_LABELS[modelId] || (modelId ? "BestShiny model" : "—");
 
-/** Provider names shown to users. Aggregator transports (openrouter, runapi)
- *  deliberately map to nothing: their models already carry their own brand,
- *  and the transport is an internal fact. */
-const PROVIDER_BRANDS = {
-  google_flow: "Google Flow", seedance: "Seedance", veo_official: "Veo", grok: "Grok",
-  kling: "Kling", runway: "Runway", omni: "Omni", wan: "Wan",
+/** The Director page holds a provider string but never a model id, so it can
+ *  only name the tier the route belongs to. Tier-only is the honest answer:
+ *  naming a vendor there would promise a specific model we have not resolved. */
+const PROVIDER_TIER = {
+  seedance: "Shiny Motion", grok: "Shiny Motion",
+  kling: "Shinier Motion", wan: "Shinier Motion",
+  runway: "Shinier Motion", omni: "Shinier Motion",
+  veo_official: "Shiniest Motion", google_flow: "Shiniest Motion",
 };
-const providerBrand = (provider) => PROVIDER_BRANDS[provider] || "";
+const routeName = (provider) => PROVIDER_TIER[provider] || (provider ? "BestShiny model" : "—");
 
 /** The quote the job's reservation was taken on, in USD. The provider-verified
  *  figure never reaches the browser — it is a billing internal. */
@@ -298,13 +313,14 @@ function clearWorkspaceState() {
   sessionStorage.removeItem(SUBMISSION_STORAGE_KEY);
   state.confirmedAssets.clear();
   $("projectSelect").innerHTML = '<option value="">No projects yet</option>';
-  $("characterList").innerHTML = '<p class="empty-inline">No characters yet</p>';
+  $("characterList").innerHTML = CHARACTERS_EMPTY;
+  bindCharactersEmptyCta($("characterList"));
   $("passengerExistingAsset").innerHTML = '<option value="">Create a new asset</option>';
   $("manualExistingAsset").innerHTML = '<option value="">Create a new asset</option>';
   $("manualAssetFile").value = "";
   $("manualAssetStatus").textContent = "A character's master reference can also be updated from the Director inspector.";
   $("lockProjectStyleBtn").disabled = true;
-  $("projectStyleLockStatus").textContent = "Promote a style version to canonical first, then a project member can lock it explicitly.";
+  $("projectStyleLockStatus").textContent = "Make a style version the main reference first, then a project member can lock it explicitly.";
   $("passengerReference").value = "";
   $("passengerPrompt").value = "";
   $("scriptInput").value = "";
@@ -428,15 +444,21 @@ async function loadCredits() {
 const PAGE_HINT = {
   create: "Describe the frame, pick a quality level, generate.",
   "ai-director": "Bring a vague idea; approve the brief, visuals, bible and beats.",
-  director: "Compile a script, then direct one shot at a time.",
-  productions: "Every generation job, with progress, cost and recovery.",
+  director: "Break a script into shots, then direct one shot at a time.",
+  productions: "Everything you have made, with progress, cost and a way to recover a failure.",
   admin: "Provider gateway, skills, evidence and verified uploads.",
 };
 
 function switchPage(page) {
   state.page = page;
   document.querySelectorAll("[data-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.mode === page);
+    const active = button.dataset.mode === page;
+    button.classList.toggle("active", active);
+    // The nav is a set of page links, not tabs. aria-current has no "false"
+    // that assistive tech treats as absent, so the inactive state is the
+    // attribute being gone, not the string "false".
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   });
   document.querySelectorAll("[data-page]").forEach((node) => {
     node.hidden = node.dataset.page !== page;
@@ -478,7 +500,9 @@ function setPassengerMedia(media) {
   state.passengerMedia = media;
   $("passengerPrompt").value = state.passengerPrompts[media];
   document.querySelectorAll("[data-media]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.media === media);
+    const active = button.dataset.media === media;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active)); // role="tab" needs the state, not just the class
   });
   const video = media === "video";
   // Image work picks a public quality level; only video exposes a route list.
@@ -499,7 +523,7 @@ function setPassengerMedia(media) {
   $("passengerPrompt").placeholder = video
     ? "e.g. Slow push toward the bottle, backlight sweeps the glass edge, the logo stays stable"
     : "e.g. Rainy convenience-store doorway at night, a girl turns with a lit phone, 35mm film, cold and warm light meeting";
-  $("promptTypeBadge").textContent = video ? "Sent as written" : "Auto intent";
+  $("promptTypeBadge").textContent = video ? "Sent as written" : "Auto";
   $("promptCorrectionSummary").textContent = video
     ? "Video prompts are never rewritten by the image rules. What you wrote is what is submitted."
     : "Only composition, light, material and depth are enhanced. Your subject is never redesigned.";
@@ -559,22 +583,21 @@ function renderPassengerModels() {
   // a multi-workspace user on a PRO project is not told they are on FREE.
   const freeVideo = state.passengerMedia === "video"
     && state.modelProfiles.some((model) => model.plan_locked);
-  const auto = '<option value="">Auto — Recommended</option>';
+  const auto = '<option value="">Auto — BestShiny picks for you</option>';
   $("passengerModel").innerHTML = auto + state.modelProfiles.map((model) => {
     // Locked and unavailable routes stay visible: an option that disappears
-    // is indistinguishable from one that never existed.
+    // is indistinguishable from one that never existed. The reason rides in
+    // the visible label, not in a title: a title is never announced by a
+    // screen reader on an <option> and does not exist at all on touch.
     const locked = Boolean(model.plan_locked);
     const unavailable = model.available === false;
-    const suffix = locked ? " \u{1F512}" : (unavailable ? " — unavailable right now" : "");
-    const title = locked
-      ? "Part of the Pro plan"
-      : (unavailable ? "Temporarily unavailable" : "");
-    return `<option value="${model.provider}|${model.model_id}"${locked || unavailable ? " disabled" : ""}${title ? ` title="${title}"` : ""}>`
+    const suffix = locked ? " \u{1F512} Pro plan" : (unavailable ? " — unavailable right now" : "");
+    return `<option value="${model.provider}|${model.model_id}"${locked || unavailable ? " disabled" : ""}>`
       + `${escapeHTML(friendlyModel(model.model_id))}${suffix}</option>`;
   }).join("");
   $("modelHint").textContent = freeVideo
-    ? "Free plan video runs on Seedance. Upgrade to reach every route."
-    : "Auto lets the platform choose. Pick a route and exactly that route runs, or the request is refused.";
+    ? "Your Free plan runs video on Shiny Motion. Upgrade to Pro to unlock Shinier and Shiniest Motion."
+    : "Auto lets BestShiny choose for this shot. Pick one yourself and exactly that one runs — if it cannot, the generation is refused rather than quietly swapped.";
   renderImageTierOptions();
   updatePassengerCost();
 }
@@ -654,7 +677,8 @@ function updatePassengerCost() {
   $("barAspect").textContent = $("passengerAspect").value;
   $("barResolution").textContent = $("passengerResolution").value;
   $("barDuration").textContent = `${$("passengerDuration").value || 4}s`;
-  $("barModel").textContent = profile ? friendlyModel(profile.model_id) : "None";
+  // "None" was false: with no named profile the router still picks one.
+  $("barModel").textContent = profile ? friendlyModel(profile.model_id) : "Auto";
   $("advModel").textContent = profile ? friendlyModel(profile.model_id) : "—";
   $("advPricing").textContent = "Quoted before you generate";
   syncImageTierHint();
@@ -663,14 +687,14 @@ function updatePassengerCost() {
     // Nothing is quoted until the platform has resolved a target, so the figure
     // the user sees can never belong to a model other than the one that runs.
     const routed = state.passengerMedia === "image" || isAutoModel();
-    $("passengerCost").textContent = routed ? "Quoted on submit" : "Pick a route";
+    $("passengerCost").textContent = routed ? "Quoted on submit" : "Pick a quality level";
     if (state.passengerMedia === "image") {
       const tier = selectedImageTier();
       $("barModel").textContent = `${tier.stars} ${tier.name}`;
       $("advModel").textContent = `${tier.stars} ${tier.name}`;
-    } else {
-      $("barModel").textContent = isAutoModel() ? "Auto" : "None";
     }
+    // Video with no resolved profile keeps the "Auto" set above: naming a
+    // model the router has not picked yet would be a promise we cannot keep.
     return;
   }
   $("passengerCost").textContent = "Quoted on submit";
@@ -748,7 +772,7 @@ async function refinePassengerPrompt() {
     state.passengerOriginal ??= result.original || prompt;
     $("passengerPrompt").value = result.refined;
     $("undoImagePromptBtn").disabled = false;
-    $("promptTypeBadge").textContent = result.model_refinement?.accepted ? "Model refined" : "Rule refined";
+    $("promptTypeBadge").textContent = "Refined";
     $("promptCorrectionSummary").textContent = `Deep refine complete. ${result.preserved_facts?.length || 0} facts locked.`;
     toast("Prompt refined. Your original facts stay locked.");
   } finally {
@@ -766,29 +790,78 @@ function undoPassengerPrompt() {
   $("promptCorrectionSummary").textContent = "Your original prompt is back.";
 }
 
+/* ---- Empty-state furniture -------------------------------------
+   Line art at 26px inside the 56px well, not a text glyph: the old set
+   (▣ ◷ ◻ ▦ ✦ ◇) reused ◷ for BOTH "generating" and "no jobs", so the same
+   mark meant two opposite things on the same page. Every empty state also
+   ends in exactly ONE .btn-primary; every other exit is .btn-tertiary. */
+const ICON_FRAME = `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <rect x="2.5" y="6.5" width="27" height="19" rx="3" stroke="currentColor" stroke-width="1.6"/>
+  <path d="M8.6 20.2l4.6-5.4a1.4 1.4 0 0 1 2.1 0l3 3.6 2-2.2a1.4 1.4 0 0 1 2.1.05l3 3.9"
+        stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".6"/>
+  <circle cx="11.3" cy="12.3" r="1.8" stroke="currentColor" stroke-width="1.6"/>
+  <path d="M12 29.4v-1.8M16 29.4v-1.8M20 29.4v-1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".45"/>
+</svg>`;
+const ICON_PROJECT = `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <path d="M3.5 9.2A2.7 2.7 0 0 1 6.2 6.5h5.3l2.6 3.1h11.7a2.7 2.7 0 0 1 2.7 2.7v11.5a2.7 2.7 0 0 1-2.7 2.7H6.2a2.7 2.7 0 0 1-2.7-2.7V9.2Z"
+        stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M16 15.4v6.6M12.7 18.7h6.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+</svg>`;
+const ICON_ALERT = `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <path d="M16 4.8 29 27.2H3L16 4.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M16 13v6.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="16" cy="23" r="1.2" fill="currentColor"/></svg>`;
+
+/* One literal for the character rail's empty state, because the reset path and
+   the render path both paint it and a drifting pair reads as a flicker. */
+const CHARACTERS_EMPTY = `
+  <div class="empty-block is-compact">
+    <strong>No characters locked yet</strong>
+    <p>Add one so every later shot can hold the same face.</p>
+    <div class="btn-row btn-row-center">
+      <button class="btn btn-tertiary" type="button">Add a character</button>
+    </div>
+  </div>`;
+
+function bindCharactersEmptyCta(list) {
+  // #createCharacterBtn validates the name field first, so with an empty name
+  // it would only bounce off its own guard: send the user to the field.
+  list.querySelector(".empty-block button")?.addEventListener("click", () => {
+    const name = $("characterName");
+    const panel = name?.closest("details");
+    if (panel && !panel.open) panel.open = true;
+    if (name && !name.value.trim()) { name.focus(); return; }
+    $("createCharacterBtn").click();
+  });
+}
+
 /* An empty state that cannot be acted on is just a label. Both branches here
    end in a button that moves the user forward. */
 function emptyCanvasMarkup() {
   if (!state.project) {
     return `
       <div class="empty-block">
-        <span class="empty-icon" aria-hidden="true">◇</span>
-        <strong>Create a project first</strong>
-        <p>Frames, shots, characters and credits all belong to a project. Make one and the canvas opens up.</p>
+        <span class="empty-icon" aria-hidden="true">${ICON_PROJECT}</span>
+        <strong>Open a project to start shooting</strong>
+        <p>Frames, shots, characters and credits all live inside a project. Make one and this canvas comes alive.</p>
         <div class="btn-row btn-row-center">
-          <button class="btn btn-secondary" type="button" data-empty-action="new-project">Create a project</button>
+          <button class="btn btn-primary" type="button" data-empty-action="new-project">Create a project</button>
         </div>
       </div>`;
   }
+  // The example pill seeds the prompt box with its own placeholder, so the
+  // suggestion is always the one the field itself is offering for this medium.
+  const example = ($("passengerPrompt")?.placeholder || "").replace(/^e\.g\.\s*/, "");
   return `
     <div class="empty-block">
-      <span class="empty-icon" aria-hidden="true">▣</span>
-      <strong>Nothing generated yet</strong>
-      <p>Start from a written frame, or drop a reference image to work from.</p>
+      <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+      <strong>Describe the frame you want</strong>
+      <p>Write it on the left the way you'd tell a DP — subject, light, lens, mood. Or drop a reference image anywhere on this canvas.</p>
       <div class="btn-row btn-row-center">
-        <button class="btn btn-secondary" type="button" data-empty-action="prompt">Start from prompt</button>
-        <button class="btn btn-secondary" type="button" data-empty-action="upload">Upload an image</button>
+        <button class="btn btn-primary" type="button" data-empty-action="generate">${state.passengerMedia === "video" ? "Generate video" : "Generate image"}</button>
+        <button class="btn btn-tertiary" type="button" data-empty-action="upload">Use a reference image</button>
       </div>
+      ${example ? `<button class="btn empty-example" type="button" data-empty-action="example">${escapeHTML(example)}</button>` : ""}
     </div>`;
 }
 
@@ -838,29 +911,155 @@ function estimateJobProgress(job, startedAt) {
   // the creep. Most report a placeholder — 0.0 while queued, 0.5 while
   // running from Seedance, Wan, RunAPI and Flow — which must not freeze the
   // bar below the creep for the whole generation.
-  if (provider === null) return estimate; // null → no signal yet: shimmer
+  if (provider === null) return estimate;               // no signal yet -> shimmer
+  // A provider reporting 0.0 is saying "queued", not "0% done": taken as a
+  // number it pins a determinate bar to zero for the whole wait.
+  if (provider === 0 && estimate === null) return null;  // "queued" is not progress
   return estimate === null ? provider : Math.max(provider, estimate);
 }
 
-/** Monotonic progress for the job currently being polled (0-100 or null). */
+/** Monotonic progress for the job being polled: 0-100, or null meaning
+ *  "no signal — render indeterminate".
+ *  `shown` starts as null, not 0: `??` treats 0 as a value, so seeding it
+ *  with 0 made this return 0 forever and the indeterminate branch was
+ *  unreachable dead code. */
 function passengerDisplayProgress(job) {
   const poll = passengerPoll && passengerPoll.jobId === job.id ? passengerPoll : null;
   const raw = estimateJobProgress(job, poll?.startedAt ?? Date.now());
-  if (raw === null) return poll?.shown ?? null;
+  if (raw === null) return poll?.shown ?? null;      // stays null until a real number arrives
   const shown = Math.max(poll?.shown ?? 0, Math.min(100, Math.round(raw)));
   if (poll) poll.shown = shown;
   return shown;
 }
 
+/* ---- The generating block ---------------------------------------
+   Status-driven copy, an elapsed clock that ticks between polls, and a bar
+   that is honestly indeterminate when nothing has told us a number. */
+const GENERATING_COPY = {
+  RESERVED:   { title: "Reserving your credits",   note: "Nothing is charged until a model accepts the job." },
+  NEW:        { title: "Choosing a model",         note: "Matching this frame to the model that shoots it best." },
+  QUEUED:     { title: "Waiting in the queue",     note: "The model is busy right now. Your place is held." },
+  SUBMITTED:  { title: "The model has your frame", note: "First pixels usually arrive inside a minute." },
+  RUNNING:    { title: "Rendering your frame",     note: "" },
+  GENERATING: { title: "Rendering your frame",     note: "" },
+  RETRY_WAIT: { title: "Trying again",             note: "The first attempt didn't return. You are only charged once." },
+};
+const clockOf = (ms) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}`;
+const genNote = (job, det) => GENERATING_COPY[job.status]?.note
+  || (det ? "The frame lands here the moment it's ready."
+          : "This model doesn't report progress — the timer is the honest signal.");
+
+function generatingMarkup(job, { progress, startedAt }) {
+  const det = typeof progress === "number";
+  const pct = det ? Math.round(progress) : null;
+  // An ABSENT aria-valuenow is the correct ARIA encoding of an indeterminate
+  // bar. Never emit a fake number: it would be announced as real progress.
+  return `
+  <div class="canvas-generating" data-progress-stage data-job-id="${escapeHTML(job.id)}"
+       data-started="${startedAt}" aria-busy="true">
+    <div class="gen-bloom" aria-hidden="true"></div>
+    <div class="gen-gate" aria-hidden="true"><i></i><i></i><i></i></div>
+    <p class="gen-title" role="status">${escapeHTML(GENERATING_COPY[job.status]?.title || "Rendering your frame")}</p>
+    <div class="gen-track ${det ? "is-determinate" : "is-indeterminate"}"
+         role="progressbar" aria-label="Generation progress"
+         aria-valuemin="0" aria-valuemax="100"${det ? ` aria-valuenow="${pct}"` : ""}>
+      <i class="gen-fill"${det ? ` style="width:${pct}%"` : ""}></i>
+    </div>
+    <p class="gen-sub mono">
+      <span data-gen-pct>${det ? `${pct}%` : "Working"}</span> ·
+      <span data-gen-clock>${clockOf(Date.now() - startedAt)}</span> ·
+      ${escapeHTML(friendlyModel(job.model))}
+    </p>
+    <p class="gen-note" data-gen-note>${escapeHTML(genNote(job, det))}</p>
+    <button class="btn btn-tertiary" type="button" data-gen-cancel="${escapeHTML(job.id)}">Cancel</button>
+  </div>`;
+}
+
+/** A failed take is a rim and a sentence, never a red canvas: a red fill
+ *  reads as a system alarm rather than "this one didn't come back". */
+function failedMarkup(job) {
+  const cancelled = job.status === "CANCELLED";
+  return `
+  <div class="canvas-failed">
+    <span class="empty-icon" aria-hidden="true">${ICON_ALERT}</span>
+    <strong>${cancelled ? "You cancelled this one" : "This one didn't come back"}</strong>
+    <p>${cancelled
+      ? "Nothing was produced. Your balance updates once the reserved credits are released."
+      : "This generation failed. Nothing usable was produced, and the credits it reserved are released once the job settles."}</p>
+    ${job.error_message ? `<details class="gen-details"><summary>What the model said</summary><p>${escapeHTML(job.error_message)}</p></details>` : ""}
+    <div class="btn-row btn-row-center">
+      <button class="btn btn-primary" type="button" data-empty-action="generate">Try another take</button>
+    </div>
+  </div>`;
+}
+
+/** Ten minutes of polling is our budget, not the job's. Saying "failed" here
+ *  would be a lie: the job is alive, we simply stopped watching. */
+function stalledMarkup(job) {
+  return `
+  <div class="canvas-generating is-stalled" data-job-id="${escapeHTML(job.id)}">
+    <div class="gen-bloom" aria-hidden="true"></div>
+    <div class="gen-gate" aria-hidden="true"><i></i><i></i><i></i></div>
+    <p class="gen-title" role="status">Still running — we stopped watching</p>
+    <p class="gen-note">This has been going for ten minutes, so BestShiny stopped checking on it. Your credits stay reserved until the job settles.</p>
+    <div class="btn-row btn-row-center">
+      <button class="btn btn-primary" type="button" data-gen-resume="${escapeHTML(job.id)}">Check again</button>
+      <button class="btn btn-tertiary" type="button" data-gen-cancel="${escapeHTML(job.id)}">Cancel</button>
+    </div>
+  </div>`;
+}
+
+/* The clock must tick BETWEEN the 2.5s polls, or the only honest signal in
+   the indeterminate state moves once every three seconds. */
+let genClock = null;
+function startGenClock(stage) {
+  window.clearInterval(genClock);
+  const block = stage.querySelector("[data-progress-stage]");
+  const node = stage.querySelector("[data-gen-clock]");
+  if (!block || !node) return;
+  const started = Number(block.dataset.started) || Date.now();
+  genClock = window.setInterval(() => {
+    if (!node.isConnected) return window.clearInterval(genClock);
+    node.textContent = clockOf(Date.now() - started);
+  }, 1000);
+}
+
+/** Repaint the canvas without losing the drag-over overlay. The overlay is
+ *  static markup inside #passengerResult, so an innerHTML rewrite deletes it
+ *  and the whole-canvas drop target would work exactly once. */
+function paintStage(stage, html) {
+  const overlay = stage.querySelector(".canvas-drop");
+  stage.innerHTML = html;
+  if (overlay) stage.append(overlay);
+}
+
+/** Speak one sentence into the canvas live region. The node is permanent and
+ *  lives outside the stage, so a screen reader hears the change; writing the
+ *  same text twice is a no-op rather than a repeated announcement. */
+function announceCanvas(message) {
+  const node = $("canvasAnnounce");
+  if (node && node.textContent !== message) node.textContent = message;
+}
+
+/** The ratio, resolution and duration we actually asked for, plus the
+ *  timeout flag, live on the job object: the server is not guaranteed to
+ *  echo the request back, and every poll tick replaces the job wholesale. */
+function carryPassengerJobLocals(next, previous) {
+  if (next && previous?.__req && !next.__req) next.__req = previous.__req;
+  return next;
+}
+
 function startPassengerPolling(jobId, media) {
   stopPassengerPolling(); // only ever one active poll per page
-  const poll = { jobId, media, startedAt: Date.now(), shown: 0, timedOut: false, timer: null };
+  // shown starts as null, not 0 — see passengerDisplayProgress.
+  const poll = { jobId, media, startedAt: Date.now(), shown: null, timedOut: false, timer: null };
   passengerPoll = poll;
   const tick = async () => {
     if (passengerPoll !== poll) return;
     const job = await request(`/v1/generations/${encodeURIComponent(jobId)}`).catch(() => null);
     if (passengerPoll !== poll) return;
     if (job) {
+      carryPassengerJobLocals(job, state.passengerJobs[media]);
       rememberJob({ ...job, progress: passengerDisplayProgress(job) });
       state.passengerJobs[media] = job;
       if (state.passengerMedia === media && state.page === "create") {
@@ -870,13 +1069,20 @@ function startPassengerPolling(jobId, media) {
       if (TERMINAL_JOB_STATES.has(job.status)) {
         stopPassengerPolling();
         await loadCredits().catch(() => null);
-        if (job.status === "COMPLETED") toast(`${friendlyModel(job.model)} finished.`);
-        else if (job.status === "FAILED") toast(job.error_message || "The generation failed.");
+        if (job.status === "COMPLETED") toast("Your creation is ready.");
+        else if (job.status === "FAILED") toast(job.error_message || "This generation failed. Nothing usable was produced.");
         return;
       }
     }
     if (Date.now() - poll.startedAt > PASSENGER_POLL_BUDGET_MS) {
       poll.timedOut = true;
+      if (job) {
+        // The flag belongs to the JOB, not the poll: stopPassengerPolling()
+        // nulls passengerPoll a line below, and a media toggle or page switch
+        // would then silently revert the honest "we stopped watching" copy.
+        job.__timedOut = true;
+        state.passengerJobs[media] = job;
+      }
       if (job && state.passengerMedia === media && state.page === "create") {
         await renderPassengerJob(job).catch(() => null);
       }
@@ -894,7 +1100,7 @@ async function renderPassengerJob(job) {
     if (state.passengerPreviewObjectUrl) URL.revokeObjectURL(state.passengerPreviewObjectUrl);
     state.passengerPreviewObjectUrl = null;
     stage.className = "canvas-stage empty-state";
-    stage.innerHTML = emptyCanvasMarkup();
+    paintStage(stage, emptyCanvasMarkup());
     $("saveToProjectBtn").disabled = true;
     $("promotePassengerAssetBtn").disabled = true;
     $("promotePassengerAssetBtn").textContent = "Save version";
@@ -904,26 +1110,37 @@ async function renderPassengerJob(job) {
   $("operationsJobId").value = job.id;
 
   const reconciling = job.credit_status === "RECONCILIATION_REQUIRED";
-  const displayedStatus = reconciling ? "Reconciling · credits held" : simpleLabel(job.status);
+  const displayedStatus = reconciling ? "Checking the charge · credits still held" : simpleLabel(job.status);
   const tone = reconciling ? "is-queued" : statusTone(job.status);
   const running = !TERMINAL_JOB_STATES.has(job.status);
   const progress = running ? passengerDisplayProgress(job) : 100;
-  const timedOut = Boolean(passengerPoll?.jobId === job.id && passengerPoll.timedOut);
+  // The flag lives on the job so it survives stopPassengerPolling() nulling
+  // passengerPoll; the poll object is still consulted for the tick that sets it.
+  const timedOut = Boolean(job.__timedOut || (passengerPoll?.jobId === job.id && passengerPoll.timedOut));
 
   if (running && !job.output_asset_id && !timedOut) {
     // In-place update keeps the width transition animating instead of
     // rebuilding the bar at its new width every poll tick. The timeout tick
     // must fall through to the full render so its copy actually appears.
+    // Every status-driven string is refreshed here too: updating only the bar
+    // froze the headline and the note at whatever they said on first render,
+    // for the whole generation.
     const existing = stage.querySelector("[data-progress-stage]");
     if (existing && existing.dataset.jobId === job.id) {
-      const bar = existing.querySelector(".job-progress");
-      const fill = existing.querySelector(".job-progress i");
-      if (bar && fill) {
-        bar.classList.toggle("indeterminate", progress === null);
-        fill.style.width = `${progress === null ? 30 : progress}%`;
-      }
-      const title = existing.querySelector("strong");
-      if (title) title.textContent = displayedStatus;
+      const track = existing.querySelector(".gen-track");
+      const fill = existing.querySelector(".gen-fill");
+      const det = typeof progress === "number";
+      track.classList.toggle("is-determinate", det);
+      track.classList.toggle("is-indeterminate", !det);
+      if (det) { fill.style.width = `${progress}%`; track.setAttribute("aria-valuenow", String(progress)); }
+      else { fill.style.removeProperty("width"); track.removeAttribute("aria-valuenow"); }
+      existing.querySelector("[data-gen-pct]").textContent = det ? `${progress}%` : "Working";
+      // .gen-title is a live region. Writing it unconditionally re-announces the
+      // same sentence on every poll tick, so only write it when it actually changes.
+      const title = existing.querySelector(".gen-title");
+      const nextTitle = GENERATING_COPY[job.status]?.title || "Rendering your frame";
+      if (title.textContent !== nextTitle) title.textContent = nextTitle;
+      existing.querySelector("[data-gen-note]").textContent = genNote(job, det);
       const chip = stage.querySelector(".result-bar .status-chip");
       if (chip) { chip.className = `status-chip ${tone}`; chip.textContent = displayedStatus; }
       return;
@@ -956,27 +1173,47 @@ async function renderPassengerJob(job) {
     }
   }
 
-  const waitingBlock = `
-    <div class="empty-block" data-progress-stage data-job-id="${escapeHTML(job.id)}">
-      <span class="empty-icon" aria-hidden="true">◷</span>
-      <strong>${escapeHTML(displayedStatus)}</strong>
-      ${running
-        ? `<div class="job-progress create-progress${progress === null ? " indeterminate" : ""}"><i style="width:${progress === null ? 30 : progress}%"></i></div>`
-        : ""}
-      <p>${timedOut
-        ? "Still running — refresh to check again. Your credits stay reserved until the job settles."
-        : "The result appears here as soon as the provider returns it."}</p>
-    </div>`;
-  stage.className = "canvas-stage has-result";
-  stage.innerHTML = `
-    ${preview || waitingBlock}
+  // The request's own facts, because the server is not guaranteed to echo
+  // them back on the job view.
+  const asked = job.__req || {};
+  const isVideo = (job.generation_type || job.media_type || state.passengerMedia) === "video";
+  const frame = [job.aspect_ratio || asked.aspect_ratio, job.resolution || asked.resolution]
+    .filter(Boolean).join(" · ") || "—";
+  const length = job.duration ?? asked.duration ?? null;
+  const credits = jobCredits(job);
+  const resultBar = `
     <div class="result-bar">
       <span class="status-chip ${tone}">${escapeHTML(displayedStatus)}</span>
+      <button class="result-id" type="button" data-copy-id="${escapeHTML(job.id)}"
+              title="Copy this creation's ID">Copy ID</button>
       <div class="result-meta">
-        <div><span>Model</span><strong>${escapeHTML(friendlyModel(job.model))}</strong></div>
-        <div><span>Creation ID</span><strong>${escapeHTML(job.id)}</strong></div>
+        <div><span>Look</span><strong>${escapeHTML(friendlyModel(job.model))}</strong></div>
+        <div><span>Frame</span><strong>${escapeHTML(frame)}</strong></div>
+        ${isVideo && length ? `<div><span>Length</span><strong>${escapeHTML(String(length))}s</strong></div>` : ""}
+        <div class="is-cost"><span>Cost</span><strong>${credits ? `${credits} credits` : "—"}</strong></div>
       </div>
     </div>`;
+
+  // has-result fires ONLY when there is a result. It flips the stage from
+  // flex to block, so applying it to the waiting/failed/stalled blocks was
+  // what jammed them against the top of a 60vh dark rectangle.
+  const failed = ["FAILED", "CANCELLED"].includes(job.status);
+  const stateCls = failed ? "is-failed"
+    : timedOut ? "is-stalled"
+      : preview ? "has-result"
+        : "is-generating";
+  stage.className = `canvas-stage ${stateCls}`;
+  const body = failed ? failedMarkup(job)
+    : timedOut ? stalledMarkup(job)
+      : preview || generatingMarkup(job, { progress, startedAt: passengerPoll?.startedAt ?? Date.now() });
+  paintStage(stage, `${body}${preview ? resultBar : ""}`);
+  // #passengerResult carries no aria-live: its whole subtree is rewritten on every
+  // render, which would re-announce the entire result bar each tick. #canvasAnnounce
+  // is a permanent node outside the stage, so setting its text is actually heard.
+  announceCanvas(preview && job.status === "COMPLETED"
+    ? `Your ${isVideo ? "video" : "frame"} is ready.`
+    : job.status === "FAILED" ? "The generation failed." : "");
+  if (stateCls === "is-generating") startGenClock(stage);
   const confirmed = state.confirmedAssets.has(job.output_asset_id);
   $("saveToProjectBtn").disabled = !job.output_asset_id || confirmed;
   $("saveToProjectBtn").textContent = confirmed ? "Saved to project" : "Save to project";
@@ -1047,14 +1284,17 @@ async function generatePassenger() {
     };
     if (duration !== null) payload.duration = duration;
     const job = await request("/api/passenger/generate", { method: "POST", body: JSON.stringify(payload) });
+    // What we asked for, kept on the job: the result bar reports the frame and
+    // the length, and the job view is not guaranteed to echo them back.
+    job.__req = { aspect_ratio: aspectRatio, resolution: isImage ? "" : resolution, duration };
     state.passengerJobs[mediaType] = job;
     await renderPassengerJob(job);
     startPassengerPolling(job.id, mediaType);
     await loadCredits();
     succeeded = true;
     toast(auto
-      ? `Submitted on ${friendlyModel(job.model)} — ${job.estimated_credits} credits.`
-      : "Submitted. The route you chose is the one that runs and the one you are billed for.");
+      ? `Submitted on ${friendlyModel(job.model)} — ${job.estimated_credits} credits reserved.`
+      : "Submitted. The model you chose is the one that runs and the one you are billed for.");
   } finally {
     finishSubmission("passenger", idempotencyKey, succeeded);
     button.disabled = false;
@@ -1069,6 +1309,9 @@ async function refreshPassengerJob() {
   const current = state.passengerJobs[state.passengerMedia];
   if (!current) return toast("No generation running");
   const job = await request(`/v1/generations/${current.id}`);
+  // The request facts carry over; __timedOut deliberately does not — asking
+  // for a refresh IS the user saying "start watching again".
+  carryPassengerJobLocals(job, current);
   state.passengerJobs[state.passengerMedia] = job;
   await renderPassengerJob(job);
   // A manual refresh on a live job also restarts the poll loop (e.g. after
@@ -1106,7 +1349,7 @@ async function confirmPassengerAsset() {
   if (job.id === state.passengerJobs[state.passengerMedia]?.id) await renderPassengerJob(job);
   renderProductions();
   $("saveAssetDialog").close();
-  toast(result.canonical ? "Version saved and set as canonical" : "Version saved to the project");
+  toast(result.canonical ? "Version saved and set as the main reference" : "Version saved to the project");
 }
 
 /* ============================================================
@@ -1130,8 +1373,8 @@ async function loadLogicalAssets() {
   const options = (canonicalLabel) => '<option value="">Create a new asset</option>' + state.logicalAssets
     .map((asset) => `<option value="${asset.id}">${simpleLabel(asset.asset_type)} · ${escapeHTML(asset.name)}${asset.canonical_version_id ? canonicalLabel : ""}</option>`)
     .join("");
-  $("passengerExistingAsset").innerHTML = options(" · canonical");
-  $("manualExistingAsset").innerHTML = options(" · canonical");
+  $("passengerExistingAsset").innerHTML = options(" · main reference");
+  $("manualExistingAsset").innerHTML = options(" · main reference");
   renderAssetRail();
   renderProjectStyleLock();
 }
@@ -1141,7 +1384,14 @@ function renderAssetRail() {
   if (!rail) return;
   if (!state.logicalAssets.length) {
     rail.classList.add("empty");
-    rail.innerHTML = '<p class="empty-inline">No assets yet. Generate a frame and save it to the project.</p>';
+    rail.innerHTML = `
+      <div class="empty-block is-compact">
+        <strong>No project assets yet</strong>
+        <p>Save a finished frame and it becomes a reference every later shot can reuse.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-tertiary" type="button" data-empty-action="go-create">Save a frame</button>
+        </div>
+      </div>`;
     return;
   }
   rail.classList.remove("empty");
@@ -1192,10 +1442,15 @@ function hydrateAssetRailThumbs() {
   });
 }
 
+/** The asset taxonomy palette. Tokens only, never literals: an inline style
+ *  is unreachable by any scope, so a hex here would keep its dark-theme value
+ *  on the light rail — and STYLE spent brand amber on a taxonomy label, which
+ *  the amber law reserves for CTA, selection, generating and credits. */
 function assetKindColor(type) {
   return ({
-    CHARACTER: "var(--violet)", SCENE: "var(--ok)", PRODUCT: "var(--info)",
-    STYLE: "var(--brand)", WARDROBE: "#f2708b", PROP: "#e8c96b",
+    CHARACTER: "var(--kind-character)", SCENE: "var(--kind-scene)",
+    PRODUCT: "var(--kind-product)", STYLE: "var(--kind-style)",
+    WARDROBE: "var(--kind-wardrobe)", PROP: "var(--kind-prop)",
   })[type] || "var(--fg-meta)";
 }
 
@@ -1208,7 +1463,7 @@ function renderProjectStyleLock() {
     ? "Locked. Later shots inherit this look and are checked for drift."
     : (lockable
       ? "Locking is permanent. The look is captured once and every later generation is checked against it."
-      : "Promote a style version to canonical first, then a project member can lock it explicitly.");
+      : "Make a style version the main reference first, then a project member can lock it explicitly.");
 }
 
 async function openAssetDetails(assetId) {
@@ -1225,13 +1480,16 @@ async function syncManualAssetSelection() {
     $("assetCurrentMeta").textContent = "—";
     $("assetCurrentMedia").innerHTML = '<span class="empty-icon" aria-hidden="true">▣</span>';
     $("assetVersionList").className = "version-list empty-state";
-    $("assetVersionList").textContent = "Select an asset to see its versions.";
+    $("assetVersionList").innerHTML = `
+      <div class="empty-block is-compact">
+        <p>Pick an asset on the left to see its version history.</p>
+      </div>`;
     return;
   }
   $("manualAssetType").value = selected.asset_type;
   $("manualAssetName").value = selected.name;
   $("assetCurrentName").textContent = selected.name;
-  $("assetCurrentMeta").textContent = `${simpleLabel(selected.asset_type).toUpperCase()} · ${selected.canonical_version_id ? "canonical set" : "no canonical yet"}`;
+  $("assetCurrentMeta").textContent = `${simpleLabel(selected.asset_type).toUpperCase()} · ${selected.canonical_version_id ? "main reference set" : "no main reference yet"}`;
 
   const detail = await request(`/api/assets/${selected.id}`).catch(() => null);
   const versions = detail?.versions || [];
@@ -1253,7 +1511,20 @@ async function syncManualAssetSelection() {
   const list = $("assetVersionList");
   if (!versions.length) {
     list.className = "version-list empty-state";
-    list.textContent = "No versions saved yet.";
+    list.innerHTML = `
+      <div class="empty-block is-compact">
+        <strong>No versions saved yet</strong>
+        <p>Upload a file or promote a generation to create v1.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-tertiary" type="button">Upload a version</button>
+        </div>
+      </div>`;
+    // The dialog's own Save button validates the file field first, so with no
+    // file chosen the honest next move is the picker, not its error message.
+    list.querySelector("button")?.addEventListener("click", () => {
+      if ($("manualAssetFile")?.files[0]) $("manualAssetUploadBtn").click();
+      else $("manualAssetFile")?.click();
+    });
     return;
   }
   list.className = "version-list";
@@ -1263,8 +1534,8 @@ async function syncManualAssetSelection() {
       <span class="version-no mono">v${escapeHTML(String(version.version))}</span>
       <span class="version-label">${escapeHTML(version.label || simpleLabel(version.source))}</span>
       ${canonical
-        ? '<span class="status-chip is-ok">Canonical</span>'
-        : `<button class="btn btn-tertiary" type="button" data-promote-version="${escapeHTML(version.id)}">Set as canonical</button>`}
+        ? '<span class="status-chip is-ok">Main reference</span>'
+        : `<button class="btn btn-tertiary" type="button" data-promote-version="${escapeHTML(version.id)}">Set as main reference</button>`}
     </div>`;
   }).join("");
   list.querySelectorAll("[data-promote-version]").forEach((button) => {
@@ -1280,14 +1551,14 @@ async function promoteAssetVersion(assetId, versionId) {
   await loadLogicalAssets();
   $("manualExistingAsset").value = assetId;
   await syncManualAssetSelection();
-  toast("Canonical reference updated. Earlier versions are kept.");
+  toast("Main reference updated. Earlier versions are kept.");
 }
 
 async function lockSelectedProjectStyle() {
   if (!state.project) return toast("Create a project first");
   const selected = state.logicalAssets.find((asset) => asset.id === $("manualExistingAsset").value);
   if (selected?.asset_type !== "STYLE" || !selected.canonical_version_id) {
-    return toast("Pick a style asset that already has a canonical version");
+    return toast("Pick a style asset that already has a main reference");
   }
   if (!window.confirm("Locking the project style is permanent and becomes a gate on every later generation. Continue?")) return;
   state.styleLock = await request(`/api/projects/${state.project.id}/style-lock`, {
@@ -1353,7 +1624,7 @@ async function uploadManualAssetVersion() {
     $("manualExistingAsset").value = logical.id;
     await syncManualAssetSelection();
     $("manualAssetFile").value = "";
-    $("manualAssetStatus").textContent = `Saved ${simpleLabel(assetType)} "${assetName}" as v${version.version}${promoted ? " and set it as canonical." : ". The canonical reference did not change."}`;
+    $("manualAssetStatus").textContent = `Saved ${simpleLabel(assetType)} "${assetName}" as v${version.version}${promoted ? " and set it as the main reference." : ". The main reference did not change."}`;
     toast("New version saved. Earlier versions stay traceable.");
   } catch (error) {
     // The dialog is modal; leaving its own status line on the default helper
@@ -1448,7 +1719,7 @@ function resetProductionView() {
   $("compileBtn").disabled = !state.project;
   $("scriptInput").disabled = !state.project;
   $("sceneList").className = "shot-tree empty-state";
-  $("sceneList").textContent = "Compile a script to see scenes and shots.";
+  $("sceneList").textContent = "Break a script into shots to see them here.";
   $("shotTimeline").className = "filmstrip empty-state";
   $("shotTimeline").textContent = "No shots yet";
   renderNoShotSelected();
@@ -1486,7 +1757,7 @@ function renderScenes() {
   const tree = $("sceneList");
   if (!scenes.length) {
     tree.className = "shot-tree empty-state";
-    tree.textContent = "Compile a script to see scenes and shots.";
+    tree.textContent = "Break a script into shots to see them here.";
     return;
   }
   let counter = 0;
@@ -1538,28 +1809,42 @@ function renderNoShotSelected() {
   $("directorTimeContext").textContent = "";
   $("directorShotStatus").className = "status-chip is-neutral";
   $("directorShotStatus").textContent = "Draft";
+  // Exactly one primary; three different situations, three different next moves.
+  const empty = !state.project
+    ? {
+      icon: ICON_PROJECT,
+      title: "Scenes belong to a project",
+      body: "Create one and the script you paste becomes an ordered, producible shot list.",
+      cta: '<button class="btn btn-primary" type="button" data-empty-action="new-project">Create a project</button>',
+    }
+    : hasShots
+      ? {
+        icon: ICON_FRAME,
+        title: "Pick a shot to direct it",
+        body: "The approved take for the selected shot shows here; variants for comparison sit below.",
+        cta: '<button class="btn btn-primary" type="button" data-empty-action="first-shot">Open the first shot</button>',
+      }
+      : {
+        icon: ICON_FRAME,
+        title: "Break a script into shots",
+        body: "Paste a script on the left. BestShiny splits it into scenes and shots and remembers the state each shot starts and ends in.",
+        cta: '<button class="btn btn-primary" type="button" data-empty-action="compile">Break into shots</button>',
+      };
+  // The scope attribute on #shotPreviewStage survives this className rewrite;
+  // the state class is what the redesign's canvas rules key off.
+  $("shotPreviewStage").className = "shot-stage is-empty";
   $("shotStageMedia").innerHTML = `
     <div class="empty-block">
-      <span class="empty-icon" aria-hidden="true">◻</span>
-      <strong>No shot selected</strong>
-      <p>${!state.project
-        ? "Scenes and shots belong to a project. Create one to start directing."
-        : hasShots
-          ? "Pick a shot from the tree on the left to direct it."
-          : "Paste a script on the left and compile it into an ordered shot list."}</p>
-      <div class="btn-row btn-row-center">
-        ${!state.project
-          ? '<button class="btn btn-secondary" type="button" data-empty-action="new-project">Create a project</button>'
-          : hasShots
-            ? '<button class="btn btn-secondary" type="button" data-empty-action="first-shot">Choose a shot</button>'
-            : '<button class="btn btn-secondary" type="button" data-empty-action="compile">Generate shots</button>'}
-      </div>
+      <span class="empty-icon" aria-hidden="true">${empty.icon}</span>
+      <strong>${empty.title}</strong>
+      <p>${empty.body}</p>
+      <div class="btn-row btn-row-center">${empty.cta}</div>
     </div>`;
   $("shotNumber").textContent = "SHOT —";
   $("shotAction").textContent = "Select a shot";
   $("shotState").textContent = "Opening state → one action → closing state";
   $("shotTitle").textContent = "No shot selected";
-  $("shotPrompt").textContent = "Compile a script on the left and the system builds an ordered, producible shot list, remembering the state each shot starts and ends in.";
+  $("shotPrompt").textContent = "Break a script into shots on the left. BestShiny builds an ordered shot list and remembers the state each shot starts and ends in.";
   ["shotDuration", "shotContinuity", "shotPolicy", "shotProvider"].forEach((id) => { $(id).textContent = "—"; });
   ["compShotType", "compInputState", "compOutputState"].forEach((id) => { $(id).textContent = "—"; });
   ["shotModelProvider", "shotModelPolicy", "shotModelContinuity"].forEach((id) => { $(id).textContent = "—"; });
@@ -1595,17 +1880,19 @@ async function selectShot(id) {
   $("shotDuration").textContent = `${shot.duration}s`;
   $("shotContinuity").textContent = simpleLabel(shot.continuity_policy);
   $("shotPolicy").textContent = simpleLabel(shot.generation_policy);
-  $("shotProvider").textContent = simpleLabel(shot.provider);
+  // A provider string is not a model id, so the Director can only name the
+  // route tier. Naming a vendor here would promise a model nobody resolved.
+  $("shotProvider").textContent = routeName(shot.provider);
   $("compShotType").textContent = simpleLabel(shot.shot_type);
   $("compInputState").textContent = shot.input_state ? "Set" : "Not set";
   $("compOutputState").textContent = shot.output_state ? "Planned" : "Not set";
-  $("shotModelProvider").textContent = simpleLabel(shot.provider);
+  $("shotModelProvider").textContent = routeName(shot.provider);
   $("shotModelPolicy").textContent = simpleLabel(shot.generation_policy);
   $("shotModelContinuity").textContent = simpleLabel(shot.continuity_policy);
   $("rawPrompt").value = shot.user_prompt;
   $("compiledPrompt").value = shot.compiled_prompt || "";
   $("barShotDuration").textContent = `${shot.duration}s`;
-  $("barShotModel").textContent = simpleLabel(shot.provider);
+  $("barShotModel").textContent = routeName(shot.provider);
   $("generateBtn").disabled = false;
   $("generateBtn").textContent = shot.status === "COMMITTED" ? "Regenerate shot" : "Generate shot";
   // Only a shot with no paid history can be deleted; the server refuses the rest.
@@ -1633,24 +1920,47 @@ async function renderShotStage() {
   if (shotStageObjectUrl) { URL.revokeObjectURL(shotStageObjectUrl); shotStageObjectUrl = null; }
   const committed = state.candidates.find((candidate) => candidate.status === "COMMITTED" && candidate.output_asset_id)
     || state.candidates.find((candidate) => candidate.output_asset_id);
+  const shotFrame = $("shotPreviewStage");
   if (!committed) {
     const generating = state.candidates.some((candidate) => ["QUEUED", "RUNNING", "GENERATING", "VALIDATING"].includes(candidate.status));
-    stage.innerHTML = `
+    shotFrame.className = `shot-stage ${generating ? "is-generating" : "is-empty"}`;
+    // Shot candidates arrive as a SET with no per-candidate signal, so the
+    // bar here is always indeterminate: no number, no aria-valuenow, no
+    // claim about how far along it is.
+    stage.innerHTML = generating
+      ? `
+      <div class="canvas-generating">
+        <div class="gen-bloom" aria-hidden="true"></div>
+        <div class="gen-gate" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p class="gen-title" role="status">Shooting this shot</p>
+        <div class="gen-track is-indeterminate" role="progressbar" aria-label="Generation progress"
+             aria-valuemin="0" aria-valuemax="100"><i class="gen-fill"></i></div>
+        <p class="gen-note">Variants appear below as each one comes back. Nothing is approved until you approve it.</p>
+      </div>`
+      : `
       <div class="empty-block">
-        <span class="empty-icon" aria-hidden="true">${generating ? "◷" : "◻"}</span>
-        <strong>${generating ? "Generating this shot" : "Nothing generated for this shot"}</strong>
-        <p>${generating
-          ? "Variants appear below as the provider returns them."
-          : "Generate the shot to see the take here, then approve one variant into the timeline."}</p>
+        <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+        <strong>This shot hasn't been shot yet</strong>
+        <p>Generate it to see the take here, then approve one variant into the timeline.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-primary" type="button" data-empty-action="generate-shot">Generate this shot</button>
+        </div>
       </div>`;
     return;
   }
   const media = await resolveAssetMedia(committed.output_asset_id);
   if (!media) {
-    stage.innerHTML = '<div class="empty-block"><strong>Result is not previewable</strong><p>The output asset exists but no preview could be loaded.</p></div>';
+    shotFrame.className = "shot-stage is-empty";
+    stage.innerHTML = `
+      <div class="empty-block">
+        <span class="empty-icon" aria-hidden="true">${ICON_ALERT}</span>
+        <strong>This take will not display</strong>
+        <p>The file exists but nothing could be loaded from it. Refreshing the variants usually recovers it.</p>
+      </div>`;
     return;
   }
   if (media.revocable) shotStageObjectUrl = media.url;
+  shotFrame.className = "shot-stage has-result";
   stage.innerHTML = media.mime.startsWith("video/")
     ? `<video src="${escapeHTML(media.url)}" controls playsinline></video>`
     : `<img src="${escapeHTML(media.url)}" alt="Approved take for this shot" />`;
@@ -1670,14 +1980,27 @@ async function loadCandidates() {
   syncOperationsContext();
 }
 
+/** What the automated checks actually found, in the words a director would
+ *  use. The raw enum is the backend's vocabulary, not the creator's. */
+const QA_SUMMARY = {
+  IDENTITY_DRIFT: "The character does not look like their reference.",
+  ACTION_MISMATCH: "The action does not match what the shot asked for.",
+  CAMERA_MISMATCH: "The framing or move is not what was planned.",
+  LOW_CONFIDENCE: "The checks could not decide on their own.",
+};
+
 function renderCandidates(candidates) {
   const grid = $("candidateGrid");
   if (!candidates.length) {
     grid.className = "variant-grid empty-state";
     grid.innerHTML = `
       <div class="empty-block">
-        <strong>No variants yet</strong>
-        <p>Generate this shot to compare A / B / C with quality checks and cost.</p>
+        <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+        <strong>No takes to compare yet</strong>
+        <p>Each generation returns A / B / C with identity, camera and action checks, so you can pick the one that holds.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-primary" type="button" data-empty-action="generate-shot">Generate this shot</button>
+        </div>
       </div>`;
     return;
   }
@@ -1710,7 +2033,9 @@ function renderCandidates(candidates) {
       </div>
       <div class="score-bars">${scores.map(([name, value]) => `
         <div class="score-row ${value >= 75 ? "is-strong" : ""}"><span>${name}</span><div class="bar"><i style="width:${value}%"></i></div><b>${value}</b></div>`).join("")}</div>
-      <div class="output-box">${escapeHTML(humanizeCode(qa.summary) || "Waiting for generation or checks")}<br>${Math.max(1, Math.ceil(candidate.cost / .01))} credits</div>
+      <div class="output-box">${escapeHTML(qa.summary
+        ? (QA_SUMMARY[qa.summary] || sentenceCase(humanizeCode(qa.summary)))
+        : "Waiting for generation or checks")}<br>${Math.max(1, Math.ceil(candidate.cost / .01))} credits</div>
       ${humanReview}
       <div class="variant-actions">${validateAction}${commitAction}</div>
     </article>`;
@@ -1742,12 +2067,12 @@ async function compileScript() {
     });
     episodeId = episode.id;
   } else if (state.episode?.script_source !== script) {
-    toast("Existing shots are protected: the script is not overwritten. Create a new project to compile a different script.");
+    toast("Your existing shots are protected, so the script is not overwritten. Start a new project to break down a different script.");
     return;
   }
   await request(`/v1/episodes/${episodeId}/compile`, { method: "POST", body: "{}" });
   await selectProject(state.project.id);
-  toast("Script compiled into scenes and shots, with the join between each shot recorded.");
+  toast("Script broken into scenes and shots. The join between each shot is recorded.");
 }
 
 async function generateShot() {
@@ -1839,15 +2164,17 @@ async function loadCharacters() {
 }
 
 function renderCharacters() {
-  $("characterList").innerHTML = state.characters.length ? state.characters.map((character) => {
+  const list = $("characterList");
+  list.innerHTML = state.characters.length ? state.characters.map((character) => {
     const latest = character.identity_versions.at(-1);
     const selected = character.id === state.selectedCharacterId ? " selected" : "";
     const identity = latest
       ? `Identity v${latest.version} locked · upload to create v${latest.version + 1}`
       : "No master reference locked yet";
     return `<button class="binding${selected}" type="button" data-character="${character.id}"><strong>${escapeHTML(character.name)}</strong><span>${identity}</span></button>`;
-  }).join("") : '<p class="empty-inline">No characters yet. Add one so later shots can hold the same face.</p>';
-  $("characterList").querySelectorAll("[data-character]").forEach((button) => button.addEventListener("click", () => {
+  }).join("") : CHARACTERS_EMPTY;
+  bindCharactersEmptyCta(list);
+  list.querySelectorAll("[data-character]").forEach((button) => button.addEventListener("click", () => {
     state.selectedCharacterId = button.dataset.character;
     renderCharacters();
     syncOperationsContext();
@@ -1930,7 +2257,12 @@ function jobProgress(job) {
   if (typeof job.progress === "number" && Number.isFinite(job.progress)) {
     return Math.max(0, Math.min(100, Math.round(job.progress)));
   }
-  return ({ queued: 8, running: 55, completed: 100, failed: 100 })[bucketOf(job)] || 0;
+  const bucket = bucketOf(job);
+  // A finished row is 100% by definition. An in-flight row with no reported
+  // progress returns null, which the renderer draws as an indeterminate
+  // shimmer instead of inventing a percentage.
+  if (bucket === "completed" || bucket === "failed") return 100;
+  return null;
 }
 
 /** Seed and refresh state.jobs from the server's per-project listing, so
@@ -1981,7 +2313,7 @@ function renderProductions() {
   $("prodCountQueued").textContent = counts.queued;
   $("prodCountCompleted").textContent = counts.completed;
   $("prodCountFailed").textContent = counts.failed;
-  $("barJobCount").textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+  $("barJobCount").textContent = `${jobs.length} creation${jobs.length === 1 ? "" : "s"}`;
   // The quoted credits of this project's jobs that ran or are running. Failed
   // and cancelled jobs are left out: a pre-submission failure is refunded
   // server-side and the job row keeps its quote, so counting it would show
@@ -1995,16 +2327,26 @@ function renderProductions() {
   const visible = state.jobFilter === "all" ? jobs : jobs.filter((job) => bucketOf(job) === state.jobFilter);
   if (!visible.length) {
     list.className = "job-list empty-state";
-    list.innerHTML = `
+    // Two different emptinesses: nothing made at all, or nothing in the state
+    // the filter is asking for. They need different next moves.
+    list.innerHTML = jobs.length
+      ? `
       <div class="empty-block">
-        <span class="empty-icon" aria-hidden="true">◷</span>
-        <strong>${jobs.length ? "Nothing in this state" : "No production jobs yet"}</strong>
-        <p>${jobs.length
-          ? "Switch the filter to see the jobs you do have."
-          : "Jobs appear here as soon as you generate a frame or a shot."}</p>
+        <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+        <strong>No creations in this state</strong>
+        <p>You have ${jobs.length} creation${jobs.length === 1 ? "" : "s"} in other states.</p>
         <div class="btn-row btn-row-center">
-          <button class="btn btn-secondary" type="button" data-empty-action="go-create">Go to Create</button>
-          <button class="btn btn-secondary" type="button" data-empty-action="go-director">Go to Director</button>
+          <button class="btn btn-primary" type="button" data-empty-action="show-all-jobs">Show all</button>
+        </div>
+      </div>`
+      : `
+      <div class="empty-block">
+        <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+        <strong>Nothing has been produced yet</strong>
+        <p>Every frame and shot you generate appears here with its progress, its cost and a way to recover it.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-primary" type="button" data-empty-action="go-create">Go to Create</button>
+          <button class="btn btn-tertiary" type="button" data-empty-action="go-director">Open Director</button>
         </div>
       </div>`;
     return;
@@ -2014,7 +2356,6 @@ function renderProductions() {
     const bucket = bucketOf(job);
     const tone = statusTone(job.status);
     const credits = jobCredits(job);
-    const brand = providerBrand(job.provider);
     return `<button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job="${escapeHTML(job.id)}">
       <span class="job-rail ${tone}"></span>
       <span class="job-main">
@@ -2022,11 +2363,15 @@ function renderProductions() {
           <strong>${escapeHTML(job.shotLabel || friendlyModel(job.model))}</strong>
           <span class="status-chip ${tone}">${simpleLabel(job.status)}</span>
         </span>
-        <span class="job-sub mono">${escapeHTML(job.id)}${brand ? ` · ${escapeHTML(brand)}` : ""}</span>
+        <span class="job-sub mono">${escapeHTML(job.id)}</span>
       </span>
       <span class="job-side">
         ${bucket === "running" || bucket === "queued"
-          ? `<span class="job-progress"><i style="width:${jobProgress(job)}%"></i></span>`
+          ? (jobProgress(job) === null
+            // No signal from this route yet — the row shimmers rather than showing a
+            // number the provider never gave us. Same honesty rule as the canvas.
+            ? '<span class="job-progress indeterminate"><i></i></span>'
+            : `<span class="job-progress"><i style="width:${jobProgress(job)}%"></i></span>`)
           : ""}
         <span class="job-cost mono">${credits ? `${credits} credits` : "—"}</span>
       </span>
@@ -2045,9 +2390,12 @@ function renderCreationsGallery(jobs = projectJobs()) {
     grid.className = "creations-grid empty-state";
     grid.innerHTML = `
       <div class="empty-block">
-        <span class="empty-icon" aria-hidden="true">▦</span>
-        <strong>No creations yet</strong>
-        <p>Everything you generate in this project lands here, ready to save as an asset.</p>
+        <span class="empty-icon" aria-hidden="true">${ICON_FRAME}</span>
+        <strong>Your gallery is empty</strong>
+        <p>Everything you generate in this project lands here and stays across reloads, ready to save as an asset.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-primary" type="button" data-empty-action="go-create">Generate your first frame</button>
+        </div>
       </div>`;
     return;
   }
@@ -2058,7 +2406,8 @@ function renderCreationsGallery(jobs = projectJobs()) {
     const saved = state.confirmedAssets.has(job.output_asset_id);
     const when = job.created_at ? job.created_at.slice(0, 16).replace("T", " ") : job.id.slice(0, 8);
     return `<figure class="creation-card" data-creation="${escapeHTML(job.id)}">
-      <div class="creation-thumb${finished ? "" : " is-pending"}" data-creation-thumb="${escapeHTML(job.output_asset_id || "")}">
+      <div class="creation-thumb${finished ? "" : " is-pending"}" data-surface="dark"
+           data-creation-thumb="${escapeHTML(job.output_asset_id || "")}">
         ${finished ? "" : `<span class="status-chip ${tone}">${simpleLabel(job.status)}</span>`}
       </div>
       <figcaption>
@@ -2215,25 +2564,46 @@ function selectedJobId() {
   return $("operationsJobId").value.trim();
 }
 
+/** What happened, in order, for a creator. The raw event codes and their JSON
+ *  payloads are provider telemetry: the admin console keeps them, this
+ *  inspector does not. */
+const EVENT_LABELS = {
+  REQUEST_SUBMITTED: "Sent to the model",
+  WORKER_SELECTED: "Model chosen",
+  PROVIDER_JOB_POLL: "Checking progress",
+  MEDIA_DOWNLOADED: "Result downloaded",
+  VIDEO_GENERATED: "Video finished",
+  JOB_COMPLETED: "Done",
+};
+
 function renderGenerationControl(job) {
   state.operations.job = job;
   if (!job) {
     setText("operationsJobMetric", "None");
     $("generationControlStatus").className = "output-box empty-state";
-    $("generationControlStatus").textContent = "Select a job, or paste a job ID on the left.";
+    $("generationControlStatus").innerHTML = `
+      <p>Select a creation, or paste a creation ID on the left.</p>
+      <div class="btn-row">
+        <button class="btn btn-tertiary" type="button" data-empty-action="go-productions">Open Productions</button>
+      </div>`;
     ["retryJobBtn", "cancelJobBtn", "reconcileJobBtn"].forEach((id) => { $(id).disabled = true; });
     return;
   }
   rememberJob(job);
   setText("operationsJobMetric", simpleLabel(job.status));
   $("operationsJobId").value = job.id;
+  // Credits are RESERVED until the job settles; saying "charged" while they
+  // are still held is the one thing this line must never do.
+  const held = ["RESERVED", "RECONCILIATION_REQUIRED"].includes(job.credit_status);
+  const attempts = Number(job.attempt_count || 0);
+  const credits = jobCredits(job);
   $("generationControlStatus").className = "output-box";
   $("generationControlStatus").innerHTML = `
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
-    ${escapeHTML([providerBrand(job.provider), friendlyModel(job.model)].filter(Boolean).join(" · "))}<br>
-    Stage ${escapeHTML(humanizeCode(simpleLabel(job.submission_state)))} · credits ${escapeHTML(humanizeCode(simpleLabel(job.credit_status)))}<br>
-    Attempts ${Number(job.attempt_count || 0)}
-    ${job.error_message ? `<br><span style="color:var(--danger)">${escapeHTML(job.error_message)}</span>` : ""}`;
+    ${escapeHTML(friendlyModel(job.model))}<br>
+    ${credits} credits ${held ? "reserved" : "charged"}<br>
+    Tried ${attempts} time${attempts === 1 ? "" : "s"}
+    ${job.error_message ? `<br><span class="output-error">${escapeHTML(job.error_message)}</span>` : ""}`;
   $("retryJobBtn").disabled = job.safe_to_retry !== true;
   $("cancelJobBtn").disabled = !["QUEUED", "SUBMITTED", "RUNNING", "RETRY_WAIT"].includes(job.status);
   $("reconcileJobBtn").disabled = !["SENT_UNCONFIRMED", "SUBMITTED"].includes(job.submission_state) && !["FAILED", "RUNNING"].includes(job.status);
@@ -2242,27 +2612,27 @@ function renderGenerationControl(job) {
   const list = $("generationEvents");
   list.className = events.length ? "event-list" : "event-list empty-state";
   list.innerHTML = events.length
-    ? events.map((event) => `<div class="event-item"><strong>${escapeHTML(simpleLabel(event.type))}</strong><small>${escapeHTML(event.created_at || "")}</small><div>${jsonView(event.detail || {})}</div></div>`).join("")
-    : "No events on this job";
+    ? events.map((event) => `<div class="event-item"><strong>${escapeHTML(EVENT_LABELS[event.type] || sentenceCase(humanizeCode(event.type)))}</strong><small>${escapeHTML(event.created_at || "")}</small></div>`).join("")
+    : "Nothing has happened on this creation yet";
   renderProductions();
 }
 
 async function loadGenerationJob() {
   const id = selectedJobId();
-  if (!id) return toast("Paste a generation job ID");
+  if (!id) return toast("Paste a creation ID");
   renderGenerationControl(await request(`/v1/generations/${encodeURIComponent(id)}`));
 }
 
 async function mutateGenerationJob(action) {
   const id = selectedJobId();
-  if (!id) return toast("Load a job first");
+  if (!id) return toast("Load a creation first");
   await request(`/v1/generations/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" });
   await loadGenerationJob();
   await loadCredits();
   toast(({
-    retry: "Job re-entered safe retry",
-    cancel: "Cancellation processed",
-    reconcile: "Job state reconciled",
+    retry: "Trying again. The same submission is reused, so you are not charged twice.",
+    cancel: "Cancelled. Your balance updates once the reserved credits are released.",
+    reconcile: "Rechecked. The credit status now matches what actually happened.",
   })[action]);
 }
 
@@ -2476,7 +2846,7 @@ async function requestPasswordReset() {
   $("passwordResetStatus").textContent = result.message;
   if (result.reset_token) {
     $("resetToken").value = result.reset_token;
-    $("passwordResetStatus").textContent += " Development token filled in automatically.";
+    $("passwordResetStatus").textContent += " A token was filled in for you.";
   }
 }
 
@@ -2504,7 +2874,7 @@ const CREATIVE_STAGE_LABEL = {
   INTAKE: "Idea", CLARIFYING: "Clarifying", BRIEF_PROPOSED: "Brief proposed",
   BRIEF_APPROVED: "Brief approved", VISUALS_IN_PROGRESS: "Key visuals",
   BIBLE_PROPOSED: "Bible drafted", BIBLE_LOCKED: "Bible locked",
-  BEATS_PROPOSED: "Beats proposed", COMPILED: "Compiled", ABANDONED: "Abandoned",
+  BEATS_PROPOSED: "Beats proposed", COMPILED: "Shots built", ABANDONED: "Abandoned",
 };
 
 async function loadCreativeSessions() {
@@ -2514,7 +2884,18 @@ async function loadCreativeSessions() {
   const list = $("creativeSessionList");
   if (!state.creative.sessions.length) {
     list.className = "shot-tree empty-state";
-    list.textContent = "No sessions yet for this project.";
+    list.innerHTML = `
+      <div class="empty-block is-compact">
+        <strong>No director sessions yet</strong>
+        <p>Start one above and it stays here, so you can pick the conversation up later.</p>
+        <div class="btn-row btn-row-center">
+          <button class="btn btn-tertiary" type="button">Start a session</button>
+        </div>
+      </div>`;
+    // Bound by reference rather than through a data-* verb: the idea box is
+    // right above this rail, so the move is "put the cursor there", not a
+    // route change the dispatcher would have to learn.
+    list.querySelector("button")?.addEventListener("click", () => $("creativeIdeaInput").focus());
     return;
   }
   list.className = "shot-tree";
@@ -2595,7 +2976,6 @@ function renderCreativeTurns(turns) {
       <b>${turn.speaker === "USER" ? "You" : "Director"}</b>
       <p>${escapeHTML(turn.content)}</p>
       ${questions ? `<ul>${questions}</ul>` : ""}
-      ${turn.speaker === "DIRECTOR" && turn.reasoner ? `<small class="mono">${escapeHTML(turn.reasoner)}</small>` : ""}
     </div>`;
   }).join("");
 }
@@ -2654,10 +3034,10 @@ function renderCreative() {
     $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}`;
     $("creativeAnchorGrid").innerHTML = anchors.map((anchor) => `
       <figure class="asset-card" data-anchor-asset="${anchor.media_asset_id || ""}">
-        <div class="asset-thumb empty-state" data-anchor-thumb="${anchor.id}">${anchor.status === "READY" ? "…" : escapeHTML(simpleLabel(anchor.status))}</div>
+        <div class="asset-thumb empty-state" data-surface="dark" data-anchor-thumb="${anchor.id}">${anchor.status === "READY" ? "…" : escapeHTML(simpleLabel(anchor.status))}</div>
         <figcaption>
           <b>${escapeHTML(anchor.title)}</b>
-          <small>${escapeHTML(anchor.kind.toLowerCase())}${anchor.failure_code ? ` · ${escapeHTML(anchor.failure_code)}` : ""}</small>
+          <small>${escapeHTML(simpleLabel(anchor.kind))}${anchor.failure_code ? ` · ${escapeHTML(sentenceCase(humanizeCode(anchor.failure_code)))}` : ""}</small>
         </figcaption>
       </figure>`).join("");
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
@@ -2715,7 +3095,7 @@ function renderCreative() {
     brief: ["BRIEF_APPROVED", "VISUALS_IN_PROGRESS", "BIBLE_PROPOSED", "BIBLE_LOCKED", "BEATS_PROPOSED", "COMPILED"].includes(status) ? "Approved" : (brief ? "Proposed" : "—"),
     visuals: anchors.length ? `${anchors.filter((anchor) => anchor.status === "READY").length}/${anchors.length}` : "—",
     bible: bible ? simpleLabel(bible.status) : "—",
-    beats: status === "COMPILED" ? "Compiled" : (beats.length ? "Proposed" : "—"),
+    beats: status === "COMPILED" ? "Shots built" : (beats.length ? "Proposed" : "—"),
   };
   document.querySelectorAll("[data-creative-stage]").forEach((node) => {
     node.textContent = stages[node.dataset.creativeStage] || "—";
@@ -2781,7 +3161,7 @@ async function creativeApproveBeats() {
     method: "POST",
     body: JSON.stringify({ plan_revision: view.session.beat_revision }),
   });
-  toast(`Compiled ${result.shot_ids.length} shots. Continue in Director.`);
+  toast(`Built ${result.shot_ids.length} shots. Continue in Director.`);
   await openCreativeSession(view.session.id);
   await selectProject(state.project.id);
   if (result.episode_id) await loadEpisode(result.episode_id);
@@ -2814,7 +3194,17 @@ function renderEpisodeStrip() {
   $("createNextEpisodeBtn").disabled = !state.episodes.length;
   if (!state.episodes.length) {
     strip.className = "episode-strip empty-state";
-    strip.textContent = "No episodes yet.";
+    strip.innerHTML = `
+      <p class="empty-inline">No episodes yet</p>
+      <button class="btn btn-tertiary" type="button">Create the first episode</button>`;
+    strip.querySelector("button")?.addEventListener("click", () => {
+      // #createNextEpisodeBtn continues an EXISTING episode and is disabled
+      // while there are none, so with an empty strip the real first move is
+      // the script box: an empty state that cannot be acted on is a label.
+      const next = $("createNextEpisodeBtn");
+      if (next && !next.disabled) next.click();
+      else { switchPage("director"); $("scriptInput").focus(); }
+    });
     return;
   }
   strip.className = "episode-strip";
@@ -2829,7 +3219,9 @@ function renderEpisodeStrip() {
 function setContinuationMode(mode) {
   state.continuation.mode = mode;
   document.querySelectorAll("[data-continuation-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.continuationMode === mode);
+    const active = button.dataset.continuationMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active)); // role="tab"
   });
   $("continuationModeNote").textContent = CONTINUATION_NOTES[mode];
   $("continuationTimeGapField").hidden = mode === "CONTINUOUS";
@@ -2873,7 +3265,7 @@ async function prepareContinuation() {
   const preview = $("continuationPreview");
   preview.hidden = false;
   preview.innerHTML = `
-    <b>EP${String(view.next_episode_number).padStart(2, "0")} proposal · ${escapeHTML(view.continuation_mode)}</b>
+    <b>EP${String(view.next_episode_number).padStart(2, "0")} proposal · ${escapeHTML(simpleLabel(view.continuation_mode))}</b>
     <p>${escapeHTML(view.brief.premise || "")}</p>
     ${view.brief.carried_obligations?.length ? `<small>Carries: ${view.brief.carried_obligations.map(escapeHTML).join(" · ")}</small>` : ""}
     <ol>${view.beats.map((beat) => `<li><b>${escapeHTML(beat.intent)}</b> — ${escapeHTML(beat.summary || "")} <small>(${escapeHTML(beat.location || "")})</small></li>`).join("")}</ol>`;
@@ -2893,7 +3285,7 @@ async function confirmContinuation() {
   }
   $("continuationDialog").close();
   state.continuation.view = null;
-  toast(`EP${String(result.next_episode_number).padStart(2, "0")} compiled: ${result.compiled.shot_count} shots inherit the series state.`);
+  toast(`EP${String(result.next_episode_number).padStart(2, "0")} built: ${result.compiled.shot_count} shots inherit the series state.`);
   await selectProject(state.project.id);
   if (result.compiled?.episode_id) await loadEpisode(result.compiled.episode_id);
 }
@@ -2910,10 +3302,21 @@ document.querySelectorAll("[data-media]").forEach((button) => {
 document.querySelectorAll("[data-job-filter]").forEach((button) => {
   button.addEventListener("click", () => {
     state.jobFilter = button.dataset.jobFilter;
-    document.querySelectorAll("[data-job-filter]").forEach((item) => item.classList.toggle("active", item === button));
+    syncJobFilterTabs();
     renderProductions();
   });
 });
+
+/** The filter row is a role="tablist": the class carries the look, the
+ *  aria-selected state carries the meaning. Both are set from one place so a
+ *  filter changed from an empty state's "Show all" stays in sync. */
+function syncJobFilterTabs() {
+  document.querySelectorAll("[data-job-filter]").forEach((item) => {
+    const active = item.dataset.jobFilter === state.jobFilter;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  });
+}
 
 /* Empty states always offer the next move; this is where those moves land. */
 document.addEventListener("click", (event) => {
@@ -2924,11 +3327,69 @@ document.addEventListener("click", (event) => {
   if (action === "upload") { switchPage("create"); $("passengerReference").click(); }
   if (action === "go-create") switchPage("create");
   if (action === "go-director") switchPage("director");
+  // The value "compile" keeps its name even though the visible verb is now
+  // "Break into shots": it is a dispatcher hook, not a label.
   if (action === "compile") { switchPage("director"); $("scriptInput").focus(); }
   if (action === "first-shot") {
     const first = document.querySelector("[data-shot]");
     if (first) first.click();
   }
+  if (action === "generate") {
+    const box = $("passengerPrompt");
+    if (!box.value.trim()) { box.focus(); return toast("Describe the frame first — one sentence is enough."); }
+    $("passengerGenerateBtn").click();
+  }
+  if (action === "example") {
+    const box = $("passengerPrompt");
+    box.value = box.placeholder.replace(/^e\.g\.\s*/, "");
+    box.focus();
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (action === "go-productions") switchPage("productions");
+  if (action === "show-all-jobs") {
+    state.jobFilter = "all";
+    syncJobFilterTabs();
+    renderProductions();
+  }
+  if (action === "generate-shot") {
+    const button = $("generateBtn");
+    // #candidateGrid ships this CTA before any shot is picked, and #generateBtn
+    // stays disabled until one is. A disabled button dispatches no click event,
+    // so without this branch the amber primary is silently dead on first paint.
+    if (button.disabled) {
+      const first = document.querySelector("[data-shot]");
+      if (first) { first.click(); return toast("Opened the first shot — Generate shot is in the action bar."); }
+      return toast("Break a script into shots first, then pick one to generate.");
+    }
+    button.click();
+  }
+});
+
+/* The creation ID is a support handle, not something anyone should retype. */
+document.addEventListener("click", (event) => {
+  const id = event.target.closest("[data-copy-id]")?.dataset.copyId;
+  if (!id) return;
+  if (!navigator.clipboard) return toast("This browser will not let the page copy for you.");
+  navigator.clipboard.writeText(id).then(
+    () => toast("Creation ID copied"),
+    () => toast("Could not copy the ID"),
+  );
+});
+
+/** Cancelling from the canvas acts on the job the canvas is showing, not on
+ *  whatever id the Productions inspector happens to hold. */
+async function cancelPassengerJob(jobId) {
+  await request(`/v1/generations/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: "{}" });
+  await refreshPassengerJob();
+  toast("Cancelled. Your balance updates once the reserved credits are released.");
+}
+
+document.addEventListener("click", (event) => {
+  const cancelId = event.target.closest("[data-gen-cancel]")?.dataset.genCancel;
+  if (cancelId) { guard(cancelPassengerJob)(cancelId); return; }
+  // "Check again" after the ten-minute watch budget: a manual refresh clears
+  // the stalled copy and restarts the poll, which is exactly what was asked.
+  if (event.target.closest("[data-gen-resume]")) guard(refreshPassengerJob)();
 });
 
 /* Top bar */
@@ -2978,23 +3439,85 @@ on("passengerReference", "change", (event) => {
   if (file) $("referenceFileName").textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
   updatePassengerCost();
 });
-const dropzone = document.querySelector(".dropzone");
-if (dropzone) {
-  ["dragenter", "dragover"].forEach((type) => dropzone.addEventListener(type, (event) => {
-    event.preventDefault();
-    dropzone.classList.add("is-over");
-  }));
-  ["dragleave", "drop"].forEach((type) => dropzone.addEventListener(type, () => dropzone.classList.remove("is-over")));
-  dropzone.addEventListener("drop", (event) => {
-    event.preventDefault();
-    const file = event.dataTransfer?.files?.[0];
-    if (!file) return;
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    $("passengerReference").files = transfer.files;
-    $("passengerReference").dispatchEvent(new Event("change"));
-  });
+/* ---- Reference drag and drop ------------------------------------
+   Two targets: the sidebar strip and the whole canvas. During a drag the
+   files themselves are not readable, so the MIME check runs on the items
+   list and the real check happens on drop. */
+const dragCarriesImage = (transfer) => {
+  if (!transfer) return false;
+  const items = Array.from(transfer.items || []);
+  if (items.length) return items.some((i) => i.kind === "file" && (!i.type || i.type.startsWith("image/")));
+  return Array.from(transfer.types || []).includes("Files");
+};
+
+function acceptReferenceFile(file, target) {
+  const reject = (message) => {
+    target?.el.classList.add("is-reject");
+    window.setTimeout(() => target?.el.classList.remove(target.cls, "is-reject"), 620);
+    toast(message);
+  };
+  if (!file) return reject("Nothing landed — try dragging the file again.");
+  if (!file.type.startsWith("image/")) return reject("That's not an image. Drop a PNG, JPG or WebP.");
+  if (file.size > 20 * 1024 * 1024) return reject("That image is over 20 MB. Use a smaller file.");
+  // Accepted: the drag is over and the highlight has done its job.
+  target?.el.classList.remove(target.cls, "is-reject");
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  $("passengerReference").files = transfer.files;
+  $("passengerReference").dispatchEvent(new Event("change"));
+  toast(`Reference set — ${file.name}`);
 }
+
+[
+  { el: document.querySelector(".dropzone"), cls: "is-over" },
+  { el: $("passengerResult"), cls: "is-over" },
+].filter((t) => t.el).forEach((target) => {
+  let depth = 0;                                   // dragenter/dragleave fire per child crossed
+  const clear = () => { depth = 0; target.el.classList.remove(target.cls, "is-reject"); };
+  target.el.addEventListener("dragenter", (e) => {
+    if (!dragCarriesImage(e.dataTransfer)) return;
+    e.preventDefault(); depth += 1; target.el.classList.add(target.cls);
+  });
+  target.el.addEventListener("dragover", (e) => {
+    if (!dragCarriesImage(e.dataTransfer)) return;
+    e.preventDefault();                            // without this, `drop` never fires
+    e.dataTransfer.dropEffect = "copy";            // the OS cursor finally agrees with the highlight
+  });
+  target.el.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) clear(); });
+  target.el.addEventListener("drop", (e) => {
+    e.preventDefault();
+    // A drop ends the drag whatever the verdict, but a REJECTED drop never
+    // reaches clear() — it only drops the classes on a 620 ms timer. Without
+    // this reset the counter stays at 1, the next dragleave can never bring it
+    // back to 0, and the whole-canvas overlay stays painted for good. The
+    // classes are deliberately left alone here: `is-reject` is only visible
+    // while `is-over` holds the overlay at opacity 1, so acceptReferenceFile
+    // clears them itself once it knows the file was actually taken.
+    depth = 0;
+    acceptReferenceFile(e.dataTransfer?.files?.[0], target);
+  });
+});
+
+// Anywhere else, a dropped file must NOT navigate the tab away from the SPA.
+// Today it does, and the prompt, the selected shot, the in-flight poll and every
+// object URL are lost with it.
+["dragover", "drop"].forEach((type) => {
+  window.addEventListener(type, (e) => {
+    // The exception list is the two REAL drop targets plus file inputs. A
+    // broad [data-surface="dark"] would also match the shot stage, the media
+    // viewer and every creation thumb — none of which handle a drop, so a file
+    // dropped there would still navigate the tab away.
+    if (e.target.closest?.("#passengerResult, .dropzone, input[type=file]")) return;
+    // Only a FILE drag navigates the tab away. Dragging text or a link into a
+    // field is a native affordance of every input and textarea in the app and
+    // this guard has no business killing it — a FILE dropped on a field does
+    // still navigate, so that case stays cancelled.
+    const carriesFiles = Array.from(e.dataTransfer?.types || []).includes("Files");
+    if (!carriesFiles && e.target.closest?.("textarea, input, [contenteditable]")) return;
+    e.preventDefault();
+    if (type === "dragover" && e.dataTransfer) e.dataTransfer.dropEffect = "none";
+  });
+});
 on("saveToProjectBtn", "click", () => {
   const job = state.passengerJobs[state.passengerMedia];
   if (!job?.output_asset_id) return toast("Wait for the generation to finish");
@@ -3136,6 +3659,7 @@ onRoute((route) => {
 /* Boot */
 switchPage("create");
 setPassengerMedia("image");
+syncJobFilterTabs();
 setAuthMode(currentRoute() === "/signup" ? "register" : "login");
 renderProductions();
 bootstrapAuth().catch((error) => toast(error.message));

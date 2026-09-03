@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The workbench is light. Without this the browser chrome (and, on the auth
+         card, native autofill) renders dark over a light document. -->
+    <meta name="theme-color" content="#F5F5F6" />
     <title>Best Shiny — AI Video Production Workspace</title>
     <meta name="description" content="Best Shiny is an AI video production workspace. Go from script to final shot with scenes, shots, characters and continuity — not just prompts." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -61,7 +64,7 @@
               <button id="authModeBtn" class="btn btn-tertiary" type="button">No account? Create one</button>
               <button id="forgotPasswordBtn" class="btn btn-tertiary" type="button">Forgot password?</button>
             </div>
-            <small class="auth-footnote">Passwords are stored as strong hashes only. Sessions can be revoked at any time.</small>
+            <small class="auth-footnote">Your password is never stored in a readable form, and you can sign out every device at any time.</small>
           </div>
         </section>
       </main>
@@ -104,8 +107,10 @@
 
         <nav class="app-nav" aria-label="Workspace">
           <button class="app-nav-item active" data-mode="create" type="button">Create</button>
-          <button class="app-nav-item" data-mode="ai-director" type="button">BestShiny Director</button>
-          <button class="app-nav-item" data-mode="director" type="button">Director</button>
+          <!-- The data-mode values are the routing contract; only the labels are the
+               product's own vocabulary. Do not rename ai-director / director. -->
+          <button class="app-nav-item" data-mode="ai-director" type="button">Develop</button>
+          <button class="app-nav-item" data-mode="director" type="button">Direct</button>
           <button class="app-nav-item" data-mode="productions" type="button">Productions</button>
         </nav>
 
@@ -162,7 +167,7 @@
         </div>
         <!-- Productions -->
         <div class="subbar-pane" data-page="productions" hidden>
-          <div class="segmented" role="tablist" aria-label="Job status filter">
+          <div class="segmented" role="tablist" aria-label="Status filter">
             <button class="active" data-job-filter="all" type="button" role="tab">All</button>
             <button data-job-filter="running" type="button" role="tab">Running</button>
             <button data-job-filter="queued" type="button" role="tab">Queued</button>
@@ -182,7 +187,7 @@
             <section class="pane-block">
               <div class="pane-head">
                 <h2 id="passengerPromptHeading">Describe the frame</h2>
-                <span id="promptTypeBadge" class="badge">Auto intent</span>
+                <span id="promptTypeBadge" class="badge">Auto</span>
               </div>
               <textarea id="passengerPrompt" class="prompt-box" rows="9" placeholder="e.g. Rainy convenience-store doorway at night, a girl turns with a lit phone, 35mm film, cold and warm light meeting"></textarea>
               <div id="imagePromptActions" class="btn-row">
@@ -211,7 +216,14 @@
                 <button id="openAssetsBtn" class="btn btn-tertiary" type="button">Manage</button>
               </div>
               <div id="assetRail" class="asset-rail empty">
-                <p class="empty-inline">No assets yet. Generate a frame and save it to the project.</p>
+                <div class="empty-block is-compact">
+                  <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 4.2 28.4 10 16 15.8 3.6 10 16 4.2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M3.6 16 16 21.8 28.4 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/><path d="M3.6 22 16 27.8 28.4 22" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".35"/></svg></span>
+                  <strong>No project assets yet</strong>
+                  <p>Save a finished frame and it becomes a reference every later shot can reuse.</p>
+                  <div class="btn-row btn-row-center">
+                    <button class="btn btn-tertiary" type="button" data-empty-action="go-create">Save a frame</button>
+                  </div>
+                </div>
               </div>
             </section>
           </div>
@@ -233,7 +245,21 @@
                 <h2>Sessions</h2>
                 <span class="badge mono"><b id="creativeSessionCount">0</b></span>
               </div>
-              <div id="creativeSessionList" class="shot-tree empty-state">No sessions yet for this project.</div>
+              <div id="creativeSessionList" class="shot-tree empty-state">
+                <div class="empty-block is-compact">
+                  <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M4.5 8.4A2.9 2.9 0 0 1 7.4 5.5h17.2a2.9 2.9 0 0 1 2.9 2.9v9.7a2.9 2.9 0 0 1-2.9 2.9H13l-6 4.4v-4.4H7.4a2.9 2.9 0 0 1-2.9-2.9V8.4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M10.6 11.4h10.8M10.6 15.4h6.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".55"/></svg></span>
+                  <strong>No director sessions yet</strong>
+                  <p>Start one above and it stays here, so you can pick the conversation up later.</p>
+                  <!-- Same CTA loadCreativeSessions() paints, so the block does not grow a
+                       button the moment the first render lands. app.js binds it by
+                       reference (focus #creativeIdeaInput) rather than through a
+                       data-empty-action verb, because the idea box is directly above
+                       this rail — the move is "put the cursor there", not a route change. -->
+                  <div class="btn-row btn-row-center">
+                    <button class="btn btn-tertiary" type="button">Start a session</button>
+                  </div>
+                </div>
+              </div>
             </section>
           </div>
 
@@ -244,13 +270,13 @@
                 <h2>Episodes</h2>
                 <span class="badge mono"><b id="episodeCount">0</b></span>
               </div>
-              <div id="episodeStrip" class="episode-strip empty-state">No episodes yet.</div>
+              <div id="episodeStrip" class="episode-strip empty-state">No episodes yet</div>
               <button id="createNextEpisodeBtn" class="btn btn-secondary btn-full" type="button" disabled>+ Create next episode</button>
             </section>
             <section class="pane-block pane-block-grow" id="scriptPanel">
               <div class="pane-head">
                 <h2>Script</h2>
-                <span id="episodeStatus" class="badge">Not compiled</span>
+                <span id="episodeStatus" class="badge">Not broken down yet</span>
               </div>
               <textarea id="scriptInput" class="script-box" spellcheck="false" placeholder="EXT. HOTEL AWNING - NIGHT
 ZHAO KAI: Look at this phone.
@@ -264,7 +290,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <h2>Scenes &amp; shots</h2>
                 <span class="badge mono"><b id="sceneCount">0</b> scenes</span>
               </div>
-              <div id="sceneList" class="shot-tree empty-state">Compile a script to see scenes and shots.</div>
+              <div id="sceneList" class="shot-tree empty-state">Break a script into shots to see them here.</div>
             </section>
           </div>
 
@@ -280,10 +306,10 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </div>
             </section>
             <section class="pane-block">
-              <div class="pane-head"><h2>Track a job</h2></div>
-              <label class="field">Job ID<input id="operationsJobId" autocomplete="off" placeholder="Paste a generation job id" /></label>
-              <button id="loadJobBtn" class="btn btn-secondary btn-full" type="button">Load job</button>
-              <p class="pane-note">Jobs you started in this session are listed automatically.</p>
+              <div class="pane-head"><h2>Find a creation</h2></div>
+              <label class="field">Creation ID<input id="operationsJobId" autocomplete="off" placeholder="Paste a creation ID" /></label>
+              <button id="loadJobBtn" class="btn btn-secondary btn-full" type="button">Look it up</button>
+              <p class="pane-note">Anything you started in this session is listed automatically.</p>
             </section>
           </div>
 
@@ -294,23 +320,55 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <!-- Create canvas -->
           <section id="passengerWorkspace" class="pane canvas-pane" data-page="create">
             <div class="canvas-toolbar">
-              <h1 class="page-title">Generation canvas</h1>
+              <h1 class="page-title">Canvas</h1>
               <div class="btn-row">
                 <button id="saveToProjectBtn" class="btn btn-secondary" type="button" disabled>Save to project</button>
                 <button id="passengerRefreshBtn" class="btn btn-tertiary" type="button">Refresh</button>
               </div>
             </div>
-            <div id="passengerResult" class="canvas-stage empty-state" aria-live="polite">
+            <!-- THE DARK ISLAND. data-surface="dark" re-binds the token set for this
+                 subtree; it is an ATTRIBUTE and not a class on purpose, because app.js
+                 rewrites this element's whole className string on every render and a
+                 scoping class would silently vanish the first time a job lands.
+                 No aria-live here: the entire innerHTML is replaced on every render, so
+                 a live region would re-announce the whole result bar. The live region is
+                 the .gen-title inside the generating block instead. -->
+            <div id="passengerResult" class="canvas-stage empty-state" data-surface="dark">
               <div class="empty-block">
-                <span class="empty-icon" aria-hidden="true">▣</span>
-                <strong>Nothing generated yet</strong>
-                <p>Start from a written frame, or drop a reference image to work from.</p>
+                <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                  <rect x="2.5" y="6.5" width="27" height="19" rx="3" stroke="currentColor" stroke-width="1.6"/>
+                  <path d="M8.6 20.2l4.6-5.4a1.4 1.4 0 0 1 2.1 0l3 3.6 2-2.2a1.4 1.4 0 0 1 2.1.05l3 3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".6"/>
+                  <circle cx="11.3" cy="12.3" r="1.8" stroke="currentColor" stroke-width="1.6"/>
+                  <path d="M12 29.4v-1.8M16 29.4v-1.8M20 29.4v-1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".45"/>
+                </svg></span>
+                <strong>Describe the frame you want</strong>
+                <p>Write it on the left the way you'd tell a DP — subject, light, lens, mood. Or drop a reference image anywhere on this canvas.</p>
                 <div class="btn-row btn-row-center">
-                  <button class="btn btn-secondary" type="button" data-empty-action="prompt">Start from prompt</button>
-                  <button class="btn btn-secondary" type="button" data-empty-action="upload">Upload an image</button>
+                  <button class="btn btn-primary" type="button" data-empty-action="generate">Generate image</button>
+                  <button class="btn btn-tertiary" type="button" data-empty-action="upload">Use a reference image</button>
+                </div>
+                <!-- `btn empty-example`, both classes, exactly as app.js emits it in
+                     emptyCanvasMarkup: `.empty-example` only overrides geometry and
+                     colour, so without `.btn` the pill loses its pointer cursor and
+                     its 500 weight and then changes on the first repaint. -->
+                <button class="btn empty-example" type="button" data-empty-action="example">Rainy convenience-store doorway at night, a girl turns with a lit phone, 35mm film, cold and warm light meeting</button>
+              </div>
+              <!-- The drag-over overlay is static markup so it survives every
+                   stage.innerHTML rewrite (app.js re-appends it in paintStage). -->
+              <div class="canvas-drop" aria-hidden="true">
+                <div class="canvas-drop-inner">
+                  <span class="canvas-drop-icon">↓</span>
+                  <strong>Drop to use as a reference</strong>
+                  <small>PNG, JPG or WebP · one image</small>
                 </div>
               </div>
             </div>
+            <!-- The canvas announcer lives OUTSIDE #passengerResult on purpose. A live
+                 region only announces when its own text changes; the stage's innerHTML
+                 is replaced wholesale on every render, which would destroy and recreate
+                 the region and announce nothing at all. This node is never rewritten,
+                 so app.js can set its textContent and be heard. -->
+            <p id="canvasAnnounce" class="sr-only" role="status" aria-live="polite"></p>
           </section>
 
           <!-- BestShiny Director canvas: dialogue plus staged approvals -->
@@ -322,9 +380,12 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </div>
             </div>
             <div id="creativeEmpty" class="empty-block">
-              <span class="empty-icon" aria-hidden="true">✦</span>
+              <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                <path d="M16 3.4c.9 5.6 2.9 8.6 8.6 9.6-5.7 1-7.7 4-8.6 9.6-.9-5.6-2.9-8.6-8.6-9.6 5.7-1 7.7-4 8.6-9.6Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                <path d="M24.6 19.6c.5 2.8 1.5 4.3 4.3 4.8-2.8.5-3.8 2-4.3 4.8-.5-2.8-1.5-4.3-4.3-4.8 2.8-.5 3.8-2 4.3-4.8Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity=".55"/>
+              </svg></span>
               <strong>Tell the director what you want to make</strong>
-              <p>Type a vague idea on the left. You review and approve each stage: brief → key visuals → visual bible → beats → shots.</p>
+              <p>One rough sentence is enough. The director asks what's missing, then walks you through brief → key visuals → visual bible → beats → shots.</p>
             </div>
             <div id="creativeFlow" hidden>
               <!-- The conversation is a column of its own so it can use the full
@@ -344,7 +405,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <div class="btn-row">
                     <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief &amp; generate key visuals</button>
                   </div>
-                  <p class="pane-note">Approving generates the key visuals below through the ordinary image pipeline — each one is priced and reserved like any generation.</p>
+                  <p class="pane-note">Approving generates the key visuals below the same way the Create page does — each one is quoted, and its credits are reserved before it runs.</p>
                 </section>
                 <section class="pane-block" id="creativeVisualsCard" hidden>
                   <div class="pane-head"><h2>Key visuals</h2><span id="creativeVisualsStatus" class="badge">Waiting</span></div>
@@ -368,9 +429,9 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <div id="creativeBeatList" class="output-box"></div>
                   <div class="btn-row">
                     <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats</button>
-                    <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; compile shots</button>
+                    <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; build the shots</button>
                   </div>
-                  <p class="pane-note">Approval compiles the beats into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
+                  <p class="pane-note">Approving turns the beats into the same scenes and shots a written script produces, with the join between each shot recorded — then you continue in Director.</p>
                 </section>
               </div>
             </div>
@@ -380,15 +441,25 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <section id="autopilotWorkspace" class="pane canvas-pane" data-page="director" hidden>
             <div id="shotTimeline" class="filmstrip empty-state">No shots yet</div>
 
-            <div class="shot-stage" id="shotPreviewStage">
+            <!-- THE DARK ISLAND (Director). Same reason as #passengerResult: an
+                 attribute survives the className rewrites app.js does on this stage. -->
+            <div class="shot-stage" id="shotPreviewStage" data-surface="dark">
               <div class="shot-stage-media" id="shotStageMedia">
                 <div class="empty-block">
-                  <span class="empty-icon" aria-hidden="true">◻</span>
-                  <strong id="shotStageTitle">No shot selected</strong>
-                  <p id="shotStageCopy">Choose a shot from the tree on the left, or compile a script to generate the shot list.</p>
+                  <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                    <rect x="2.5" y="6.5" width="27" height="19" rx="3" stroke="currentColor" stroke-width="1.6"/>
+                    <path d="M8.6 20.2l4.6-5.4a1.4 1.4 0 0 1 2.1 0l3 3.6 2-2.2a1.4 1.4 0 0 1 2.1.05l3 3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".6"/>
+                    <circle cx="11.3" cy="12.3" r="1.8" stroke="currentColor" stroke-width="1.6"/>
+                    <path d="M12 29.4v-1.8M16 29.4v-1.8M20 29.4v-1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".45"/>
+                  </svg></span>
+                  <!-- Byte-identical to renderNoShotSelected's `hasShots` branch in app.js,
+                       headline, body and the single primary. That function repaints this
+                       block on every Director render, so any drift here reads as the block
+                       rewriting itself the moment app.js runs. One primary, no secondary. -->
+                  <strong id="shotStageTitle">Pick a shot to direct it</strong>
+                  <p id="shotStageCopy">The approved take for the selected shot shows here; variants for comparison sit below.</p>
                   <div class="btn-row btn-row-center" id="shotStageActions">
-                    <button class="btn btn-secondary" type="button" data-empty-action="first-shot">Choose a shot</button>
-                    <button class="btn btn-secondary" type="button" data-empty-action="compile">Generate shots</button>
+                    <button class="btn btn-primary" type="button" data-empty-action="first-shot">Open the first shot</button>
                   </div>
                 </div>
               </div>
@@ -405,13 +476,13 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <h2 id="shotTitle">No shot selected</h2>
                   <button id="shotDeleteBtn" class="btn btn-ghost btn-danger" type="button" hidden title="Delete this shot">Delete shot</button>
                 </div>
-                <p id="shotPrompt" class="shot-directive">Compile a script on the left and the system builds an ordered, producible shot list, remembering the state each shot starts and ends in.</p>
-                <label class="field">Director notes<textarea id="rawPrompt" rows="3" readonly placeholder="Select a shot to see the original directive"></textarea></label>
+                <p id="shotPrompt" class="shot-directive">Break a script into shots on the left. BestShiny builds an ordered shot list and remembers the state each shot starts and ends in.</p>
+                <label class="field">Director notes<textarea id="rawPrompt" rows="3" readonly placeholder="Select a shot to see the line of script it came from"></textarea></label>
               </div>
               <div class="shot-notes-side">
                 <div class="metric"><span>Duration</span><b id="shotDuration">—</b></div>
-                <div class="metric"><span>Continuity</span><b id="shotContinuity">—</b></div>
-                <div class="metric"><span>Method</span><b id="shotPolicy">—</b></div>
+                <div class="metric"><span>Joins to</span><b id="shotContinuity">—</b></div>
+                <div class="metric"><span>Starts from</span><b id="shotPolicy">—</b></div>
                 <div class="metric"><span>Model</span><b id="shotProvider">—</b></div>
               </div>
             </div>
@@ -423,8 +494,17 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </div>
               <div id="candidateGrid" class="variant-grid empty-state">
                 <div class="empty-block">
-                  <strong>No variants yet</strong>
-                  <p>Generate this shot to compare A / B / C with quality checks and cost.</p>
+                  <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                    <rect x="2.5" y="9.5" width="8" height="13" rx="2" stroke="currentColor" stroke-width="1.6" opacity=".55"/>
+                    <rect x="12" y="6.5" width="8" height="19" rx="2" stroke="currentColor" stroke-width="1.6"/>
+                    <rect x="21.5" y="9.5" width="8" height="13" rx="2" stroke="currentColor" stroke-width="1.6" opacity=".55"/>
+                    <path d="M14.2 19.6l2-2.5 3.2 3.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg></span>
+                  <strong>No takes to compare yet</strong>
+                  <p>Each generation returns A / B / C with identity, camera and action checks, so you can pick the one that holds.</p>
+                  <div class="btn-row btn-row-center">
+                    <button class="btn btn-primary" type="button" data-empty-action="generate-shot">Generate this shot</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -434,16 +514,23 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <section id="productionsWorkspace" class="pane canvas-pane" data-page="productions" hidden>
             <div class="canvas-toolbar">
               <h1 class="page-title">Productions</h1>
-              <span class="page-subtitle">Generation jobs for this workspace, with progress, cost and recovery.</span>
+              <span class="page-subtitle">Everything you have made in this project, with progress, cost, and a way to recover a failure.</span>
             </div>
             <div id="productionsList" class="job-list empty-state">
               <div class="empty-block">
-                <span class="empty-icon" aria-hidden="true">◷</span>
-                <strong>No production jobs yet</strong>
-                <p>Jobs appear here as soon as you generate a frame or a shot.</p>
+                <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                  <rect x="2.5" y="4.5" width="27" height="7" rx="2.4" stroke="currentColor" stroke-width="1.6"/>
+                  <rect x="2.5" y="14.5" width="27" height="7" rx="2.4" stroke="currentColor" stroke-width="1.6" opacity=".65"/>
+                  <rect x="2.5" y="24.5" width="27" height="4" rx="2" stroke="currentColor" stroke-width="1.6" opacity=".35"/>
+                  <circle cx="8" cy="8" r="1.6" fill="currentColor"/>
+                  <circle cx="8" cy="18" r="1.6" fill="currentColor" opacity=".65"/>
+                  <path d="M13.4 8h11.2M13.4 18h7.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".45"/>
+                </svg></span>
+                <strong>Nothing has been produced yet</strong>
+                <p>Every frame and shot you generate appears here with its progress, its cost and a way to recover it.</p>
                 <div class="btn-row btn-row-center">
-                  <button class="btn btn-secondary" type="button" data-empty-action="go-create">Go to Create</button>
-                  <button class="btn btn-secondary" type="button" data-empty-action="go-director">Go to Director</button>
+                  <button class="btn btn-primary" type="button" data-empty-action="go-create">Go to Create</button>
+                  <button class="btn btn-tertiary" type="button" data-empty-action="go-director">Open Director</button>
                 </div>
               </div>
             </div>
@@ -454,9 +541,18 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
             </div>
             <div id="creationsGrid" class="creations-grid empty-state">
               <div class="empty-block">
-                <span class="empty-icon" aria-hidden="true">▦</span>
-                <strong>No creations yet</strong>
-                <p>Everything you generate in this project lands here, ready to save as an asset.</p>
+                <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none">
+                  <rect x="3.5" y="3.5" width="11" height="11" rx="2.4" stroke="currentColor" stroke-width="1.6"/>
+                  <rect x="17.5" y="3.5" width="11" height="11" rx="2.4" stroke="currentColor" stroke-width="1.6" opacity=".65"/>
+                  <rect x="3.5" y="17.5" width="11" height="11" rx="2.4" stroke="currentColor" stroke-width="1.6" opacity=".65"/>
+                  <rect x="17.5" y="17.5" width="11" height="11" rx="2.4" stroke="currentColor" stroke-width="1.6" opacity=".35"/>
+                  <path d="M5.9 12.2l2.6-3.1a1.2 1.2 0 0 1 1.8 0l2.4 2.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg></span>
+                <strong>Your gallery is empty</strong>
+                <p>Everything you generate in this project lands here and stays across reloads, ready to save as an asset.</p>
+                <div class="btn-row btn-row-center">
+                  <button class="btn btn-primary" type="button" data-empty-action="go-create">Generate your first frame</button>
+                </div>
               </div>
             </div>
           </section>
@@ -469,21 +565,22 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <div class="pane" data-page="create">
             <div class="inspector-head">
               <span class="eyebrow">Inspector</span>
-              <h2 id="inspectorTitle">Generation settings</h2>
+              <h2 id="inspectorTitle">Creation settings</h2>
             </div>
             <div class="inspector-body">
               <section class="group" id="imageModelGroup">
-                <h3 class="group-title">Image model</h3>
+                <h3 class="group-title">Image quality</h3>
                 <label class="field"><span class="field-label">Quality level</span>
                   <select id="passengerImageTier"></select>
                 </label>
                 <p id="imageTierHint" class="field-note"></p>
               </section>
               <section class="group" id="imageTaskGroup">
-                <h3 class="group-title">Creative task</h3>
-                <label class="field"><span class="field-label">What are you making?</span>
+                <h3 class="group-title">What you're making</h3>
+                <label class="field"><span class="field-label">Type</span>
+                  <!-- The option VALUES are the image_task contract. Only the labels change. -->
                   <select id="passengerImageTask">
-                    <option value="auto">Auto — detect from the prompt</option>
+                    <option value="auto">Auto — read it from my prompt</option>
                     <option value="portrait">Character</option>
                     <option value="product">Product</option>
                     <option value="commercial">Commercial</option>
@@ -492,12 +589,12 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                     <option value="reference_character_regeneration">Character from reference</option>
                   </select>
                 </label>
-                <p class="field-note">The task decides how your prompt is treated and which route the platform picks. You are told the model and the price the moment you submit.</p>
+                <p class="field-note">What you're making changes how your prompt is read and which model BestShiny uses. You see the model and the exact credit cost the moment you submit — before anything is charged.</p>
               </section>
               <section class="group" id="videoModelGroup" hidden>
-                <h3 class="group-title">Model</h3>
-                <label class="field"><span class="field-label">Generation model</span><select id="passengerModel"><option value="">Auto — Recommended</option></select></label>
-                <p id="modelHint" class="field-note">Auto lets the platform choose. Name a model and that exact model runs, or the request is refused.</p>
+                <h3 class="group-title">Video quality</h3>
+                <label class="field"><span class="field-label">Quality level</span><select id="passengerModel"><option value="">Auto — BestShiny picks for you</option></select></label>
+                <p id="modelHint" class="field-note">Auto lets BestShiny choose for this shot. Pick one yourself and exactly that one runs — if it cannot, the generation is refused rather than quietly swapped.</p>
               </section>
               <section class="group">
                 <h3 class="group-title">Output</h3>
@@ -509,18 +606,19 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </section>
               <details class="disclosure">
                 <summary>Advanced</summary>
-                <label class="field"><span class="field-label">Negative prompt</span><textarea id="passengerNegativePrompt" rows="3" placeholder="What must not appear"></textarea></label>
-                <label class="field"><span class="field-label">Generation strategy</span>
+                <label class="field"><span class="field-label">What must not appear</span><textarea id="passengerNegativePrompt" rows="3" placeholder="e.g. no text, no logos, no extra hands"></textarea></label>
+                <label class="field"><span class="field-label">How much this shot has to be right</span>
+                  <!-- Values are the asset_criticality contract; only the labels change. -->
                   <select id="passengerCriticality">
-                    <option value="STANDARD">Standard</option>
+                    <option value="STANDARD">Normal</option>
                     <option value="IMPORTANT">Important</option>
-                    <option value="HERO">Hero</option>
-                    <option value="CANONICAL">Canonical</option>
+                    <option value="HERO">Hero shot</option>
+                    <option value="CANONICAL">Sets the reference for others</option>
                   </select>
                 </label>
-                <p class="field-note">Criticality raises the trust bar the platform requires of a provider before it accepts the result.</p>
+                <p class="field-note">The higher you set this, the more evidence BestShiny needs before it accepts a result instead of sending it to you to review. It does not guarantee a better image, and a stricter setting can cost more.</p>
                 <div class="kv-list">
-                  <div class="kv"><span>Visual model</span><b id="advModel">—</b></div>
+                  <div class="kv"><span>Model</span><b id="advModel">—</b></div>
                   <div class="kv"><span>Billing</span><b id="advPricing">Quoted before you generate</b></div>
                 </div>
               </details>
@@ -545,7 +643,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </section>
               <section class="group">
                 <h3 class="group-title">How this works</h3>
-                <p class="field-note">The director only asks for what is missing and high-value. Every stage waits for your approval; nothing is generated without the same credit and routing checks as the Create page.</p>
+                <p class="field-note">The director only asks for what is missing and high-value. Every stage waits for your approval; nothing is generated without the same credit check and quote as the Create page.</p>
               </section>
             </div>
           </div>
@@ -559,7 +657,21 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
             <div class="inspector-body">
               <details class="group-disclosure" open>
                 <summary><h3 class="group-title">Character</h3></summary>
-                <div id="characterList" class="binding-list"><p class="empty-inline">No characters yet</p></div>
+                <div id="characterList" class="binding-list">
+                  <div class="empty-block is-compact">
+                    <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="11.4" r="5.4" stroke="currentColor" stroke-width="1.6"/><path d="M5.8 27.2a10.2 10.2 0 0 1 20.4 0" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+                    <strong>No characters locked yet</strong>
+                    <p>Add one so every later shot can hold the same face.</p>
+                    <!-- Same CTA app.js's CHARACTERS_EMPTY paints, so the rail does not
+                         grow a button on the first repaint. app.js binds it through
+                         bindCharactersEmptyCta rather than a data-empty-action verb:
+                         #createCharacterBtn validates the name field first, so with an
+                         empty name it would only bounce off its own guard. -->
+                    <div class="btn-row btn-row-center">
+                      <button class="btn btn-tertiary" type="button">Add a character</button>
+                    </div>
+                  </div>
+                </div>
                 <details class="disclosure">
                   <summary>Add or update a character</summary>
                   <label class="field"><span class="field-label">Name</span><input id="characterName" placeholder="e.g. Lin Jin" /></label>
@@ -595,24 +707,26 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
 
               <details class="group-disclosure">
                 <summary><h3 class="group-title">Continuity</h3></summary>
-                <button id="continuityBtn" class="btn btn-secondary btn-full" type="button">Check continuity</button>
-                <div id="continuityResult" class="output-box empty-state">Select a shot and the system proposes the safer way to join it to the previous one.</div>
+                <button id="continuityBtn" class="btn btn-tertiary btn-full" type="button">Check continuity</button>
+                <div id="continuityResult" class="output-box empty-state">Select a shot and BestShiny proposes the safer way to join it to the one before.</div>
               </details>
 
               <details class="group-disclosure">
-                <summary><h3 class="group-title">Model</h3></summary>
+                <summary><h3 class="group-title">How this shot is made</h3></summary>
                 <div class="kv-list">
-                  <div class="kv"><span>Provider</span><b id="shotModelProvider" class="mono">—</b></div>
-                  <div class="kv"><span>Method</span><b id="shotModelPolicy">—</b></div>
-                  <div class="kv"><span>Continuity policy</span><b id="shotModelContinuity">—</b></div>
+                  <!-- No .mono here: this now renders a BestShiny quality name, not a
+                       machine identifier, and monospace would read as a raw provider id. -->
+                  <div class="kv"><span>Model</span><b id="shotModelProvider">—</b></div>
+                  <div class="kv"><span>Starts from</span><b id="shotModelPolicy">—</b></div>
+                  <div class="kv"><span>Joins to the last shot</span><b id="shotModelContinuity">—</b></div>
                 </div>
-                <p class="field-note">The director picks a route from the shot's requirements, its join to the previous shot, and what is configured right now.</p>
+                <p class="field-note">BestShiny picks the model from what this shot needs, how it joins the shot before it, and what your plan can reach right now.</p>
               </details>
 
               <details class="disclosure">
                 <summary>Advanced</summary>
-                <label class="field"><span class="field-label">Per-shot budget ceiling (USD)</span><input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
-                <label class="field"><span class="field-label">Compiled prompt (read only)</span><textarea id="compiledPrompt" rows="7" readonly></textarea></label>
+                <label class="field"><span class="field-label">Most I'll spend on this shot (USD)</span><input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
+                <label class="field"><span class="field-label">The full prompt BestShiny will send (read only)</span><textarea id="compiledPrompt" rows="7" readonly></textarea></label>
               </details>
             </div>
           </div>
@@ -621,18 +735,22 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <div class="pane" data-page="productions" hidden>
             <div class="inspector-head">
               <span class="eyebrow">Inspector</span>
-              <h2>Job detail</h2>
+              <h2>Creation detail</h2>
             </div>
             <div class="inspector-body">
-              <div id="generationControlStatus" class="output-box empty-state">Select a job, or paste a job ID on the left.</div>
-              <div class="btn-row btn-row-stack">
-                <button id="retryJobBtn" class="btn btn-secondary" type="button" disabled>Retry safely</button>
-                <button id="cancelJobBtn" class="btn btn-danger" type="button" disabled>Cancel generation</button>
-                <button id="reconcileJobBtn" class="btn btn-secondary" type="button" disabled hidden>Reconcile</button>
+              <div id="generationControlStatus" class="output-box empty-state">
+                <p>Select a creation, or paste a creation ID on the left.</p>
+                <div class="btn-row"><button class="btn btn-tertiary" type="button" data-empty-action="go-productions">Open Productions</button></div>
               </div>
+              <div class="btn-row btn-row-stack">
+                <button id="retryJobBtn" class="btn btn-secondary" type="button" disabled>Try again</button>
+                <button id="cancelJobBtn" class="btn btn-danger" type="button" disabled>Cancel generation</button>
+                <button id="reconcileJobBtn" class="btn btn-secondary" type="button" disabled hidden>Recheck credits</button>
+              </div>
+              <p class="field-note">A retry reuses the same submission, so you are never charged twice for it.</p>
               <details class="disclosure">
-                <summary>Job events</summary>
-                <div id="generationEvents" class="event-list empty-state">No job loaded</div>
+                <summary>What happened</summary>
+                <div id="generationEvents" class="event-list empty-state">Nothing loaded yet</div>
               </details>
             </div>
           </div>
@@ -645,9 +763,11 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <div class="actionbar-facts">
             <div class="fact"><span>Model</span><b id="barModel">—</b></div>
             <div class="fact"><span>Ratio</span><b id="barAspect">9:16</b></div>
-            <div class="fact"><span>Quality</span><b id="barResolution">720p</b></div>
+            <div class="fact"><span>Resolution</span><b id="barResolution">720p</b></div>
             <div class="fact" id="barDurationFact" hidden><span>Duration</span><b id="barDuration">4s</b></div>
-            <div class="fact fact-cost"><span>Estimated</span><b id="passengerCost">Pick a model</b></div>
+            <!-- "Quoted on submit" must match app.js's own default: the two used to
+                 disagree, so the bar changed wording on the first render. -->
+            <div class="fact fact-cost"><span>Cost</span><b id="passengerCost">Quoted on submit</b></div>
           </div>
           <button id="passengerGenerateBtn" class="btn btn-primary btn-cta" type="button">Generate image</button>
         </div>
@@ -657,15 +777,16 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
             <div class="fact"><span>Duration</span><b id="barShotDuration">—</b></div>
             <div class="fact"><span>Model</span><b id="barShotModel">—</b></div>
             <div class="fact"><span>Resolution</span><b id="barShotResolution">1080p</b></div>
-            <div class="fact fact-cost"><span>Budget ceiling</span><b id="barShotCost">$0.80</b></div>
+            <div class="fact fact-cost"><span>Spend limit</span><b id="barShotCost">$0.80</b></div>
           </div>
           <button id="generateBtn" class="btn btn-primary btn-cta" type="button" disabled>Generate shot</button>
         </div>
 
         <div class="pane actionbar-pane" data-page="productions" hidden>
           <div class="actionbar-facts">
-            <div class="fact"><span>Tracked</span><b id="barJobCount" class="mono">0 jobs</b></div>
-            <div class="fact fact-cost"><span>Quoted (this project)</span><b id="barJobSpend" class="mono">0 credits</b></div>
+            <div class="fact"><span>Creations</span><b id="barJobCount" class="mono">0 creations</b></div>
+            <!-- barJobSpend is a QUOTE TOTAL, not a ledger. Never relabel it "Spent". -->
+            <div class="fact fact-cost"><span>Quoted this project</span><b id="barJobSpend" class="mono">0 credits</b></div>
           </div>
           <button class="btn btn-primary btn-cta" type="button" data-empty-action="go-create">New generation</button>
         </div>
@@ -719,7 +840,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         <div class="sheet-actions">
           <button id="cancelContinuationBtn" class="btn btn-tertiary" type="button">Cancel</button>
           <button id="prepareContinuationBtn" class="btn btn-secondary" type="button">Propose the episode</button>
-          <button id="confirmContinuationBtn" class="btn btn-primary" type="button" hidden>Confirm &amp; compile</button>
+          <button id="confirmContinuationBtn" class="btn btn-primary" type="button" hidden>Confirm &amp; build the shots</button>
         </div>
       </div>
     </dialog>
@@ -785,7 +906,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
         </div>
         <label class="field"><span class="field-label">Email</span><input id="resetEmail" type="email" maxlength="320" autocomplete="email" required /></label>
         <button id="requestResetBtn" class="btn btn-secondary btn-full" type="button">Request reset token</button>
-        <label class="field"><span class="field-label">Reset token</span><input id="resetToken" minlength="20" maxlength="500" autocomplete="off" placeholder="From the reset email; auto-filled in development" /></label>
+        <label class="field"><span class="field-label">Reset token</span><input id="resetToken" minlength="20" maxlength="500" autocomplete="off" placeholder="From the reset email" /></label>
         <label class="field"><span class="field-label">New password</span><input id="resetNewPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" /></label>
         <p id="passwordResetStatus" class="sheet-status" role="status" aria-live="polite"></p>
         <p id="passwordResetError" class="sheet-error" role="alert"></p>
@@ -821,7 +942,9 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
             <label class="field"><span class="field-label">Asset type</span><select id="passengerAssetType"><option value="REFERENCE">Reference</option><option value="CHARACTER">Character</option><option value="SCENE">Scene</option><option value="PRODUCT">Product</option><option value="PROP">Prop</option><option value="WARDROBE">Wardrobe</option><option value="STYLE">Style</option></select></label>
             <label class="field"><span class="field-label">Asset name</span><input id="passengerAssetName" placeholder="e.g. Lead — formal look" /></label>
           </div>
-          <label class="check-row"><input id="passengerPromoteCanonical" type="checkbox" /> Set as the canonical reference for this asset</label>
+          <!-- The label says "main reference"; the request field is still
+               promote_to_canonical and the element id is unchanged. -->
+          <label class="check-row"><input id="passengerPromoteCanonical" type="checkbox" /> Set as the main reference for this asset</label>
         </div>
         <div class="sheet-actions">
           <button id="closeSaveAssetBtn" class="btn btn-tertiary" type="button">Cancel</button>
@@ -834,7 +957,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
       <div class="sheet-body">
         <div class="sheet-head">
           <h2 id="assetDetailsTitle">Project assets</h2>
-          <p>Pick an asset to see its current reference. Version history and canonical control are one level down.</p>
+          <p>Pick an asset to see its current reference. Version history and main-reference control are one level down.</p>
         </div>
         <div class="asset-details">
           <label class="field"><span class="field-label">Asset</span><select id="manualExistingAsset"><option value="">Create a new asset</option></select></label>
@@ -857,11 +980,11 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
           <div id="manualAssetStatus" class="output-box">A character's master reference can also be updated from the Director inspector.</div>
 
           <details class="disclosure">
-            <summary>Version history &amp; canonical control</summary>
-            <div id="assetVersionList" class="version-list empty-state">Select an asset to see its versions.</div>
-            <label class="check-row"><input id="manualPromoteCanonical" type="checkbox" /> Set the uploaded version as the canonical reference</label>
+            <summary>Version history &amp; main-reference control</summary>
+            <div id="assetVersionList" class="version-list empty-state">Pick an asset on the left to see its version history.</div>
+            <label class="check-row"><input id="manualPromoteCanonical" type="checkbox" /> Set the uploaded version as the main reference</label>
             <button id="lockProjectStyleBtn" class="btn btn-secondary btn-full" type="button" disabled>Lock as the project's style</button>
-            <small id="projectStyleLockStatus" class="field-note">Promote a style version to canonical first, then a project member can lock it explicitly.</small>
+            <small id="projectStyleLockStatus" class="field-note">Make a style version the main reference first, then a project member can lock it explicitly.</small>
           </details>
         </div>
         <div class="sheet-actions">
@@ -872,7 +995,8 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
 
     <dialog id="mediaViewerDialog" class="sheet sheet-wide" aria-label="View media">
       <div class="sheet-body">
-        <div id="mediaViewerBody" class="media-viewer"></div>
+        <!-- THE DARK ISLAND (media viewer): a dark review surface inside a light sheet. -->
+        <div id="mediaViewerBody" class="media-viewer" data-surface="dark"></div>
         <div class="sheet-actions">
           <button id="closeMediaViewerBtn" class="btn btn-tertiary" type="button">Close</button>
         </div>
@@ -928,7 +1052,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <span><small>Currency</small><b id="walletCurrency">Native USDC</b></span>
                 <span><small>Crediting</small><b id="walletCreditingStatus">Checking</b></span>
               </div>
-              <div id="walletConnectQr" class="wallet-connect-qr" aria-label="WalletConnect QR code" hidden></div>
+              <div id="walletConnectQr" class="wallet-connect-qr" aria-label="Wallet QR code" hidden></div>
               <div id="xunhupayQr" class="wallet-connect-qr xunhupay-qr" aria-label="WeChat Pay QR code" hidden></div>
               <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
               <p id="walletError" class="sheet-error" role="alert"></p>

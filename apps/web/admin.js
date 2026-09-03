@@ -142,11 +142,11 @@ function renderOverview(data) {
     ${metric("Live models", data.live_models, "Lifecycle = LIVE")}
     ${metric("Healthy providers", providers.HEALTHY || 0, `${fmt(providers.NOT_CONFIGURED || 0)} not configured`)}
     ${metric("Provider incidents", (providers.DOWN || 0) + (providers.DEGRADED || 0), "Down + degraded")}
-  </div>${table(["Job", "Provider / model", "Error", "Created"], (data.recent_errors || []).map((job) => `<tr data-detail="job" data-id="${esc(job.id)}"><td class="admin-mono">${esc(job.id)}</td><td>${esc(job.provider)} · ${esc(job.model)}</td><td>${status(job.error_code || "FAILED")} ${esc(job.error_message || "")}</td><td>${date(job.created_at)}</td></tr>`), "No recent failed jobs.")}`;
+  </div>${table(["Job", "Provider / model", "Error", "Created"], (data.recent_errors || []).map((job) => `<tr data-detail="job" data-id="${esc(job.id)}" tabindex="0"><td class="admin-mono">${esc(job.id)}</td><td>${esc(job.provider)} · ${esc(job.model)}</td><td>${status(job.error_code || "FAILED")} ${esc(job.error_message || "")}</td><td>${date(job.created_at)}</td></tr>`), "No recent failed jobs.")}`;
 }
 
 function renderUsers(data) {
-  return table(["User", "Role", "Plan", "Status", "Available / reserved", "Generations", "Last activity"], (data.items || []).map((item) => `<tr data-detail="user" data-id="${esc(item.id)}"><td><strong>${esc(item.email)}</strong><br><span class="admin-mono admin-muted">${esc(item.id)}</span></td><td>${status(item.platform_role)}</td><td>${esc(item.plan || "—")}</td><td>${status(item.status)}</td><td class="admin-mono">${fmt(item.credits_balance)} / ${fmt(item.reserved_credits)}</td><td class="admin-mono">${fmt(item.generation_count)}</td><td>${date(item.last_activity)}</td></tr>`));
+  return table(["User", "Role", "Plan", "Status", "Available / reserved", "Generations", "Last activity"], (data.items || []).map((item) => `<tr data-detail="user" data-id="${esc(item.id)}" tabindex="0"><td><strong>${esc(item.email)}</strong><br><span class="admin-mono admin-muted">${esc(item.id)}</span></td><td>${status(item.platform_role)}</td><td>${esc(item.plan || "—")}</td><td>${status(item.status)}</td><td class="admin-mono">${fmt(item.credits_balance)} / ${fmt(item.reserved_credits)}</td><td class="admin-mono">${fmt(item.generation_count)}</td><td>${date(item.last_activity)}</td></tr>`));
 }
 
 function renderCredits(data) {
@@ -156,11 +156,11 @@ function renderCredits(data) {
     ${metric("Held", summary.held)}
     ${metric("Deducted", summary.deducted)}
     ${metric("Released", summary.released)}
-  </section>${table(["Source / event", "Workspace", "Generation", "Credits", "Balance Δ / after", "Reason", "Time"], (data.items || []).map((item) => `<tr data-detail="job" data-id="${esc(item.generation_job_id || "")}"><td><span class="admin-muted">${esc(item.source || "GENERATION_LIFECYCLE")}</span><br>${status(item.event_type)}</td><td class="admin-mono">${esc(item.workspace_id)}</td><td class="admin-mono">${esc(item.generation_job_id || "—")}</td><td>${fmt(item.credits)}</td><td class="admin-mono">${fmt(item.balance_delta)} / ${fmt(item.balance_after)}</td><td>${esc(item.reason)}</td><td>${date(item.created_at)}</td></tr>`))}`;
+  </section>${table(["Source / event", "Workspace", "Generation", "Credits", "Balance Δ / after", "Reason", "Time"], (data.items || []).map((item) => `<tr data-detail="job" data-id="${esc(item.generation_job_id || "")}" tabindex="0"><td><span class="admin-muted">${esc(item.source || "GENERATION_LIFECYCLE")}</span><br>${status(item.event_type)}</td><td class="admin-mono">${esc(item.workspace_id)}</td><td class="admin-mono">${esc(item.generation_job_id || "—")}</td><td>${fmt(item.credits)}</td><td class="admin-mono">${fmt(item.balance_delta)} / ${fmt(item.balance_after)}</td><td>${esc(item.reason)}</td><td>${date(item.created_at)}</td></tr>`))}`;
 }
 
 function renderModels(data) {
-  return table(["Model", "Provider", "Capability", "Lifecycle", "Configured / verified", "Router", "Pricing", "Live canary", "Last live test"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}"><td><strong>${esc(item.display_name)}</strong><br><span class="admin-mono admin-muted">${esc(item.internal_key)}</span></td><td>${esc(item.provider)}</td><td>${esc(item.capability)}<br><span class="admin-muted">${esc((item.generation_modes || []).join(", "))}</span></td><td>${status(item.lifecycle_status)}</td><td>${item.configured ? "Yes" : "No"} / ${item.verified ? "Yes" : "No"}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td class="admin-mono">${esc(item.cost_class)}</td><td>${status(item.live_canary_status)}</td><td>${date(item.last_live_test_at)}</td></tr>`));
+  return table(["Model", "Provider", "Capability", "Lifecycle", "Configured / verified", "Router", "Pricing", "Live canary", "Last live test"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}" tabindex="0"><td><strong>${esc(item.display_name)}</strong><br><span class="admin-mono admin-muted">${esc(item.internal_key)}</span></td><td>${esc(item.provider)}</td><td>${esc(item.capability)}<br><span class="admin-muted">${esc((item.generation_modes || []).join(", "))}</span></td><td>${status(item.lifecycle_status)}</td><td>${item.configured ? "Yes" : "No"} / ${item.verified ? "Yes" : "No"}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td class="admin-mono">${esc(item.cost_class)}</td><td>${status(item.live_canary_status)}</td><td>${date(item.last_live_test_at)}</td></tr>`));
 }
 
 function renderProviders(data) {
@@ -170,15 +170,15 @@ function renderProviders(data) {
 }
 
 function renderRouting(data) {
-  return `<p class="admin-muted">Router version <span class="admin-mono">${esc(data.router_version)}</span>. Scores are intentionally not fabricated without request requirements.</p>${table(["Model", "Lifecycle", "Router", "Eligible", "Evidence", "Score coverage"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}"><td>${esc(item.provider)} · ${esc(item.internal_key)}</td><td>${status(item.lifecycle_status)}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td>${status(item.router_eligible ? "ACTIVE" : "DISABLED")}</td><td>${fmt(item.evidence?.length || 0)} records</td><td class="admin-muted">${esc(item.score_coverage)}</td></tr>`))}`;
+  return `<p class="admin-muted">Router version <span class="admin-mono">${esc(data.router_version)}</span>. Scores are intentionally not fabricated without request requirements.</p>${table(["Model", "Lifecycle", "Router", "Eligible", "Evidence", "Score coverage"], (data.items || []).map((item) => `<tr data-detail="model" data-id="${esc(item.id)}" tabindex="0"><td>${esc(item.provider)} · ${esc(item.internal_key)}</td><td>${status(item.lifecycle_status)}</td><td>${status(item.router_enabled ? "ACTIVE" : "DISABLED")}</td><td>${status(item.router_eligible ? "ACTIVE" : "DISABLED")}</td><td>${fmt(item.evidence?.length || 0)} records</td><td class="admin-muted">${esc(item.score_coverage)}</td></tr>`))}`;
 }
 
 function renderJobs(data) {
-  return table(["Job", "User / project", "Status", "Provider / model", "Duration", "Credits", "Retry", "Created"], (data.items || []).map((item) => `<tr data-detail="job" data-id="${esc(item.id)}"><td class="admin-mono">${esc(item.id)}</td><td>${esc(item.user?.email || "—")}<br><span class="admin-muted">${esc(item.project?.title || item.project_id)}</span></td><td>${status(item.status)}</td><td>${esc(item.provider)} · ${esc(item.model)}</td><td>${item.duration_seconds == null ? "—" : `${item.duration_seconds.toFixed(1)}s`}</td><td>${fmt(item.credits)}</td><td>${fmt(item.retry_count)}</td><td>${date(item.created_at)}</td></tr>`));
+  return table(["Job", "User / project", "Status", "Provider / model", "Duration", "Credits", "Retry", "Created"], (data.items || []).map((item) => `<tr data-detail="job" data-id="${esc(item.id)}" tabindex="0"><td class="admin-mono">${esc(item.id)}</td><td>${esc(item.user?.email || "—")}<br><span class="admin-muted">${esc(item.project?.title || item.project_id)}</span></td><td>${status(item.status)}</td><td>${esc(item.provider)} · ${esc(item.model)}</td><td>${item.duration_seconds == null ? "—" : `${item.duration_seconds.toFixed(1)}s`}</td><td>${fmt(item.credits)}</td><td>${fmt(item.retry_count)}</td><td>${date(item.created_at)}</td></tr>`));
 }
 
 function renderProjects(data) {
-  return table(["Project", "Owner", "Status", "Workspace", "Created"], (data.items || []).map((item) => `<tr data-detail="project" data-id="${esc(item.id)}"><td><strong>${esc(item.title)}</strong><br><span class="admin-mono admin-muted">${esc(item.id)}</span></td><td>${esc(item.owner?.email || "—")}</td><td>${status(item.status)}</td><td class="admin-mono">${esc(item.workspace_id || "—")}</td><td>${date(item.created_at)}</td></tr>`));
+  return table(["Project", "Owner", "Status", "Workspace", "Created"], (data.items || []).map((item) => `<tr data-detail="project" data-id="${esc(item.id)}" tabindex="0"><td><strong>${esc(item.title)}</strong><br><span class="admin-mono admin-muted">${esc(item.id)}</span></td><td>${esc(item.owner?.email || "—")}</td><td>${status(item.status)}</td><td class="admin-mono">${esc(item.workspace_id || "—")}</td><td>${date(item.created_at)}</td></tr>`));
 }
 
 function renderSystem(data) {
@@ -186,11 +186,22 @@ function renderSystem(data) {
 }
 
 function renderAudit(data) {
-  return table(["Action", "Actor", "Entity", "Reason", "Request", "Created"], (data.items || []).map((item) => `<tr data-detail="audit" data-id="${esc(item.id)}"><td>${status(item.action)}</td><td>${esc(item.actor_role)}<br><span class="admin-mono admin-muted">${esc(item.actor_user_id)}</span></td><td>${esc(item.entity_type)} · <span class="admin-mono">${esc(item.entity_id)}</span></td><td>${esc(item.reason || "—")}</td><td class="admin-mono">${esc(item.request_id)}</td><td>${date(item.created_at)}</td></tr>`));
+  return table(["Action", "Actor", "Entity", "Reason", "Request", "Created"], (data.items || []).map((item) => `<tr data-detail="audit" data-id="${esc(item.id)}" tabindex="0"><td>${status(item.action)}</td><td>${esc(item.actor_role)}<br><span class="admin-mono admin-muted">${esc(item.actor_user_id)}</span></td><td>${esc(item.entity_type)} · <span class="admin-mono">${esc(item.entity_id)}</span></td><td>${esc(item.reason || "—")}</td><td class="admin-mono">${esc(item.request_id)}</td><td>${date(item.created_at)}</td></tr>`));
+}
+
+// The row whose drawer is open is the only selected state this console has, so
+// it is marked here and not in the click handler: a deep link (/admin/users/<id>)
+// opens the same drawer with no click at all. Called with no arguments it clears
+// the mark, because dataset.detail is always a string and never matches null.
+function markCurrentRow(kind = null, id = null) {
+  document.querySelectorAll(".admin-table tbody tr[data-detail]").forEach((row) => {
+    row.classList.toggle("is-current", row.dataset.detail === kind && row.dataset.id === id);
+  });
 }
 
 async function openDetail(kind, id) {
   if (!id) return;
+  markCurrentRow(kind, id);
   const endpoint = { user: `/admin/users/${id}`, model: `/admin/models/${id}`, job: `/admin/jobs/${id}`, project: `/admin/projects/${id}` }[kind];
   if (!endpoint) {
     const audit = (await request(`/admin/audit?entity_id=${encodeURIComponent(id)}`)).items?.[0];
@@ -251,6 +262,7 @@ function detailActions(kind, data) {
 function closeDrawer() {
   $("adminDrawer").hidden = true;
   activeDetail = null;
+  markCurrentRow();
   if (/^\/admin\/(users|models)\/[^/]+/.test(location.pathname)) history.replaceState({}, "", `/admin/${activePage}`);
 }
 
@@ -373,6 +385,23 @@ document.addEventListener("click", async (event) => {
     if (!Number.isInteger(delta) || delta === 0) return;
     return confirmAction({ title: `Adjust credits by ${delta}`, description: `Workspace ${credit.dataset.workspace}. The balance cannot become negative and the request is idempotent.`, run: (reason) => request(`/admin/users/${credit.dataset.id}/credit-adjustments`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ workspace_id: credit.dataset.workspace, delta, reason }) }) });
   }
+});
+
+// The drill-down rows carry tabindex="0" but deliberately NOT role="button".
+// role="button" would make a <tr> stop exposing `row`, which orphans every <td>
+// (the `cell` role requires an owning `row`), and because button is
+// Children-Presentational it would flatten all eight cells into one run-on
+// accessible name — losing column-header association in every admin table. So
+// the row stays a row and this handler supplies by hand the Enter/Space that a
+// real button would have given for free. Until it existed every detail view in
+// the console was mouse-only, which made the whole console unusable from the
+// keyboard.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const row = e.target.closest?.(".admin-table tbody tr[data-detail]");
+  if (!row) return;
+  e.preventDefault();
+  row.click();
 });
 
 $("adminRefreshBtn").addEventListener("click", () => load(activePath));

@@ -1,6 +1,17 @@
 /* ============================================================
-   Best Shiny — public website
-   Independent shell. Shares only the design tokens in styles.css.
+   Best Shiny — public website. STAYS DARK by product decision.
+   Independent shell. Shares only the design tokens in styles.css,
+   which are now LIGHT at :root. The dark values are restored for
+   this shell by the `.pub, body.public-route` re-binding block in
+   styles.css.
+   Do not add literals here and do not "fix" the amber: the amber
+   law governs the workspace and the admin console, not the cinema.
+
+   Nothing in the .pub-* rules below changed. The only addition is
+   the RESIDUAL block at the foot of this file: the shared primitives
+   (.btn, inputs, chips, .auth-card, .sheet, .disclosure) whose
+   GEOMETRY — not colour — changed under the redesign, and which a
+   token re-binding therefore cannot restore on its own.
    ============================================================ */
 .pub {
   --pub-max: 1200px;
@@ -272,3 +283,8 @@
   .pub-flow-step::after { display: none; }
   .pub-section { padding: 64px var(--pub-gutter); }
 }
+
+/* The residual geometry fixes for the marketing shell (buttons, inputs,
+   status chips, the auth card, dialogs, disclosures) live in styles.css
+   next to the `.pub, body.public-route` colour re-binding — one block,
+   not two, so the two can never drift out of sync. */

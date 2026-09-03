@@ -2,10 +2,19 @@
 
 **This is the entry point for the next session.** It records the "Create with BestShiny Director"
 overhaul on branch `claude/bestshiny-director-workflow-1a6b59` (worktree
-`.claude/worktrees/bestshiny-director-workflow-1a6b59`). Everything below was run and read back
-unless it is listed under §6 as unverified. The previous entry point,
+`.claude/worktrees/bestshiny-director-workflow-1a6b59`), committed as **`23f248d`**. Everything
+below was run and read back unless it is listed under §6 as unverified. The previous entry point,
 [`SESSION_HANDOVER_2026-09-02-C.md`](SESSION_HANDOVER_2026-09-02-C.md), still describes production
-(`DEPLOYED_SHA = 86987c3`, alembic `0069`); nothing in this branch is deployed.
+(`DEPLOYED_SHA = 86987c3`, alembic `0069`); **production is untouched**.
+
+**The dev stack (`ai-director-platform` compose, api :8080 / web :3000) was rebuilt from `23f248d`
+on 2026-09-02** and its database upgraded to `0070_creative_director_screenplay` by the api
+container's own `alembic upgrade head`; running image ids equal the built ones, zero tracebacks.
+An earlier round of browser testing had been done against the *previous* dev images (built from
+`86987c3`), which is why it still showed the rule-based director. Dev runs `PROVIDER_MODE=live`
+under the daily budget breaker, so every director turn and screenplay draft there is a paid
+opus-5 call (turns were ≈USD 0.002 each in production; a 6000-token screenplay draft is
+considerably more - watch `GET /internal/production-budget`).
 
 ---
 
@@ -92,8 +101,8 @@ Gates on the final tree (2026-09-02, run from the worktree on the main venv, det
 
 | Gate | Result |
 | --- | --- |
-| `pytest` (SQLite half) | 1409 passed, 12 skipped, exit 0 (8m14s) |
-| `pytest --database=postgres` | 1414 passed, 7 skipped, exit 0 (19m37s) |
+| `pytest` (SQLite half) | 1409 passed, 12 skipped, exit 0 (8m14s) before the image-change/UX round; **1411 passed, 12 skipped, exit 0 (6m28s) on `23f248d`** |
+| `pytest --database=postgres` | 1414 passed, 7 skipped, exit 0 (19m37s) before the image-change/UX round; on `23f248d` the creative, free-tier and migration suites re-ran on PostgreSQL: 67 passed, exit 0 |
 | `ruff check .` | clean |
 | `mypy` (repo config) | clean, 199 source files |
 | `vite build` (apps/web) | built |

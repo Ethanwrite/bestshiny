@@ -47,9 +47,9 @@ def test_every_generation_request_serializes_an_explicit_asset_criticality() -> 
 def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> None:
     config = load_model_infrastructure_config(CONFIG_PATH)
     provider_ids = {item.provider_model_id for item in config.models}
-    # 22 + the three OpenRouter Veo 3.1 variants added 2026-08-25.
-    # 25 - 2 duplicate 'official' records + 1 OpenRouter Wan 3.0 route.
-    assert len(config.models) == 24
+    # The retired OpenRouter Voyage row remains for historical execution
+    # evidence; the official Voyage transport is a distinct current model.
+    assert len(config.models) == 25
     assert {
         "openai/gpt-5.6-sol",
         "anthropic/claude-opus-5",
@@ -67,6 +67,7 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
         "kwaivgi/kling-v3.0-std",
         "kwaivgi/kling-v3.0-pro",
         "voyageai/voyage-multimodal-3.5",
+        "voyage-multimodal-3.5",
         "flow-veo-3.1",
         "NARWHAL",
         "doubao-seedance-2-5-260628",
@@ -77,6 +78,18 @@ def test_versioned_defaults_include_frozen_provider_models_and_no_secrets() -> N
         "alibaba/wan-3.0",
     } <= provider_ids
     assert all(not item.live_enabled for item in config.models)
+    voyage = next(item for item in config.models if item.logical_name == "voyage-multimodal-3.5-official")
+    assert (voyage.provider, voyage.provider_model_id, voyage.enabled) == (
+        "voyage",
+        "voyage-multimodal-3.5",
+        True,
+    )
+    retired = next(
+        item for item in config.models if item.logical_name == "voyage-multimodal-3.5-openrouter"
+    )
+    assert retired.enabled is False
+    binding = next(item for item in config.role_bindings if item.role is ModelRole.MULTIMODAL_EMBEDDING)
+    assert binding.model_logical_name == "voyage-multimodal-3.5-official"
     source = CONFIG_PATH.read_text(encoding="utf-8")
     assert "sk-" not in source
     assert "ark-" not in source

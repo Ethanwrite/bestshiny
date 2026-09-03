@@ -98,6 +98,7 @@ from sqlalchemy.engine import make_url
 from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService, StyleDriftMonitor
 from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
+from voyage_provider import VoyageProvider
 from wan_provider import WanProvider
 
 logger = logging.getLogger(__name__)
@@ -408,6 +409,13 @@ def build_container(settings: Settings | None = None) -> Container:
         video_generate_audio=settings.openrouter_video_generate_audio,
         transport_settings=live_provider_settings,
     )
+    voyage = VoyageProvider(
+        api_key=settings.voyage_api_key,
+        base_url=settings.voyage_base_url,
+        model_id=settings.voyage_multimodal_model,
+        timeout_seconds=settings.provider_http_timeout_seconds,
+        transport_settings=live_provider_settings,
+    )
     wan = WanProvider(
         api_key=settings.wan_api_key,
         openai_base_url=settings.wan_openai_base_url,
@@ -473,6 +481,9 @@ def build_container(settings: Settings | None = None) -> Container:
             ProviderCapability.IMAGE.value,
             ProviderCapability.VIDEO.value,
         },
+    )
+    provider_capabilities.register(
+        "voyage", voyage, {ProviderCapability.EMBEDDINGS.value}
     )
     provider_capabilities.register(
         "wan", wan, {ProviderCapability.CHAT.value, ProviderCapability.VIDEO.value}

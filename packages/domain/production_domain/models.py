@@ -4287,13 +4287,18 @@ class CreativeSessionStatus(StrEnum):
 
     Every transition is forward-only except ABANDONED; approvals move the
     session, never edits. The stage names mirror the product flow:
-    idea -> clarify -> brief -> key visuals -> visual bible -> beats -> compile.
+    idea -> clarify -> brief -> screenplay -> key visuals -> visual bible ->
+    beats -> compile. The screenplay stage (2026-09-02) is where the DIRECTOR
+    model writes the treatment and script from the approved brief; the key
+    visuals are derived from brief *and* screenplay together.
     """
 
     INTAKE = "INTAKE"
     CLARIFYING = "CLARIFYING"
     BRIEF_PROPOSED = "BRIEF_PROPOSED"
     BRIEF_APPROVED = "BRIEF_APPROVED"
+    SCREENPLAY_PROPOSED = "SCREENPLAY_PROPOSED"
+    SCREENPLAY_APPROVED = "SCREENPLAY_APPROVED"
     VISUALS_IN_PROGRESS = "VISUALS_IN_PROGRESS"
     BIBLE_PROPOSED = "BIBLE_PROPOSED"
     BIBLE_LOCKED = "BIBLE_LOCKED"
@@ -4319,6 +4324,13 @@ class CreativeAnchorStatus(StrEnum):
     GENERATING = "GENERATING"
     READY = "READY"
     FAILED = "FAILED"
+    #: An optional anchor the user explicitly chose to go without; recorded,
+    #: never inferred. A required anchor can never be skipped.
+    SKIPPED = "SKIPPED"
+    #: Its content changed after it was derived; a newer version of the same
+    #: anchor_key carries the current prompt. Old prompts and images are never
+    #: re-used under a new version.
+    SUPERSEDED = "SUPERSEDED"
 
 
 class CreativeActionStatus(StrEnum):
@@ -4335,6 +4347,7 @@ class CreativeSession(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint(
             "status IN ('INTAKE', 'CLARIFYING', 'BRIEF_PROPOSED', 'BRIEF_APPROVED', "
+            "'SCREENPLAY_PROPOSED', 'SCREENPLAY_APPROVED', "
             "'VISUALS_IN_PROGRESS', 'BIBLE_PROPOSED', 'BIBLE_LOCKED', 'BEATS_PROPOSED', "
             "'COMPILED', 'ABANDONED')",
             name="ck_creative_session_status",
@@ -4360,17 +4373,27 @@ class CreativeSession(Base, TimestampMixin):
     #: Head pointers into the append-only revision tables below. They are
     #: projections, not truth: the revision rows are.
     current_brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current_screenplay_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     current_bible_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_beat_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     compiled_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
 
 
 class CreativeTurn(Base, TimestampMixin):
-    """Append-only dialogue ledger: what was said, asked, and extracted."""
+    """Append-only dialogue ledger: what was said, asked, and extracted.
+
+    A director turn is written in the same transaction as the user turn it
+    answers, the brief revision it produced and the question states it moved,
+    so a model failure can never leave a user message without its result (and
+    never counts against the FREE dialogue budget).
+    """
 
     __tablename__ = "creative_turns"
     __table_args__ = (
         UniqueConstraint("session_id", "sequence", name="uq_creative_turn_sequence"),
+        UniqueConstraint("session_id", "client_turn_id", name="uq_creative_turn_client_id"),
         CheckConstraint("speaker IN ('USER', 'DIRECTOR')", name="ck_creative_turn_speaker"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -4384,17 +4407,42 @@ class CreativeTurn(Base, TimestampMixin):
     #: code it targets, so a question is never re-asked for an answered gap.
     questions_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     #: The structured brief patch this turn produced (empty for pure replies).
-    extracted_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: Since 2026-09-02 this is the list of applied brief operations.
+    extracted_json: Mapped[dict[str, Any] | list[dict[str, Any]]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     #: MODEL:<role> when a model reasoned about this turn, DETERMINISTIC when
     #: the rules engine did, USER for user turns. Model outage degrades to the
     #: rules engine loudly, never silently.
     reasoner: Mapped[str] = mapped_column(String(60), default="USER", nullable=False)
     reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     brief_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Client-supplied idempotency key for a user turn: a retried POST with the
+    #: same key returns the recorded director reply instead of a second turn.
+    client_turn_id: Mapped[str | None] = mapped_column(String(120))
+    #: Which Director Skill text the model was given (content-addressed), and
+    #: the ModelExecutionRecord that paid for the call - the audit of what the
+    #: director actually saw and said.
+    skill_version: Mapped[str | None] = mapped_column(String(80))
+    skill_content_hash: Mapped[str | None] = mapped_column(String(64))
+    model_execution_record_id: Mapped[str | None] = mapped_column(String(36))
+    #: How the model's context was assembled: turns included, compression
+    #: applied, the preserved facts. Empty for user turns.
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: The validated DirectorTurnResult (assumptions, unresolved questions,
+    #: creative notes, rejected operations) behind this director turn.
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class CreativeBriefRevision(Base, TimestampMixin):
-    """Append-only CreativeBrief revisions; approval freezes one."""
+    """Append-only CreativeBrief revisions; approval freezes one.
+
+    ``provenance_json`` records, per field path, who established the value
+    (the user's words, a model inference, a default, a direct edit, an
+    accepted assumption), from which turn, by which operation. ``question_state_json``
+    is the per-gap question ledger (UNASKED / ASKED / ANSWERED /
+    SKIPPED_BY_USER / ASSUMPTION_ACCEPTED) as of this revision.
+    """
 
     __tablename__ = "creative_briefs"
     __table_args__ = (
@@ -4417,6 +4465,57 @@ class CreativeBriefRevision(Base, TimestampMixin):
     completeness_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    question_state_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: What produced this revision: TURN (a dialogue round), USER_EDIT (the
+    #: brief editor), ASSUMPTION (an accepted assumption), APPROVAL.
+    source: Mapped[str] = mapped_column(String(40), default="TURN", server_default="TURN", nullable=False)
+    turn_id: Mapped[str | None] = mapped_column(String(36))
+
+
+class CreativeScreenplayRevision(Base, TimestampMixin):
+    """Append-only, model-authored screenplay revisions for one session.
+
+    ``content_json`` is the validated structured screenplay (treatment, hook,
+    invariants and variables, characters and relationships, scenes, beats with
+    dialogue and one-action ShotIntents, start/end states and continuity
+    obligations, product claims and required copy). ``script_text`` is the
+    rendering of that structure in the narrative compiler's own vocabulary -
+    derived, never edited by hand. Only the exact APPROVED revision is ever
+    compiled, and the compiled episode records which one.
+    """
+
+    __tablename__ = "creative_screenplays"
+    __table_args__ = (
+        UniqueConstraint("session_id", "revision", name="uq_creative_screenplay_revision"),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'SUPERSEDED')",
+            name="ck_creative_screenplay_status",
+        ),
+        CheckConstraint("length(content_hash) = 64", name="ck_creative_screenplay_hash_length"),
+        CheckConstraint("revision > 0", name="ck_creative_screenplay_revision_positive"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
+    brief_id: Mapped[str] = mapped_column(ForeignKey("creative_briefs.id"), nullable=False)
+    #: MODEL:DIRECTOR, DETERMINISTIC (explicit degradation, shown to the
+    #: user), or USER_EDIT (the user's own revision of an earlier one).
+    reasoner: Mapped[str] = mapped_column(String(60), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    parent_revision: Mapped[int | None] = mapped_column(Integer)
+    #: The user's rewrite request that produced this revision, when any.
+    user_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    skill_version: Mapped[str | None] = mapped_column(String(80))
+    skill_content_hash: Mapped[str | None] = mapped_column(String(64))
+    model_execution_record_id: Mapped[str | None] = mapped_column(String(36))
+    content_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    script_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class VisualBibleVersion(Base, TimestampMixin):
@@ -4424,7 +4523,10 @@ class VisualBibleVersion(Base, TimestampMixin):
 
     Locking is the version-lock the product promises after user approval: the
     service refuses any further mutation of a LOCKED row, and later changes
-    append a new version that supersedes it.
+    append a new version that supersedes it. ``lineage_json`` records what the
+    lock produced through the platform's own services - the
+    CharacterIdentityVersion per character anchor and the ProjectStyleLock -
+    and a bible whose lineage is incomplete blocks compilation.
     """
 
     __tablename__ = "visual_bibles"
@@ -4450,10 +4552,12 @@ class VisualBibleVersion(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="DRAFT", nullable=False)
     brief_id: Mapped[str] = mapped_column(ForeignKey("creative_briefs.id"), nullable=False)
+    screenplay_id: Mapped[str | None] = mapped_column(ForeignKey("creative_screenplays.id"))
     content_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(120))
+    lineage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class CreativeVisualAnchor(Base, TimestampMixin):
@@ -4461,31 +4565,40 @@ class CreativeVisualAnchor(Base, TimestampMixin):
 
     The anchor is the structured intent; the generation itself always goes
     through the existing Passenger image path (admission, credits, router,
-    gateway) - never a direct provider call from creative code.
+    gateway) - never a direct provider call from creative code. An anchor is
+    versioned by content: when the brief or screenplay changes what the anchor
+    depicts, a new (anchor_key, version) row is created and the old one is
+    SUPERSEDED, so an old prompt or image is never passed off as the new one.
     """
 
     __tablename__ = "creative_visual_anchors"
     __table_args__ = (
-        UniqueConstraint("session_id", "anchor_key", name="uq_creative_anchor_key"),
+        UniqueConstraint("session_id", "anchor_key", "version", name="uq_creative_anchor_key"),
         CheckConstraint(
             "kind IN ('CHARACTER', 'SCENE', 'STYLE', 'PRODUCT', 'PROP', 'MOOD')",
             name="ck_creative_anchor_kind",
         ),
         CheckConstraint(
-            "status IN ('PENDING', 'GENERATING', 'READY', 'FAILED')",
+            "status IN ('PENDING', 'GENERATING', 'READY', 'FAILED', 'SKIPPED', 'SUPERSEDED')",
             name="ck_creative_anchor_status",
         ),
+        CheckConstraint("version > 0", name="ck_creative_anchor_version_positive"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     session_id: Mapped[str] = mapped_column(
         ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
     )
     anchor_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
     title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     #: Structured prompt parts (subject / style / constraints), composed into a
     #: provider prompt only at action-execution time.
     prompt_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    prompt_hash: Mapped[str] = mapped_column(String(64), default="", server_default="", nullable=False)
+    #: A required anchor must be READY before a visual bible can be proposed;
+    #: an optional one may be skipped by the user, on record.
+    required: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
     status: Mapped[str] = mapped_column(
         String(40), default=CreativeAnchorStatus.PENDING.value, nullable=False
     )
@@ -4493,6 +4606,9 @@ class CreativeVisualAnchor(Base, TimestampMixin):
     media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
     character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id"))
     failure_code: Mapped[str | None] = mapped_column(String(240))
+    skip_reason: Mapped[str | None] = mapped_column(String(240))
+    brief_id: Mapped[str | None] = mapped_column(ForeignKey("creative_briefs.id"))
+    screenplay_id: Mapped[str | None] = mapped_column(ForeignKey("creative_screenplays.id"))
 
 
 class CreativeAction(Base, TimestampMixin):
@@ -4509,7 +4625,7 @@ class CreativeAction(Base, TimestampMixin):
         UniqueConstraint("idempotency_key", name="uq_creative_action_idempotency"),
         CheckConstraint(
             "kind IN ('GENERATE_KEY_VISUAL', 'CREATE_EPISODE', 'COMPILE_EPISODE', "
-            "'OPEN_OBLIGATION', 'ESTABLISH_FACT')",
+            "'OPEN_OBLIGATION', 'ESTABLISH_FACT', 'LOCK_CHARACTER_IDENTITY', 'LOCK_PROJECT_STYLE')",
             name="ck_creative_action_kind",
         ),
         CheckConstraint(
@@ -4533,7 +4649,12 @@ class CreativeAction(Base, TimestampMixin):
 
 
 class CreativeBeat(Base, TimestampMixin):
-    """One beat of a proposed beat plan, with its structured shot intents."""
+    """One beat of a proposed beat plan, with its structured shot intents.
+
+    Since 2026-09-02 beats are materialized from an approved screenplay
+    revision (``screenplay_id``) rather than from a fixed scaffold; the
+    scaffold survives only as the explicit DETERMINISTIC degradation.
+    """
 
     __tablename__ = "creative_beats"
     __table_args__ = (
@@ -4554,6 +4675,36 @@ class CreativeBeat(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(40), default="PROPOSED", nullable=False)
     #: {intent, summary, location, time, characters, shots: [ShotIntent...]}
     beat_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    screenplay_id: Mapped[str | None] = mapped_column(ForeignKey("creative_screenplays.id"))
+
+
+class CreativeShotLineage(Base, TimestampMixin):
+    """Where one compiled shot came from: brief, screenplay, bible, anchors, locks.
+
+    Written in the compile step for every shot the narrative compiler created
+    from an approved screenplay, so a shot can be traced back to the exact
+    approved brief and screenplay revisions, the locked visual bible, the key
+    visual anchors it depends on, the CharacterIdentityVersions and the
+    ProjectStyleLock that bound them.
+    """
+
+    __tablename__ = "creative_shot_lineage"
+    __table_args__ = (UniqueConstraint("shot_id", name="uq_creative_shot_lineage_shot"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), nullable=False)
+    episode_id: Mapped[str] = mapped_column(ForeignKey("episodes.id", ondelete="CASCADE"), nullable=False)
+    brief_id: Mapped[str] = mapped_column(ForeignKey("creative_briefs.id"), nullable=False)
+    screenplay_id: Mapped[str] = mapped_column(ForeignKey("creative_screenplays.id"), nullable=False)
+    bible_id: Mapped[str | None] = mapped_column(ForeignKey("visual_bibles.id"))
+    beat_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    anchor_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    identity_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    style_lock_id: Mapped[str | None] = mapped_column(String(36))
+    intent_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class EpisodeContinuation(Base, TimestampMixin):

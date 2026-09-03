@@ -11,6 +11,15 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-09-02 update — the director writes.** Migration head is now
+> `0070_creative_director_screenplay`. The creative director's DIRECTOR model runs under the
+> Director Skill with the whole conversation, applies explicit brief operations with per-field
+> provenance and question states, and authors versioned screenplay revisions after brief approval;
+> key visuals derive from brief and screenplay, the bible lock produces real
+> `CharacterIdentityVersion` rows and a `ProjectStyleLock`, and every compiled shot has a lineage
+> row. Details in the "Creative director" section and in
+> [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md).
+
 > **2026-08-30 update — FREE-plan gates and QA hardening.** Migration head is now
 > `0064_free_tier_defaults`. What moved since this snapshot's header:
 > the FREE catalogue has real targets (`doubao-free-reasoner` →
@@ -512,45 +521,96 @@ still runs the planner immediately after script compilation; `POST
 /v1/shots/{id}/continuity`) are inspect/re-plan surfaces — the preflight re-decides anything they
 left stale.
 
-## Creative director: idea to shot plan without a script
+## Creative director: idea to screenplay to shot plan, with the model writing
 
-`core/creative-director/creative_director_core` (migration `0053_creative_director`, seven tables)
-is the stateful layer above the script surface:
+`core/creative-director/creative_director_core` (migrations `0053_creative_director` and
+`0070_creative_director_screenplay`, nine tables) is the stateful layer above the script surface:
 
 ```text
-idea -> dialogue clarification -> CreativeBrief -> key visuals -> VisualBible
-     -> BeatPlan/ShotIntents -> derived script -> NarrativeCompiler -> existing chain
+idea -> dialogue (Director Skill, operations with provenance, question states) -> CreativeBrief
+     -> approval (server-enforced) -> Screenplay revisions (DIRECTOR model writes; user revises)
+     -> key visuals derived from brief + screenplay (versioned anchors) -> VisualBible
+     -> lock (CharacterIdentityVersion + ProjectStyleLock through their own services)
+     -> BeatPlan/ShotIntents from the approved screenplay -> derived script -> NarrativeCompiler
+     -> existing chain, with a lineage row per compiled shot
 ```
 
-Three rules shape it:
+Rules that shape it (2026-09-02 overhaul):
 
-- **Questions are computed, never scripted.** `BRIEF_FIELD_SPECS` weights every brief field per
-  format (short drama, advertisement, product, social, music, fashion, beauty, concept). A turn
-  asks at most three missing HIGH/CRITICAL fields, never re-asks an answered or already-asked code,
-  and a complete opening idea produces a brief with zero questions. Unanswered non-critical gaps
-  are defaulted at proposal time and the applied defaults are recorded in the revision's
-  completeness report.
-- **Structure, not a prompt string.** Turns, brief revisions, the visual bible, anchors, beats and
-  actions are typed rows (`creative_turns`, `creative_briefs`, `visual_bibles`,
-  `creative_visual_anchors`, `creative_beats`, `creative_actions`). Script text is *derived* from
-  approved beats — one primary action per line in the narrative compiler's own vocabulary — so
-  compiled shots zip one-to-one with `ShotIntent`s and intent extras (shot type, duration) are
-  applied to the real Shot rows. The prompt compiler then reads the same structured truth it always
-  read; nothing concatenates a session into a mega-prompt.
-- **Structured actions are the only door to spending.** The service never holds a provider client.
-  `GENERATE_KEY_VISUAL` actions are executed by the API layer through the same
-  `admit_passenger -> visual_runtime.submit` path as `POST /v1/images/generations` (role-resolved
-  image model, credit reservation, router, gateway), keyed idempotently per anchor and revision;
-  failures (402, plan denial, target errors) are recorded per action and retryable without
-  duplicating the successes. Model reasoning goes through `ModelRoleRuntime.execute_chat(DIRECTOR)`
-  and degrades to the deterministic rules engine with the degradation recorded on the turn
-  (`reasoner`, reason codes) — never silently.
+- **The Director Skill is the model's system prompt.** Every DIRECTOR call resolves
+  `SkillRegistry.resolve("director")` and records the Skill's content-addressed version and hash on
+  the turn (`creative_turns.skill_version`, `skill_content_hash`) and on the screenplay revision,
+  together with the `ModelExecutionRecord` that paid for the call. The Skill text is followed by
+  the application protocol (the JSON contract). Provider, model, quota and retry facts never enter
+  the creative context; a missing Skill is recorded as `SKILL_UNAVAILABLE`, never silent.
+- **Every turn sees the whole conversation.** `director_context.build_turn_messages` assembles the
+  ordered turns (the director's earlier questions travel with its replies), the structured brief,
+  per-field provenance, question states, the user-established facts nobody may move, the stage and
+  the latest message. Over budget, the middle of a long conversation is condensed on record
+  (`context_json`: turns kept, turns condensed, `CONTEXT_COMPRESSED`) while user facts,
+  corrections, prohibitions, unanswered questions and approved content are restated verbatim.
+- **Explicit operations, not fill-the-blanks.** The model answers a validated `DirectorTurnResult`
+  (`assistant_message`, `brief_operations`, answered / skipped question codes, `unresolved_questions`,
+  `assumptions`, `creative_notes`). Operations are SET / REPLACE / UPSERT / REMOVE / KEEP with the
+  user's words as evidence; `brief.apply_operations` honours REPLACE and REMOVE only when the model
+  attributes them to the user (`USER_STATED`) or the user edits directly, and an inference can never
+  overwrite a user-established value (`INFERRED_CANNOT_OVERRIDE_USER_FACT` is recorded on the turn).
+  Characters merge by normalized name, so a look can be added, a second character added, changed or
+  removed. Every field carries provenance (source, operation, reasoner, turn, evidence, revision) in
+  `creative_briefs.provenance_json`; the brief editor (`POST …/brief/edit`) goes through the same
+  path as `USER_EDIT`. Malformed nested output is rejected per operation or degraded with
+  `MODEL_OUTPUT_INVALID`; it cannot 500.
+- **Asked is not answered.** Each gap has a state - UNASKED, ASKED, ANSWERED, SKIPPED_BY_USER,
+  ASSUMPTION_ACCEPTED (`question_state_json`). A turn asks at most three high-value questions and
+  may re-confirm an unanswered one; a code having appeared once never retires it. The brief is
+  proposable when the format is known, every CRITICAL field is ANSWERED or an accepted assumption,
+  and no HIGH gap is still unasked. `approve_brief` refuses (409 with a reason code) a CLARIFYING
+  session, an open CRITICAL field (`CRITICAL_UNANSWERED`) and unconfirmed assumed values
+  (`ASSUMPTIONS_UNCONFIRMED`); `POST …/brief/questions` lets the user accept the director's
+  assumption or skip a question on record. Defaults and inferred values are shown as assumptions
+  and become `ASSUMPTION_ACCEPTED` under the approver's name - never disguised as answers.
+- **The model writes the screenplay.** After approval the DIRECTOR role authors a validated
+  `Screenplay` (`creative_screenplays`): treatment and hook, invariants and variables, characters
+  and relationships, scenes, beats with dialogue and one-action `ShotIntent`s (actor + one verb
+  from the narrative compiler's vocabulary, or one line), start/end state and gaze target,
+  continuity obligations, product claims and required copy, unresolved choices. Revisions are
+  append-only: the user can redraft with notes (`REVISE_SCREENPLAY`), edit the structure
+  (`USER_EDIT`), and approve exactly one revision. The fixed scaffold (`BeatPlanner`) survives only
+  as the explicit degradation - reasoner `DETERMINISTIC`, reason codes on the row, placeholder
+  lines named as such - and approving it needs `accept_deterministic`.
+- **Key visuals come from brief and screenplay together, versioned by content.** Anchors
+  (characters, style plate, product for commerce formats - required; scenes and props - optional)
+  carry `version` and `prompt_hash`; a changed depiction supersedes the old row and generates anew,
+  never re-using an old prompt or image under a new version. Generation still runs only through
+  `GENERATE_KEY_VISUAL` actions executed by the API layer via `admit_passenger -> visual_runtime.submit`
+  (idempotent per anchor version). The bible cannot be proposed until every required anchor is
+  READY and every optional one is READY or explicitly SKIPPED (`POST …/visuals/anchors/{id}/skip`).
+- **Locking the bible binds real identities and a real style lock.** `approve_bible` runs
+  `CharacterIdentityService.confirm_identity` per character anchor (plus the canonical CHARACTER
+  asset version, as the manual route does) and promotes the style plate into a STYLE asset version
+  locked through `ProjectStyleService.lock` - a signed-in user is required, the development bypass
+  is refused with `STYLE_LOCK_REQUIRES_USER`. A project that already has a lock inherits it, on
+  record (`STYLE_LOCK_INHERITED`). Any failure leaves the bible DRAFT with the error in
+  `lineage_json` and blocks compilation (`BIBLE_LOCK_INCOMPLETE`); a retry completes only what is
+  missing. Nothing here writes identity or style tables directly.
+- **Only the approved screenplay is compiled, idempotently.** Beats are materialized from the
+  approved revision; edits at approval become a new APPROVED `USER_EDIT` revision whose rendered
+  script is the episode's `script_source`. The compile reuses the same episode on retry, runs the
+  same narrative compiler and frame anchor planner, applies the shot intents, and writes one
+  `creative_shot_lineage` row per shot (brief, screenplay, bible, anchors, identity versions,
+  style lock) - `GET /v1/creative/shots/{id}/lineage` reads it back.
+- **One dialogue round is one transaction.** The user turn, the director turn, the applied
+  operations, the question states and the brief revision land together or not at all; a crash after
+  the model answered leaves no orphan message and spends no FREE round (the FREE budget counts
+  landed rounds). `client_turn_id` makes a retried POST replay the recorded reply
+  (`IDEMPOTENT_REPLAY`). Model failures degrade with a retryable reason code
+  (`MODEL_UNAVAILABLE`, `MODEL_BUDGET_REFUSED`, `MODEL_OUTPUT_INVALID`, `MODEL_CALL_ERROR`).
 
 The **VisualBible is version-locked on approval**: a LOCKED version is immutable and cannot be
-re-proposed over; changes append a new version that needs its own approval (service-enforced —
-OPEN_ISSUES §2.39 records the tier). Approving beats compiles a real episode through the existing
-compiler and frame anchor planner, and opens the plan's cliffhanger as a `narrative_obligations`
-row, which is exactly the thread the next episode picks up.
+re-proposed over; changes append a new version that needs its own approval (service-enforced -
+OPEN_ISSUES §2.39 records the tier). The web page polls key visuals with backoff while they render,
+stops on leaving the page, switching sessions, a terminal state or an unrecoverable error, keeps a
+manual refresh, and edits brief, screenplay, beats and shot intents through the endpoints above.
 
 ## Series continuation: the next episode inherits state, not a script
 

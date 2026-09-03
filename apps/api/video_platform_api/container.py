@@ -914,6 +914,13 @@ def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator,
         ledger=narrative_ledger,
         model_roles=model_roles,
+        # The Director Skill is the model's system prompt (content-addressed
+        # on every turn); the bible lock runs through the platform's own
+        # identity and style services rather than writing their tables.
+        skills=skills,
+        characters=characters,
+        styles=styles,
+        asset_registry=asset_registry,
         free_plan_turn_limit=settings.free_plan_max_director_turns,
     )
     episode_continuations = EpisodeContinuationService(

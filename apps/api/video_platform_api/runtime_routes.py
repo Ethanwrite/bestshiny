@@ -985,6 +985,12 @@ def register_runtime_routes(
             job = session.get(GenerationJob, job_id)
             if not job or not job.output_asset_id:
                 raise HTTPException(409, "generation has no completed output")
+            if job.deleted_at is not None:
+                # A creation the user removed reads as absent everywhere they
+                # can act. Saving its output would also outrun the media
+                # reclamation queued by the deletion and leave an asset
+                # version pointing at bytes that are on their way out.
+                raise HTTPException(404, "generation not found")
             auth.require_project(principal, job.project_id, write=True)
             media = session.get(MediaAsset, job.output_asset_id)
             if not media:

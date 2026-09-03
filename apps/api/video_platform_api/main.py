@@ -67,7 +67,9 @@ from media_service import (
     ThumbnailUnavailable,
     WorkspaceStorageQuota,
     WorkspaceStorageQuotaExceeded,
+    enqueue_creation_media_cleanup,
     lineage_key,
+    sweep_creation_media_cleanup,
     sweep_expired_uploads,
     sweep_generation_staging,
 )
@@ -108,7 +110,9 @@ from production_domain.models import (
     DirectUploadStatus,
     Episode,
     GenerationCandidate,
+    GenerationEvent,
     GenerationJob,
+    JobStatus,
     MediaAsset,
     MediaProviderBinding,
     MediaRendition,
@@ -142,7 +146,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .admin_routes import register_admin_routes
@@ -2695,6 +2699,38 @@ def create_app(container: Container | None = None) -> FastAPI:
         ).as_response()
 
     @app.post(
+        "/internal/maintenance/creation-media",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def sweep_creation_media_endpoint(
+        limit: int | None = None,
+        cleanup_id: str | None = None,
+        include_failed: bool = False,
+    ):
+        """The operator-triggered face of the sweep the worker runs on
+        `CREATION_MEDIA_CLEANUP_INTERVAL_SECONDS`.
+
+        A deleted creation's media is reclaimed here rather than inside the
+        deletion, because object storage cannot join that transaction. Each
+        row is claimed under a lease, so running this beside the worker
+        double-deletes nothing; an asset anything else still references is
+        kept and the holder recorded. `cleanup_id` with `include_failed` is
+        the re-drive for a row that exhausted its attempts while the bucket
+        was unreachable.
+        """
+
+        return sweep_creation_media_cleanup(
+            database=container.database,
+            storage=container.storage,
+            limit=max(1, limit or container.settings.creation_media_cleanup_limit),
+            lease_seconds=container.settings.creation_media_cleanup_lease_seconds,
+            max_attempts=container.settings.creation_media_cleanup_max_attempts,
+            backoff_seconds=container.settings.creation_media_cleanup_backoff_seconds,
+            cleanup_ids=[cleanup_id] if cleanup_id else None,
+            include_failed=include_failed,
+        ).as_response()
+
+    @app.post(
         "/internal/maintenance/character-evidence",
         dependencies=[Depends(verify_api_key)],
     )
@@ -3111,7 +3147,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         This is the durable Productions list: it answers from the jobs table,
         so a reload shows the same history the session built up. Events are
         deliberately not included — fifty jobs times a poll history is a
-        payload, and the per-job endpoint already serves them.
+        payload, and the per-job endpoint already serves them. Creations the
+        user deleted are not listed.
         """
 
         auth.require_project(principal, project_id)
@@ -3120,7 +3157,14 @@ def create_app(container: Container | None = None) -> FastAPI:
             rows = list(
                 session.scalars(
                     select(GenerationJob)
-                    .where(GenerationJob.project_id == project_id)
+                    .where(
+                        GenerationJob.project_id == project_id,
+                        # A creation the user removed is gone from every one
+                        # of this page's numbers: the list, the four state
+                        # counts, the session panel and the project total are
+                        # all derived from this one answer.
+                        GenerationJob.deleted_at.is_(None),
+                    )
                     .order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc())
                     .limit(capped + 1)
                 )
@@ -3130,14 +3174,26 @@ def create_app(container: Container | None = None) -> FastAPI:
             "has_more": len(rows) > capped,
         }
 
+    def _live_generation(job_id: str):  # type: ignore[no-untyped-def]
+        """A creation that still exists for its owner, or 404.
+
+        A deleted creation is still a row — the ledger, the cost records and
+        the provider evidence all point at it — but to everyone outside the
+        admin console it is gone, so every user-facing route treats it as
+        absent rather than showing a state the user cannot act on.
+        """
+
+        job = container.gateway.get(job_id)
+        if not job or job.deleted_at is not None:
+            raise HTTPException(404, "generation not found")
+        return job
+
     @app.get("/v1/generations/{job_id}")
     def get_generation(
         job_id: str,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        job = container.gateway.get(job_id)
-        if not job:
-            raise HTTPException(404, "generation not found")
+        job = _live_generation(job_id)
         auth.require_project(principal, job.project_id)
         return {
             **_job_view(job, credit_status=container.gateway.credit_status(job.id)),
@@ -3152,9 +3208,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         job_id: str,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        job = container.gateway.get(job_id)
-        if not job:
-            raise HTTPException(404, "generation not found")
+        job = _live_generation(job_id)
         auth.require_project(principal, job.project_id, write=True)
         try:
             retried = container.gateway.retry(job_id)
@@ -3172,9 +3226,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         job_id: str,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        job = container.gateway.get(job_id)
-        if not job:
-            raise HTTPException(404, "generation not found")
+        job = _live_generation(job_id)
         auth.require_project(principal, job.project_id, write=True)
         try:
             cancelled = await container.gateway.cancel(job_id)
@@ -3190,14 +3242,148 @@ def create_app(container: Container | None = None) -> FastAPI:
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
+    #: Creations with no work left to stop. Deleting one is a single step.
+    _DIRECTLY_DELETABLE_STATES = frozenset(
+        {
+            JobStatus.COMPLETED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.RETRY_WAIT.value,
+            JobStatus.WORKER_NEEDS_USER_ACTION.value,
+        }
+    )
+
+    @app.delete("/v1/generations/{job_id}")
+    async def delete_generation(
+        job_id: str,
+        project_id: str | None = None,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ):
+        """Remove a creation from its project.
+
+        Deletion never removes the row. A creation is what the credit ledger
+        entries, the reservation settlements, the provider execution records,
+        the cost rows and the billing evidence all point at, and none of that
+        may be rewritten because someone tidied their gallery: the row is
+        stamped ``deleted_at``/``deleted_by`` and leaves every user surface,
+        with the money exactly as it was. Nothing is refunded here.
+
+        A creation with work still in flight is stopped first, through the
+        same cancellation the Cancel action performs — so its credit
+        behaviour is the cancellation's, unchanged, and this route adds none
+        of its own. If the provider finishes during that stop, the result is
+        accepted and the creation is still deleted: it must not come back.
+        A creation whose submission was never confirmed is refused instead,
+        because its charge is unknown and deleting it would hide a bill.
+
+        Idempotent by construction: a second call finds the row already
+        stamped and reports the same success without touching anything.
+        """
+
+        job = container.gateway.get(job_id)
+        if not job:
+            raise HTTPException(404, "generation not found")
+        # The workspace fence. `require_project` resolves the creation's own
+        # project and refuses a caller who is not a writer in the workspace
+        # that owns it, so a creation can never be deleted from outside it.
+        # A caller that names a project must name the right one.
+        if project_id is not None and project_id != job.project_id:
+            raise HTTPException(404, "generation not found")
+        auth.require_project(principal, job.project_id, write=True)
+
+        if job.deleted_at is not None:
+            return {
+                "id": job.id,
+                "project_id": job.project_id,
+                "deleted": True,
+                "cancelled": False,
+                "media_cleanup_queued": True,
+            }
+
+        if job.submission_state == "SENT_UNCONFIRMED":
+            # The model was sent this creation and never told us what it did
+            # with it, so the charge is unknown and the work may still be
+            # running. Hiding it now would hide a bill nobody could ever
+            # settle. The same recheck that unblocks Cancel unblocks this.
+            raise HTTPException(
+                409,
+                "This creation is still being confirmed with the model. "
+                "Use 'Recheck credits' first, then delete it.",
+            )
+
+        cancelled = False
+        if job.status not in _DIRECTLY_DELETABLE_STATES:
+            try:
+                stopped = await container.gateway.cancel(job_id)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            terminal = {
+                JobStatus.CANCELLED.value,
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+            }
+            if stopped.status not in terminal:
+                # The generation could not be stopped safely — an unconfirmed
+                # submission whose charge is still unknown, or a provider that
+                # refused. Deleting now would hide work that is still running
+                # and still spending, so it is refused in the user's terms.
+                raise HTTPException(
+                    409,
+                    "This creation could not be stopped yet. Try again in a moment.",
+                )
+            cancelled = stopped.status == JobStatus.CANCELLED.value
+
+        with container.database.session() as session:
+            # Conditional on `deleted_at IS NULL`, so two concurrent deletes
+            # produce one stamp, one queue row and one event.
+            stamped = session.execute(
+                update(GenerationJob)
+                .where(GenerationJob.id == job_id, GenerationJob.deleted_at.is_(None))
+                # The development bypass has no user row to point at, so it
+                # records the deletion without an author rather than a name
+                # the users table does not know.
+                .values(
+                    deleted_at=utcnow(),
+                    deleted_by=None if principal.development_bypass else principal.user_id,
+                )
+            )
+            row = session.get(GenerationJob, job_id)
+            if row is None:  # pragma: no cover - the row is never removed.
+                raise HTTPException(404, "generation not found")
+            first_delete = int(getattr(stamped, "rowcount", 0) or 0) == 1
+            if first_delete:
+                session.add(
+                    GenerationEvent(
+                        generation_job_id=job_id,
+                        event_type="CREATION_DELETED",
+                        detail={
+                            "deleted_by": principal.user_id,
+                            "development_bypass": principal.development_bypass,
+                            "status_at_deletion": row.status,
+                            "cancelled_first": cancelled,
+                        },
+                    )
+                )
+            # Storage is reclaimed after this transaction commits, never
+            # inside it: a bucket that is briefly unreachable must not undo a
+            # deletion the user already saw succeed.
+            enqueue_creation_media_cleanup(session, row)
+            session.flush()
+
+        return {
+            "id": job_id,
+            "project_id": job.project_id,
+            "deleted": True,
+            "cancelled": cancelled,
+            "media_cleanup_queued": True,
+        }
+
     @app.post("/v1/generations/{job_id}/reconcile")
     def reconcile_generation(
         job_id: str,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        job = container.gateway.get(job_id)
-        if not job:
-            raise HTTPException(404, "generation not found")
+        job = _live_generation(job_id)
         auth.require_project(principal, job.project_id, write=True)
         try:
             reconciled = container.gateway.reconcile(job_id)

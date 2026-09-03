@@ -1,3 +1,11 @@
+from .creation_cleanup import (
+    DEFAULT_CREATION_CLEANUP_BACKOFF_SECONDS,
+    DEFAULT_CREATION_CLEANUP_LIMIT,
+    DEFAULT_CREATION_CLEANUP_MAX_ATTEMPTS,
+    CreationMediaCleanupSweep,
+    enqueue_creation_media_cleanup,
+    sweep_creation_media_cleanup,
+)
 from .direct_upload import (
     AuthorizedUpload,
     CompletionClaim,
@@ -75,6 +83,12 @@ from .video_renditions import (
 
 __all__ = [
     "AuthorizedUpload",
+    "DEFAULT_CREATION_CLEANUP_BACKOFF_SECONDS",
+    "DEFAULT_CREATION_CLEANUP_LIMIT",
+    "DEFAULT_CREATION_CLEANUP_MAX_ATTEMPTS",
+    "CreationMediaCleanupSweep",
+    "enqueue_creation_media_cleanup",
+    "sweep_creation_media_cleanup",
     "CompletionClaim",
     "DirectUploadConflict",
     "DirectUploadExpired",

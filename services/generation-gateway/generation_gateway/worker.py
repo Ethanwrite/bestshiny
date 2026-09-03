@@ -38,6 +38,12 @@ async def process_next_job(container) -> bool:  # type: ignore[no-untyped-def]
                         ),
                     ),
                 ),
+                # A deleted creation is never resumed. Deletion stops the
+                # generation first, so this is the second fence rather than
+                # the first: it is what guarantees that a row which slipped
+                # into a runnable state cannot spend money for a creation the
+                # user no longer has.
+                GenerationJob.deleted_at.is_(None),
             )
             .order_by(GenerationJob.priority.desc(), GenerationJob.created_at)
         )
@@ -163,6 +169,41 @@ def sweep_rendition_gc_once(container) -> int:  # type: ignore[no-untyped-def]
     return len(result.deleted_rows)
 
 
+def sweep_creation_media_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Reclaim the media of deleted creations. Never fatal to the worker.
+
+    Deleting a creation commits without touching object storage, on purpose:
+    a bucket that is briefly unreachable must not roll back a deletion the
+    user already saw succeed. This is the other half — retried under a
+    backoff, and only ever deleting an object nothing else references.
+    """
+
+    from media_service import sweep_creation_media_cleanup
+
+    result = sweep_creation_media_cleanup(
+        database=container.database,
+        storage=container.storage,
+        limit=max(1, container.settings.creation_media_cleanup_limit),
+        lease_seconds=container.settings.creation_media_cleanup_lease_seconds,
+        max_attempts=container.settings.creation_media_cleanup_max_attempts,
+        backoff_seconds=container.settings.creation_media_cleanup_backoff_seconds,
+    )
+    if result.failed:
+        logger.warning(
+            "creation media cleanup: %d row(s) exhausted their attempts and need an operator",
+            result.failed,
+        )
+    if result.completed or result.kept_shared:
+        logger.info(
+            "creation media cleanup: %d reclaimed (%d object(s), %d rendition(s)), %d kept shared",
+            result.completed,
+            result.objects_deleted,
+            result.renditions_deleted,
+            result.kept_shared,
+        )
+    return result.completed
+
+
 def verify_media_once(container) -> int:  # type: ignore[no-untyped-def]
     """Fully verify directly uploaded media. Never fatal to the worker.
 
@@ -248,6 +289,9 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
     rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
     verification_interval = max(0, int(container.settings.media_verification_interval_seconds))
+    creation_media_interval = max(
+        0, int(getattr(container.settings, "creation_media_cleanup_interval_seconds", 0))
+    )
     # Older embedders/tests may supply a deliberately narrow settings object.
     # Missing means disabled, never "run with guessed defaults".
     relayer_interval = max(
@@ -261,6 +305,7 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
     next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
     next_verification = asyncio.get_running_loop().time() if verification_interval else None
+    next_creation_media = asyncio.get_running_loop().time() if creation_media_interval else None
     next_relayer_sweep = (
         asyncio.get_running_loop().time()
         if relayer_interval and container.eip3009_relayer.configured
@@ -273,6 +318,15 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("EIP-3009 payment sweep failed")
             next_relayer_sweep = asyncio.get_running_loop().time() + relayer_interval
+        if (
+            next_creation_media is not None
+            and asyncio.get_running_loop().time() >= next_creation_media
+        ):
+            try:
+                await asyncio.to_thread(sweep_creation_media_once, container)
+            except Exception:
+                logger.exception("creation media cleanup sweep failed")
+            next_creation_media = asyncio.get_running_loop().time() + creation_media_interval
         if next_verification is not None and asyncio.get_running_loop().time() >= next_verification:
             try:
                 await asyncio.to_thread(verify_media_once, container)

@@ -2320,6 +2320,9 @@ function projectJobs() {
 function renderProductions() {
   const list = $("productionsList");
   if (!list) return;
+  // The rows are about to be replaced; an open menu anchored to one of them
+  // would be orphaned, so it closes with the redraw.
+  closeJobMenu();
   const jobs = projectJobs();
   const counts = { running: 0, queued: 0, completed: 0, failed: 0 };
   jobs.forEach((job) => { counts[bucketOf(job)] += 1; });
@@ -2370,7 +2373,8 @@ function renderProductions() {
     const bucket = bucketOf(job);
     const tone = statusTone(job.status);
     const credits = jobCredits(job);
-    return `<button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job="${escapeHTML(job.id)}">
+    return `<div class="job-row">
+      <button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job="${escapeHTML(job.id)}">
       <span class="job-rail ${tone}"></span>
       <span class="job-main">
         <span class="job-title">
@@ -2389,11 +2393,47 @@ function renderProductions() {
           : ""}
         <span class="job-cost mono">${credits ? `${credits} credits` : "—"}</span>
       </span>
-    </button>`;
+      </button>
+      <button class="job-menu" type="button" aria-haspopup="menu" aria-expanded="false"
+              data-job-menu="${escapeHTML(job.id)}" title="More actions"
+              aria-label="More actions for this creation">&#8943;</button>
+    </div>`;
   }).join("");
   list.querySelectorAll("[data-job]").forEach((button) => {
     button.addEventListener("click", guard(() => selectJob(button.dataset.job)));
   });
+  list.querySelectorAll("[data-job-menu]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleJobMenu(button);
+    });
+  });
+}
+
+/* ---- The row menu. One open at a time, closed by anything else. ---- */
+function closeJobMenu() {
+  document.querySelectorAll(".job-menu-panel").forEach((panel) => panel.remove());
+  document.querySelectorAll('.job-menu[aria-expanded="true"]')
+    .forEach((button) => button.setAttribute("aria-expanded", "false"));
+}
+
+function toggleJobMenu(button) {
+  const wasOpen = button.getAttribute("aria-expanded") === "true";
+  closeJobMenu();
+  if (wasOpen) return;
+  const jobId = button.dataset.jobMenu;
+  const panel = document.createElement("div");
+  panel.className = "job-menu-panel";
+  panel.setAttribute("role", "menu");
+  panel.innerHTML = `<button type="button" role="menuitem" class="is-danger" data-job-delete="${escapeHTML(jobId)}">Delete</button>`;
+  panel.querySelector("[data-job-delete]").addEventListener("click", (event) => {
+    event.stopPropagation();
+    closeJobMenu();
+    openDeleteCreationDialog(jobId);
+  });
+  button.parentElement.appendChild(panel);
+  button.setAttribute("aria-expanded", "true");
+  panel.querySelector("button").focus();
 }
 
 /* ---- My creations: the project's generations as a durable gallery ---- */
@@ -2467,6 +2507,81 @@ function openSaveDialogForJob(jobId) {
   state.savingJobId = jobId;
   $("promotePassengerAssetBtn").disabled = false;
   if (!$("saveAssetDialog").open) $("saveAssetDialog").showModal();
+}
+
+/* ---- Deleting a creation ----------------------------------------
+
+   The one destructive action on this page. Two doors reach it — the row's
+   menu and the Inspector — and both go through the same confirmation, the
+   same request and the same local cleanup, so the four numbers on this page
+   (the list, the state counts, the session panel and the project total) can
+   never disagree about what is left.
+
+   States with nothing left to stop delete in one step. Anything still being
+   made is stopped first, server-side; the dialog says so in those words. */
+const DIRECTLY_DELETABLE_JOB_STATES = new Set([
+  "COMPLETED", "FAILED", "CANCELLED", "RETRY_WAIT", "WORKER_NEEDS_USER_ACTION",
+]);
+
+let pendingDeleteJobId = null;
+
+function openDeleteCreationDialog(jobId) {
+  const job = state.jobs.get(jobId);
+  if (!job) return toast("Select a creation first");
+  pendingDeleteJobId = jobId;
+  const label = job.shotLabel || friendlyModel(job.model);
+  const credits = jobCredits(job);
+  $("deleteCreationSummary").innerHTML = `
+    <strong>${escapeHTML(label)}</strong><br>
+    <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
+    <span class="mono">${escapeHTML(job.id)}</span>${credits ? `<br>${credits} credits used` : ""}`;
+  $("deleteCreationRunningNote").hidden = DIRECTLY_DELETABLE_JOB_STATES.has(job.status);
+  $("deleteCreationError").textContent = "";
+  $("confirmDeleteCreationBtn").disabled = false;
+  if (!$("deleteCreationDialog").open) $("deleteCreationDialog").showModal();
+}
+
+function closeDeleteCreationDialog() {
+  pendingDeleteJobId = null;
+  $("deleteCreationDialog").close();
+}
+
+async function confirmDeleteCreation() {
+  const jobId = pendingDeleteJobId;
+  if (!jobId) return;
+  const button = $("confirmDeleteCreationBtn");
+  button.disabled = true;
+  $("deleteCreationError").textContent = "";
+  try {
+    await deleteCreation(jobId);
+  } catch (error) {
+    $("deleteCreationError").textContent = error.message;
+    button.disabled = false;
+    return;
+  }
+  closeDeleteCreationDialog();
+  toast("Deleted. Your credit history is unchanged.");
+}
+
+async function deleteCreation(jobId) {
+  // The project is named on the request as well as resolved server-side, so a
+  // stale row from another project can never delete something here.
+  const projectId = state.jobs.get(jobId)?.project_id || state.project?.id || null;
+  const scope = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  await request(`/v1/generations/${encodeURIComponent(jobId)}${scope}`, { method: "DELETE" });
+  forgetJob(jobId);
+}
+
+/** Drop a creation from the session's memory so every count on this page
+ *  falls immediately, without waiting for the next listing. */
+function forgetJob(jobId) {
+  state.jobs.delete(jobId);
+  if (state.selectedJobId === jobId) state.selectedJobId = null;
+  if ($("operationsJobId") && $("operationsJobId").value.trim() === jobId) {
+    $("operationsJobId").value = "";
+  }
+  if (state.operations.job?.id === jobId) renderGenerationControl(null);
+  renderProductions();
 }
 
 async function selectJob(id) {
@@ -2600,7 +2715,8 @@ function renderGenerationControl(job) {
       <div class="btn-row">
         <button class="btn btn-tertiary" type="button" data-empty-action="go-productions">Open Productions</button>
       </div>`;
-    ["retryJobBtn", "cancelJobBtn", "reconcileJobBtn"].forEach((id) => { $(id).disabled = true; });
+    ["retryJobBtn", "cancelJobBtn", "reconcileJobBtn", "deleteJobBtn"]
+      .forEach((id) => { if ($(id)) $(id).disabled = true; });
     return;
   }
   rememberJob(job);
@@ -2621,6 +2737,8 @@ function renderGenerationControl(job) {
   $("retryJobBtn").disabled = job.safe_to_retry !== true;
   $("cancelJobBtn").disabled = !["QUEUED", "SUBMITTED", "RUNNING", "RETRY_WAIT"].includes(job.status);
   $("reconcileJobBtn").disabled = !["SENT_UNCONFIRMED", "SUBMITTED"].includes(job.submission_state) && !["FAILED", "RUNNING"].includes(job.status);
+  // Any creation can be deleted; one still being made is stopped first.
+  if ($("deleteJobBtn")) $("deleteJobBtn").disabled = false;
 
   const events = job.events || [];
   const list = $("generationEvents");
@@ -4465,6 +4583,19 @@ on("loadJobBtn", "click", guard(loadGenerationJob));
 on("retryJobBtn", "click", guard(() => mutateGenerationJob("retry")));
 on("cancelJobBtn", "click", guard(() => mutateGenerationJob("cancel")));
 on("reconcileJobBtn", "click", guard(() => mutateGenerationJob("reconcile")));
+on("deleteJobBtn", "click", () => openDeleteCreationDialog(selectedJobId()));
+on("cancelDeleteCreationBtn", "click", closeDeleteCreationDialog);
+on("confirmDeleteCreationBtn", "click", guard(confirmDeleteCreation));
+// Escape and the backdrop both close the dialog without deleting; clearing the
+// pending id here means no later confirmation can act on a stale creation.
+on("deleteCreationDialog", "close", () => { pendingDeleteJobId = null; });
+// A row menu is dismissed by anything else the user does.
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".job-menu, .job-menu-panel")) closeJobMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeJobMenu();
+});
 
 /* Admin */
 on("operationsRefreshBtn", "click", guard(loadOperations));

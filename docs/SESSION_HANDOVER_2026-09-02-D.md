@@ -4,8 +4,10 @@
 overhaul on branch `claude/bestshiny-director-workflow-1a6b59` (worktree
 `.claude/worktrees/bestshiny-director-workflow-1a6b59`), committed as **`23f248d`**. Everything
 below was run and read back unless it is listed under §6 as unverified. The previous entry point,
-[`SESSION_HANDOVER_2026-09-02-C.md`](SESSION_HANDOVER_2026-09-02-C.md), still describes production
-(`DEPLOYED_SHA = 86987c3`, alembic `0069`); **production is untouched**.
+[`SESSION_HANDOVER_2026-09-02-C.md`](SESSION_HANDOVER_2026-09-02-C.md), described production before
+this work. **Production was deployed from this branch on 2026-09-03 ≈01:08Z: `DEPLOYED_SHA =
+c3b184b`, `.prev = 86987c3`, alembic `0070`, verified (see `docs/DEPLOYMENT.md` §6).** The PR
+against `main` is open; after it merges, redeploy from `main` or record the squash SHA.
 
 **The dev stack (`ai-director-platform` compose, api :8080 / web :3000) was rebuilt from `23f248d`
 on 2026-09-02** and its database upgraded to `0070_creative_director_screenplay` by the api

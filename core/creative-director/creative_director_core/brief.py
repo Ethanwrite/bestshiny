@@ -28,6 +28,7 @@ from .schemas import (
     CHARACTER_LIST_PATH,
     FORMAT_DEFAULTS,
     INTEGER_PATHS,
+    MAX_CAST,
     MAX_QUESTIONS_PER_TURN,
     NESTED_OBJECT_PATHS,
     RESOLVED_QUESTION_STATUSES,
@@ -225,7 +226,7 @@ def sanitize_value(path: str, value: Any) -> Any:
         if not isinstance(value, list):
             return None
         members = [member for member in (sanitize_character(item) for item in value) if member]
-        return members[:8] or None
+        return members[:MAX_CAST] or None
     if path in NESTED_OBJECT_PATHS:
         return value if isinstance(value, dict) else None
     return None
@@ -554,6 +555,15 @@ def _apply_character_operation(  # noqa: PLR0913 - one place for the member merg
                 # SET adds members only when the cast is empty or the model
                 # attributes the addition to the user.
                 pass
+            if len(members) >= MAX_CAST:
+                # The cast cap is the same number the screenplay, the anchors
+                # and the identity locks are bound by; refuse the addition
+                # instead of appending a member nothing downstream can carry.
+                reject(
+                    operation.model_copy(update={"path": f"{CHARACTER_LIST_PATH}.{key}"}),
+                    "CAST_LIMIT_REACHED",
+                )
+                continue
             members.append(dict(member))
             by_key[key] = members[-1]
             record(path_key, operation, source)

@@ -72,6 +72,9 @@ from .schemas import (
     ASSUMED_SOURCES,
     COMMERCE_FORMATS,
     FORMAT_DEFAULTS,
+    MAX_CAST,
+    MAX_PROP_ANCHORS,
+    MAX_SCENE_ANCHORS,
     RETRYABLE_REASON_CODES,
     SPECS_BY_CODE,
     BriefOperation,
@@ -84,11 +87,12 @@ from .schemas import (
     StructuredActionKind,
 )
 from .screenplay import (
+    AnchorDerivation,
     ScreenplayInvalid,
     anchor_keys_for_shot,
     apply_beat_edits,
     beats_from_screenplay,
-    derive_anchor_specs,
+    derive_anchors,
     deterministic_screenplay,
     screenplay_hash,
     script_name,
@@ -1481,7 +1485,9 @@ class CreativeDirectorService:
             brief = self._approved_brief(session, row)
             screenplay = validate_screenplay(_content_without_audit(screenplay_row.content_json))
             row.status = CreativeSessionStatus.SCREENPLAY_APPROVED.value
-            anchors = self._derive_anchors(session, row, brief, screenplay_row, screenplay)
+            anchors, derivation = self._derive_anchors(
+                session, row, brief, screenplay_row, screenplay
+            )
             actions = self._emit_visual_actions(session, row, anchors, dict(brief.fields_json))
             row.status = CreativeSessionStatus.VISUALS_IN_PROGRESS.value
             session.flush()
@@ -1490,6 +1496,7 @@ class CreativeDirectorService:
                 "screenplay": self._screenplay_view(screenplay_row),
                 "actions": actions,
                 "anchors": [_anchor_view(anchor) for anchor in anchors],
+                "coverage": derivation.coverage_json(),
                 "session_status": row.status,
             }
 
@@ -1501,16 +1508,20 @@ class CreativeDirectorService:
         brief: CreativeBriefRevision,
         screenplay_row: CreativeScreenplayRevision,
         screenplay: Screenplay,
-    ) -> list[CreativeVisualAnchor]:
+    ) -> tuple[list[CreativeVisualAnchor], AnchorDerivation]:
         """Anchors implied by brief and screenplay, versioned by content.
 
         A key whose depiction changed gets a new version and the old row is
         SUPERSEDED; a key that is no longer implied is SUPERSEDED too. Character
         anchors materialize project Character rows under the script name the
         narrative compiler will parse, so the compile binds the same entity.
+        Returns the anchors together with the derivation's coverage report, so
+        the caller can record which screenplay elements deliberately get no key
+        visual and why.
         """
 
-        specs = derive_anchor_specs(dict(brief.fields_json), screenplay)
+        derivation: AnchorDerivation = derive_anchors(dict(brief.fields_json), screenplay)
+        specs = list(derivation.specs)
         rows = list(
             session.scalars(select(CreativeVisualAnchor).where(CreativeVisualAnchor.session_id == row.id))
         )
@@ -1558,7 +1569,7 @@ class CreativeDirectorService:
                 anchor.status = CreativeAnchorStatus.SUPERSEDED.value
         session.flush()
         result.sort(key=lambda anchor: (not anchor.required, anchor.kind, anchor.anchor_key))
-        return result
+        return result, derivation
 
     def _emit_visual_actions(
         self,
@@ -2017,6 +2028,10 @@ class CreativeDirectorService:
                     }
                     for anchor in anchors
                 ],
+                # Which screenplay elements deliberately carry no key visual,
+                # and why. A background-only character is a decision on record,
+                # never an element that quietly fell off a slice.
+                "coverage": derive_anchors(fields, validate_screenplay(screenplay_content)).coverage_json(),
                 "rules": {
                     "palette": get_path(fields, "visual_style.palette") or "",
                     "medium": get_path(fields, "visual_style.medium") or "",
@@ -2727,6 +2742,29 @@ class CreativeDirectorService:
                 if shot_id in existing:
                     continue
                 anchor_keys = [str(key) for key in intent.get("anchors") or []]
+                unresolved = [key for key in anchor_keys if key not in anchor_ids_by_key]
+                # Every character on screen must have a key visual behind it.
+                # An optional scene or prop the user skipped is a recorded
+                # decision; a character with no anchor is an unanchored face,
+                # and compiling one silently is the defect this refuses.
+                missing_characters = [
+                    key
+                    for key in unresolved
+                    if key.startswith("character:")
+                ] + [
+                    key
+                    for key in anchor_keys
+                    if key.startswith("character:")
+                    and key in anchor_ids_by_key
+                    and not (identities.get(key) or {}).get("identity_version_id")
+                ]
+                if missing_characters:
+                    raise CreativeSessionConflict(
+                        "compiled shots reference characters with no locked identity: "
+                        + ", ".join(sorted(set(missing_characters))),
+                        reason_code=ReasonCode.CHARACTER_IDENTITY_NOT_COVERED.value,
+                        details={"shot_id": shot_id, "anchor_keys": sorted(set(missing_characters))},
+                    )
                 session.add(
                     CreativeShotLineage(
                         session_id=session_id,
@@ -2746,7 +2784,7 @@ class CreativeDirectorService:
                             if key in identities and identities[key].get("identity_version_id")
                         ],
                         style_lock_id=lineage.get("style_lock_id"),
-                        intent_json=intent,
+                        intent_json={**intent, "unresolved_anchor_keys": unresolved},
                     )
                 )
             session.flush()
@@ -2859,6 +2897,15 @@ class CreativeDirectorService:
                 (item for item in screenplay_rows if item.revision == row.current_screenplay_revision), None
             )
             brief_view = self._brief_view(brief) if brief is not None else None
+            coverage: dict[str, Any] | None = None
+            if current_screenplay is not None and brief is not None:
+                try:
+                    coverage = derive_anchors(
+                        dict(brief.fields_json),
+                        validate_screenplay(_content_without_audit(current_screenplay.content_json)),
+                    ).coverage_json()
+                except ScreenplayInvalid:
+                    coverage = None
             return CreativeSessionState(
                 session={
                     "id": row.id,
@@ -2872,6 +2919,16 @@ class CreativeDirectorService:
                     "beat_revision": row.current_beat_revision,
                     "compiled_episode_id": row.compiled_episode_id,
                     "superseded_anchors": superseded,
+                    #: What the pipeline can carry end to end; the SPA reads
+                    #: this rather than mirroring the number in JS.
+                    "limits": {
+                        "max_cast": MAX_CAST,
+                        "max_scene_anchors": MAX_SCENE_ANCHORS,
+                        "max_prop_anchors": MAX_PROP_ANCHORS,
+                    },
+                    #: Which screenplay elements deliberately have no key
+                    #: visual, and why.
+                    "anchor_coverage": coverage,
                     "shot_lineage_count": int(
                         session.scalar(
                             select(func.count())

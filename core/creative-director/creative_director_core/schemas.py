@@ -31,6 +31,25 @@ ANCHOR_PROMPT_VERSION = "creative-anchor-v2"
 #: or is defaulted at proposal time.
 MAX_QUESTIONS_PER_TURN = 3
 
+#: The largest cast the pipeline can carry end to end. Every character that
+#: appears in a beat or a shot gets its own key visual and a locked
+#: CharacterIdentityVersion, so this single number bounds the brief's cast, the
+#: screenplay schema, the director's prompt, anchor derivation, the compiler
+#: and the UI. A screenplay over the cap is *refused* at validation - the cast
+#: is never silently sliced, because a sliced character still acts on screen
+#: with no canonical reference behind it.
+MAX_CAST = 12
+
+#: Locations that may each receive their own canonical SCENE key visual. Equal
+#: to the screenplay's own scene cap: every scene a beat actually plays in is
+#: anchored, so the frame-anchor planner can always resolve one.
+MAX_SCENE_ANCHORS = 12
+
+#: Distinct props that may receive their own key visual. Unlike the cast this
+#: is a budget, not a contract: a prop beyond it is recorded as uncovered with
+#: its reason rather than refusing the screenplay.
+MAX_PROP_ANCHORS = 6
+
 
 class FieldWeight(IntEnum):
     """How much a missing field hurts, for one format."""
@@ -132,6 +151,7 @@ class ReasonCode(StrEnum):
     LOCK_SERVICES_UNAVAILABLE = "LOCK_SERVICES_UNAVAILABLE"
     LOCK_FAILED = "LOCK_FAILED"
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
+    CHARACTER_IDENTITY_NOT_COVERED = "CHARACTER_IDENTITY_NOT_COVERED"
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
 
 
@@ -703,8 +723,8 @@ class Screenplay(BaseModel):
     treatment: Treatment
     invariants: list[str] = Field(default_factory=list, max_length=40)
     variables: list[str] = Field(default_factory=list, max_length=40)
-    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=12)
-    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=12)
+    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=MAX_CAST)
+    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=MAX_SCENE_ANCHORS)
     beats: list[ScreenplayBeat] = Field(min_length=1, max_length=40)
     product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
     required_copy: list[str] = Field(default_factory=list, max_length=20)

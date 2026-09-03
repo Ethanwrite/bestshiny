@@ -1298,7 +1298,7 @@ def test_an_anchor_whose_content_changed_gets_a_new_version_instead_of_reusing_t
         )
         session.add(screenplay_row)
         session.flush()
-        first_rows = service._derive_anchors(
+        first_rows, _first_coverage = service._derive_anchors(
             session, row, brief, screenplay_row, validate_screenplay(SCREENPLAY)
         )
         mira_v1 = next(a for a in first_rows if a.anchor_key == "character:mira")
@@ -1315,7 +1315,9 @@ def test_an_anchor_whose_content_changed_gets_a_new_version_instead_of_reusing_t
         )
         session.add(second_row)
         session.flush()
-        second_rows = service._derive_anchors(session, row, brief, second_row, validate_screenplay(changed))
+        second_rows, _second_coverage = service._derive_anchors(
+            session, row, brief, second_row, validate_screenplay(changed)
+        )
         mira_v2 = next(a for a in second_rows if a.anchor_key == "character:mira")
         assert mira_v2.version == 2 and mira_v2.status == "PENDING" and mira_v2.id != mira_v1.id
         assert mira_v1.status == "SUPERSEDED"

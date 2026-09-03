@@ -3390,6 +3390,14 @@ function renderBriefFields(brief) {
   return rows.concat(cast).join("") || "<p class='empty-inline'>Nothing captured yet.</p>";
 }
 
+// The pipeline's cast limit comes from the server (session.limits.max_cast,
+// which is creative_director_core.schemas.MAX_CAST). The fallback matters only
+// before the first state load; the number is never authored twice.
+const CREATIVE_CAST_FALLBACK = 12;
+function creativeMaxCast() {
+  return Number(state.creative?.session?.session?.limits?.max_cast) || CREATIVE_CAST_FALLBACK;
+}
+
 function renderBriefEditor(brief) {
   const fields = brief.fields || {};
   const text = (label, path, value, extra = "") =>
@@ -3421,7 +3429,7 @@ function renderBriefEditor(brief) {
     text("Hook", "hook", fields.hook),
     text("Call to action", "call_to_action", fields.call_to_action),
     text("Audience", "audience", fields.audience),
-    `<div class="creative-cast"><b>Characters</b>${cast}<div><button class="btn btn-tertiary" type="button" data-cast-add="1">Add character</button></div></div>`,
+    `<div class="creative-cast"><b>Characters</b>${cast}<div><button class="btn btn-tertiary" type="button" data-cast-add="1" ${(fields.characters || []).length >= creativeMaxCast() ? "disabled" : ""}>Add character</button><small class="creative-cast-limit">Every character who appears on screen gets its own key visual and identity lock; at most ${creativeMaxCast()}.</small></div></div>`,
   ].join("");
 }
 
@@ -3555,6 +3563,20 @@ function renderScreenplay(view) {
     ${(content.unresolved || []).length ? `<h4>Unresolved creative choices</h4>${list(content.unresolved)}` : ""}
     <h4>Script as compiled</h4><pre class="mono" style="white-space:pre-wrap;font-size:11px">${escapeHTML(screenplay.script_text || "")}</pre>
     <div class="creative-revisions">Revisions: ${escapeHTML(revisions)}${screenplay.skill_version ? ` · skill ${escapeHTML(screenplay.skill_version)}` : ""}</div>`;
+}
+
+function renderUncoveredElements(view) {
+  const uncovered = view.session?.anchor_coverage?.uncovered || [];
+  if (!uncovered.length) return "";
+  const reasons = {
+    NOT_IN_ANY_BEAT_OR_SHOT: "named in the treatment only, never on screen",
+    SCENE_NOT_USED_BY_ANY_BEAT: "no beat plays in this scene",
+    SCENE_ANCHOR_LIMIT: "beyond the scene key-visual budget",
+    PROP_ANCHOR_LIMIT: "beyond the prop key-visual budget",
+  };
+  const rows = uncovered.map((item) =>
+    `<li><b>${escapeHTML(item.title)}</b> <small>${escapeHTML(item.kind.toLowerCase())} · ${escapeHTML(reasons[item.reason] || item.reason)}</small></li>`).join("");
+  return `<div class="creative-uncovered"><b>No key visual (on record)</b><ul>${rows}</ul></div>`;
 }
 
 function renderAnchors(view) {
@@ -3761,7 +3783,7 @@ function renderCreative() {
     const generating = anchors.some((anchor) => anchor.status === "GENERATING");
     const polling = Boolean(creativePoll && creativePoll.sessionId === view.session.id);
     $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${polling ? " · auto-refreshing" : ""}`;
-    $("creativeAnchorGrid").innerHTML = renderAnchors(view);
+    $("creativeAnchorGrid").innerHTML = renderAnchors(view) + renderUncoveredElements(view);
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
       const media = await resolveAssetThumbnail(anchor.media_asset_id).catch(() => null);
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
@@ -4517,6 +4539,10 @@ on("creativeBriefEditor", "click", (event) => {
   if (event.target.closest("[data-cast-add]")) {
     const cast = $("creativeBriefEditor").querySelector(".creative-cast");
     const index = cast.querySelectorAll("[data-cast-row]").length;
+    if (index >= creativeMaxCast()) {
+      setNotice("creativeBriefNotice", `<b>Cast is full</b>At most ${creativeMaxCast()} characters; each one needs its own key visual and identity lock.`, "is-warning");
+      return;
+    }
     const row = document.createElement("div");
     row.className = "creative-cast-row";
     row.dataset.castRow = String(index);

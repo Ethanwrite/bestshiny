@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .brief import BriefEngine
-from .schemas import ACTION_VERBS, MAX_QUESTIONS_PER_TURN, SHOT_TYPES, SPECS_BY_CODE
+from .schemas import ACTION_VERBS, MAX_CAST, MAX_QUESTIONS_PER_TURN, SHOT_TYPES, SPECS_BY_CODE
 
 #: Conversation budget, in characters of turn content, before compression.
 HISTORY_CHAR_BUDGET = 14000
@@ -108,6 +108,10 @@ Shot contract (generation shots are single-action):
   Duration is 2-10 seconds per shot; the total should approximate the brief's duration.
 - Every actor and speaker must be a character in "characters"; beat.scene_key must be a scene key;
   beats are numbered 1..n consecutively.
+- Write at most {MAX_CAST} characters. Every character who appears in a beat or a shot gets a
+  generated key visual and a locked identity, so one extra name is one more unanchored face; a
+  cast over the limit is rejected, not trimmed. Name in "characters" only who is actually on
+  screen - describe anyone who is merely referred to inside the prose instead.
 - State an explicit start_state, end_state and gaze_target for every shot. Nobody looks into the
   lens unless the client asked.
 - Product claims and required copy stay exact. Mark every open creative choice in "unresolved".

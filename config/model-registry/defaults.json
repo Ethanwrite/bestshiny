@@ -1,5 +1,5 @@
 {
-  "version": "phase2-model-infrastructure-v7",
+  "version": "phase2-model-infrastructure-v8",
   "models": [
     {
       "logical_name": "gpt-5.6-sol-openrouter",
@@ -446,11 +446,55 @@
         "EDGE",
         "TEMPORARY"
       ],
-      "enabled": true,
+      "enabled": false,
       "live_enabled": false,
       "metadata_json": {
         "transport": "openrouter",
-        "not_for_face_identity_verification": true
+        "not_for_face_identity_verification": true,
+        "retired_reason": "Official Voyage multimodal transport replaces the string-only OpenRouter embeddings surface."
+      }
+    },
+    {
+      "logical_name": "voyage-multimodal-3.5-official",
+      "provider": "voyage",
+      "provider_model_id": "voyage-multimodal-3.5",
+      "modality": "multimodal_embedding",
+      "capabilities": [
+        "multimodal_embedding"
+      ],
+      "quality_tier": "PREMIUM",
+      "cost_class": "STANDARD",
+      "provider_trust_level": "PRODUCTION",
+      "criticality_allowed": [
+        "CANONICAL",
+        "HERO",
+        "IMPORTANT",
+        "STANDARD",
+        "EDGE",
+        "TEMPORARY"
+      ],
+      "enabled": true,
+      "live_enabled": false,
+      "context_window": 32000,
+      "metadata_json": {
+        "transport": "voyage",
+        "api_surface": "POST /v1/multimodalembeddings",
+        "natively_multimodal": true,
+        "credential_required": true,
+        "not_for_face_identity_verification": true,
+        "capability_source": "https://docs.voyageai.com/reference/multimodal-embeddings-api"
+      },
+      "capability_profile": {
+        "profile_version": "voyage-multimodal-3.5-official-v1",
+        "supported_operations": [
+          "multimodal_embedding"
+        ],
+        "provider_metadata": {
+          "adapter": "voyage",
+          "endpoint": "/v1/multimodalembeddings",
+          "output_dimensions": [256, 512, 1024, 2048]
+        },
+        "source": "MANUAL_PRIOR"
       }
     },
     {
@@ -1713,7 +1757,7 @@
     },
     {
       "role": "MULTIMODAL_EMBEDDING",
-      "model_logical_name": "voyage-multimodal-3.5-openrouter",
+      "model_logical_name": "voyage-multimodal-3.5-official",
       "priority": 0
     },
     {

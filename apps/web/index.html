@@ -340,37 +340,67 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <div class="creative-stages">
                 <section class="pane-block" id="creativeBriefCard" hidden>
                   <div class="pane-head"><h2>Creative brief</h2><span id="creativeBriefStatus" class="badge">Proposed</span></div>
+                  <div id="creativeBriefNotice" class="creative-notice" hidden></div>
                   <div id="creativeBriefFields" class="kv-list"></div>
+                  <div id="creativeBriefEditor" class="creative-editor" hidden></div>
+                  <div id="creativeQuestions" class="creative-questions"></div>
+                  <div id="creativeAssumptions" class="creative-assumptions"></div>
                   <div class="btn-row">
-                    <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief &amp; generate key visuals</button>
+                    <button id="creativeEditBriefBtn" class="btn btn-tertiary" type="button">Edit brief</button>
+                    <button id="creativeSaveBriefBtn" class="btn btn-secondary" type="button" hidden>Save changes</button>
+                    <button id="creativeCancelBriefBtn" class="btn btn-tertiary" type="button" hidden>Cancel</button>
+                    <label class="check-inline" id="creativeAcceptAssumptionsLabel" hidden><input type="checkbox" id="creativeAcceptAssumptions" /> I accept the director's assumptions above</label>
+                    <button id="creativeApproveBriefBtn" class="btn btn-primary" type="button">Approve brief</button>
                   </div>
-                  <p class="pane-note">Approving generates the key visuals below through the ordinary image pipeline — each one is priced and reserved like any generation.</p>
+                  <p class="pane-note">Approval freezes the brief and hands it to the director, who writes the treatment and screenplay next. Nothing is generated until you approve the screenplay.</p>
+                </section>
+                <section class="pane-block" id="creativeScreenplayCard" hidden>
+                  <div class="pane-head"><h2>Treatment &amp; screenplay</h2><span id="creativeScreenplayStatus" class="badge">Drafting</span></div>
+                  <div id="creativeScreenplayNotice" class="creative-notice" hidden></div>
+                  <div id="creativeScreenplayBody" class="creative-screenplay"></div>
+                  <div id="creativeScreenplayEditor" hidden>
+                    <textarea id="creativeScreenplayJson" rows="18" spellcheck="false"></textarea>
+                    <p class="field-note">The structured screenplay, exactly as the director writes it: one primary action or one line per shot. Saving creates a new revision; only the revision you approve is compiled.</p>
+                  </div>
+                  <div class="btn-row">
+                    <button id="creativeRedraftBtn" class="btn btn-tertiary" type="button">Redraft with the director</button>
+                    <button id="creativeEditScreenplayBtn" class="btn btn-tertiary" type="button">Edit screenplay</button>
+                    <button id="creativeSaveScreenplayBtn" class="btn btn-secondary" type="button" hidden>Save as new revision</button>
+                    <button id="creativeCancelScreenplayBtn" class="btn btn-tertiary" type="button" hidden>Cancel</button>
+                    <label class="check-inline" id="creativeAcceptDeterministicLabel" hidden><input type="checkbox" id="creativeAcceptDeterministic" /> Use this scaffold anyway</label>
+                    <button id="creativeApproveScreenplayBtn" class="btn btn-primary" type="button">Approve screenplay &amp; generate key visuals</button>
+                  </div>
+                  <p class="pane-note">Approving derives the key visuals from the brief and this exact screenplay revision, then generates them through the ordinary image pipeline — each one priced and reserved like any generation.</p>
                 </section>
                 <section class="pane-block" id="creativeVisualsCard" hidden>
                   <div class="pane-head"><h2>Key visuals</h2><span id="creativeVisualsStatus" class="badge">Waiting</span></div>
+                  <div id="creativeVisualsNotice" class="creative-notice" hidden></div>
                   <div id="creativeAnchorGrid" class="asset-grid"></div>
                   <div class="btn-row">
                     <button id="creativeSyncVisualsBtn" class="btn btn-tertiary" type="button">Refresh visuals</button>
                     <button id="creativeRetryVisualsBtn" class="btn btn-tertiary" type="button" hidden>Retry failed</button>
                     <button id="creativeProposeBibleBtn" class="btn btn-secondary" type="button" disabled>Draft visual bible</button>
                   </div>
+                  <p class="pane-note">Required visuals (characters, style plate, a commerce product) must be ready before the bible can be drafted. An optional one that failed can be retried or skipped, on record.</p>
                 </section>
                 <section class="pane-block" id="creativeBibleCard" hidden>
                   <div class="pane-head"><h2>Visual bible</h2><span id="creativeBibleStatus" class="badge">Draft</span></div>
+                  <div id="creativeBibleNotice" class="creative-notice" hidden></div>
                   <div id="creativeBibleContent" class="kv-list"></div>
+                  <div id="creativeBibleLineage" class="kv-list"></div>
                   <div class="btn-row">
                     <button id="creativeLockBibleBtn" class="btn btn-primary" type="button">Approve &amp; lock this version</button>
                   </div>
-                  <p class="pane-note">Locking freezes this version permanently. Later changes create a new version that needs approval again.</p>
+                  <p class="pane-note">Locking creates each character's canonical identity version and the project's style lock through the platform's own services. If a lock fails, compilation is blocked until it succeeds.</p>
                 </section>
                 <section class="pane-block" id="creativeBeatsCard" hidden>
                   <div class="pane-head"><h2>Story beats &amp; shot plan</h2><span id="creativeBeatsStatus" class="badge">Proposed</span></div>
                   <div id="creativeBeatList" class="output-box"></div>
                   <div class="btn-row">
-                    <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats</button>
+                    <button id="creativeProposeBeatsBtn" class="btn btn-secondary" type="button">Draft beats from the screenplay</button>
                     <button id="creativeApproveBeatsBtn" class="btn btn-primary" type="button" hidden>Approve &amp; compile shots</button>
                   </div>
-                  <p class="pane-note">Approval compiles the beats into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
+                  <p class="pane-note">Edit a line, a staging note or a shot's duration here; approval saves your edits as the screenplay revision that is compiled into the same scenes, shots and continuity graph a written script produces — then you continue in Director.</p>
                 </section>
               </div>
             </div>
@@ -538,14 +568,24 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <h3 class="group-title">Stages</h3>
                 <div class="kv-list" id="creativeStageList">
                   <div class="kv"><span>1 · Brief</span><b data-creative-stage="brief">—</b></div>
-                  <div class="kv"><span>2 · Key visuals</span><b data-creative-stage="visuals">—</b></div>
-                  <div class="kv"><span>3 · Visual bible</span><b data-creative-stage="bible">—</b></div>
-                  <div class="kv"><span>4 · Beats &amp; shots</span><b data-creative-stage="beats">—</b></div>
+                  <div class="kv"><span>2 · Screenplay</span><b data-creative-stage="screenplay">—</b></div>
+                  <div class="kv"><span>3 · Key visuals</span><b data-creative-stage="visuals">—</b></div>
+                  <div class="kv"><span>4 · Visual bible</span><b data-creative-stage="bible">—</b></div>
+                  <div class="kv"><span>5 · Beats &amp; shots</span><b data-creative-stage="beats">—</b></div>
+                </div>
+              </section>
+              <section class="group">
+                <h3 class="group-title">Director</h3>
+                <div class="kv-list" id="creativeReasonerList">
+                  <div class="kv"><span>Last reply</span><b data-creative-meta="reasoner">—</b></div>
+                  <div class="kv"><span>Skill</span><b data-creative-meta="skill" class="mono">—</b></div>
+                  <div class="kv"><span>Open questions</span><b data-creative-meta="open">—</b></div>
+                  <div class="kv"><span>Assumptions</span><b data-creative-meta="assumptions">—</b></div>
                 </div>
               </section>
               <section class="group">
                 <h3 class="group-title">How this works</h3>
-                <p class="field-note">The director only asks for what is missing and high-value. Every stage waits for your approval; nothing is generated without the same credit and routing checks as the Create page.</p>
+                <p class="field-note">The director reads the whole conversation through its Skill and only asks for what is missing and high-value. You can correct any fact, edit the brief and the screenplay, and every stage waits for your approval; nothing is generated without the same credit and routing checks as the Create page. When the director model is unavailable, the fallback is labelled — never passed off as the director.</p>
               </section>
             </div>
           </div>

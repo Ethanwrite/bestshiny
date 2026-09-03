@@ -36,7 +36,7 @@ from production_domain.models import ModelDefinition, ModelPricingProfile
 from sqlalchemy import select
 from video_platform_api.container import build_container
 
-EXPECTED_MODEL_COUNT = 24
+EXPECTED_MODEL_COUNT = 25
 
 # The five that carry no price, and why. Each is a deliberate refusal, not a gap
 # waiting to be filled with a guess.

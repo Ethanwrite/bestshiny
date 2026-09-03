@@ -212,6 +212,9 @@ class Settings(BaseSettings):
     # double the silent rate on Veo 3.1. Stated explicitly so the bill matches
     # the quote rather than a default that can move.
     openrouter_video_generate_audio: bool = True
+    voyage_api_key: str = ""
+    voyage_base_url: str = "https://api.voyageai.com"
+    voyage_multimodal_model: str = "voyage-multimodal-3.5"
     ark_api_key: str = ""
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model_id: str = ""

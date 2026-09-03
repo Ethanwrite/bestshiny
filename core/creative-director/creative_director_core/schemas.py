@@ -5,16 +5,26 @@ field carries a per-format value weight, and the dialogue only ever asks for
 fields that are missing *and* high-value for the selected format - the
 question list is computed from the gaps, so a user who supplies everything up
 front is asked nothing and a fixed questionnaire cannot exist.
+
+Since 2026-09-02 the director's model turn is a validated
+``DirectorTurnResult``: a message in the user's language plus explicit brief
+*operations* (SET / REPLACE / UPSERT / REMOVE / KEEP) with provenance, the
+questions it considers answered or skipped, the assumptions it proposes and
+its creative notes. The screenplay the model writes after brief approval is a
+validated ``Screenplay``. Both schemas are strict: a malformed model reply is
+rejected or degraded on record, never turned into a 500.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
+from typing import Any, Literal
 
 from production_domain.models import CreativeFormat
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-ANCHOR_PROMPT_VERSION = "creative-anchor-v1"
+ANCHOR_PROMPT_VERSION = "creative-anchor-v2"
 
 #: The most questions one director turn may ask. Clarification is a dialogue,
 #: not a form; anything beyond the highest-value gaps waits for the next turn
@@ -38,6 +48,103 @@ class StructuredActionKind(StrEnum):
     COMPILE_EPISODE = "COMPILE_EPISODE"
     OPEN_OBLIGATION = "OPEN_OBLIGATION"
     ESTABLISH_FACT = "ESTABLISH_FACT"
+    LOCK_CHARACTER_IDENTITY = "LOCK_CHARACTER_IDENTITY"
+    LOCK_PROJECT_STYLE = "LOCK_PROJECT_STYLE"
+
+
+class BriefOperationKind(StrEnum):
+    """Explicit merge semantics for one brief field.
+
+    SET fills an empty field; REPLACE overwrites an existing value and is only
+    honoured when the user said so; UPSERT updates or adds one member of a
+    list (characters, selling points); REMOVE deletes a value or member on the
+    user's explicit request; KEEP records that an existing fact was confirmed.
+    """
+
+    SET = "SET"
+    REPLACE = "REPLACE"
+    UPSERT = "UPSERT"
+    REMOVE = "REMOVE"
+    KEEP = "KEEP"
+
+
+class ProvenanceSource(StrEnum):
+    """Who established a brief value. Only the first three are user facts."""
+
+    USER_STATED = "USER_STATED"
+    USER_EDIT = "USER_EDIT"
+    ASSUMPTION_ACCEPTED = "ASSUMPTION_ACCEPTED"
+    MODEL_INFERRED = "MODEL_INFERRED"
+    DEFAULT = "DEFAULT"
+
+
+USER_ESTABLISHED_SOURCES = frozenset(
+    {
+        ProvenanceSource.USER_STATED.value,
+        ProvenanceSource.USER_EDIT.value,
+        ProvenanceSource.ASSUMPTION_ACCEPTED.value,
+    }
+)
+ASSUMED_SOURCES = frozenset({ProvenanceSource.MODEL_INFERRED.value, ProvenanceSource.DEFAULT.value})
+
+
+class QuestionStatus(StrEnum):
+    UNASKED = "UNASKED"
+    ASKED = "ASKED"
+    ANSWERED = "ANSWERED"
+    SKIPPED_BY_USER = "SKIPPED_BY_USER"
+    ASSUMPTION_ACCEPTED = "ASSUMPTION_ACCEPTED"
+
+
+#: Statuses that satisfy a CRITICAL field for proposal and approval.
+RESOLVED_QUESTION_STATUSES = frozenset(
+    {QuestionStatus.ANSWERED.value, QuestionStatus.ASSUMPTION_ACCEPTED.value}
+)
+
+
+class ReasonCode(StrEnum):
+    """Machine-readable outcomes recorded on turns, revisions and replies."""
+
+    MODEL_REPLY = "MODEL_REPLY"
+    MODEL_OPERATIONS_APPLIED = "MODEL_OPERATIONS_APPLIED"
+    MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID"
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    MODEL_BUDGET_REFUSED = "MODEL_BUDGET_REFUSED"
+    MODEL_RUNTIME_NOT_CONFIGURED = "MODEL_RUNTIME_NOT_CONFIGURED"
+    MODEL_CALL_ERROR = "MODEL_CALL_ERROR"
+    DETERMINISTIC_FILL = "DETERMINISTIC_FILL"
+    DETERMINISTIC_FALLBACK = "DETERMINISTIC_FALLBACK"
+    OPERATIONS_REJECTED = "OPERATIONS_REJECTED"
+    CONTEXT_COMPRESSED = "CONTEXT_COMPRESSED"
+    SKILL_LOADED = "SKILL_LOADED"
+    SKILL_UNAVAILABLE = "SKILL_UNAVAILABLE"
+    BRIEF_NOT_PROPOSED = "BRIEF_NOT_PROPOSED"
+    CRITICAL_UNANSWERED = "CRITICAL_UNANSWERED"
+    ASSUMPTIONS_UNCONFIRMED = "ASSUMPTIONS_UNCONFIRMED"
+    REVISION_SUPERSEDED = "REVISION_SUPERSEDED"
+    DETERMINISTIC_SCREENPLAY_UNCONFIRMED = "DETERMINISTIC_SCREENPLAY_UNCONFIRMED"
+    REQUIRED_ANCHORS_NOT_READY = "REQUIRED_ANCHORS_NOT_READY"
+    OPTIONAL_ANCHORS_NOT_TERMINAL = "OPTIONAL_ANCHORS_NOT_TERMINAL"
+    ANCHOR_SKIPPED = "ANCHOR_SKIPPED"
+    ANCHOR_SUPERSEDED = "ANCHOR_SUPERSEDED"
+    STYLE_LOCK_INHERITED = "STYLE_LOCK_INHERITED"
+    STYLE_LOCK_REQUIRES_USER = "STYLE_LOCK_REQUIRES_USER"
+    LOCK_SERVICES_UNAVAILABLE = "LOCK_SERVICES_UNAVAILABLE"
+    LOCK_FAILED = "LOCK_FAILED"
+    BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
+    IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
+
+
+#: Reason codes whose failure a caller may retry without changing the input.
+RETRYABLE_REASON_CODES = frozenset(
+    {
+        ReasonCode.MODEL_UNAVAILABLE.value,
+        ReasonCode.MODEL_BUDGET_REFUSED.value,
+        ReasonCode.MODEL_OUTPUT_INVALID.value,
+        ReasonCode.MODEL_CALL_ERROR.value,
+        ReasonCode.LOCK_FAILED.value,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +166,7 @@ def _w(weight: FieldWeight, *formats: CreativeFormat) -> dict[str, FieldWeight]:
 
 _ALL = tuple(value for value in CreativeFormat if value is not CreativeFormat.UNSPECIFIED)
 _COMMERCE = (CreativeFormat.ADVERTISEMENT, CreativeFormat.PRODUCT_SHOWCASE)
+COMMERCE_FORMATS = frozenset(value.value for value in _COMMERCE)
 
 BRIEF_FIELD_SPECS: tuple[BriefFieldSpec, ...] = (
     BriefFieldSpec(
@@ -172,9 +280,11 @@ BRIEF_FIELD_SPECS: tuple[BriefFieldSpec, ...] = (
 )
 
 SPECS_BY_CODE: dict[str, BriefFieldSpec] = {spec.code: spec for spec in BRIEF_FIELD_SPECS}
+SPECS_BY_PATH: dict[str, BriefFieldSpec] = {spec.path: spec for spec in BRIEF_FIELD_SPECS}
 
 #: Values a proposal may assume when a HIGH (never CRITICAL) gap stays open.
-#: Every applied default is recorded in the revision's completeness report, so
+#: Every applied default is recorded in the revision's provenance as DEFAULT,
+#: shown to the user as an assumption, and must be accepted before approval -
 #: an assumed value is visible rather than indistinguishable from an answer.
 FORMAT_DEFAULTS: dict[str, dict[str, object]] = {
     CreativeFormat.SHORT_DRAMA.value: {
@@ -219,3 +329,425 @@ FORMAT_DEFAULTS: dict[str, dict[str, object]] = {
         "visual_style.medium": "atmospheric concept film",
     },
 }
+
+#: Every brief path a model or an editor may touch, with its value kind.
+#: Anything else is dropped on validation: a model invents no fields.
+SCALAR_STRING_PATHS = frozenset(
+    {
+        "logline",
+        "platform",
+        "aspect_ratio",
+        "hook",
+        "call_to_action",
+        "audience",
+        "visual_style.medium",
+        "visual_style.palette",
+        "setting.location",
+        "setting.time",
+        "product.name",
+        "music.mood",
+        "music.reference",
+    }
+)
+INTEGER_PATHS = frozenset({"duration_seconds", "episode_count"})
+STRING_LIST_PATHS = frozenset({"tone", "product.selling_points"})
+CHARACTER_LIST_PATH = "characters"
+NESTED_OBJECT_PATHS = frozenset({"visual_style", "setting", "product", "music"})
+ALLOWED_BRIEF_PATHS = (
+    SCALAR_STRING_PATHS
+    | INTEGER_PATHS
+    | STRING_LIST_PATHS
+    | {CHARACTER_LIST_PATH, "format"}
+    | NESTED_OBJECT_PATHS
+)
+ASPECT_RATIOS = frozenset({"9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"})
+
+
+# ---------------------------------------------------------------- turn result
+class BriefOperation(BaseModel):
+    """One explicit change to the brief, as the model (or the editor) states it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    op: BriefOperationKind
+    path: str = Field(min_length=1, max_length=80)
+    value: Any = None
+    #: The user's own words that justify this operation.
+    evidence: str = Field(default="", max_length=400)
+    #: USER_STATED: the user said it; INFERRED: the director's reading. Only
+    #: USER_STATED may replace or remove something the user established.
+    confidence: Literal["USER_STATED", "INFERRED"] = "INFERRED"
+
+    @field_validator("path")
+    @classmethod
+    def _normalize_path(cls, value: str) -> str:
+        return value.strip()
+
+
+class UnresolvedQuestion(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    code: str = Field(min_length=1, max_length=40)
+    question: str = Field(default="", max_length=400)
+
+
+class DirectorAssumption(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = Field(min_length=1, max_length=80)
+    value: Any = None
+    rationale: str = Field(default="", max_length=400)
+
+
+class DirectorTurnResult(BaseModel):
+    """The validated shape of one DIRECTOR model turn.
+
+    ``assistant_message`` is what the user reads. Everything else is
+    structure the service applies under its own rules; nothing here is
+    trusted to overwrite a user fact on the model's say-so.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    assistant_message: str = Field(min_length=1, max_length=4000)
+    brief_operations: list[BriefOperation] = Field(default_factory=list, max_length=40)
+    answered_question_codes: list[str] = Field(default_factory=list, max_length=20)
+    skipped_question_codes: list[str] = Field(default_factory=list, max_length=20)
+    unresolved_questions: list[UnresolvedQuestion] = Field(default_factory=list, max_length=10)
+    assumptions: list[DirectorAssumption] = Field(default_factory=list, max_length=20)
+    creative_notes: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("answered_question_codes", "skipped_question_codes")
+    @classmethod
+    def _upper_codes(cls, value: list[str]) -> list[str]:
+        return [str(code).strip().upper()[:40] for code in value if str(code).strip()]
+
+    @field_validator("creative_notes")
+    @classmethod
+    def _trim_notes(cls, value: list[str]) -> list[str]:
+        return [str(note).strip()[:600] for note in value if str(note).strip()]
+
+
+# ------------------------------------------------------------------ screenplay
+#: The one-action vocabulary the narrative compiler parses. A shot names
+#: exactly one of these (or is a dialogue shot); the renderer turns it into a
+#: line the compiler maps to the same canonical action.
+ACTION_VERBS: tuple[str, ...] = (
+    "enter",
+    "exit",
+    "walk",
+    "look",
+    "pick_up",
+    "raise",
+    "place",
+    "turn",
+    "stop",
+    "sit",
+    "stand",
+    "open",
+    "close",
+    "push",
+    "pull",
+)
+SHOT_TYPES: tuple[str, ...] = (
+    "WIDE",
+    "MEDIUM",
+    "CLOSE",
+    "CLOSE_UP",
+    "EXTREME_CLOSE_UP",
+    "INSERT",
+    "OVER_SHOULDER",
+    "TWO_SHOT",
+    "DIALOGUE",
+)
+TIMES_OF_DAY: tuple[str, ...] = ("DAY", "NIGHT", "DUSK", "DAWN")
+
+
+def _clean_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value if value is not None else "").split())
+    return text[:limit]
+
+
+class ShotAction(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    actor: str = Field(min_length=1, max_length=60)
+    verb: str = Field(min_length=1, max_length=20)
+    object: str = Field(default="", max_length=60)
+    target: str = Field(default="", max_length=60)
+    #: The director's staging note for the prompt compiler; never parsed.
+    description: str = Field(default="", max_length=400)
+
+    @field_validator("verb")
+    @classmethod
+    def _known_verb(cls, value: str) -> str:
+        verb = value.strip().lower().replace(" ", "_").replace("-", "_")
+        aliases = {"picks_up": "pick_up", "pickup": "pick_up", "leave": "exit", "leaves": "exit"}
+        verb = aliases.get(verb, verb)
+        if verb not in ACTION_VERBS:
+            raise ValueError(f"unknown action verb {value!r}; use one of {', '.join(ACTION_VERBS)}")
+        return verb
+
+    @field_validator("actor", "object", "target")
+    @classmethod
+    def _clean_names(cls, value: str) -> str:
+        return _clean_text(value, 60)
+
+    @field_validator("description")
+    @classmethod
+    def _clean_description(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+
+class ShotDialogue(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    speaker: str = Field(min_length=1, max_length=60)
+    text: str = Field(min_length=1, max_length=400)
+
+    @field_validator("speaker", "text")
+    @classmethod
+    def _one_line(cls, value: str) -> str:
+        cleaned = _clean_text(value, 400)
+        if not cleaned:
+            raise ValueError("dialogue must not be empty")
+        return cleaned
+
+
+class ScreenplayShot(BaseModel):
+    """One planned shot: exactly one primary visible action or one line."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    sequence: int = Field(ge=1, le=200)
+    shot_type: str = Field(default="MEDIUM", max_length=40)
+    duration: float = Field(default=5.0, ge=1.0, le=15.0)
+    action: ShotAction | None = None
+    dialogue: ShotDialogue | None = None
+    start_state: str = Field(default="", max_length=400)
+    end_state: str = Field(default="", max_length=400)
+    gaze_target: str = Field(default="", max_length=120)
+    continuity_obligations: list[str] = Field(default_factory=list, max_length=8)
+    anchors: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("shot_type")
+    @classmethod
+    def _shot_type(cls, value: str) -> str:
+        normalized = value.strip().upper().replace(" ", "_").replace("-", "_") or "MEDIUM"
+        aliases = {"CLOSEUP": "CLOSE_UP", "ECU": "EXTREME_CLOSE_UP", "CU": "CLOSE_UP"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in SHOT_TYPES:
+            raise ValueError(f"unknown shot type {value!r}")
+        return normalized
+
+    @field_validator("start_state", "end_state", "gaze_target")
+    @classmethod
+    def _clean_states(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+    @field_validator("continuity_obligations", "anchors")
+    @classmethod
+    def _clean_lists(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 200) for item in value if _clean_text(item, 200)]
+
+    @model_validator(mode="after")
+    def _exactly_one_primary(self) -> ScreenplayShot:
+        if (self.action is None) == (self.dialogue is None):
+            raise ValueError(
+                f"shot {self.sequence} must carry exactly one primary element: an action or a line"
+            )
+        if self.dialogue is not None:
+            self.shot_type = "DIALOGUE"
+        elif self.shot_type == "DIALOGUE":
+            self.shot_type = "MEDIUM"
+        return self
+
+
+class ScreenplayBeat(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    sequence: int = Field(ge=1, le=60)
+    intent: str = Field(min_length=1, max_length=40)
+    summary: str = Field(default="", max_length=600)
+    scene_key: str = Field(min_length=1, max_length=60)
+    characters: list[str] = Field(default_factory=list, max_length=8)
+    emotional_beat: str = Field(default="", max_length=300)
+    shots: list[ScreenplayShot] = Field(min_length=1, max_length=12)
+
+    @field_validator("intent")
+    @classmethod
+    def _intent(cls, value: str) -> str:
+        cleaned = "_".join(_clean_text(value, 40).upper().replace("-", " ").split())
+        return cleaned or "BEAT"
+
+    @field_validator("summary", "emotional_beat")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 600)
+
+
+class ScreenplayScene(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    key: str = Field(min_length=1, max_length=60)
+    location: str = Field(min_length=1, max_length=80)
+    time: str = Field(default="DAY", max_length=20)
+    interior: bool | None = None
+    description: str = Field(default="", max_length=600)
+
+    @field_validator("time")
+    @classmethod
+    def _time(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        aliases = {
+            "NOON": "DAY",
+            "MORNING": "DAY",
+            "AFTERNOON": "DAY",
+            "EVENING": "DUSK",
+            "SUNSET": "DUSK",
+            "GOLDEN HOUR": "DUSK",
+            "MIDNIGHT": "NIGHT",
+            "SUNRISE": "DAWN",
+            "白天": "DAY",
+            "夜": "NIGHT",
+            "夜晚": "NIGHT",
+            "晚上": "NIGHT",
+            "黄昏": "DUSK",
+            "傍晚": "DUSK",
+            "清晨": "DAWN",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in TIMES_OF_DAY:
+            raise ValueError(f"unknown time of day {value!r}")
+        return normalized
+
+    @field_validator("location", "description")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 600)
+
+
+class CharacterRelationship(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    with_: str = Field(alias="with", min_length=1, max_length=60)
+    relation: str = Field(default="", max_length=120)
+
+
+class ScreenplayCharacter(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=60)
+    role: str = Field(default="", max_length=120)
+    look: str = Field(default="", max_length=400)
+    wants: str = Field(default="", max_length=300)
+    relationships: list[CharacterRelationship] = Field(default_factory=list, max_length=8)
+
+    @field_validator("name", "role", "look", "wants")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+
+class HookIntent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    opening_question: str = Field(default="", max_length=400)
+    promise: str = Field(default="", max_length=400)
+    audience_feeling: str = Field(default="", max_length=200)
+
+
+class Treatment(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(default="", max_length=120)
+    premise: str = Field(min_length=1, max_length=1200)
+    hook: HookIntent = Field(default_factory=HookIntent)
+    audience_expectation: str = Field(default="", max_length=600)
+    tone_direction: str = Field(default="", max_length=400)
+    visual_direction: str = Field(default="", max_length=600)
+    ending: str = Field(default="", max_length=600)
+
+
+class ProductClaim(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    claim: str = Field(min_length=1, max_length=300)
+    must_preserve: bool = True
+
+
+class ScreenplayObligation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    key: str = Field(min_length=1, max_length=80)
+    promise: str = Field(min_length=1, max_length=400)
+    category: str = Field(default="GENERIC", max_length=40)
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, value: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in value.strip())
+        return cleaned[:80] or "obligation"
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, value: str) -> str:
+        return _clean_text(value, 40).upper().replace(" ", "_") or "GENERIC"
+
+
+class Screenplay(BaseModel):
+    """The structured screenplay the DIRECTOR model writes; strictly validated."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    treatment: Treatment
+    invariants: list[str] = Field(default_factory=list, max_length=40)
+    variables: list[str] = Field(default_factory=list, max_length=40)
+    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=12)
+    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=12)
+    beats: list[ScreenplayBeat] = Field(min_length=1, max_length=40)
+    product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
+    required_copy: list[str] = Field(default_factory=list, max_length=20)
+    obligations: list[ScreenplayObligation] = Field(default_factory=list, max_length=20)
+    unresolved: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("invariants", "variables", "required_copy", "unresolved")
+    @classmethod
+    def _clean_lists(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
+
+    @model_validator(mode="after")
+    def _cross_references(self) -> Screenplay:
+        scene_keys = {scene.key for scene in self.scenes}
+        if len(scene_keys) != len(self.scenes):
+            raise ValueError("scene keys must be unique")
+        names = {_normalize_name(character.name) for character in self.characters}
+        if len(names) != len(self.characters):
+            raise ValueError("character names must be unique")
+        expected_sequence = 1
+        for beat in self.beats:
+            if beat.scene_key not in scene_keys:
+                raise ValueError(f"beat {beat.sequence} references unknown scene {beat.scene_key!r}")
+            if beat.sequence != expected_sequence:
+                raise ValueError(f"beats must be numbered consecutively from 1; got {beat.sequence}")
+            expected_sequence += 1
+            for shot in beat.shots:
+                speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
+                if _normalize_name(speaker) not in names:
+                    raise ValueError(
+                        f"beat {beat.sequence} shot {shot.sequence} uses unknown character {speaker!r}"
+                    )
+            for name in beat.characters:
+                if _normalize_name(name) not in names:
+                    raise ValueError(f"beat {beat.sequence} lists unknown character {name!r}")
+        return self
+
+
+def _normalize_name(value: str) -> str:
+    return " ".join(str(value).casefold().split())
+
+
+def normalize_name(value: str) -> str:
+    """Stable identity for list members (characters, props): case- and space-folded."""
+
+    return _normalize_name(value)

@@ -51,6 +51,7 @@ from production_domain.models import (
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from . import evidence as evidence_module
 from .beats import render_script
 from .brief import (
     BriefEngine,
@@ -68,6 +69,7 @@ from .director_context import (
     build_screenplay_messages,
     build_turn_messages,
 )
+from .evidence import UserTextIndex, UserUtterance
 from .schemas import (
     ASSUMED_SOURCES,
     COMMERCE_FORMATS,
@@ -690,19 +692,54 @@ class CreativeDirectorService:
             result = reasoning.result
             reason_codes = list(reasoning.reason_codes)
 
+            # The user's own words for this session, newest last: what a
+            # USER_STATED claim has to be found in.
+            evidence_index = UserTextIndex(
+                [
+                    UserUtterance(
+                        turn_id=str(turn.get("id") or ""),
+                        turn_sequence=int(turn.get("sequence") or 0),
+                        text=str(turn.get("content") or ""),
+                    )
+                    for turn in turns
+                    if turn.get("speaker") == "USER"
+                ]
+                + [UserUtterance(turn_id=user_turn.id, turn_sequence=user_sequence, text=content)]
+            )
+            # The format the client chose in the request body is the client's
+            # own act, like a brief-editor edit - not a quote to be found in
+            # prose. It is applied under its own actor so verification cannot
+            # demote it.
+            fields1, provenance1, hint_outcome = apply_operations(
+                fields,
+                provenance,
+                hint_operations,
+                OperationActor(
+                    reasoner="USER",
+                    turn_id=user_turn.id,
+                    turn_sequence=user_sequence,
+                    revision=revision,
+                    at=now,
+                    direct_user_edit=True,
+                ),
+            )
             actor = OperationActor(
                 reasoner=reasoning.reasoner,
                 turn_id=user_turn.id,
                 turn_sequence=user_sequence,
                 revision=revision,
                 at=now,
+                evidence_index=evidence_index,
             )
-            operations: list[BriefOperation] = list(hint_operations)
-            if result is not None:
-                operations.extend(result.brief_operations)
-            fields2, provenance2, outcome = apply_operations(fields, provenance, operations, actor)
-            applied = list(outcome.applied)
-            rejected = list(outcome.rejected)
+            operations: list[BriefOperation] = list(result.brief_operations) if result is not None else []
+            fields2, provenance2, outcome = apply_operations(fields1, provenance1, operations, actor)
+            applied = [*hint_outcome.applied, *outcome.applied]
+            rejected = [*hint_outcome.rejected, *outcome.rejected]
+            outcome.answered_codes |= hint_outcome.answered_codes
+            if any(
+                item.get("claimed") == ProvenanceSource.USER_STATED.value for item in outcome.rejected
+            ):
+                reason_codes.append(ReasonCode.EVIDENCE_UNVERIFIED.value)
             if result is not None:
                 assumption_ops = [
                     BriefOperation(
@@ -746,7 +783,13 @@ class CreativeDirectorService:
                 reason_codes.append(ReasonCode.OPERATIONS_REJECTED.value)
 
             format_value = str(fields2.get("format") or CreativeFormat.UNSPECIFIED.value)
-            skipped = list(result.skipped_question_codes) if result is not None else []
+            claimed_skips = list(result.skipped_question_codes) if result is not None else []
+            skipped, refused_skips = self._verified_skips(
+                result, question_states, evidence_index
+            )
+            if refused_skips:
+                reason_codes.append(ReasonCode.SKIP_UNVERIFIED.value)
+                rejected.extend(refused_skips)
             states2 = reconcile_questions(
                 question_states,
                 fields2,
@@ -880,6 +923,8 @@ class CreativeDirectorService:
                     else [],
                     "answered_question_codes": sorted(outcome.answered_codes),
                     "skipped_question_codes": skipped,
+                    "claimed_skipped_question_codes": claimed_skips,
+                    "refused_skips": refused_skips,
                     "creative_notes": list(result.creative_notes) if result else [],
                     "rejected_operations": rejected,
                     "retryable": reasoning.retryable,
@@ -902,6 +947,50 @@ class CreativeDirectorService:
                 retryable=reasoning.retryable,
                 turn_sequence=director_sequence,
             )
+
+    @staticmethod
+    def _verified_skips(
+        result: DirectorTurnResult | None,
+        question_states: dict[str, Any],
+        evidence_index: UserTextIndex,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Which claimed skips the user's own record actually supports.
+
+        A skip silences a gap for good and can make an incomplete brief
+        proposable, so the model's word alone never carries one. A code is
+        honoured when the question was genuinely asked *and* the model quotes
+        the user declining it; everything else is recorded as refused, with the
+        claim preserved so the audit shows what was asserted.
+        """
+
+        if result is None:
+            return [], []
+        honoured: list[str] = []
+        refused: list[dict[str, Any]] = []
+        proofs = {claim.code: claim for claim in result.skipped_questions}
+        for code in dict.fromkeys(result.skipped_question_codes):
+            state = question_states.get(code)
+            asked = bool(isinstance(state, dict) and state.get("asked_turns"))
+            claim = proofs.get(code)
+            if not asked:
+                refused.append({"op": "SKIP", "path": code, "reason": "QUESTION_WAS_NEVER_ASKED"})
+                continue
+            if claim is None:
+                refused.append({"op": "SKIP", "path": code, "reason": evidence_module.NO_EVIDENCE})
+                continue
+            verdict = evidence_index.verify(claim.evidence, turn_id=claim.evidence_turn_id)
+            if not verdict.verified:
+                refused.append(
+                    {
+                        "op": "SKIP",
+                        "path": code,
+                        "reason": verdict.reason,
+                        "evidence": claim.evidence[:300],
+                    }
+                )
+                continue
+            honoured.append(code)
+        return honoured, refused
 
     # ------------------------------------------------------------ brief edits
     def edit_brief(self, session_id: str, operations: list[dict[str, Any]], *, actor: str) -> dict[str, Any]:

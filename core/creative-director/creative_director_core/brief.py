@@ -21,6 +21,7 @@ from typing import Any
 
 from production_domain.models import CreativeFormat
 
+from .evidence import EvidenceVerdict, UserTextIndex
 from .schemas import (
     ASPECT_RATIOS,
     ASSUMED_SOURCES,
@@ -294,6 +295,11 @@ class OperationActor:
     at: str
     #: When True (the brief editor), every operation is the user's own act.
     direct_user_edit: bool = False
+    #: The user's own words for this session. Present only for a reasoner whose
+    #: USER_STATED claims must be proved - the model. A direct user edit needs
+    #: no quote (the act *is* the user's), and the deterministic extractor
+    #: quotes the message it was handed by construction.
+    evidence_index: UserTextIndex | None = None
 
 
 def apply_operations(
@@ -304,6 +310,12 @@ def apply_operations(
 ) -> tuple[dict[str, Any], dict[str, Any], OperationOutcome]:
     """Apply explicit operations under the provenance rules.
 
+    A USER_STATED claim from a reasoner that carries an ``evidence_index`` is
+    verified against the user's own words first: an operation whose quote is
+    not on record is demoted to the director's inference before any gate reads
+    it, so REPLACE, REMOVE and the assumption-confirming KEEP all fall back to
+    the rules that protect a user fact. The verdict is recorded either way.
+
     Returns new fields, new provenance and the outcome (applied / rejected
     with reasons). Inputs are not mutated.
     """
@@ -311,6 +323,7 @@ def apply_operations(
     result = deepcopy(fields)
     records = deepcopy(provenance)
     outcome = OperationOutcome()
+    verdicts: dict[int, EvidenceVerdict] = {}
 
     def source_for(operation: BriefOperation) -> str:
         if actor.direct_user_edit:
@@ -320,7 +333,8 @@ def apply_operations(
         return ProvenanceSource.MODEL_INFERRED.value
 
     def record(path_key: str, operation: BriefOperation, source: str) -> None:
-        records[path_key] = {
+        verdict = verdicts.get(id(operation))
+        entry: dict[str, Any] = {
             "source": source,
             "operation": operation.op.value,
             "reasoner": actor.reasoner,
@@ -330,6 +344,11 @@ def apply_operations(
             "revision": actor.revision,
             "at": actor.at,
         }
+        if verdict is not None:
+            # Where the quote was found, or why it was not: the audit of who
+            # really established this value.
+            entry["evidence_verification"] = verdict.as_json()
+        records[path_key] = entry
 
     def reject(operation: BriefOperation, reason: str) -> None:
         outcome.rejected.append({"op": operation.op.value, "path": operation.path, "reason": reason})
@@ -360,6 +379,36 @@ def apply_operations(
     expanded: list[BriefOperation] = []
     for operation in operations:
         expanded.extend(_expand_nested(operation))
+
+    if actor.evidence_index is not None and not actor.direct_user_edit:
+        verified: list[BriefOperation] = []
+        for operation in expanded:
+            if operation.confidence != "USER_STATED":
+                verified.append(operation)
+                continue
+            verdict = actor.evidence_index.verify(
+                operation.evidence, turn_id=operation.evidence_turn_id
+            )
+            if verdict.verified:
+                verdicts[id(operation)] = verdict
+                verified.append(operation)
+                continue
+            # The claim stands as the director's reading, never as the user's
+            # word. Every gate below now sees INFERRED.
+            demoted = operation.model_copy(update={"confidence": "INFERRED"})
+            verdicts[id(demoted)] = verdict
+            outcome.rejected.append(
+                {
+                    "op": operation.op.value,
+                    "path": operation.path,
+                    "reason": verdict.reason,
+                    "claimed": ProvenanceSource.USER_STATED.value,
+                    "recorded": ProvenanceSource.MODEL_INFERRED.value,
+                    "evidence": operation.evidence[:300],
+                }
+            )
+            verified.append(demoted)
+        expanded = verified
 
     for operation in expanded:
         path = operation.path
@@ -782,10 +831,14 @@ class BriefEngine:
         aspect = _ASPECT.search(text)
         if aspect:
             fill("aspect_ratio", aspect.group(1), aspect.group(0))
-        elif "竖屏" in text or "vertical" in text.casefold():
-            fill("aspect_ratio", "9:16", "竖屏/vertical")
-        elif "横屏" in text or "widescreen" in text.casefold():
-            fill("aspect_ratio", "16:9", "横屏/widescreen")
+        elif "竖屏" in text:
+            fill("aspect_ratio", "9:16", "竖屏")
+        elif "vertical" in text.casefold():
+            fill("aspect_ratio", "9:16", "vertical")
+        elif "横屏" in text:
+            fill("aspect_ratio", "16:9", "横屏")
+        elif "widescreen" in text.casefold():
+            fill("aspect_ratio", "16:9", "widescreen")
 
         episodes = _EPISODES.search(text)
         if episodes:

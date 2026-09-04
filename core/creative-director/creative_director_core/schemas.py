@@ -153,6 +153,12 @@ class ReasonCode(StrEnum):
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
     CHARACTER_IDENTITY_NOT_COVERED = "CHARACTER_IDENTITY_NOT_COVERED"
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
+    #: At least one USER_STATED claim could not be found in the user's own
+    #: words and was recorded as the director's inference instead.
+    EVIDENCE_UNVERIFIED = "EVIDENCE_UNVERIFIED"
+    #: At least one claimed skip was not honoured: the question was never
+    #: asked, or the user never declined it in their own words.
+    SKIP_UNVERIFIED = "SKIP_UNVERIFIED"
 
 
 #: Reason codes whose failure a caller may retry without changing the input.
@@ -392,10 +398,18 @@ class BriefOperation(BaseModel):
     op: BriefOperationKind
     path: str = Field(min_length=1, max_length=80)
     value: Any = None
-    #: The user's own words that justify this operation.
+    #: The user's own words that justify this operation. Verbatim, because the
+    #: server checks it against the user's messages before honouring a
+    #: USER_STATED claim; a paraphrase is not a quote.
     evidence: str = Field(default="", max_length=400)
+    #: Which user turn the quote comes from, when the model names one. Naming a
+    #: turn that is not on record fails the proof; naming none searches every
+    #: user turn in the session.
+    evidence_turn_id: str | None = Field(default=None, max_length=36)
     #: USER_STATED: the user said it; INFERRED: the director's reading. Only
-    #: USER_STATED may replace or remove something the user established.
+    #: USER_STATED may replace or remove something the user established - and
+    #: the model's word for it is a claim, not the finding: the service
+    #: verifies the quote and demotes an unprovable claim to INFERRED.
     confidence: Literal["USER_STATED", "INFERRED"] = "INFERRED"
 
     @field_validator("path")
@@ -409,6 +423,26 @@ class UnresolvedQuestion(BaseModel):
 
     code: str = Field(min_length=1, max_length=40)
     question: str = Field(default="", max_length=400)
+
+
+class SkippedQuestionClaim(BaseModel):
+    """The model's claim that the user declined one question, with its proof.
+
+    A skip permanently silences a gap and can make a brief proposable, so it is
+    honoured only for a question that was actually asked *and* whose decline
+    the user's own words support.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    code: str = Field(min_length=1, max_length=40)
+    evidence: str = Field(default="", max_length=400)
+    evidence_turn_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("code")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return value.strip().upper()[:40]
 
 
 class DirectorAssumption(BaseModel):
@@ -433,6 +467,10 @@ class DirectorTurnResult(BaseModel):
     brief_operations: list[BriefOperation] = Field(default_factory=list, max_length=40)
     answered_question_codes: list[str] = Field(default_factory=list, max_length=20)
     skipped_question_codes: list[str] = Field(default_factory=list, max_length=20)
+    #: The same skips with the user's words behind them. A bare code in
+    #: ``skipped_question_codes`` carries no proof and is recorded but not
+    #: honoured; an entry here is honoured when its quote verifies.
+    skipped_questions: list[SkippedQuestionClaim] = Field(default_factory=list, max_length=20)
     unresolved_questions: list[UnresolvedQuestion] = Field(default_factory=list, max_length=10)
     assumptions: list[DirectorAssumption] = Field(default_factory=list, max_length=20)
     creative_notes: list[str] = Field(default_factory=list, max_length=20)

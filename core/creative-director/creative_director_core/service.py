@@ -56,6 +56,7 @@ from production_domain.models import (
 )
 from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from . import evidence as evidence_module
 from .beats import render_script
@@ -396,6 +397,31 @@ def _aware(value: datetime) -> datetime:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _uncovered_character_keys(
+    anchor_keys: list[str],
+    anchor_ids_by_key: dict[str, str],
+    identities: dict[str, Any],
+) -> list[str]:
+    """Character anchor keys on one shot that have no key visual or no identity.
+
+    Every character on screen must have a key visual behind them. An optional
+    scene or prop the user skipped is a recorded decision; a character with no
+    anchor is an unanchored face, and compiling one silently is the defect the
+    callers of this refuse.
+    """
+
+    missing = {
+        key
+        for key in anchor_keys
+        if key.startswith("character:")
+        and (
+            key not in anchor_ids_by_key
+            or not (identities.get(key) or {}).get("identity_version_id")
+        )
+    }
+    return sorted(missing)
 
 
 def _is_cjk_text(value: str) -> bool:
@@ -3361,16 +3387,33 @@ class CreativeDirectorService:
                 .with_for_update()
             )
             if row is None:
-                row = CreativeLockStep(
-                    session_id=session_id,
-                    bible_id=bible_id,
-                    step_kind=kind,
-                    step_key=step_key[:160],
-                    idempotency_key=idempotency_key[:250],
-                    status="PENDING",
-                )
-                session.add(row)
-                session.flush()
+                # Two approvals arriving together both read None - the row they
+                # are racing for does not exist yet, so there is nothing for
+                # `FOR UPDATE` to lock. The loser hits the unique index on
+                # `idempotency_key`; inside a SAVEPOINT that rolls back only the
+                # insert, and re-reading finds the winner's row so the loser
+                # follows the normal RUNNING/COMPLETED path below instead of
+                # failing the whole lock with an IntegrityError.
+                try:
+                    with session.begin_nested():
+                        row = CreativeLockStep(
+                            session_id=session_id,
+                            bible_id=bible_id,
+                            step_kind=kind,
+                            step_key=step_key[:160],
+                            idempotency_key=idempotency_key[:250],
+                            status="PENDING",
+                        )
+                        session.add(row)
+                        session.flush()
+                except IntegrityError:
+                    row = session.scalar(
+                        select(CreativeLockStep)
+                        .where(CreativeLockStep.idempotency_key == idempotency_key)
+                        .with_for_update()
+                    )
+                    if row is None:  # pragma: no cover - the unique violation proves it exists
+                        raise
             if row.status == "COMPLETED":
                 return dict(row.produced_json)
             if row.status == "RUNNING" and row.claimed_at is not None:
@@ -3678,6 +3721,14 @@ class CreativeDirectorService:
                 "the approved screenplay's script and its beat plan disagree; re-propose the beats",
                 reason_code="SCRIPT_BEAT_MISMATCH",
             )
+        # Refuse before anything is created, not after. This same check runs
+        # again in `_write_shot_lineage`, but by then the Episode, its Scenes
+        # and its Shots are committed, and the refusal leaves them orphaned:
+        # listed by the project's episode endpoint, openable in Director, and
+        # generatable - which spends real money on shots that have no lineage
+        # row. The inputs are all in hand here, so the cheap refusal is the
+        # early one and the late one is only a backstop.
+        self._assert_character_identity_coverage(ordered_intents, anchor_ids_by_key, lineage)
         with self.database.session() as session:
             from production_domain.models import Episode
 
@@ -3879,6 +3930,36 @@ class CreativeDirectorService:
             item["location_bound"] = True
             _ = key
 
+    def _assert_character_identity_coverage(
+        self,
+        ordered_intents: list[dict[str, Any]],
+        anchor_ids_by_key: dict[str, str],
+        lineage: dict[str, Any],
+    ) -> None:
+        """Refuse a compile whose shots name a character with no locked identity.
+
+        Called before the Episode exists, so the refusal costs nothing and
+        leaves nothing behind. `_write_shot_lineage` repeats it per shot as a
+        backstop for any path that reaches it without coming through here.
+        """
+
+        identities = {
+            key: value
+            for key, value in (lineage.get("identities") or {}).items()
+            if isinstance(value, dict)
+        }
+        missing: set[str] = set()
+        for intent in ordered_intents:
+            anchor_keys = [str(key) for key in intent.get("anchors") or []]
+            missing.update(_uncovered_character_keys(anchor_keys, anchor_ids_by_key, identities))
+        if missing:
+            raise CreativeSessionConflict(
+                "compiled shots reference characters with no locked identity: "
+                + ", ".join(sorted(missing)),
+                reason_code=ReasonCode.CHARACTER_IDENTITY_NOT_COVERED.value,
+                details={"anchor_keys": sorted(missing)},
+            )
+
     def _write_shot_lineage(  # noqa: PLR0913
         self,
         session_id: str,
@@ -3917,27 +3998,15 @@ class CreativeDirectorService:
                     continue
                 anchor_keys = [str(key) for key in intent.get("anchors") or []]
                 unresolved = [key for key in anchor_keys if key not in anchor_ids_by_key]
-                # Every character on screen must have a key visual behind it.
-                # An optional scene or prop the user skipped is a recorded
-                # decision; a character with no anchor is an unanchored face,
-                # and compiling one silently is the defect this refuses.
-                missing_characters = [
-                    key
-                    for key in unresolved
-                    if key.startswith("character:")
-                ] + [
-                    key
-                    for key in anchor_keys
-                    if key.startswith("character:")
-                    and key in anchor_ids_by_key
-                    and not (identities.get(key) or {}).get("identity_version_id")
-                ]
+                missing_characters = _uncovered_character_keys(
+                    anchor_keys, anchor_ids_by_key, identities
+                )
                 if missing_characters:
                     raise CreativeSessionConflict(
                         "compiled shots reference characters with no locked identity: "
-                        + ", ".join(sorted(set(missing_characters))),
+                        + ", ".join(missing_characters),
                         reason_code=ReasonCode.CHARACTER_IDENTITY_NOT_COVERED.value,
-                        details={"shot_id": shot_id, "anchor_keys": sorted(set(missing_characters))},
+                        details={"shot_id": shot_id, "anchor_keys": missing_characters},
                     )
                 session.add(
                     CreativeShotLineage(

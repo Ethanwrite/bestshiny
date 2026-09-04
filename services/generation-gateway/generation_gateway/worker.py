@@ -265,6 +265,11 @@ def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-
     return result.dispatched
 
 
+#: Wall-clock ceiling on one advisory memory-index pass. It shares the loop
+#: that moves paid generation jobs, so it gets a bounded slice of it.
+MEMORY_INDEX_DRAIN_TIMEOUT_SECONDS = 60.0
+
+
 def drain_memory_index_once(container) -> int:  # type: ignore[no-untyped-def]
     """Embed the advisory vector memories queued by whoever wrote Canon.
 
@@ -396,7 +401,20 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             and asyncio.get_running_loop().time() >= next_memory_index
         ):
             try:
-                await asyncio.to_thread(drain_memory_index_once, container)
+                # Bounded: this is advisory work sharing the loop that moves
+                # paid generation jobs. One slow embedding pass must not hold
+                # `process_next_job` off for minutes. The drain is resumable by
+                # construction - every row keeps its claim lease - so abandoning
+                # a pass loses nothing but the rest of this batch.
+                await asyncio.wait_for(
+                    asyncio.to_thread(drain_memory_index_once, container),
+                    timeout=MEMORY_INDEX_DRAIN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "memory index outbox drain exceeded %ss; resuming job processing",
+                    MEMORY_INDEX_DRAIN_TIMEOUT_SECONDS,
+                )
             except Exception:
                 logger.exception("memory index outbox drain failed")
             next_memory_index = asyncio.get_running_loop().time() + memory_index_interval

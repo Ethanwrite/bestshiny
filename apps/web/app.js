@@ -6,6 +6,13 @@
  * one object-centric shell (sidebar / canvas / inspector / action bar) instead
  * of three pages of stacked forms.
  */
+import {
+  beginCreativeTurn,
+  isRetryableSendFailure,
+  pruneCreativeTurns,
+  settleCreativeTurn,
+  turnScopeKey,
+} from "./creative-turn-id.js";
 import { currentRoute, isAdminRoute, navigate, onRoute, setAuth } from "./router.js";
 
 const API = window.AI_DIRECTOR_API
@@ -13,6 +20,7 @@ const API = window.AI_DIRECTOR_API
     ? "http://127.0.0.1:18080"
     : "/api");
 const SUBMISSION_STORAGE_KEY = "aiDirectorPendingSubmissions";
+const CREATIVE_TURN_STORAGE_KEY = "aiDirectorPendingCreativeTurns";
 const CSRF_COOKIE_NAME = "ai_director_csrf";
 sessionStorage.removeItem("aiDirectorAccessToken");
 
@@ -239,6 +247,90 @@ function finishSubmission(slot, key, succeeded) {
   sessionStorage.setItem(SUBMISSION_STORAGE_KEY, JSON.stringify(state.submissions));
 }
 
+/* ---- the director's send idempotency -------------------------------------
+   `creative-turn-id.js` owns the rule; this owns where it is kept and what a
+   "scope" is here. The store is sessionStorage, so a reload mid-retry still
+   re-sends the id the server may already have committed. */
+
+function readCreativeTurns() {
+  try {
+    return pruneCreativeTurns(JSON.parse(sessionStorage.getItem(CREATIVE_TURN_STORAGE_KEY) || "{}"));
+  } catch (_error) {
+    sessionStorage.removeItem(CREATIVE_TURN_STORAGE_KEY);
+    return {};
+  }
+}
+
+function writeCreativeTurns(pending) {
+  try {
+    sessionStorage.setItem(CREATIVE_TURN_STORAGE_KEY, JSON.stringify(pending));
+  } catch (_error) { /* a full or blocked store must never break the send */ }
+}
+
+/** This account, this project, this request slot - and nothing else's. */
+function creativeTurnScope(slot) {
+  return turnScopeKey({
+    userId: state.authUser?.id || state.authUser?.email || "",
+    projectId: state.project?.id || "",
+    slot,
+  });
+}
+
+function newClientTurnId() {
+  return (window.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+/**
+ * Run one send under the id that belongs to *these words in this slot*.
+ *
+ * `attempt(clientTurnId)` performs a single HTTP request. Every retry of the
+ * same words - after a timeout, a dropped connection, a 5xx, or a refusal the
+ * server marked retryable - is handed the identical id, so a reply lost on the
+ * way back is replayed from the record instead of paying for a second turn.
+ * The id is released on success, and on a refusal that will not change.
+ */
+async function sendWithClientTurnId(slot, content, attempt) {
+  const scopeKey = creativeTurnScope(slot);
+  const begun = beginCreativeTurn(readCreativeTurns(), scopeKey, content, newClientTurnId);
+  writeCreativeTurns(begun.pending);
+  let outcome = "terminal";
+  try {
+    const reply = await attempt(begun.id);
+    outcome = "success";
+    return reply;
+  } catch (error) {
+    outcome = isRetryableSendFailure(error) ? "retryable" : "terminal";
+    throw error;
+  } finally {
+    writeCreativeTurns(settleCreativeTurn(readCreativeTurns(), scopeKey, begun.id, outcome));
+  }
+}
+
+/**
+ * Forget a pending id whose turn is already on the record.
+ *
+ * A send whose response was lost leaves its id pending, which is the point -
+ * the retry has to reuse it. But once the conversation shows the turn landed,
+ * holding the id would make the *next* identical message replay the old reply
+ * instead of reaching the director. Seeing the turn is what settles it.
+ */
+function releaseLandedCreativeTurns(view) {
+  const landed = new Set(
+    (view?.turns || [])
+      .filter((turn) => turn.speaker === "USER" && turn.client_turn_id)
+      .map((turn) => turn.client_turn_id)
+  );
+  if (!landed.size) return;
+  const pending = readCreativeTurns();
+  let changed = false;
+  for (const [scopeKey, entry] of Object.entries(pending)) {
+    if (!landed.has(entry?.id)) continue;
+    delete pending[scopeKey];
+    changed = true;
+  }
+  if (changed) writeCreativeTurns(pending);
+}
+
 async function request(path, options = {}) {
   const method = options.method || "GET";
   const headers = csrfHeaders(method, { "Content-Type": "application/json", ...(options.headers || {}) });
@@ -320,6 +412,9 @@ function clearWorkspaceState() {
   state.thumbCache.clear();
   stopPassengerPolling();
   sessionStorage.removeItem(SUBMISSION_STORAGE_KEY);
+  // The scope key already isolates accounts; dropping the store on sign-out
+  // means a shared browser does not even keep the previous user's words.
+  sessionStorage.removeItem(CREATIVE_TURN_STORAGE_KEY);
   state.confirmedAssets.clear();
   $("projectSelect").innerHTML = '<option value="">No projects yet</option>';
   $("characterList").innerHTML = CHARACTERS_EMPTY;
@@ -3097,6 +3192,7 @@ async function openCreativeSession(id) {
     state.creative.revealedScreenplay = null;
   }
   state.creative.session = await request(`/v1/creative/sessions/${id}`);
+  releaseLandedCreativeTurns(state.creative.session);
   if (state.creative.revealedTurn === null) {
     // First paint of a session: everything before now is history.
     const lastDirector = [...(state.creative.session.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
@@ -3117,10 +3213,13 @@ async function startCreativeSession() {
   button.textContent = "The director is thinking…";
   let started;
   try {
-    started = await request("/v1/creative/sessions", {
+    // The id is the whole create's idempotency key, not just its first turn's:
+    // a retry after a lost response returns the session that already exists
+    // instead of opening a second conversation about the same idea.
+    started = await sendWithClientTurnId("session:new", idea, (clientTurnId) => request("/v1/creative/sessions", {
       method: "POST",
-      body: JSON.stringify({ project_id: state.project.id, idea, client_turn_id: newClientTurnId() }),
-    });
+      body: JSON.stringify({ project_id: state.project.id, idea, client_turn_id: clientTurnId }),
+    }));
   } finally {
     button.disabled = false;
     button.textContent = "Start with BestShiny Director";
@@ -3130,10 +3229,6 @@ async function startCreativeSession() {
   state.creative.revealedTurn = 0; // reveal the director's first words as they arrive
   state.creative.revealedScreenplay = null;
   await openCreativeSession(started.session_id);
-}
-
-function newClientTurnId() {
-  return (window.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
 
 function reportDirectorReply(reply) {
@@ -3152,18 +3247,20 @@ async function sendCreativeReply() {
   const input = $("creativeReplyInput");
   const content = input.value.trim();
   if (!content) return;
-  // One turn at a time, and one idempotency key per attempt: a retried send
-  // replays the recorded reply instead of paying for a second one.
+  // One turn at a time, and one idempotency key per *send*, not per attempt:
+  // the words the user typed once carry the same id through every retry, so a
+  // reply lost on the way back is replayed instead of paid for twice.
   creativeReplyInFlight = true;
   input.disabled = true;
   $("creativeReplyBtn").disabled = true;
   input.value = "";
   showCreativeThinking(content, "The director is thinking");
   try {
-    const reply = await request(`/v1/creative/sessions/${session.session.id}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content, client_turn_id: newClientTurnId() }),
-    });
+    const reply = await sendWithClientTurnId(`session:${session.session.id}`, content, (clientTurnId) =>
+      request(`/v1/creative/sessions/${session.session.id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content, client_turn_id: clientTurnId }),
+      }));
     state.creative.thinking = null; // the reply is in; the real turns replace the placeholder
     reportDirectorReply(reply);
     await openCreativeSession(session.session.id);
@@ -3390,6 +3487,14 @@ function renderBriefFields(brief) {
   return rows.concat(cast).join("") || "<p class='empty-inline'>Nothing captured yet.</p>";
 }
 
+// The pipeline's cast limit comes from the server (session.limits.max_cast,
+// which is creative_director_core.schemas.MAX_CAST). The fallback matters only
+// before the first state load; the number is never authored twice.
+const CREATIVE_CAST_FALLBACK = 12;
+function creativeMaxCast() {
+  return Number(state.creative?.session?.session?.limits?.max_cast) || CREATIVE_CAST_FALLBACK;
+}
+
 function renderBriefEditor(brief) {
   const fields = brief.fields || {};
   const text = (label, path, value, extra = "") =>
@@ -3421,7 +3526,7 @@ function renderBriefEditor(brief) {
     text("Hook", "hook", fields.hook),
     text("Call to action", "call_to_action", fields.call_to_action),
     text("Audience", "audience", fields.audience),
-    `<div class="creative-cast"><b>Characters</b>${cast}<div><button class="btn btn-tertiary" type="button" data-cast-add="1">Add character</button></div></div>`,
+    `<div class="creative-cast"><b>Characters</b>${cast}<div><button class="btn btn-tertiary" type="button" data-cast-add="1" ${(fields.characters || []).length >= creativeMaxCast() ? "disabled" : ""}>Add character</button><small class="creative-cast-limit">Every character who appears on screen gets its own key visual and identity lock; at most ${creativeMaxCast()}.</small></div></div>`,
   ].join("");
 }
 
@@ -3532,6 +3637,17 @@ function renderScreenplay(view) {
     return `<div class="creative-beat"><b>${beat.sequence} · ${escapeHTML(beat.intent)}</b><p>${escapeHTML(beat.summary || "")}${beat.emotional_beat ? ` <i>(${escapeHTML(beat.emotional_beat)})</i>` : ""}</p><small>scene ${escapeHTML(beat.scene_key)} · ${(beat.characters || []).map(escapeHTML).join(", ")}</small>${shots}</div>`;
   }).join("");
   const claims = (content.product_claims || []).map((claim) => `${claim.claim}${claim.must_preserve ? " (must preserve)" : ""}`);
+  // Invariants and required copy are structured now: an invariant may name the
+  // characters and scenes it is about, and copy names the shot it appears in.
+  const invariants = (content.invariants || []).map((item) => {
+    if (typeof item === "string") return item;
+    const scope = [...(item.characters || []), ...(item.scenes || [])].join(", ");
+    return scope ? `${item.text} — only for ${scope}` : item.text;
+  });
+  const requiredCopy = (content.required_copy || []).map((item) =>
+    typeof item === "string"
+      ? `${item} — no placement`
+      : `${item.text} — beat ${item.beat ?? "?"}, shot ${item.shot ?? "?"}`);
   const obligations = (content.obligations || []).map((item) => `${item.key}: ${item.promise} [${item.category}]`);
   const revisions = (view.screenplays || []).map((item) =>
     `r${item.revision} · ${item.status.toLowerCase()} · ${REASONER_LABEL(item.reasoner)}`).join(" | ");
@@ -3544,23 +3660,45 @@ function renderScreenplay(view) {
     ${treatment.visual_direction ? `<p><b>Visual direction:</b> ${escapeHTML(treatment.visual_direction)}</p>` : ""}
     ${treatment.tone_direction ? `<p><b>Tone:</b> ${escapeHTML(treatment.tone_direction)}</p>` : ""}
     ${treatment.ending ? `<p><b>Ending:</b> ${escapeHTML(treatment.ending)}</p>` : ""}
-    <h4>Locked facts (invariants)</h4>${list(content.invariants)}
+    <h4>Locked facts (invariants)</h4>${list(invariants)}
     <h4>Open to exploration (variables)</h4>${list(content.variables)}
     <h4>Characters &amp; relationships</h4><ul>${characters}</ul>
     <h4>Scenes</h4><ul>${scenes}</ul>
     <h4>Beats, dialogue &amp; shots</h4>${beats}
     ${claims.length ? `<h4>Product claims</h4>${list(claims)}` : ""}
-    ${(content.required_copy || []).length ? `<h4>Copy that must survive</h4>${list(content.required_copy)}` : ""}
+    ${requiredCopy.length ? `<h4>Copy that must survive</h4>${list(requiredCopy)}` : ""}
     ${obligations.length ? `<h4>Continuity obligations opened</h4>${list(obligations)}` : ""}
     ${(content.unresolved || []).length ? `<h4>Unresolved creative choices</h4>${list(content.unresolved)}` : ""}
     <h4>Script as compiled</h4><pre class="mono" style="white-space:pre-wrap;font-size:11px">${escapeHTML(screenplay.script_text || "")}</pre>
     <div class="creative-revisions">Revisions: ${escapeHTML(revisions)}${screenplay.skill_version ? ` · skill ${escapeHTML(screenplay.skill_version)}` : ""}</div>`;
 }
 
+function renderUncoveredElements(view) {
+  const uncovered = view.session?.anchor_coverage?.uncovered || [];
+  if (!uncovered.length) return "";
+  const reasons = {
+    NOT_IN_ANY_BEAT_OR_SHOT: "named in the treatment only, never on screen",
+    SCENE_NOT_USED_BY_ANY_BEAT: "no beat plays in this scene",
+    SCENE_ANCHOR_LIMIT: "beyond the scene key-visual budget",
+    PROP_ANCHOR_LIMIT: "beyond the prop key-visual budget",
+  };
+  const rows = uncovered.map((item) =>
+    `<li><b>${escapeHTML(item.title)}</b> <small>${escapeHTML(item.kind.toLowerCase())} · ${escapeHTML(reasons[item.reason] || item.reason)}</small></li>`).join("");
+  return `<div class="creative-uncovered"><b>No key visual (on record)</b><ul>${rows}</ul></div>`;
+}
+
 function renderAnchors(view) {
   const anchors = view.anchors || [];
   const status = view.session.status;
   const actionable = ["VISUALS_IN_PROGRESS", "BIBLE_PROPOSED"].includes(status);
+  // The key-visual action behind each anchor carries which attempt this is and
+  // why the last one failed; the anchor row alone only knows a failure code.
+  const attemptByAnchor = new Map();
+  for (const action of view.actions || []) {
+    if (action.kind !== "GENERATE_KEY_VISUAL") continue;
+    const anchorId = action.payload?.anchor_id;
+    if (anchorId) attemptByAnchor.set(anchorId, action);
+  }
   return anchors.map((anchor) => {
     const buttons = [];
     if (actionable && anchor.status === "FAILED") {
@@ -3574,10 +3712,14 @@ function renderAnchors(view) {
     }
     const thumbClass = anchor.status === "GENERATING" ? " is-generating" : anchor.status === "FAILED" ? " is-failed" : "";
     const thumbLabel = anchor.status === "READY" ? "…" : anchor.status === "GENERATING" ? "Rendering…" : escapeHTML(simpleLabel(anchor.status) || anchor.status);
+    const action = attemptByAnchor.get(anchor.id);
+    const attempt = Number(action?.result?.attempt || 0);
+    const failure = action?.result?.error_message || action?.result?.error || anchor.failure_code;
     const detail = [
       anchor.kind.toLowerCase(), `v${anchor.version}`,
       anchor.required ? "required" : "optional",
-      anchor.failure_code ? `failed: ${anchor.failure_code}` : "",
+      attempt > 1 ? `attempt ${attempt}` : "",
+      anchor.status === "FAILED" && failure ? `failed: ${failure}` : "",
       anchor.skip_reason ? `skipped: ${anchor.skip_reason}` : "",
     ].filter(Boolean).join(" · ");
     return `
@@ -3732,13 +3874,23 @@ function renderCreative() {
     if (editing && !$("creativeScreenplayJson").value) {
       $("creativeScreenplayJson").value = JSON.stringify(screenplay?.content || {}, null, 2);
     }
-    if (screenplay?.deterministic) {
+    const conflicts = (screenplay?.brief_conformance || []).filter((item) => item.severity === "BLOCKING");
+    const enrichments = (screenplay?.brief_conformance || []).filter((item) => item.severity !== "BLOCKING");
+    if (conflicts.length) {
+      const rows = conflicts.map((item) =>
+        `<li><b>${escapeHTML(item.brief_path)}</b> — brief: <i>${escapeHTML(JSON.stringify(item.brief_value))}</i>; screenplay: <i>${escapeHTML(JSON.stringify(item.screenplay_value))}</i><br><small>${escapeHTML(item.reason)}</small></li>`).join("");
+      setNotice("creativeScreenplayNotice", `<b>This screenplay contradicts your approved brief</b>Ask the director to redraft, or approve anyway to overrule your own brief.<ul>${rows}</ul>`, "is-error");
+    } else if (screenplay?.deterministic) {
       const codes = (screenplay.reason_codes || []).filter((code) => !["SKILL_LOADED", "DETERMINISTIC_FALLBACK"].includes(code)).join(", ");
       setNotice("creativeScreenplayNotice", `<b>Deterministic scaffold — not the director's writing</b>The director model was unavailable (${escapeHTML(codes)}). Every line is a placeholder. Redraft with the director, or approve knowing this.`, "is-error");
     } else if (screenplay?.reasoner === "USER_EDIT") {
       setNotice("creativeScreenplayNotice", `<b>Your revision</b>This revision was edited by you from r${screenplay.parent_revision ?? "?"}.`);
     } else if (screenplay) {
-      setNotice("creativeScreenplayNotice", (screenplay.content?.unresolved || []).length ? `<b>Unresolved choices</b>The director left ${screenplay.content.unresolved.length} creative choice(s) open; see the list below.` : "");
+      const unresolved = (screenplay.content?.unresolved || []).length;
+      const enriched = enrichments.length
+        ? `<b>The director went beyond the brief</b>${enrichments.length} point(s) depart from what the director itself assumed, not from anything you fixed: ${escapeHTML(enrichments.map((item) => item.brief_path).join(", "))}.`
+        : "";
+      setNotice("creativeScreenplayNotice", unresolved ? `<b>Unresolved choices</b>The director left ${unresolved} creative choice(s) open; see the list below.` : enriched);
     } else {
       setNotice("creativeScreenplayNotice", `<b>Drafting</b>The director is writing the treatment and screenplay from the approved brief.`, "is-warning");
     }
@@ -3747,6 +3899,7 @@ function renderCreative() {
     $("creativeSaveScreenplayBtn").hidden = !editing;
     $("creativeCancelScreenplayBtn").hidden = !editing;
     $("creativeAcceptDeterministicLabel").hidden = !(status === "SCREENPLAY_PROPOSED" && screenplay?.deterministic && !editing);
+    $("creativeAcceptBriefViolationsLabel").hidden = !(status === "SCREENPLAY_PROPOSED" && conflicts.length && !editing);
     $("creativeApproveScreenplayBtn").hidden = status !== "SCREENPLAY_PROPOSED" || editing;
   }
 
@@ -3761,7 +3914,7 @@ function renderCreative() {
     const generating = anchors.some((anchor) => anchor.status === "GENERATING");
     const polling = Boolean(creativePoll && creativePoll.sessionId === view.session.id);
     $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${polling ? " · auto-refreshing" : ""}`;
-    $("creativeAnchorGrid").innerHTML = renderAnchors(view);
+    $("creativeAnchorGrid").innerHTML = renderAnchors(view) + renderUncoveredElements(view);
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
       const media = await resolveAssetThumbnail(anchor.media_asset_id).catch(() => null);
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
@@ -3965,12 +4118,18 @@ async function creativeApproveScreenplay() {
   const view = state.creative.session;
   if (!view?.screenplay) return;
   const accept = $("creativeAcceptDeterministic")?.checked === true;
+  const overrule = $("creativeAcceptBriefViolations")?.checked === true;
   const result = await request(`/v1/creative/sessions/${view.session.id}/screenplay/approve`, {
     method: "POST",
-    body: JSON.stringify({ revision: view.screenplay.revision, accept_deterministic: accept }),
+    body: JSON.stringify({
+      revision: view.screenplay.revision,
+      accept_deterministic: accept,
+      accept_brief_violations: overrule,
+    }),
   });
   const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
-  if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
+  if (!(result.executions || []).length) toast("Nothing to retry — refresh the visuals first.");
+  else if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
   else toast(`Screenplay approved. ${(result.executions || []).length} key visual(s) are being generated.`);
   await openCreativeSession(view.session.id);
 }
@@ -3986,8 +4145,11 @@ async function creativeRetryVisuals() {
   const view = state.creative.session;
   if (!view) return;
   const result = await request(`/v1/creative/sessions/${view.session.id}/visuals/execute`, { method: "POST", body: "{}" });
-  const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
-  if (failed.length) toast(`${failed.length} key visual(s) still could not start: ${failed[0].error}`);
+  const executions = result.executions || [];
+  const failed = executions.filter((entry) => entry.status === "FAILED");
+  if (!executions.length) toast("Nothing to retry — the failed visuals may already be running.");
+  else if (failed.length) toast(`${failed.length} key visual(s) still could not start: ${failed[0].error}`);
+  else toast(`Retrying ${executions.length} key visual(s).`);
   await openCreativeSession(view.session.id);
 }
 
@@ -4517,6 +4679,10 @@ on("creativeBriefEditor", "click", (event) => {
   if (event.target.closest("[data-cast-add]")) {
     const cast = $("creativeBriefEditor").querySelector(".creative-cast");
     const index = cast.querySelectorAll("[data-cast-row]").length;
+    if (index >= creativeMaxCast()) {
+      setNotice("creativeBriefNotice", `<b>Cast is full</b>At most ${creativeMaxCast()} characters; each one needs its own key visual and identity lock.`, "is-warning");
+      return;
+    }
     const row = document.createElement("div");
     row.className = "creative-cast-row";
     row.dataset.castRow = String(index);

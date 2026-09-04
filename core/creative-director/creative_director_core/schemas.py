@@ -31,6 +31,25 @@ ANCHOR_PROMPT_VERSION = "creative-anchor-v2"
 #: or is defaulted at proposal time.
 MAX_QUESTIONS_PER_TURN = 3
 
+#: The largest cast the pipeline can carry end to end. Every character that
+#: appears in a beat or a shot gets its own key visual and a locked
+#: CharacterIdentityVersion, so this single number bounds the brief's cast, the
+#: screenplay schema, the director's prompt, anchor derivation, the compiler
+#: and the UI. A screenplay over the cap is *refused* at validation - the cast
+#: is never silently sliced, because a sliced character still acts on screen
+#: with no canonical reference behind it.
+MAX_CAST = 12
+
+#: Locations that may each receive their own canonical SCENE key visual. Equal
+#: to the screenplay's own scene cap: every scene a beat actually plays in is
+#: anchored, so the frame-anchor planner can always resolve one.
+MAX_SCENE_ANCHORS = 12
+
+#: Distinct props that may receive their own key visual. Unlike the cast this
+#: is a budget, not a contract: a prop beyond it is recorded as uncovered with
+#: its reason rather than refusing the screenplay.
+MAX_PROP_ANCHORS = 6
+
 
 class FieldWeight(IntEnum):
     """How much a missing field hurts, for one format."""
@@ -123,6 +142,15 @@ class ReasonCode(StrEnum):
     ASSUMPTIONS_UNCONFIRMED = "ASSUMPTIONS_UNCONFIRMED"
     REVISION_SUPERSEDED = "REVISION_SUPERSEDED"
     DETERMINISTIC_SCREENPLAY_UNCONFIRMED = "DETERMINISTIC_SCREENPLAY_UNCONFIRMED"
+    #: The screenplay disagrees with a fact the user established in the
+    #: approved brief. A redraft is the remedy, never a plain retry.
+    SCREENPLAY_CONTRADICTS_BRIEF = "SCREENPLAY_CONTRADICTS_BRIEF"
+    #: The screenplay departs from something the director itself inferred:
+    #: enrichment, recorded and shown, never a blocked approval.
+    SCREENPLAY_BRIEF_ADVISORY = "SCREENPLAY_BRIEF_ADVISORY"
+    #: Copy that must appear on screen without a shot to appear in. The
+    #: director or the user has to say where; the platform will not pick.
+    REQUIRED_COPY_UNPLACED = "REQUIRED_COPY_UNPLACED"
     REQUIRED_ANCHORS_NOT_READY = "REQUIRED_ANCHORS_NOT_READY"
     OPTIONAL_ANCHORS_NOT_TERMINAL = "OPTIONAL_ANCHORS_NOT_TERMINAL"
     ANCHOR_SKIPPED = "ANCHOR_SKIPPED"
@@ -132,7 +160,30 @@ class ReasonCode(StrEnum):
     LOCK_SERVICES_UNAVAILABLE = "LOCK_SERVICES_UNAVAILABLE"
     LOCK_FAILED = "LOCK_FAILED"
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
+    #: Another approval is inside this exact lock step right now.
+    LOCK_IN_PROGRESS = "LOCK_IN_PROGRESS"
+    CHARACTER_IDENTITY_NOT_COVERED = "CHARACTER_IDENTITY_NOT_COVERED"
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
+    #: The brief head moved while the director was thinking, so the model's
+    #: operations were re-applied to the newer revision under the same
+    #: provenance rules instead of overwriting it.
+    BRIEF_REBASED = "BRIEF_REBASED"
+    #: The caller pinned a brief revision that is no longer the head.
+    BRIEF_REVISION_CHANGED = "BRIEF_REVISION_CHANGED"
+    #: The session left the stage this operation was reasoned against.
+    SESSION_STAGE_CHANGED = "SESSION_STAGE_CHANGED"
+    #: A screenplay was written against a revision that is no longer head.
+    SCREENPLAY_REVISION_CHANGED = "SCREENPLAY_REVISION_CHANGED"
+    #: A screenplay was written against a stage the session has left.
+    SCREENPLAY_STAGE_CHANGED = "SCREENPLAY_STAGE_CHANGED"
+    #: The approved brief moved under a screenplay while it was being written.
+    SCREENPLAY_BRIEF_CHANGED = "SCREENPLAY_BRIEF_CHANGED"
+    #: At least one USER_STATED claim could not be found in the user's own
+    #: words and was recorded as the director's inference instead.
+    EVIDENCE_UNVERIFIED = "EVIDENCE_UNVERIFIED"
+    #: At least one claimed skip was not honoured: the question was never
+    #: asked, or the user never declined it in their own words.
+    SKIP_UNVERIFIED = "SKIP_UNVERIFIED"
 
 
 #: Reason codes whose failure a caller may retry without changing the input.
@@ -372,10 +423,18 @@ class BriefOperation(BaseModel):
     op: BriefOperationKind
     path: str = Field(min_length=1, max_length=80)
     value: Any = None
-    #: The user's own words that justify this operation.
+    #: The user's own words that justify this operation. Verbatim, because the
+    #: server checks it against the user's messages before honouring a
+    #: USER_STATED claim; a paraphrase is not a quote.
     evidence: str = Field(default="", max_length=400)
+    #: Which user turn the quote comes from, when the model names one. Naming a
+    #: turn that is not on record fails the proof; naming none searches every
+    #: user turn in the session.
+    evidence_turn_id: str | None = Field(default=None, max_length=36)
     #: USER_STATED: the user said it; INFERRED: the director's reading. Only
-    #: USER_STATED may replace or remove something the user established.
+    #: USER_STATED may replace or remove something the user established - and
+    #: the model's word for it is a claim, not the finding: the service
+    #: verifies the quote and demotes an unprovable claim to INFERRED.
     confidence: Literal["USER_STATED", "INFERRED"] = "INFERRED"
 
     @field_validator("path")
@@ -389,6 +448,26 @@ class UnresolvedQuestion(BaseModel):
 
     code: str = Field(min_length=1, max_length=40)
     question: str = Field(default="", max_length=400)
+
+
+class SkippedQuestionClaim(BaseModel):
+    """The model's claim that the user declined one question, with its proof.
+
+    A skip permanently silences a gap and can make a brief proposable, so it is
+    honoured only for a question that was actually asked *and* whose decline
+    the user's own words support.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    code: str = Field(min_length=1, max_length=40)
+    evidence: str = Field(default="", max_length=400)
+    evidence_turn_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("code")
+    @classmethod
+    def _upper(cls, value: str) -> str:
+        return value.strip().upper()[:40]
 
 
 class DirectorAssumption(BaseModel):
@@ -413,6 +492,10 @@ class DirectorTurnResult(BaseModel):
     brief_operations: list[BriefOperation] = Field(default_factory=list, max_length=40)
     answered_question_codes: list[str] = Field(default_factory=list, max_length=20)
     skipped_question_codes: list[str] = Field(default_factory=list, max_length=20)
+    #: The same skips with the user's words behind them. A bare code in
+    #: ``skipped_question_codes`` carries no proof and is recorded but not
+    #: honoured; an entry here is honoured when its quote verifies.
+    skipped_questions: list[SkippedQuestionClaim] = Field(default_factory=list, max_length=20)
     unresolved_questions: list[UnresolvedQuestion] = Field(default_factory=list, max_length=10)
     assumptions: list[DirectorAssumption] = Field(default_factory=list, max_length=20)
     creative_notes: list[str] = Field(default_factory=list, max_length=20)
@@ -676,6 +759,73 @@ class ProductClaim(BaseModel):
     must_preserve: bool = True
 
 
+class ScreenplayInvariant(BaseModel):
+    """One thing that must stay true, and where it applies.
+
+    An invariant that names no character and no scene holds for the whole
+    piece; one that names them holds only there. The scope is what keeps every
+    invariant out of every shot: a rule about the product's label has no
+    business constraining a two-shot in a stairwell.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = Field(min_length=1, max_length=400)
+    #: Character names this invariant is about; empty means every character.
+    characters: list[str] = Field(default_factory=list, max_length=MAX_CAST)
+    #: Scene keys this invariant is about; empty means every scene.
+    scenes: list[str] = Field(default_factory=list, max_length=MAX_SCENE_ANCHORS)
+
+    @property
+    def is_global(self) -> bool:
+        return not self.characters and not self.scenes
+
+    @field_validator("text")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+    @field_validator("characters", "scenes")
+    @classmethod
+    def _clean_scope(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 80) for item in value if _clean_text(item, 80)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_text(cls, value: Any) -> Any:
+        return {"text": value} if isinstance(value, str) else value
+
+
+class RequiredCopy(BaseModel):
+    """One line of copy that must survive, and the shot it appears in.
+
+    Copy with no declared placement is not approvable: the director has to say
+    where the words are on screen, because "somewhere in the film" is not a
+    thing a shot prompt can honour and picking a shot for the user would be
+    inventing the answer.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = Field(min_length=1, max_length=400)
+    beat: int | None = Field(default=None, ge=1, le=60)
+    shot: int | None = Field(default=None, ge=1, le=200)
+
+    @property
+    def placed(self) -> bool:
+        return self.beat is not None and self.shot is not None
+
+    @field_validator("text")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_text(cls, value: Any) -> Any:
+        return {"text": value} if isinstance(value, str) else value
+
+
 class ScreenplayObligation(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -701,20 +851,36 @@ class Screenplay(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     treatment: Treatment
-    invariants: list[str] = Field(default_factory=list, max_length=40)
+    invariants: list[ScreenplayInvariant] = Field(default_factory=list, max_length=40)
     variables: list[str] = Field(default_factory=list, max_length=40)
-    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=12)
-    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=12)
+    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=MAX_CAST)
+    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=MAX_SCENE_ANCHORS)
     beats: list[ScreenplayBeat] = Field(min_length=1, max_length=40)
     product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
-    required_copy: list[str] = Field(default_factory=list, max_length=20)
+    required_copy: list[RequiredCopy] = Field(default_factory=list, max_length=20)
     obligations: list[ScreenplayObligation] = Field(default_factory=list, max_length=20)
     unresolved: list[str] = Field(default_factory=list, max_length=20)
 
-    @field_validator("invariants", "variables", "required_copy", "unresolved")
+    @field_validator("variables", "unresolved")
     @classmethod
     def _clean_lists(cls, value: list[str]) -> list[str]:
         return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
+
+    @property
+    def required_copy_texts(self) -> list[str]:
+        """The wording of every required copy line, however it is declared."""
+
+        return [item.text for item in self.required_copy]
+
+    @property
+    def invariant_texts(self) -> list[str]:
+        return [item.text for item in self.invariants]
+
+    @property
+    def unplaced_copy(self) -> list[RequiredCopy]:
+        """Copy the director has not said where to show."""
+
+        return [item for item in self.required_copy if not item.placed]
 
     @model_validator(mode="after")
     def _cross_references(self) -> Screenplay:

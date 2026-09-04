@@ -27,7 +27,13 @@ from evaluation_core import (
 )
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from generation_gateway import IdempotencyConflict
-from memory_core import MemoryLayer, MemoryQuery, MultimodalContent, ShotMemoryInput
+from memory_core import (
+    MemoryEmbeddingUnavailable,
+    MemoryLayer,
+    MemoryQuery,
+    MultimodalContent,
+    ShotMemoryInput,
+)
 from model_registry_core import ModelRole
 from platform_contracts import GenerationRequest, PassengerGenerationCommand
 from production_domain.models import (
@@ -453,6 +459,12 @@ def _model_execution_evidence_view(item: ModelExecutionRecord) -> dict[str, Any]
                     "prompt_tokens",
                     "completion_tokens",
                     "total_tokens",
+                    # A multimodal embedding is billed on these three: text per
+                    # 1M tokens, image and video per 1B pixels. Omitting them
+                    # left an operator looking at a cost with no usage under it.
+                    "text_tokens",
+                    "image_pixels",
+                    "video_pixels",
                 }
             ),
         ),
@@ -1045,35 +1057,47 @@ def register_runtime_routes(
                 )
             memory_id = None
             if container.feature_flags.enabled("voyage_memory", project_id=project_id):
-                indexed = container.memory.index(
-                    ShotMemoryInput(
-                        project_id=project_id,
-                        layer=(MemoryLayer.CANONICAL if body.promote_to_canonical else MemoryLayer.EPISODIC),
-                        memory_type="ASSET_VERSION",
-                        content=MultimodalContent(
-                            text=f"{body.asset_type} {body.name} generation {job_id}",
-                            image_urls=(
-                                [media.public_url]
-                                if media.public_url
-                                and media.public_url.startswith("https://")
-                                and media.mime_type.startswith("image/")
-                                else []
+                # The version exists and any promotion is committed by now.
+                # Advisory vector memory is the last, weakest step of this
+                # request: the engine already records an embedding outage as a
+                # degradation, and this clause holds the boundary so no future
+                # memory path can turn a saved creation into a 500.
+                try:
+                    indexed = container.memory.index(
+                        ShotMemoryInput(
+                            project_id=project_id,
+                            layer=(
+                                MemoryLayer.CANONICAL
+                                if body.promote_to_canonical
+                                else MemoryLayer.EPISODIC
                             ),
-                            video_urls=(
-                                [media.public_url]
-                                if media.public_url
-                                and media.public_url.startswith("https://")
-                                and media.mime_type.startswith("video/")
-                                else []
+                            memory_type="ASSET_VERSION",
+                            content=MultimodalContent(
+                                text=f"{body.asset_type} {body.name} generation {job_id}",
+                                image_urls=(
+                                    [media.public_url]
+                                    if media.public_url
+                                    and media.public_url.startswith("https://")
+                                    and media.mime_type.startswith("image/")
+                                    else []
+                                ),
+                                video_urls=(
+                                    [media.public_url]
+                                    if media.public_url
+                                    and media.public_url.startswith("https://")
+                                    and media.mime_type.startswith("video/")
+                                    else []
+                                ),
                             ),
-                        ),
-                        entity_ids=[asset_id],
-                        asset_version_ids=[version.id],
-                        canonical=body.promote_to_canonical,
-                        metadata={"generation_job_id": job_id},
+                            entity_ids=[asset_id],
+                            asset_version_ids=[version.id],
+                            canonical=body.promote_to_canonical,
+                            metadata={"generation_job_id": job_id},
+                        )
                     )
-                )
-                memory_id = indexed.id
+                    memory_id = indexed.id
+                except MemoryEmbeddingUnavailable:
+                    memory_id = None
             return {
                 "asset": _asset_view(asset or logical) if asset or logical else {"id": asset_id},
                 "version": _version_view(version),

@@ -340,6 +340,7 @@ class VisualProductionRuntime:
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             preferred_provider = shot.preferred_provider or shot.provider
+            director_intent = dict(shot.director_intent_json or {})
             timeline_fence = self._timeline_fence(session, shot, project_id)
 
         # Retrieval stage one — forced. Explicit dependencies and open
@@ -402,7 +403,15 @@ class VisualProductionRuntime:
             # A budget that cannot hold a forced segment is a review
             # condition, never permission to assemble similarity-only context.
             raise ShotDependencyUnresolved(shot_id, [f"DEPENDENCY_CONTEXT_BUDGET:{exc}"]) from exc
-        extra_references = list(dict.fromkeys(reference_asset_ids or []))
+        # The key visuals the director bound to *this* shot. They are an
+        # explicit approved choice, so they join the caller's own references:
+        # always included, and exempt from the anchor-plan exclusions below.
+        director_references = [
+            str(item)
+            for item in (director_intent.get("reference_asset_ids") or [])
+            if str(item)
+        ]
+        extra_references = list(dict.fromkeys([*(reference_asset_ids or []), *director_references]))
         style_references = list(style_control.reference_media_ids) if style_control else []
         merged_references = list(
             dict.fromkeys(

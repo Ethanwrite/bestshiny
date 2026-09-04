@@ -486,6 +486,18 @@ class CharacterEvidenceSubmission:
     submitted_at: str
 
 
+@dataclass(frozen=True)
+class CharacterSubmissionTarget:
+    """One character in a shadow analysis, and what it is compared against.
+
+    A candidate can bind several characters; one remote job still analyses them
+    together, so the request carries a list of these rather than a single id.
+    """
+
+    character_id: str
+    references: tuple[CanonicalIdentityReference, ...]
+
+
 class AsyncCharacterEvidenceProducer(Protocol):
     version: str
 
@@ -494,8 +506,9 @@ class AsyncCharacterEvidenceProducer(Protocol):
         video_path: Path,
         *,
         candidate_id: str,
-        character_id: str,
-        references: Sequence[CanonicalIdentityReference],
+        character_id: str | None = None,
+        references: Sequence[CanonicalIdentityReference] = (),
+        characters: Sequence[CharacterSubmissionTarget] | None = None,
         shot_type: str = "DIALOGUE",
         sample_positions: tuple[float, ...] | None = None,
     ) -> CharacterEvidenceSubmission: ...

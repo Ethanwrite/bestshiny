@@ -44,6 +44,7 @@ from production_domain.models import (
 )
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -54,12 +55,21 @@ class CreativeSessionCreate(BaseModel):
     idea: str = Field(min_length=1, max_length=8000)
     format: str | None = None
     title: str = ""
+    #: The idempotency key for the whole create, not only for its first turn.
+    #: A retry carrying the key of a create that already landed returns that
+    #: session's recorded opening reply instead of opening a second
+    #: conversation; the same key with different words is a 409
+    #: (CLIENT_TURN_ID_CONTENT_MISMATCH), never a replay of other words.
     client_turn_id: str | None = Field(default=None, max_length=120)
 
 
 class CreativeMessage(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
     client_turn_id: str | None = Field(default=None, max_length=120)
+    #: The brief revision the client was looking at. When it is no longer the
+    #: head, the turn is refused with BRIEF_REVISION_CHANGED instead of being
+    #: re-based onto someone else's newer brief.
+    expected_brief_revision: int | None = Field(default=None, ge=0)
 
 
 _APPROVAL_PHRASES = frozenset(
@@ -93,6 +103,9 @@ class ScreenplayEdit(BaseModel):
 class ScreenplayApprove(BaseModel):
     revision: int = Field(ge=1)
     accept_deterministic: bool = False
+    #: Approve despite a recorded contradiction with the approved brief. The
+    #: user is the only one who may overrule their own brief.
+    accept_brief_violations: bool = False
 
 
 class AnchorSkip(BaseModel):
@@ -183,6 +196,7 @@ def register_creative_routes(
         enforce_plan = not principal.development_bypass and project_workspace_id is not None
         for action in pending:
             payload = action["payload"]
+            result_json = action.get("result") or {}
             try:
                 named_provider = ""
                 named_model = ""
@@ -202,6 +216,24 @@ def register_creative_routes(
                         ) from exc
                     named_provider = resolved.provider
                     named_model = resolved.provider_model_id
+                # A retry after an asynchronous failure must not reuse the key
+                # that already burned a job: the gateway would replay the dead
+                # one and rebind the anchor to it. Chaining the previous job's
+                # id keeps the retry itself idempotent - pressing Retry twice
+                # replays the same *new* job rather than paying twice - and
+                # leaves CreativeAction.idempotency_key untouched, so the
+                # action dedupe and its unique constraint still hold.
+                previous_job_id = str(result_json.get("job_id") or "")
+                # Only a job that actually reached a terminal state is dead. An
+                # action reopened for any other reason still owns its job, and
+                # replaying the same key correctly returns it instead of paying
+                # for a second one.
+                burned_job = bool(result_json.get("failed_asynchronously")) and bool(previous_job_id)
+                generation_key = (
+                    f"{action['idempotency_key']}:after:{previous_job_id}"[:250]
+                    if burned_job
+                    else action["idempotency_key"]
+                )
                 generation = GenerationRequest(
                     project_id=project_id,
                     type="image",
@@ -210,7 +242,7 @@ def register_creative_routes(
                     prompt=payload["prompt"],
                     aspect_ratio=payload.get("aspect_ratio", "1:1"),
                     image_count=int(payload.get("image_count", 1)),
-                    idempotency_key=action["idempotency_key"],
+                    idempotency_key=generation_key,
                 )
                 admitted = container.generation_admission.admit_passenger(
                     generation,
@@ -235,10 +267,17 @@ def register_creative_routes(
                 LookupError,
                 ValueError,
             ) as exc:
+                # Merged, not replaced: a synchronous refusal (out of credits,
+                # a plan denial) must not erase the burned job id that tells the
+                # NEXT retry it may not reuse the dead job's key.
                 creative.record_action_result(
                     action["id"],
                     status="FAILED",
-                    result={"error": str(exc), "error_type": type(exc).__name__},
+                    result={
+                        **result_json,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
                 )
                 results.append(
                     {
@@ -257,6 +296,10 @@ def register_creative_routes(
                     "job_id": job.id,
                     "replayed": replayed,
                     "estimated_credits": admitted.estimate.credits,
+                    # Which attempt this is, and what the previous one was, so
+                    # the audit and the UI can say "attempt 2 after <job>".
+                    "attempt": int(result_json.get("attempt") or 0) + 1,
+                    **({"previous_job_id": previous_job_id} if burned_job else {}),
                 },
             )
             results.append(
@@ -299,15 +342,60 @@ def register_creative_routes(
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
         project = auth.require_project(principal, body.project_id, write=True)
+        # `client_turn_id` makes the first *turn* replayable, but nothing
+        # guarded the session row: a create whose response was lost on the way
+        # back opened a second CreativeSession on retry - a duplicate
+        # conversation and a second paid director call - because the replay
+        # guard only ever looks inside the session it was handed. The session
+        # now carries the key that opened it, unique per project.
+        def _session_for_opening_turn(create: CreativeSessionCreate) -> str | None:
+            """The session this create key already opened, if any.
+
+            The key lives on the session row under a per-project unique index,
+            so a concurrent retry is refused by the database and resolved here
+            rather than racing a read-then-create.
+            """
+
+            if not create.client_turn_id:
+                return None
+            with container.database.session() as session:
+                return session.scalar(
+                    select(CreativeSession.id).where(
+                        CreativeSession.project_id == create.project_id,
+                        CreativeSession.create_client_turn_id == create.client_turn_id,
+                    )
+                )
+
+        replayed_session_id = _session_for_opening_turn(body)
         try:
-            reply = await creative.start_session(
-                body.project_id,
-                idea=body.idea,
-                workspace_id=project.workspace_id,
-                format_hint=body.format,
-                title=body.title,
-                client_turn_id=body.client_turn_id,
-            )
+            if replayed_session_id:
+                # Answer from the recorded turn through the same idempotency
+                # path a retried message takes, so the same key sent with
+                # different words is refused there rather than served someone
+                # else's reply.
+                reply = await creative.post_message(
+                    replayed_session_id, body.idea, client_turn_id=body.client_turn_id
+                )
+            else:
+                try:
+                    reply = await creative.start_session(
+                        body.project_id,
+                        idea=body.idea,
+                        workspace_id=project.workspace_id,
+                        format_hint=body.format,
+                        title=body.title,
+                        client_turn_id=body.client_turn_id,
+                    )
+                except IntegrityError as exc:
+                    # A concurrent retry won the opening-turn unique index. The
+                    # session exists; answer from it rather than opening a
+                    # second conversation and paying for a second director call.
+                    replayed_session_id = _session_for_opening_turn(body)
+                    if replayed_session_id is None:
+                        raise HTTPException(409, "creative session creation conflicted") from exc
+                    reply = await creative.post_message(
+                        replayed_session_id, body.idea, client_turn_id=body.client_turn_id
+                    )
         except CreativeTurnLimitReached as exc:
             raise HTTPException(403, exc.as_detail()) from exc
         except CreativeSessionConflict as exc:
@@ -405,7 +493,10 @@ def register_creative_routes(
                 }
         try:
             reply = await creative.post_message(
-                session_id, body.content, client_turn_id=body.client_turn_id
+                session_id,
+                body.content,
+                client_turn_id=body.client_turn_id,
+                expected_brief_revision=body.expected_brief_revision,
             )
         except CreativeTurnLimitReached as exc:
             raise HTTPException(403, exc.as_detail()) from exc
@@ -483,6 +574,8 @@ def register_creative_routes(
             )
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/screenplay/edit")
     def edit_creative_screenplay(
@@ -495,6 +588,8 @@ def register_creative_routes(
             return creative.edit_screenplay(session_id, body.content, actor=_actor(principal))
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -511,6 +606,7 @@ def register_creative_routes(
                 revision=body.revision,
                 actor=_actor(principal),
                 accept_deterministic=body.accept_deterministic,
+                accept_brief_violations=body.accept_brief_violations,
             )
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc

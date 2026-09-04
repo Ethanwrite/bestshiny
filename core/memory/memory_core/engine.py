@@ -17,7 +17,7 @@ from production_domain.models import (
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .embedding import EmbeddingProvider, MemoryEmbeddingUnavailable
+from .embedding import EmbeddingProvider, EmbeddingVector, MemoryEmbeddingUnavailable
 from .schemas import (
     ADVISORY_EVIDENCE_PURPOSES,
     AuthorityLevel,
@@ -29,6 +29,12 @@ from .schemas import (
     RetrievedMemory,
     ShotMemoryInput,
 )
+
+# The provider recorded on a memory row whose vector could not be produced.
+# The column is NOT NULL and must not carry a real provider's name: retrieval
+# matches on it, so a degraded row can never come back as if it were a Voyage
+# embedding, and an operator can count them.
+DEGRADED_EMBEDDING_PROVIDER = "unavailable"
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -92,13 +98,23 @@ class MultimodalMemoryEngine:
     def index(self, value: ShotMemoryInput) -> ShotMemory:
         with self.database.session() as session:
             self._validate_project_links(session, value)
-        embedded = self.embeddings.embed_with_provenance(
-            value.content,
-            input_type="document",
-            project_id=value.project_id,
-        )
-        vector = embedded.values
-        provenance = embedded.provenance
+        embedded: EmbeddingVector | None
+        try:
+            embedded = self.embeddings.embed_with_provenance(
+                value.content,
+                input_type="document",
+                project_id=value.project_id,
+            )
+        except MemoryEmbeddingUnavailable as exc:
+            # Vector memory is advisory, and indexing runs *after* the asset is
+            # promoted and Canon is written. An embedding outage therefore
+            # records a degradation and keeps the structurally retrievable row,
+            # exactly as `search` degrades to the structured timeline. It never
+            # rolls anything back and never fails the caller's request.
+            self._record_vector_degraded(value.project_id, exc)
+            embedded = None
+        vector = list(embedded.values) if embedded is not None else []
+        provenance = embedded.provenance if embedded is not None else None
         with self.database.session() as session:
             # Revalidate after the external embedding call so deleted or reassigned
             # associations cannot be persisted through the JSON version references.
@@ -106,8 +122,20 @@ class MultimodalMemoryEngine:
             metadata = dict(value.metadata)
             # These keys are server-owned policy facts. Caller metadata cannot
             # relabel an advisory similarity vector as decision authority.
-            metadata["evidence_purpose"] = provenance.evidence_purpose.value
-            metadata["authority_level"] = provenance.authority_level.value
+            if provenance is not None:
+                metadata["evidence_purpose"] = provenance.evidence_purpose.value
+                metadata["authority_level"] = provenance.authority_level.value
+                if provenance.video_frame_lineage is not None:
+                    # Which frames of which video this memory stands for, so a
+                    # retrieved memory can say what it was built from.
+                    metadata["video_frame_lineage"] = provenance.video_frame_lineage.model_dump(
+                        mode="json"
+                    )
+            else:
+                metadata["evidence_purpose"] = value.content.evidence_purpose.value
+                metadata["authority_level"] = value.content.authority_level.value
+                metadata["vector_degraded"] = True
+                metadata["degradation_reason_codes"] = ["MEMORY_VECTOR_DEGRADED"]
             memory = ShotMemory(
                 project_id=value.project_id,
                 layer=value.layer.value,
@@ -123,8 +151,10 @@ class MultimodalMemoryEngine:
                 canonical=value.canonical,
                 embedding=vector,
                 embedding_dimension=len(vector),
-                embedding_provider=provenance.provider,
-                embedding_model=provenance.model,
+                embedding_provider=(
+                    provenance.provider if provenance is not None else DEGRADED_EMBEDDING_PROVIDER
+                ),
+                embedding_model=provenance.model if provenance is not None else "",
                 metadata_json=metadata,
             )
             session.add(memory)

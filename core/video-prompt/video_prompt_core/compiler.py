@@ -237,6 +237,14 @@ class PromptCompilerService:
             name = fact.get("name")
             if name == "open_obligation":
                 rendered.append(f"open_obligation: {fact.get('value', '')}")
+            elif name == "director_continuity_obligation":
+                rendered.append(f"continuity_obligation: {fact.get('value', '')}")
+            elif name == "screenplay_invariant":
+                rendered.append(f"invariant: {fact.get('value', '')}")
+            elif name == "product_claim_verbatim":
+                rendered.append(f'product_claim (verbatim): "{fact.get("value", "")}"')
+            elif name == "required_copy_verbatim":
+                rendered.append(f'required_copy (verbatim): "{fact.get("value", "")}"')
             elif name == "known_fact":
                 rendered.append(f"known_fact[{fact.get('holder', '')}]: {fact.get('value', '')}")
             else:
@@ -403,6 +411,11 @@ class PromptCompilerService:
             scene_sequence = shot.scene.sequence
             shot_sequence = shot.sequence
             shot_type = shot.shot_type
+            # The approved director intent, written back onto the shot at
+            # compile time. Read here so the staged action, the gaze target,
+            # the states the shot moves between and the continuity it owes
+            # reach the prompt instead of stopping at the audit record.
+            director = dict(shot.director_intent_json or {})
             raw_action = shot.user_prompt or shot.prompt
             duration = shot.duration
             aspect_ratio = project.default_aspect_ratio
@@ -461,6 +474,22 @@ class PromptCompilerService:
             character_bindings,
         )
         action = self._single_action(raw_action)
+        director_gaze = str(director.get("gaze_target") or "").strip()
+        director_staging = str(director.get("description") or "").strip()
+        director_obligations = [
+            str(item).strip()
+            for item in (director.get("continuity_obligations") or [])
+            if str(item).strip()
+        ]
+        director_invariants = [
+            str(item).strip() for item in (director.get("invariants") or []) if str(item).strip()
+        ]
+        director_claims = [
+            str(item).strip() for item in (director.get("product_claims") or []) if str(item).strip()
+        ]
+        director_copy = [
+            str(item).strip() for item in (director.get("required_copy") or []) if str(item).strip()
+        ]
         state_characters = start_state.get("characters", {})
         binding_by_character = {
             self._uuid_key(character_id) or str(character_id): binding
@@ -499,6 +528,10 @@ class PromptCompilerService:
                         ),
                         eyeline_target=str(
                             state.get("eyeline_target")
+                            # The director said where this shot looks. It wins
+                            # over the compiler's inference and over the
+                            # default, but not over an explicit approved state.
+                            or director_gaze
                             or state.get("gaze_target")
                             or "approved scene partner or action target, never the camera"
                         ),
@@ -528,7 +561,8 @@ class PromptCompilerService:
                         name=str(binding.get("name") or f"subject {index}"),
                         asset_id=binding.get("character_id"),
                         asset_version_id=binding.get("identity_version_id"),
-                        eyeline_target="approved scene partner or action target, never the camera",
+                        eyeline_target=director_gaze
+                        or "approved scene partner or action target, never the camera",
                         identity_constraints=[
                             f"identity version {binding['identity_version_id']}"
                             for _ in [0]
@@ -537,10 +571,26 @@ class PromptCompilerService:
                     )
                 )
 
+        # The director's gaze is free text, and the token test below scans
+        # every subject eyeline - which now includes it. "off-camera partner"
+        # says the opposite of what the tokens would read, so the negative
+        # vocabulary has to cover it; the action line keeps its own test.
         allow_camera_gaze = self._camera_gaze_requested(action, start_state, end_state) or any(
             any(token in subject.eyeline_target.lower() for token in ("camera", "lens", "镜头"))
             and not any(
-                token in subject.eyeline_target.lower() for token in ("never", "not", "不得", "不要", "不看")
+                token in subject.eyeline_target.lower()
+                for token in (
+                    "never",
+                    "not",
+                    "off-camera",
+                    "off camera",
+                    "away from camera",
+                    "不得",
+                    "不要",
+                    "不看",
+                    "画外",
+                    "镜头外",
+                )
             )
             for subject in subjects
         )
@@ -573,6 +623,36 @@ class PromptCompilerService:
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
         dialogue = str(end_state.get("dialogue") or start_state.get("dialogue") or "")
         props = self._canonical_props(start_state.get("props", []))
+        # A canonical PRODUCT or PROP the DIRECTOR bound to *this* shot is a
+        # thing the shot must render exactly, so it enters the spec's own prop
+        # list and every adapter's prompt names it. Only this shot's own
+        # anchors: `canonical_assets` is the whole project's canonical list, and
+        # putting all of it here would make the evaluator demand a product in
+        # every shot it does not appear in - a critical failure that buys a
+        # paid retry for a shot that was correct.
+        bound_media = {
+            str(item) for item in (director.get("reference_asset_ids") or []) if item
+        }
+        known_prop_assets = {str(prop.get("asset_id")) for prop in props if prop.get("asset_id")}
+        for asset in canonical_assets:
+            if asset.get("type") not in {"PRODUCT", "PROP"}:
+                continue
+            if str(asset.get("id")) in known_prop_assets:
+                continue
+            media = {str(item) for item in (asset.get("image_urls") or [])} | {
+                str(item) for item in (asset.get("video_urls") or [])
+            }
+            if not bound_media or not (media & bound_media):
+                continue
+            props.append(
+                {
+                    "asset_id": str(asset.get("id")),
+                    "asset_version_id": asset.get("version_id"),
+                    "name": asset.get("name"),
+                    "kind": asset.get("type"),
+                    "state": "canonical appearance is fixed",
+                }
+            )
         constraints = [
             "one shot contains exactly one dominant action",
             "one dominant camera movement only",
@@ -595,6 +675,22 @@ class PromptCompilerService:
                 "contrast, texture, rendering medium, or edge treatment"
             )
         constraints.extend(state_constraint_lines)
+        # What the director approved for this exact shot, in the compiler's own
+        # constraint vocabulary. These are not suggestions the model may trade
+        # away: they are the staging and the continuity the user signed off.
+        if director_staging:
+            constraints.append(f"stage the approved action as: {director_staging}")
+        constraints.extend(f"continuity obligation: {item}" for item in director_obligations)
+        # Scoped to this shot by the director, never every invariant on every
+        # shot. Claims and copy are quoted, because their wording is the thing
+        # being preserved: a paraphrase is a different claim.
+        constraints.extend(f"invariant that holds here: {item}" for item in director_invariants)
+        constraints.extend(
+            f'product claim, verbatim and unparaphrased: "{item}"' for item in director_claims
+        )
+        constraints.extend(
+            f'required on-screen copy, exactly these words: "{item}"' for item in director_copy
+        )
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -606,8 +702,19 @@ class PromptCompilerService:
             resolution=resolution,
             subjects=subjects,
             props=props,
-            start_state=start_state,
-            end_state=end_state,
+            # The authoritative state stays exactly what the timeline says;
+            # the director's own wording for how this shot starts and ends
+            # sits beside it rather than over it.
+            start_state=(
+                {**start_state, "director_staging": director["start_state"]}
+                if director.get("start_state")
+                else start_state
+            ),
+            end_state=(
+                {**end_state, "director_staging": director["end_state"]}
+                if director.get("end_state")
+                else end_state
+            ),
             blocking=start_state.get("blocking", {}),
             camera=camera_spec,
             lighting=lighting_spec,
@@ -627,7 +734,30 @@ class PromptCompilerService:
                 # repeats it.
                 **(
                     {"facts": prompt_facts}
-                    if (prompt_facts := self._prompt_facts(dependency_facts, series_facts))
+                    if (
+                        prompt_facts := self._prompt_facts(
+                            dependency_facts,
+                            [
+                                *series_facts,
+                                *(
+                                    {"name": "director_continuity_obligation", "value": item}
+                                    for item in director_obligations
+                                ),
+                                *(
+                                    {"name": "screenplay_invariant", "value": item}
+                                    for item in director_invariants
+                                ),
+                                *(
+                                    {"name": "product_claim_verbatim", "value": item}
+                                    for item in director_claims
+                                ),
+                                *(
+                                    {"name": "required_copy_verbatim", "value": item}
+                                    for item in director_copy
+                                ),
+                            ],
+                        )
+                    )
                     else {}
                 ),
             },
@@ -659,10 +789,17 @@ class PromptCompilerService:
             )
         )
         continuity_facts: list[str | dict[str, Any]] = [
-            {"name": "approved_start_state", "value": start_state},
-            {"name": "approved_end_state", "value": end_state},
+            {"name": "approved_start_state", "value": spec.start_state},
+            {"name": "approved_end_state", "value": spec.end_state},
             *dependency_facts,
             *series_facts,
+            *(
+                {"name": "director_continuity_obligation", "value": item}
+                for item in director_obligations
+            ),
+            *({"name": "screenplay_invariant", "value": item} for item in director_invariants),
+            *({"name": "product_claim_verbatim", "value": item} for item in director_claims),
+            *({"name": "required_copy_verbatim", "value": item} for item in director_copy),
             *state_constraint_lines,
         ]
         compiler_input = PromptCompilerInput(

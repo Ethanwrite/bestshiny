@@ -142,11 +142,23 @@ def _voyage_inputs(
                 elif url:
                     pieces.append({"type": "image_url", "image_url": url})
                 continue
-            if kind == "video_url" and str(raw.get("video_url") or "").strip():
-                pieces.append({"type": "video_url", "video_url": str(raw["video_url"])})
+            if kind == "video_url":
+                # Voyage's multimodal input contract documents text and images
+                # (https://docs.voyageai.com/reference/multimodal-embeddings-api),
+                # and 0071 prices only those two. A video is refused loudly
+                # rather than dropped, because dropping it would embed a caption
+                # and call it a clip. Callers extract bounded, timestamped
+                # frames and send them as images; `memory_core` does exactly
+                # that before it reaches this adapter.
+                raise ProviderError(
+                    "Voyage multimodal embeddings take text and images, not video; "
+                    "extract bounded timestamped frames and send them as image inputs",
+                    RetryCategory.INVALID_REQUEST,
+                    code="INVALID_REQUEST",
+                )
         if not pieces:
             raise ProviderError(
-                "Voyage input contains no supported text, image, or video content",
+                "Voyage input contains no supported text or image content",
                 RetryCategory.INVALID_REQUEST,
                 code="INVALID_REQUEST",
             )

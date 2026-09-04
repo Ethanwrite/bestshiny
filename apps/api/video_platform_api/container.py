@@ -50,6 +50,7 @@ from memory_core import (
     ModelRoleEmbeddingProvider,
     MultimodalMemoryEngine,
 )
+from memory_core.outbox import MemoryIndexOutboxWorker, MemoryIndexOutboxWriter
 from model_metrics_core import ModelBenchmarkSuite, ModelMetricsService
 from model_registry_core import (
     ModelCapabilityRegistry,
@@ -187,6 +188,8 @@ class Container:
     style_drift: StyleDriftMonitor
     feature_flags: FeatureFlagService
     memory: MultimodalMemoryEngine
+    memory_outbox: MemoryIndexOutboxWriter
+    memory_outbox_worker: MemoryIndexOutboxWorker
     context: ContextAssembler
     evaluator: GenerationEvaluator
     retry_engine: RetryEngine
@@ -889,6 +892,10 @@ def build_container(settings: Settings | None = None) -> Container:
         dependencies=shot_dependencies,
         narrative_ledger=narrative_ledger,
     )
+    # Advisory vector memory is enqueued by whoever writes Canon and drained by
+    # a worker, so a third-party embedding call is never on the critical path.
+    memory_outbox = MemoryIndexOutboxWriter(database)
+    memory_outbox_worker = MemoryIndexOutboxWorker(database, memory, flags=feature_flags)
     candidates = CandidatePipeline(
         database,
         gateway,
@@ -905,6 +912,7 @@ def build_container(settings: Settings | None = None) -> Container:
         characters=characters,
         narrative_ledger=narrative_ledger,
         shot_dependencies=shot_dependencies,
+        memory_outbox=memory_outbox,
     )
     orchestrator = AgentOrchestrator(
         narrative,
@@ -932,6 +940,7 @@ def build_container(settings: Settings | None = None) -> Container:
         characters=characters,
         styles=styles,
         asset_registry=asset_registry,
+        memory_outbox=memory_outbox,
         free_plan_turn_limit=settings.free_plan_max_director_turns,
     )
     episode_continuations = EpisodeContinuationService(
@@ -999,6 +1008,8 @@ def build_container(settings: Settings | None = None) -> Container:
         style_drift=style_drift,
         feature_flags=feature_flags,
         memory=memory,
+        memory_outbox=memory_outbox,
+        memory_outbox_worker=memory_outbox_worker,
         context=context,
         evaluator=evaluator,
         retry_engine=retry_engine,

@@ -204,6 +204,30 @@ class AssetRegistry:
             # versions become canonical only through promote().
             return version
 
+    def annotate(
+        self,
+        asset_id: str,
+        *,
+        canonical_metadata: Mapping[str, Any],
+    ) -> Asset:
+        """Merge facts into a logical asset's canonical metadata.
+
+        Some canonical facts are only knowable after the asset exists: a
+        director's SCENE key visual is promoted when the visual bible locks,
+        but the ``Location`` row it depicts is created later, by script
+        compilation. This is how that binding is written - through the registry
+        that owns the table, under the same row lock every other write takes,
+        never by reaching into ``assets`` from another service.
+        """
+
+        with self.database.session() as session:
+            asset = session.scalar(select(Asset).where(Asset.id == asset_id).with_for_update())
+            if not asset:
+                raise LookupError("asset not found")
+            asset.canonical_metadata = {**dict(asset.canonical_metadata or {}), **dict(canonical_metadata)}
+            session.flush()
+            return asset
+
     def promote(
         self,
         asset_id: str,

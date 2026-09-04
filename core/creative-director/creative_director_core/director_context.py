@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .brief import BriefEngine
-from .schemas import ACTION_VERBS, MAX_QUESTIONS_PER_TURN, SHOT_TYPES, SPECS_BY_CODE
+from .schemas import ACTION_VERBS, MAX_CAST, MAX_QUESTIONS_PER_TURN, SHOT_TYPES, SPECS_BY_CODE
 
 #: Conversation budget, in characters of turn content, before compression.
 HISTORY_CHAR_BUDGET = 14000
@@ -42,10 +42,12 @@ Answer with ONE JSON object and nothing else:
   "assistant_message": string,          // your words to the client, in the client's language
   "brief_operations": [                 // explicit changes to the brief
     {"op": "SET"|"REPLACE"|"UPSERT"|"REMOVE"|"KEEP", "path": string, "value": any,
-     "evidence": string, "confidence": "USER_STATED"|"INFERRED"}
+     "evidence": string, "evidence_turn_id": string|null,
+     "confidence": "USER_STATED"|"INFERRED"}
   ],
   "answered_question_codes": [string],  // codes the client just answered
   "skipped_question_codes": [string],   // codes the client explicitly declined to answer
+  "skipped_questions": [{"code": string, "evidence": string, "evidence_turn_id": string|null}],
   "unresolved_questions": [{"code": string, "question": string}],  // at most three, highest value first
   "assumptions": [{"path": string, "value": any, "rationale": string}],  // what you would assume
   "creative_notes": [string]            // directions worth remembering
@@ -60,6 +62,14 @@ Rules:
   only with confidence USER_STATED and the client's words as evidence. UPSERT adds or updates one
   character (matched by name) or list member. REMOVE deletes on the client's explicit request.
   Never rename, replace or remove a client fact on an inference. Quote the client in "evidence".
+- "evidence" is checked against the client's own messages, verbatim (case, spacing and punctuation
+  are ignored; wording is not). An operation whose evidence cannot be found in something the client
+  actually wrote is recorded as INFERRED however it is labelled - so quote, do not paraphrase, and
+  say INFERRED when you are reading between the lines. "evidence_turn_id" may name the client turn
+  the quote comes from; naming one that does not exist fails the check.
+- A skip is honoured only for a question that was actually asked and whose refusal the client's own
+  words support: list it in "skipped_questions" with the quote. A bare code in
+  "skipped_question_codes" is recorded but leaves the question open.
 - Ask at most three questions, only about fields that are missing and high-value. Never repeat a
   question the client already answered. You may re-confirm an unanswered one in context.
 - Never invent answers. Put your reading of open points in "assumptions", never in SET with
@@ -80,7 +90,8 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                 "hook": {{"opening_question": str, "promise": str, "audience_feeling": str}},
                 "audience_expectation": str, "tone_direction": str, "visual_direction": str,
                 "ending": str}},
-  "invariants": [str], "variables": [str],
+  "invariants": [{{"text": str, "characters": [str], "scenes": [str]}}],  // scope, or omit for global
+  "variables": [str],
   "characters": [{{"name": str, "role": str, "look": str, "wants": str,
                   "relationships": [{{"with": str, "relation": str}}]}}],
   "scenes": [{{"key": str, "location": str, "time": "DAY"|"NIGHT"|"DUSK"|"DAWN",
@@ -94,7 +105,7 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                         "start_state": str, "end_state": str, "gaze_target": str,
                         "continuity_obligations": [str]}}]}}],
   "product_claims": [{{"claim": str, "must_preserve": bool}}],
-  "required_copy": [str],
+  "required_copy": [{{"text": str, "beat": int, "shot": int}}],  // where the words are on screen
   "obligations": [{{"key": str, "promise": str, "category": str}}],
   "unresolved": [str]
 }}
@@ -108,9 +119,19 @@ Shot contract (generation shots are single-action):
   Duration is 2-10 seconds per shot; the total should approximate the brief's duration.
 - Every actor and speaker must be a character in "characters"; beat.scene_key must be a scene key;
   beats are numbered 1..n consecutively.
+- Write at most {MAX_CAST} characters. Every character who appears in a beat or a shot gets a
+  generated key visual and a locked identity, so one extra name is one more unanchored face; a
+  cast over the limit is rejected, not trimmed. Name in "characters" only who is actually on
+  screen - describe anyone who is merely referred to inside the prose instead.
 - State an explicit start_state, end_state and gaze_target for every shot. Nobody looks into the
   lens unless the client asked.
-- Product claims and required copy stay exact. Mark every open creative choice in "unresolved".
+- Product claims stay exact, word for word: they are recorded as narrative facts and cannot be
+  reworded later by you, by the prompt compiler, or by an edit.
+- Every "required_copy" entry must name the beat and shot the words appear in. Copy with no
+  placement blocks approval - say where it is on screen rather than leaving it to the platform.
+- Scope an invariant with "characters" and/or "scenes" when it is about them; leave both out only
+  when it holds for the whole piece. A scoped invariant constrains only the shots it applies to.
+- Mark every open creative choice in "unresolved".
 - Write real, specific dialogue for this story. No placeholders.
 """.strip()
 

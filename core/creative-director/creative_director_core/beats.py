@@ -5,7 +5,9 @@ per-shot ``ShotIntent`` entries - and the script text is *derived* from them
 for the existing deterministic ``NarrativeCompiler``. The renderer emits
 exactly one primary visual action per line, in the compiler's own action
 vocabulary, so the compiled shots map one-to-one onto the intents and the
-intent extras (shot type, duration) can be applied to the real Shot rows
+whole approved intent - shot type and duration, but also the staged action,
+the start and end states, the gaze target, the continuity the shot owes and
+the key visuals it is bound to - can be applied to the real Shot rows
 afterwards. Nothing here stores a grown prompt string.
 """
 
@@ -64,13 +66,23 @@ _EXTERIOR_CUES = (
 
 @dataclass(frozen=True)
 class ShotIntent:
-    """One planned shot: a single primary action, structured."""
+    """One planned shot: a single primary action, structured.
+
+    The extra staging fields default to empty so the deterministic scaffold and
+    the screenplay path produce the same shape; ``apply_shot_intents`` reads
+    them with ``.get`` either way.
+    """
 
     action: str
     dialogue: str | None
     shot_type: str
     duration: float
     anchors: tuple[str, ...]
+    start_state: str = ""
+    end_state: str = ""
+    gaze_target: str = ""
+    continuity_obligations: tuple[str, ...] = ()
+    description: str = ""
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -79,6 +91,11 @@ class ShotIntent:
             "shot_type": self.shot_type,
             "duration": self.duration,
             "anchors": list(self.anchors),
+            "start_state": self.start_state,
+            "end_state": self.end_state,
+            "gaze_target": self.gaze_target,
+            "continuity_obligations": list(self.continuity_obligations),
+            "description": self.description,
         }
 
 
@@ -317,12 +334,24 @@ def render_script(beats: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]
         if scene_key != current_scene:
             lines.append(f"{_scene_prefix(location)} {location} - {time_of_day}")
             current_scene = scene_key
-        for shot in beat.get("shots", []):
+        for index, shot in enumerate(beat.get("shots", []), 1):
             action = str(shot.get("action") or "").strip()
             if not action:
                 continue
             lines.append(action)
-            ordered_intents.append(dict(shot))
+            # Stamp where this intent came from, so every field applied to a
+            # compiled shot can be traced back to one beat and one shot of one
+            # screenplay revision.
+            ordered_intents.append(
+                {
+                    **shot,
+                    "beat_sequence": int(beat.get("sequence", 0)),
+                    # The shot's own sequence when it has one (a screenplay
+                    # shot always does); its position otherwise, for the
+                    # deterministic scaffold's plain dicts.
+                    "shot_sequence": int(shot.get("sequence") or index),
+                }
+            )
     return "\n".join(lines), ordered_intents
 
 
@@ -330,15 +359,83 @@ class ShotIntentMismatch(ValueError):
     """The compiled shot list and the rendered intents disagree."""
 
 
+#: The shape persisted on ``Shot.director_intent_json``. Versioned so a prompt
+#: compiler reading an older shot knows what it is looking at.
+DIRECTOR_INTENT_VERSION = "director-shot-intent-v1"
+
+
+def director_intent(
+    intent: dict[str, Any],
+    *,
+    reference_asset_ids: list[str] | None = None,
+    screenplay_id: str | None = None,
+) -> dict[str, Any]:
+    """The approved intent, in the shape the generation path reads back.
+
+    Only what a prompt has to honour: the staged action the director wrote, the
+    states the shot moves between, where the subject looks, the continuity it
+    owes, and the key visuals it is bound to. Empty values are kept out so a
+    shot with no staging carries no misleading blanks.
+    """
+
+    payload: dict[str, Any] = {
+        "version": DIRECTOR_INTENT_VERSION,
+        "action_line": str(intent.get("action") or ""),
+        "shot_type": str(intent.get("shot_type") or ""),
+        "start_state": str(intent.get("start_state") or ""),
+        "end_state": str(intent.get("end_state") or ""),
+        "gaze_target": str(intent.get("gaze_target") or ""),
+        "description": str(intent.get("description") or ""),
+        "continuity_obligations": [
+            str(item) for item in (intent.get("continuity_obligations") or []) if str(item).strip()
+        ],
+        "anchors": [str(item) for item in (intent.get("anchors") or []) if str(item).strip()],
+        # The screenplay-level material that applies to *this* shot: the
+        # invariants scoped to it, the product claims it must quote word for
+        # word, and the copy that appears in it. Never every invariant on
+        # every shot.
+        "invariants": [str(item) for item in (intent.get("invariants") or []) if str(item).strip()],
+        "product_claims": [
+            str(item) for item in (intent.get("product_claims") or []) if str(item).strip()
+        ],
+        "required_copy": [
+            str(item) for item in (intent.get("required_copy") or []) if str(item).strip()
+        ],
+        "reference_asset_ids": list(dict.fromkeys(reference_asset_ids or [])),
+        # Provenance: which approved screenplay revision, which beat, which
+        # shot intent every field above came from.
+        "screenplay_id": screenplay_id or "",
+        "beat_sequence": int(intent.get("beat_sequence") or 0),
+        "shot_sequence": int(intent.get("shot_sequence") or 0),
+    }
+    for key in ("actor", "speaker", "verb", "object", "target", "dialogue"):
+        value = intent.get(key)
+        if value:
+            payload[key] = str(value)
+    return {key: value for key, value in payload.items() if value not in ("", [], None)}
+
+
 def apply_shot_intents(
-    database: Database, shot_ids: list[str], intents: list[dict[str, Any]]
+    database: Database,
+    shot_ids: list[str],
+    intents: list[dict[str, Any]],
+    *,
+    reference_asset_ids_by_anchor: dict[str, str] | None = None,
+    screenplay_id: str | None = None,
 ) -> None:
-    """Apply structured extras onto compiled shots, by position.
+    """Apply the approved director intent onto compiled shots, by position.
 
     The renderer emitted exactly one action line per intent and the narrative
     compiler creates exactly one shot per line, so ordinal zip is the honest
     mapping; a length mismatch means the two disagree and is raised rather
     than silently trimmed.
+
+    Everything the director approved is written, not just shot type and
+    duration: the staging goes onto ``Shot.director_intent_json`` (live input
+    to prompt compilation) and the narrative start/end states are annotated
+    with the director's own wording under ``director_staging`` so the timeline
+    the compiler reads carries it too. The compiler's own authoritative state
+    is never overwritten - the director's staging sits beside it.
     """
 
     if len(shot_ids) != len(intents):
@@ -346,8 +443,9 @@ def apply_shot_intents(
             f"compiled {len(shot_ids)} shots for {len(intents)} shot intents; "
             "the beat renderer and narrative compiler disagree"
         )
-    from production_domain.models import Shot
+    from production_domain.models import Shot, TimelineState
 
+    anchor_media = reference_asset_ids_by_anchor or {}
     with database.session() as session:
         for shot_id, intent in zip(shot_ids, intents, strict=True):
             shot = session.get(Shot, shot_id)
@@ -359,4 +457,29 @@ def apply_shot_intents(
             duration = intent.get("duration")
             if isinstance(duration, (int, float)) and duration > 0:
                 shot.duration = float(duration)
+            references = [
+                anchor_media[str(key)]
+                for key in (intent.get("anchors") or [])
+                if str(key) in anchor_media
+            ]
+            shot.director_intent_json = director_intent(
+                intent, reference_asset_ids=references, screenplay_id=screenplay_id
+            )
+            for state_id, key in (
+                (shot.input_state_id, "start_state"),
+                (shot.output_state_id, "end_state"),
+            ):
+                staged = str(intent.get(key) or "").strip()
+                if not state_id or not staged:
+                    continue
+                state = session.get(TimelineState, state_id)
+                if state is None:
+                    continue
+                state.state_json = {
+                    **dict(state.state_json or {}),
+                    # Beside the authoritative state, never over it: the
+                    # compiler owns what the world *is*, the director owns how
+                    # this shot is staged.
+                    "director_staging": staged,
+                }
         session.flush()

@@ -27,6 +27,9 @@ from .brief import get_path
 from .schemas import (
     ANCHOR_PROMPT_VERSION,
     COMMERCE_FORMATS,
+    MAX_CAST,
+    MAX_PROP_ANCHORS,
+    MAX_SCENE_ANCHORS,
     Screenplay,
     normalize_name,
 )
@@ -129,6 +132,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                 line = dialogue_line(script_name(speaker), shot.dialogue.text)
                 shots.append(
                     {
+                        "sequence": shot.sequence,
                         "action": line,
                         "dialogue": shot.dialogue.text,
                         "speaker": speaker,
@@ -155,6 +159,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
             )
             shots.append(
                 {
+                    "sequence": shot.sequence,
                     "action": rendered,
                     "dialogue": None,
                     "actor": actor,
@@ -178,6 +183,11 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                 "summary": beat.summary,
                 "emotional_beat": beat.emotional_beat,
                 "location": location,
+                # The anchor key is minted from the scene's *raw* location, so
+                # a location carrying punctuation or over 60 characters still
+                # resolves to the plate the bible locked. `location` above is
+                # the compiler's own cleaned line vocabulary.
+                "location_key": normalize_name(scene.location),
                 "time": _scene_time(scene.time),
                 "scene_key": beat.scene_key,
                 "characters": [names.get(normalize_name(name), name) for name in beat.characters],
@@ -251,18 +261,83 @@ class AnchorSpec:
     required: bool
     prompt: dict[str, Any]
     character_name: str | None = None
+    #: For SCENE anchors, the scene keys this location covers; for PROP and
+    #: PRODUCT anchors the normalized subject key. Lets the bible lock bind a
+    #: canonical asset back to the screenplay element it depicts.
+    subject_key: str = ""
+    scene_keys: tuple[str, ...] = ()
 
     @property
     def prompt_hash(self) -> str:
         return screenplay_hash({"version": ANCHOR_PROMPT_VERSION, **self.prompt})
 
 
+@dataclass(frozen=True)
+class UncoveredElement:
+    """A screenplay element that deliberately gets no key visual, and why."""
+
+    kind: str
+    title: str
+    reason: str
+
+    def as_json(self) -> dict[str, Any]:
+        return {"kind": self.kind, "title": self.title, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class AnchorDerivation:
+    """What the screenplay implies, and what it deliberately leaves uncovered."""
+
+    specs: tuple[AnchorSpec, ...]
+    uncovered: tuple[UncoveredElement, ...]
+
+    def coverage_json(self) -> dict[str, Any]:
+        return {
+            "anchored": [spec.anchor_key for spec in self.specs],
+            "uncovered": [item.as_json() for item in self.uncovered],
+        }
+
+
+def appearing_character_keys(screenplay: Screenplay) -> set[str]:
+    """Normalized names of every character that is actually on screen.
+
+    A character acts, speaks, or is listed as present in a beat. Anyone in that
+    set needs a required key visual and an identity lock; anyone outside it is
+    named in the treatment only and is recorded as uncovered, never silently
+    dropped.
+    """
+
+    appearing: set[str] = set()
+    for beat in screenplay.beats:
+        for name in beat.characters:
+            appearing.add(normalize_name(name))
+        for shot in beat.shots:
+            if shot.dialogue is not None:
+                appearing.add(normalize_name(shot.dialogue.speaker))
+            if shot.action is not None:
+                appearing.add(normalize_name(shot.action.actor))
+    return appearing
+
+
+class ScreenplayCastOverflow(ScreenplayInvalid):
+    """The screenplay names more characters than the pipeline can anchor."""
+
+
 def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[AnchorSpec]:
+    """The anchors implied by the approved brief and screenplay (specs only)."""
+
+    return list(derive_anchors(fields, screenplay).specs)
+
+
+def derive_anchors(fields: dict[str, Any], screenplay: Screenplay) -> AnchorDerivation:
     """Anchors implied by the approved brief *and* screenplay together.
 
-    Characters and the style key are required; scenes and props are optional;
-    the product is required for commerce formats. Content hashes let the
-    service version an anchor whose depiction changed.
+    Every character that appears in a beat or shot is required, as is the style
+    key; the product is required for commerce formats. Scenes a beat plays in
+    are anchored so the frame-anchor planner can always resolve a canonical
+    location. Nothing is sliced away in silence: a character named only in the
+    treatment, a scene no beat uses and a prop beyond the prop budget are all
+    returned as explicit ``UncoveredElement`` records with their reason.
     """
 
     style = {
@@ -272,13 +347,35 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
         "direction": screenplay.treatment.visual_direction,
     }
     specs: list[AnchorSpec] = []
+    uncovered: list[UncoveredElement] = []
     brief_looks = {
         normalize_name(str(member.get("name", ""))): str(member.get("look") or "")
         for member in fields.get("characters") or []
         if isinstance(member, dict)
     }
-    for character in screenplay.characters[:6]:
+    if len(screenplay.characters) > MAX_CAST:
+        # Unreachable through validate_screenplay (the schema caps the list),
+        # but derive_anchors is also called on hand-built structures; refuse
+        # rather than slice, because a sliced character still acts on screen.
+        raise ScreenplayCastOverflow(
+            f"the screenplay names {len(screenplay.characters)} characters; at most {MAX_CAST} "
+            "can be given a key visual and an identity lock",
+            [f"characters: {len(screenplay.characters)} > {MAX_CAST}"],
+        )
+    appearing = appearing_character_keys(screenplay)
+    for character in screenplay.characters:
         key = normalize_name(character.name)
+        if key not in appearing:
+            # Named in the treatment but in no beat and no shot: nothing will
+            # ever render this face, so it needs no key visual - on record.
+            uncovered.append(
+                UncoveredElement(
+                    kind="CHARACTER",
+                    title=character.name,
+                    reason="NOT_IN_ANY_BEAT_OR_SHOT",
+                )
+            )
+            continue
         specs.append(
             AnchorSpec(
                 anchor_key=f"character:{key}",
@@ -292,6 +389,7 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
                     "style": style,
                 },
                 character_name=character.name,
+                subject_key=key,
             )
         )
     format_value = str(fields.get("format") or CreativeFormat.UNSPECIFIED.value)
@@ -309,12 +407,35 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
                     "claims": [claim.claim for claim in screenplay.product_claims if claim.must_preserve],
                     "style": style,
                 },
+                subject_key=normalize_name(str(product)),
             )
         )
-    for scene in screenplay.scenes[:4]:
+    played_scene_keys = {beat.scene_key for beat in screenplay.beats}
+    scene_keys_by_location: dict[str, list[str]] = {}
+    for scene in screenplay.scenes:
+        if scene.key in played_scene_keys:
+            scene_keys_by_location.setdefault(normalize_name(scene.location), []).append(scene.key)
+    anchored_locations = 0
+    for scene in screenplay.scenes:
+        location_key = normalize_name(scene.location)
+        if scene.key not in played_scene_keys:
+            uncovered.append(
+                UncoveredElement(
+                    kind="SCENE", title=scene.location, reason="SCENE_NOT_USED_BY_ANY_BEAT"
+                )
+            )
+            continue
+        if any(spec.anchor_key == f"scene:{location_key}" for spec in specs):
+            continue
+        if anchored_locations >= MAX_SCENE_ANCHORS:
+            uncovered.append(
+                UncoveredElement(kind="SCENE", title=scene.location, reason="SCENE_ANCHOR_LIMIT")
+            )
+            continue
+        anchored_locations += 1
         specs.append(
             AnchorSpec(
-                anchor_key=f"scene:{normalize_name(scene.location)}",
+                anchor_key=f"scene:{location_key}",
                 kind="SCENE",
                 title=scene.location,
                 required=False,
@@ -325,6 +446,8 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
                     "description": scene.description,
                     "style": style,
                 },
+                subject_key=location_key,
+                scene_keys=tuple(scene_keys_by_location.get(location_key, (scene.key,))),
             )
         )
     props: list[str] = []
@@ -337,7 +460,7 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
             key = normalize_name(candidate)
             if key and key != product_key and key not in {normalize_name(p) for p in props}:
                 props.append(candidate)
-    for prop in props[:3]:
+    for prop in props[:MAX_PROP_ANCHORS]:
         specs.append(
             AnchorSpec(
                 anchor_key=f"prop:{normalize_name(prop)}",
@@ -345,8 +468,11 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
                 title=prop,
                 required=False,
                 prompt={"subject": prop, "style": style},
+                subject_key=normalize_name(prop),
             )
         )
+    for prop in props[MAX_PROP_ANCHORS:]:
+        uncovered.append(UncoveredElement(kind="PROP", title=prop, reason="PROP_ANCHOR_LIMIT"))
     specs.append(
         AnchorSpec(
             anchor_key="style:master",
@@ -366,7 +492,157 @@ def derive_anchor_specs(fields: dict[str, Any], screenplay: Screenplay) -> list[
         if spec.anchor_key not in seen:
             seen.add(spec.anchor_key)
             unique.append(spec)
-    return unique
+    return AnchorDerivation(tuple(unique), tuple(uncovered))
+
+
+@dataclass(frozen=True)
+class ShotConstraints:
+    """What a single shot must honour, scoped to that shot alone."""
+
+    beat_sequence: int
+    shot_sequence: int
+    invariants: tuple[str, ...] = ()
+    product_claims: tuple[str, ...] = ()
+    required_copy: tuple[str, ...] = ()
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "invariants": list(self.invariants),
+            "product_claims": list(self.product_claims),
+            "required_copy": list(self.required_copy),
+        }
+
+    def __bool__(self) -> bool:
+        return bool(self.invariants or self.product_claims or self.required_copy)
+
+
+#: Characters that can carry a word: everything else is a boundary. Explicit
+#: rather than \b, because \b is meaningless between two CJK characters and a
+#: CJK name is matched by position, not by spacing.
+_WORD_CHARACTERS = re.compile(r"[0-9A-Za-z_\u00c0-\u024f]")
+
+
+def _mentions(text: str, name: str) -> bool:
+    """Whether `text` names `name`, without matching it inside another word.
+
+    A one- or two-letter cast name is ordinary in this product's audience, and
+    a bare substring test made "Al" match inside "always" - which silently
+    turned a global invariant into a character-scoped one and dropped it from
+    the ledger and from most shots.
+    """
+
+    needle = " ".join(str(name or "").casefold().split())
+    if not needle:
+        return False
+    haystack = str(text or "").casefold()
+    start = haystack.find(needle)
+    while start >= 0:
+        before = haystack[start - 1] if start else ""
+        after = haystack[start + len(needle) : start + len(needle) + 1]
+        if not (_WORD_CHARACTERS.match(before) or _WORD_CHARACTERS.match(after)):
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
+
+
+def _invariant_scope(
+    invariant: Any, screenplay: Screenplay
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Which characters and scenes an invariant is about.
+
+    An explicit scope from the director wins. Otherwise the scope is read from
+    the invariant's own words: an invariant that names a character or a
+    location is about that character or that location, and one that names
+    neither holds for the whole piece. This is what stops every invariant from
+    being injected into every shot.
+    """
+
+    if invariant.characters or invariant.scenes:
+        return (
+            frozenset(normalize_name(name) for name in invariant.characters),
+            frozenset(str(key) for key in invariant.scenes),
+        )
+    text = invariant.text
+    characters = frozenset(
+        normalize_name(character.name)
+        for character in screenplay.characters
+        if _mentions(text, character.name)
+    )
+    scenes = frozenset(
+        scene.key for scene in screenplay.scenes if _mentions(text, scene.location)
+    )
+    return characters, scenes
+
+
+def global_invariants(screenplay: Screenplay) -> list[str]:
+    """Invariants that hold for the whole piece, by declared *or* read scope.
+
+    These are the ones worth putting on the narrative ledger: a fact about the
+    world, true in every shot. A scoped invariant is carried by the shots it
+    applies to instead, so the ledger does not fill up with rules about one
+    character's face.
+    """
+
+    return [
+        item.text
+        for item in screenplay.invariants
+        if not any(_invariant_scope(item, screenplay))
+    ]
+
+
+def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> list[ShotConstraints]:
+    """Per-shot invariants, product claims and required copy, in shot order.
+
+    The order matches ``render_script``'s: one entry per shot that renders an
+    action line, so the list zips with the compiled shots.
+    """
+
+    names = {normalize_name(character.name): character.name for character in screenplay.characters}
+    scoped = [(item, *_invariant_scope(item, screenplay)) for item in screenplay.invariants]
+    preserved = tuple(
+        claim.claim for claim in screenplay.product_claims if claim.must_preserve
+    )
+    product_key = normalize_name(product) if product else ""
+    copy_by_position: dict[tuple[int, int], list[str]] = {}
+    for item in screenplay.required_copy:
+        if item.placed:
+            copy_by_position.setdefault((int(item.beat), int(item.shot)), []).append(item.text)
+    result: list[ShotConstraints] = []
+    for beat in screenplay.beats:
+        beat_characters = {normalize_name(name) for name in beat.characters}
+        for shot in beat.shots:
+            speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
+            # `shot.sequence` is the shot's identity everywhere else, and it is
+            # what the director names when placing copy. Nothing renumbers it
+            # per beat, so matching on the list position would drop copy from a
+            # screenplay that numbers shots continuously across beats.
+            placed_here = copy_by_position.get((beat.sequence, shot.sequence), ())
+            present = beat_characters | {normalize_name(speaker)}
+            applicable = tuple(
+                item.text
+                for item, characters, scenes in scoped
+                if (not characters or characters & present)
+                and (not scenes or beat.scene_key in scenes)
+            )
+            object_key = (
+                normalize_name(shot.action.object) if shot.action and shot.action.object else ""
+            )
+            claims = (
+                preserved
+                if preserved and product_key and object_key == product_key
+                else ()
+            )
+            result.append(
+                ShotConstraints(
+                    beat_sequence=beat.sequence,
+                    shot_sequence=shot.sequence,
+                    invariants=applicable,
+                    product_claims=claims,
+                    required_copy=tuple(placed_here),
+                )
+            )
+            _ = names
+    return result
 
 
 def anchor_keys_for_shot(shot: dict[str, Any], beat: dict[str, Any], product: str | None) -> list[str]:
@@ -374,8 +650,9 @@ def anchor_keys_for_shot(shot: dict[str, Any], beat: dict[str, Any], product: st
     actor = shot.get("speaker") or shot.get("actor")
     if actor:
         keys.append(f"character:{normalize_name(str(actor))}")
-    if beat.get("location"):
-        keys.append(f"scene:{normalize_name(str(beat['location']))}")
+    location_key = str(beat.get("location_key") or "") or normalize_name(str(beat.get("location") or ""))
+    if location_key:
+        keys.append(f"scene:{location_key}")
     if shot.get("object"):
         object_key = normalize_name(str(shot["object"]))
         if product and object_key == normalize_name(product):

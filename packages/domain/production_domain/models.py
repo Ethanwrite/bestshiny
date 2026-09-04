@@ -1100,6 +1100,16 @@ class Shot(Base, TimestampMixin):
     user_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     compiled_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The approved director intent behind this shot: the staged action
+    #: description, start and end states, gaze target, per-shot continuity
+    #: obligations, the key-visual anchors it depends on and the reference
+    #: media those resolve to. Live input to prompt compilation - re-read on
+    #: every recompile and retry - as opposed to CreativeShotLineage.intent_json,
+    #: which is the immutable history of what was approved. Empty for shots
+    #: that did not come from a screenplay.
+    director_intent_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
     negative_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
     model: Mapped[str] = mapped_column(String(120), default="veo", nullable=False)
@@ -1617,6 +1627,109 @@ class CharacterEvidenceSubmission(Base, TimestampMixin):
     reconciliation_note: Mapped[str | None] = mapped_column(Text)
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reconciled_by: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class MemoryIndexOutbox(Base, TimestampMixin):
+    """Work waiting to be embedded into the advisory vector memory.
+
+    Embedding is an external HTTPS call to a third party. Making it inside the
+    transaction that locks a visual bible or commits a candidate would put
+    Voyage's availability on the critical path of Canon, which is exactly
+    backwards: the memory is ADVISORY and the Canon is not. So the writer
+    enqueues a row here in its own transaction and a worker drains it
+    afterwards.
+
+    The idempotency key is what makes a replayed lock or a re-run worker
+    produce one ShotMemory rather than several. A row that cannot be embedded
+    backs off and is retried; when the ``voyage_memory`` flag is off it simply
+    waits, because a queue that is not being drained is a queue, not a loss.
+    """
+
+    __tablename__ = "memory_index_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_memory_index_outbox_key"),
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'DONE', 'FAILED')",
+            name="ck_memory_index_outbox_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_memory_index_outbox_attempts"),
+        Index("ix_memory_index_outbox_due", "status", "next_attempt_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(250), nullable=False)
+    #: What produced this work: VISUAL_BIBLE_LOCK or CANDIDATE_COMMIT.
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The ShotMemoryInput this row will build, minus the media URLs, which are
+    #: resolved when the row is drained so a re-signed URL is never stale.
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_id: Mapped[str | None] = mapped_column(String(36))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    shot_memory_id: Mapped[str | None] = mapped_column(String(36))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+
+
+class CharacterEvidenceCoverage(Base, TimestampMixin):
+    """What the shadow analysis was asked about, per character, and what came back.
+
+    One remote GPU job still runs per candidate - the parent's unique candidate
+    key is that guarantee and is untouched - but a candidate can bind several
+    characters, and the parent row can hold only one. Without this table the
+    second character's references, producer run, similarity evidence and
+    failure reason had nowhere to live, so the pipeline analysed the first
+    bound character and recorded the rest in a metadata key nothing read.
+
+    Shadow-only by check constraint, exactly like the parent: nothing in this
+    table can express an operating mode that would gate a candidate commit.
+    """
+
+    __tablename__ = "character_evidence_coverage"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "character_id", name="uq_character_evidence_coverage_character"
+        ),
+        CheckConstraint(
+            "status IN ('REQUESTED', 'SKIPPED', 'REPORTED', 'FAILED')",
+            name="ck_character_evidence_coverage_status",
+        ),
+        CheckConstraint(
+            "operating_mode = 'SHADOW'",
+            name="ck_character_evidence_coverage_shadow_only",
+        ),
+        Index("ix_character_evidence_coverage_candidate", "candidate_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("character_evidence_submissions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    #: REQUESTED once the character is on the AnalyzeRequest; SKIPPED when it
+    #: had no confirmed identity references to compare against; REPORTED when
+    #: a signed callback carried its evidence; FAILED when the job failed.
+    status: Mapped[str] = mapped_column(String(40), default="REQUESTED", nullable=False)
+    skip_reason: Mapped[str | None] = mapped_column(String(240))
+    #: The references this character was analysed against, and the producer run
+    #: and similarity evidence that came back for it.
+    reference_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    producer_run_id: Mapped[str | None] = mapped_column(String(64))
+    qa_result_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    decision: Mapped[str | None] = mapped_column(String(40))
+    similarity_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+    operating_mode: Mapped[str] = mapped_column(String(20), default="SHADOW", nullable=False)
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -4434,6 +4547,18 @@ class CreativeSession(Base, TimestampMixin):
             "'MUSIC_VISUAL', 'FASHION_LOOKBOOK', 'BEAUTY_TUTORIAL', 'CONCEPT_FILM', 'UNSPECIFIED')",
             name="ck_creative_session_format",
         ),
+        # Opening a session is idempotent at the database, not just in a read:
+        # a retried create whose first attempt had not committed yet would
+        # otherwise open a second conversation and pay for a second director
+        # call. Per project, because that is how the browser scopes the key.
+        Index(
+            "uq_creative_session_create_client_id",
+            "project_id",
+            "create_client_turn_id",
+            unique=True,
+            postgresql_where=text("create_client_turn_id IS NOT NULL"),
+            sqlite_where=text("create_client_turn_id IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(
@@ -4456,6 +4581,10 @@ class CreativeSession(Base, TimestampMixin):
     current_bible_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_beat_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     compiled_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
+    #: The client-minted key of the request that opened this session. Unique
+    #: per project, so a retried create returns this session rather than
+    #: opening a second one and paying for a second director call.
+    create_client_turn_id: Mapped[str | None] = mapped_column(String(120))
 
 
 class CreativeTurn(Base, TimestampMixin):
@@ -4753,6 +4882,63 @@ class CreativeBeat(Base, TimestampMixin):
     #: {intent, summary, location, time, characters, shots: [ShotIntent...]}
     beat_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     screenplay_id: Mapped[str | None] = mapped_column(ForeignKey("creative_screenplays.id"))
+
+
+class CreativeLockStep(Base, TimestampMixin):
+    """One step of the visual-bible lock, and what it produced.
+
+    Locking a bible writes real, immutable Canon through three services -
+    ProjectStyleService, CharacterIdentityService and the AssetRegistry - none
+    of which can share one transaction. A failure part-way therefore leaves
+    Canon that cannot be rolled back (asset versions, promotions and style
+    locks are append-only by database trigger, and a project has exactly one
+    style lock). The answer is not a rollback but a resume: each step has a
+    stable idempotency key and records what it produced, so a retry continues
+    the missing steps instead of minting a second identity version or a second
+    canonical asset version.
+
+    The row alone is not the guarantee - a process can die between the write
+    and the COMPLETED stamp - so every step also re-discovers its own output
+    from the Canon before doing the work. This table is what makes the resume
+    cheap and auditable; discovery is what makes it exactly-once.
+    """
+
+    __tablename__ = "creative_lock_steps"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_creative_lock_step_key"),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED')",
+            name="ck_creative_lock_step_status",
+        ),
+        Index("ix_creative_lock_step_bible", "bible_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    bible_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_bibles.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    #: STYLE, CHARACTER_IDENTITY or SUPPORTING_ASSET.
+    step_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The anchor key (or "style:master") this step is about.
+    step_key: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(250), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: What the step created or found: identity version id, asset version id,
+    #: style lock id. The recovery record a partial lock is judged by.
+    produced_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: When the current attempt claimed the step. A step that is RUNNING and
+    #: freshly claimed belongs to a live attempt, and a second approval is
+    #: refused rather than running it concurrently; past the lease, an attempt
+    #: whose process died can be taken over.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: How the step was satisfied: EXECUTED (this attempt did it) or
+    #: RECOVERED (a previous attempt had already done it).
+    resolution: Mapped[str | None] = mapped_column(String(20))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class CreativeShotLineage(Base, TimestampMixin):

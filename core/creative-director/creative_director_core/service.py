@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any, Protocol
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:  # the director enqueues advisory memory; it never embeds
+    from memory_core.outbox import MemoryIndexOutboxWriter
 
 from platform_database import Database
 from production_domain.models import (
@@ -35,6 +40,7 @@ from production_domain.models import (
     CreativeBeat,
     CreativeBriefRevision,
     CreativeFormat,
+    CreativeLockStep,
     CreativeScreenplayRevision,
     CreativeSession,
     CreativeSessionStatus,
@@ -51,6 +57,7 @@ from production_domain.models import (
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from . import evidence as evidence_module
 from .beats import render_script
 from .brief import (
     BriefEngine,
@@ -68,10 +75,14 @@ from .director_context import (
     build_screenplay_messages,
     build_turn_messages,
 )
+from .evidence import UserTextIndex, UserUtterance
 from .schemas import (
     ASSUMED_SOURCES,
     COMMERCE_FORMATS,
     FORMAT_DEFAULTS,
+    MAX_CAST,
+    MAX_PROP_ANCHORS,
+    MAX_SCENE_ANCHORS,
     RETRYABLE_REASON_CODES,
     SPECS_BY_CODE,
     BriefOperation,
@@ -84,16 +95,20 @@ from .schemas import (
     StructuredActionKind,
 )
 from .screenplay import (
+    AnchorDerivation,
     ScreenplayInvalid,
     anchor_keys_for_shot,
     apply_beat_edits,
     beats_from_screenplay,
-    derive_anchor_specs,
+    derive_anchors,
     deterministic_screenplay,
+    global_invariants,
     screenplay_hash,
     script_name,
+    shot_constraints,
     validate_screenplay,
 )
+from .screenplay_brief import ScreenplayBriefValidator
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +267,11 @@ class LogicalAssets(Protocol):
         reason: str = "",
     ) -> Any: ...
 
+    def annotate(self, asset_id: str, *, canonical_metadata: Any) -> Any: ...
+
+
+
+
 
 DIRECTOR_SKILL_NAME = "director"
 
@@ -272,6 +292,36 @@ _DIALOGUE_STATUSES = {
     CreativeSessionStatus.CLARIFYING.value,
     CreativeSessionStatus.BRIEF_PROPOSED.value,
 }
+#: Anchor kinds whose READY key visual becomes a canonical logical asset when
+#: the visual bible locks. CHARACTER goes through CharacterIdentityService and
+#: STYLE through ProjectStyleService, so both are handled on their own paths.
+_CANONICAL_ANCHOR_KINDS = ("SCENE", "PRODUCT", "PROP")
+
+#: How long a claimed lock step may stay RUNNING before another attempt may
+#: take it over. Long enough that a slow but live step is never stolen; short
+#: enough that a process that died mid-step does not wedge a bible for ever.
+_LOCK_STEP_LEASE = timedelta(minutes=15)
+
+#: Job states from which a key visual will never arrive. WORKER_NEEDS_USER_ACTION
+#: is terminal for the *user* - nothing further happens without them - so an
+#: anchor waiting on one is a failure to retry, not a generation in flight.
+_TERMINAL_JOB_STATUSES = frozenset(
+    {
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.WORKER_NEEDS_USER_ACTION.value,
+    }
+)
+
+#: The only stages a screenplay revision may be written from. Once the
+#: screenplay is approved and its key visuals are derived, a redraft that was
+#: started earlier is stale by definition.
+_SCREENPLAY_DRAFT_STATUSES = frozenset(
+    {
+        CreativeSessionStatus.BRIEF_APPROVED.value,
+        CreativeSessionStatus.SCREENPLAY_PROPOSED.value,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -338,6 +388,12 @@ class _TurnReasoning:
     fallback_message: str | None = None
 
 
+def _aware(value: datetime) -> datetime:
+    """A stored timestamp as UTC-aware. SQLite hands back naive datetimes."""
+
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -360,6 +416,7 @@ class CreativeDirectorService:
         characters: IdentityLocker | None = None,
         styles: StyleLocker | None = None,
         asset_registry: LogicalAssets | None = None,
+        memory_outbox: MemoryIndexOutboxWriter | None = None,
         free_plan_turn_limit: int = 10,
     ):
         self.database = database
@@ -370,8 +427,11 @@ class CreativeDirectorService:
         self.characters = characters
         self.styles = styles
         self.asset_registry = asset_registry
+        self.memory_outbox = memory_outbox
         self.free_plan_turn_limit = max(0, int(free_plan_turn_limit))
         self.briefs = BriefEngine()
+        #: Compares every screenplay revision with the brief the user approved.
+        self.brief_validator = ScreenplayBriefValidator()
 
     # ------------------------------------------------------------- the skill
     def _skill(self) -> tuple[SkillText, list[str]]:
@@ -522,6 +582,11 @@ class CreativeDirectorService:
                 project_id=project_id,
                 workspace_id=workspace_id or project.workspace_id,
                 title=title or (idea.strip()[:200] or "Untitled session"),
+                # The key that opened this session, unique per project: a
+                # retried create is refused by the database rather than
+                # opening a second conversation, and the caller answers from
+                # this one instead.
+                create_client_turn_id=client_turn_id,
             )
             session.add(row)
             session.flush()
@@ -529,15 +594,65 @@ class CreativeDirectorService:
         return await self._user_turn(session_id, idea, format_hint=format_hint, client_turn_id=client_turn_id)
 
     async def post_message(
-        self, session_id: str, content: str, *, client_turn_id: str | None = None
+        self,
+        session_id: str,
+        content: str,
+        *,
+        client_turn_id: str | None = None,
+        expected_brief_revision: int | None = None,
     ) -> DirectorReply:
+        """One dialogue round. The pre-flight read takes the same lock phase 3 will.
+
+        Reading the row unlocked let a session close (or be approved) between
+        the check and the model call, so the user paid for a call phase 3 then
+        refused. ``expected_brief_revision`` lets a client pin the revision it
+        was looking at and be told the head moved rather than have its message
+        rebased onto someone else's newer brief.
+        """
+
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
+            # A replay comes first: it returns what already happened, so it is
+            # answerable from any stage. Gating it on the stage would turn a
+            # lost response into a 409 for a turn the user already paid for.
+            replay = self._replay(session, row, client_turn_id, content)
+            if replay is not None:
+                return replay
             if row.status in _CLOSED_STATUSES:
                 raise CreativeSessionConflict(
                     f"session is {row.status}; the dialogue is closed", reason_code="DIALOGUE_CLOSED"
                 )
-        return await self._user_turn(session_id, content, format_hint=None, client_turn_id=client_turn_id)
+            if row.status not in _DIALOGUE_STATUSES:
+                raise CreativeSessionConflict(
+                    f"the brief is no longer in dialogue; session is {row.status}",
+                    reason_code=ReasonCode.SESSION_STAGE_CHANGED.value,
+                    details={"status": row.status},
+                )
+            if (
+                expected_brief_revision is not None
+                and expected_brief_revision != row.current_brief_revision
+            ):
+                raise CreativeSessionConflict(
+                    f"brief revision {expected_brief_revision} is superseded by "
+                    f"{row.current_brief_revision}",
+                    reason_code=ReasonCode.BRIEF_REVISION_CHANGED.value,
+                    details={
+                        "expected_brief_revision": expected_brief_revision,
+                        "brief_revision": row.current_brief_revision,
+                    },
+                    retryable=True,
+                )
+        return await self._user_turn(
+            session_id,
+            content,
+            format_hint=None,
+            client_turn_id=client_turn_id,
+            expected_brief_revision=expected_brief_revision,
+        )
 
     def _assert_turn_budget(self, session, row) -> None:  # type: ignore[no-untyped-def]
         """FREE workspaces get a bounded number of dialogue rounds per session."""
@@ -559,7 +674,23 @@ class CreativeDirectorService:
                 reason_code="FREE_TURN_LIMIT",
             )
 
-    def _replay(self, session: Any, row: CreativeSession, client_turn_id: str | None) -> DirectorReply | None:
+    def _replay(
+        self,
+        session: Any,
+        row: CreativeSession,
+        client_turn_id: str | None,
+        content: str | None = None,
+    ) -> DirectorReply | None:
+        """Replay the reply a recorded ``client_turn_id`` already produced.
+
+        The key identifies *one* message, not "whatever the client sends
+        next". Replaying a recorded reply for different words would answer a
+        question the user never asked - and, worse, hide a real turn the user
+        meant to pay for - so the stored user turn's content has to match. A
+        mismatch is a client bug (an id reused across an edit, or a collision),
+        and is refused as a conflict rather than served from the record.
+        """
+
         if not client_turn_id:
             return None
         user_turn = session.scalar(
@@ -571,6 +702,16 @@ class CreativeDirectorService:
         )
         if user_turn is None:
             return None
+        if content is not None and user_turn.content != content:
+            raise CreativeSessionConflict(
+                "this client_turn_id already recorded a different message; a retry has to "
+                "send the same words, and edited words need a new client_turn_id",
+                reason_code="CLIENT_TURN_ID_CONTENT_MISMATCH",
+                details={
+                    "client_turn_id": client_turn_id,
+                    "turn_sequence": user_turn.sequence,
+                },
+            )
         director_turn = session.scalar(
             select(CreativeTurn).where(
                 CreativeTurn.session_id == row.id,
@@ -607,16 +748,30 @@ class CreativeDirectorService:
         *,
         format_hint: str | None,
         client_turn_id: str | None,
+        expected_brief_revision: int | None = None,
     ) -> DirectorReply:
+        """One dialogue round: read, reason outside any transaction, then write.
+
+        Phase 2 is deliberately outside a transaction - a model failure must
+        never leave a user message without its result - so phase 3 has to
+        assume the world moved. It re-reads the head brief under the row lock
+        and re-applies the model's operations to *that* revision under the same
+        provenance rules, rather than writing the phase-1 snapshot back over a
+        concurrent edit. The rebase is recorded as BRIEF_REBASED; a session
+        that left the dialogue stage during the call is refused outright, so an
+        in-flight turn can never un-approve an approved brief.
+        """
+
         # Phase 1 - read. Nothing is written until the director has answered.
         with self.database.session() as session:
             row = self._session(session, session_id)
-            replay = self._replay(session, row, client_turn_id)
+            replay = self._replay(session, row, client_turn_id, content)
             if replay is not None:
                 return replay
             self._assert_turn_budget(session, row)
             project_id = row.project_id
             status_before = row.status
+            brief_revision_at_read = row.current_brief_revision
             head = self._head_brief(session, row)
             fields = dict(head.fields_json) if head is not None else {}
             provenance = dict(head.provenance_json) if head is not None else {}
@@ -661,7 +816,7 @@ class CreativeDirectorService:
             )
             if row is None:
                 raise LookupError("creative session not found")
-            replay = self._replay(session, row, client_turn_id)
+            replay = self._replay(session, row, client_turn_id, content)
             if replay is not None:
                 return replay
             self._assert_turn_budget(session, row)
@@ -669,6 +824,42 @@ class CreativeDirectorService:
                 raise CreativeSessionConflict(
                     f"session is {row.status}; the dialogue is closed", reason_code="DIALOGUE_CLOSED"
                 )
+            if row.status not in _DIALOGUE_STATUSES:
+                # The brief was approved (or the session moved further) while
+                # the director was thinking. Writing this turn would supersede
+                # the APPROVED revision and drag the session back to
+                # BRIEF_PROPOSED - a state no single-threaded path produces.
+                raise CreativeSessionConflict(
+                    f"the session moved from {status_before} to {row.status} while the director "
+                    "was answering; the brief is no longer in dialogue",
+                    reason_code=ReasonCode.SESSION_STAGE_CHANGED.value,
+                    details={"expected_status": status_before, "status": row.status},
+                )
+            if (
+                expected_brief_revision is not None
+                and expected_brief_revision != row.current_brief_revision
+            ):
+                raise CreativeSessionConflict(
+                    f"brief revision {expected_brief_revision} is superseded by "
+                    f"{row.current_brief_revision}",
+                    reason_code=ReasonCode.BRIEF_REVISION_CHANGED.value,
+                    details={
+                        "expected_brief_revision": expected_brief_revision,
+                        "brief_revision": row.current_brief_revision,
+                    },
+                    retryable=True,
+                )
+            if row.current_brief_revision != brief_revision_at_read:
+                # Someone else's edit landed during the model call. Re-base on
+                # it: `apply_operations` will refuse anything the model may not
+                # move now that the fact belongs to the user.
+                head = self._head_brief(session, row)
+                fields = dict(head.fields_json) if head is not None else {}
+                provenance = dict(head.provenance_json) if head is not None else {}
+                question_states = dict(head.question_state_json) if head is not None else {}
+                rebased_from = brief_revision_at_read
+            else:
+                rebased_from = None
             user_sequence = self._next_turn_sequence(session, session_id)
             user_turn = CreativeTurn(
                 session_id=session_id,
@@ -685,20 +876,55 @@ class CreativeDirectorService:
             now = _now().isoformat()
             result = reasoning.result
             reason_codes = list(reasoning.reason_codes)
+            if rebased_from is not None:
+                reason_codes.append(ReasonCode.BRIEF_REBASED.value)
 
+            # The user's own words for this session, newest last: what a
+            # USER_STATED claim has to be found in. Read under the lock, not
+            # from the phase-1 snapshot, so a turn that landed during the model
+            # call still counts as something the user said.
+            evidence_index = UserTextIndex(
+                UserUtterance(turn_id=turn.id, turn_sequence=turn.sequence, text=turn.content)
+                for turn in session.scalars(
+                    select(CreativeTurn)
+                    .where(CreativeTurn.session_id == session_id, CreativeTurn.speaker == "USER")
+                    .order_by(CreativeTurn.sequence)
+                )
+            )
+            # The format the client chose in the request body is the client's
+            # own act, like a brief-editor edit - not a quote to be found in
+            # prose. It is applied under its own actor so verification cannot
+            # demote it.
+            fields1, provenance1, hint_outcome = apply_operations(
+                fields,
+                provenance,
+                hint_operations,
+                OperationActor(
+                    reasoner="USER",
+                    turn_id=user_turn.id,
+                    turn_sequence=user_sequence,
+                    revision=revision,
+                    at=now,
+                    direct_user_edit=True,
+                ),
+            )
             actor = OperationActor(
                 reasoner=reasoning.reasoner,
                 turn_id=user_turn.id,
                 turn_sequence=user_sequence,
                 revision=revision,
                 at=now,
+                evidence_index=evidence_index,
             )
-            operations: list[BriefOperation] = list(hint_operations)
-            if result is not None:
-                operations.extend(result.brief_operations)
-            fields2, provenance2, outcome = apply_operations(fields, provenance, operations, actor)
-            applied = list(outcome.applied)
-            rejected = list(outcome.rejected)
+            operations: list[BriefOperation] = list(result.brief_operations) if result is not None else []
+            fields2, provenance2, outcome = apply_operations(fields1, provenance1, operations, actor)
+            applied = [*hint_outcome.applied, *outcome.applied]
+            rejected = [*hint_outcome.rejected, *outcome.rejected]
+            outcome.answered_codes |= hint_outcome.answered_codes
+            if any(
+                item.get("claimed") == ProvenanceSource.USER_STATED.value for item in outcome.rejected
+            ):
+                reason_codes.append(ReasonCode.EVIDENCE_UNVERIFIED.value)
             if result is not None:
                 assumption_ops = [
                     BriefOperation(
@@ -742,7 +968,13 @@ class CreativeDirectorService:
                 reason_codes.append(ReasonCode.OPERATIONS_REJECTED.value)
 
             format_value = str(fields2.get("format") or CreativeFormat.UNSPECIFIED.value)
-            skipped = list(result.skipped_question_codes) if result is not None else []
+            claimed_skips = list(result.skipped_question_codes) if result is not None else []
+            skipped, refused_skips = self._verified_skips(
+                result, question_states, evidence_index
+            )
+            if refused_skips:
+                reason_codes.append(ReasonCode.SKIP_UNVERIFIED.value)
+                rejected.extend(refused_skips)
             states2 = reconcile_questions(
                 question_states,
                 fields2,
@@ -876,6 +1108,8 @@ class CreativeDirectorService:
                     else [],
                     "answered_question_codes": sorted(outcome.answered_codes),
                     "skipped_question_codes": skipped,
+                    "claimed_skipped_question_codes": claimed_skips,
+                    "refused_skips": refused_skips,
                     "creative_notes": list(result.creative_notes) if result else [],
                     "rejected_operations": rejected,
                     "retryable": reasoning.retryable,
@@ -898,6 +1132,65 @@ class CreativeDirectorService:
                 retryable=reasoning.retryable,
                 turn_sequence=director_sequence,
             )
+
+    @staticmethod
+    def _session_prohibitions(turns: list[dict[str, Any]]) -> list[str]:
+        """Every sentence in which the user forbade something, verbatim.
+
+        The director is already shown these; the validator checks the finished
+        screenplay against them so a prohibition is enforced, not just quoted.
+        """
+
+        found: list[str] = []
+        for turn in turns:
+            if turn.get("speaker") != "USER":
+                continue
+            found.extend(BriefEngine.prohibitions(str(turn.get("content") or "")))
+        return found
+
+    @staticmethod
+    def _verified_skips(
+        result: DirectorTurnResult | None,
+        question_states: dict[str, Any],
+        evidence_index: UserTextIndex,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Which claimed skips the user's own record actually supports.
+
+        A skip silences a gap for good and can make an incomplete brief
+        proposable, so the model's word alone never carries one. A code is
+        honoured when the question was genuinely asked *and* the model quotes
+        the user declining it; everything else is recorded as refused, with the
+        claim preserved so the audit shows what was asserted.
+        """
+
+        if result is None:
+            return [], []
+        honoured: list[str] = []
+        refused: list[dict[str, Any]] = []
+        proofs = {claim.code: claim for claim in result.skipped_questions}
+        for code in dict.fromkeys(result.skipped_question_codes):
+            state = question_states.get(code)
+            asked = bool(isinstance(state, dict) and state.get("asked_turns"))
+            claim = proofs.get(code)
+            if not asked:
+                refused.append({"op": "SKIP", "path": code, "reason": "QUESTION_WAS_NEVER_ASKED"})
+                continue
+            if claim is None:
+                refused.append({"op": "SKIP", "path": code, "reason": evidence_module.NO_EVIDENCE})
+                continue
+            verdict = evidence_index.verify(claim.evidence, turn_id=claim.evidence_turn_id)
+            if not verdict.verified:
+                refused.append(
+                    {
+                        "op": "SKIP",
+                        "path": code,
+                        "reason": verdict.reason,
+                        "evidence": claim.evidence[:300],
+                    }
+                )
+                continue
+            honoured.append(code)
+        return honoured, refused
 
     # ------------------------------------------------------------ brief edits
     def edit_brief(self, session_id: str, operations: list[dict[str, Any]], *, actor: str) -> dict[str, Any]:
@@ -1215,14 +1508,23 @@ class CreativeDirectorService:
     async def propose_screenplay(
         self, session_id: str, *, notes: str = "", actor: str = ""
     ) -> dict[str, Any]:
-        """The director writes (or rewrites) the screenplay from the approved brief."""
+        """The director writes (or rewrites) the screenplay from the approved brief.
+
+        The model call is slow and an approval is not, so everything this
+        redraft assumes - the stage, the approved brief and its hash, the
+        revision it branches from - is captured here and re-checked under the
+        row lock before anything is written. A redraft that comes back after
+        the old screenplay was approved and its key visuals were derived is
+        refused, not applied.
+        """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
-            if row.status not in {
-                CreativeSessionStatus.BRIEF_APPROVED.value,
-                CreativeSessionStatus.SCREENPLAY_PROPOSED.value,
-            }:
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
+            if row.status not in _SCREENPLAY_DRAFT_STATUSES:
                 raise CreativeSessionConflict(
                     f"a screenplay cannot be drafted from {row.status}", reason_code="INVALID_TRANSITION"
                 )
@@ -1236,6 +1538,10 @@ class CreativeDirectorService:
             previous_content = dict(current.content_json) if current is not None else None
             previous_revision = current.revision if current is not None else None
             brief_id = brief.id
+            brief_hash = brief.content_hash
+            brief_provenance = dict(brief.provenance_json)
+            expected_revision = row.current_screenplay_revision
+            prohibitions = self._session_prohibitions(turns)
 
         screenplay, reasoner, reason_codes, audit, execution_id, skill = await self._reason_screenplay(
             project_id,
@@ -1257,6 +1563,12 @@ class CreativeDirectorService:
             skill=skill,
             execution_id=execution_id,
             audit=audit,
+            expected_status=_SCREENPLAY_DRAFT_STATUSES,
+            expected_revision=expected_revision,
+            expected_brief_hash=brief_hash,
+            brief_fields=fields,
+            brief_provenance=brief_provenance,
+            prohibitions=prohibitions,
         )
 
     async def _reason_screenplay(
@@ -1356,7 +1668,11 @@ class CreativeDirectorService:
         except ScreenplayInvalid as exc:
             raise ValueError(f"screenplay rejected: {'; '.join(exc.details[:5])}") from exc
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status != CreativeSessionStatus.SCREENPLAY_PROPOSED.value:
                 raise CreativeSessionConflict(
                     f"the screenplay can only be edited while proposed; session is {row.status}",
@@ -1365,6 +1681,10 @@ class CreativeDirectorService:
             current = self._screenplay_at(session, session_id, row.current_screenplay_revision)
             brief = self._approved_brief(session, row)
             brief_id = brief.id
+            brief_hash = brief.content_hash
+            brief_fields = dict(brief.fields_json)
+            brief_provenance = dict(brief.provenance_json)
+            prohibitions = self._session_prohibitions(self._turn_views(session, session_id))
             parent = current.revision if current is not None else None
         return self._write_screenplay(
             session_id,
@@ -1377,9 +1697,16 @@ class CreativeDirectorService:
             skill=None,
             execution_id=None,
             audit={},
+            expected_status=frozenset({CreativeSessionStatus.SCREENPLAY_PROPOSED.value}),
+            expected_revision=parent,
+            expected_brief_hash=brief_hash,
+            brief_fields=brief_fields,
+            brief_provenance=brief_provenance,
+            prohibitions=prohibitions,
+            refuse_blocking=True,
         )
 
-    def _write_screenplay(
+    def _write_screenplay(  # noqa: PLR0913 - one guarded writer for every screenplay revision
         self,
         session_id: str,
         screenplay: Screenplay,
@@ -1393,7 +1720,26 @@ class CreativeDirectorService:
         execution_id: str | None,
         audit: dict[str, Any],
         status: str = "PROPOSED",
+        expected_status: frozenset[str],
+        expected_revision: int | None,
+        expected_brief_hash: str | None = None,
+        brief_fields: dict[str, Any],
+        brief_provenance: dict[str, Any],
+        prohibitions: list[str] | None = None,
+        refuse_blocking: bool = False,
     ) -> dict[str, Any]:
+        """Append one screenplay revision, but only onto the state it was written for.
+
+        A redraft takes seconds of model time; an approval takes none. Without
+        these checks a slow redraft landing after an approval superseded
+        nothing (the loop below only touches PROPOSED rows), moved the head
+        past the APPROVED revision and reset the session to
+        SCREENPLAY_PROPOSED - from which approving again derives and pays for a
+        second full set of key visuals. The preconditions are therefore
+        re-validated under the row lock, and a stale write is refused with the
+        reason code that says which one moved.
+        """
+
         content = screenplay.model_dump(by_alias=True)
         beats = beats_from_screenplay(screenplay)
         script, _intents = render_script(beats)
@@ -1403,6 +1749,55 @@ class CreativeDirectorService:
             )
             if row is None:
                 raise LookupError("creative session not found")
+            if row.status not in expected_status:
+                raise CreativeSessionConflict(
+                    f"a screenplay cannot be written from {row.status}; it was drafted for "
+                    + " or ".join(sorted(expected_status)),
+                    reason_code=ReasonCode.SCREENPLAY_STAGE_CHANGED.value,
+                    details={"status": row.status, "expected_status": sorted(expected_status)},
+                )
+            if expected_revision is not None and expected_revision != row.current_screenplay_revision:
+                raise CreativeSessionConflict(
+                    f"screenplay revision {expected_revision} is superseded by "
+                    f"{row.current_screenplay_revision}",
+                    reason_code=ReasonCode.SCREENPLAY_REVISION_CHANGED.value,
+                    details={
+                        "expected_revision": expected_revision,
+                        "screenplay_revision": row.current_screenplay_revision,
+                    },
+                    retryable=True,
+                )
+            approved_brief = self._approved_brief(session, row)
+            if approved_brief.id != brief_id or (
+                expected_brief_hash is not None and approved_brief.content_hash != expected_brief_hash
+            ):
+                raise CreativeSessionConflict(
+                    "the approved brief moved while the screenplay was being written",
+                    reason_code=ReasonCode.SCREENPLAY_BRIEF_CHANGED.value,
+                    details={"brief_id": approved_brief.id, "expected_brief_id": brief_id},
+                    retryable=True,
+                )
+            conformance = self.brief_validator.validate(
+                screenplay,
+                brief_fields,
+                format_value=row.format,
+                provenance=brief_provenance,
+                prohibitions=prohibitions,
+            )
+            reason_codes = list(reason_codes)
+            if conformance.blocking:
+                reason_codes.append(ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value)
+                if refuse_blocking:
+                    # A screenplay the *user* wrote or edited is refused rather
+                    # than recorded: the user is the one who can fix it now.
+                    raise CreativeSessionConflict(
+                        "this screenplay contradicts the approved brief: "
+                        + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                        reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                        details={"violations": [item.as_json() for item in conformance.blocking]},
+                    )
+            if conformance.advisory:
+                reason_codes.append(ReasonCode.SCREENPLAY_BRIEF_ADVISORY.value)
             for stale in session.scalars(
                 select(CreativeScreenplayRevision).where(
                     CreativeScreenplayRevision.session_id == session_id,
@@ -1432,7 +1827,9 @@ class CreativeDirectorService:
             if status == "PROPOSED":
                 row.status = CreativeSessionStatus.SCREENPLAY_PROPOSED.value
             session.flush()
-            return self._screenplay_view(screenplay_row)
+            view = self._screenplay_view(screenplay_row)
+            view["brief_conformance"] = conformance.as_json()
+            return view
 
     def approve_screenplay(
         self,
@@ -1441,8 +1838,17 @@ class CreativeDirectorService:
         revision: int,
         actor: str,
         accept_deterministic: bool = False,
+        accept_brief_violations: bool = False,
     ) -> dict[str, Any]:
-        """Approve exactly one screenplay revision; derive and emit the key visuals."""
+        """Approve exactly one screenplay revision; derive and emit the key visuals.
+
+        This is the last gate before real money: approval derives the key
+        visuals and emits their paid generation actions. A screenplay that
+        contradicts a fact the user established in the approved brief is
+        refused here with the conflicting paths, the brief's value and the
+        screenplay's, so the user can redraft rather than pay for a story they
+        did not approve.
+        """
 
         with self.database.session() as session:
             row = session.scalar(
@@ -1480,8 +1886,40 @@ class CreativeDirectorService:
             screenplay_row.approved_at = _now()
             brief = self._approved_brief(session, row)
             screenplay = validate_screenplay(_content_without_audit(screenplay_row.content_json))
+            conformance = self.brief_validator.validate(
+                screenplay,
+                dict(brief.fields_json),
+                format_value=row.format,
+                provenance=dict(brief.provenance_json),
+                prohibitions=self._session_prohibitions(self._turn_views(session, session_id)),
+            )
+            unplaced = screenplay.unplaced_copy
+            if unplaced:
+                # "Somewhere in the film" is not something a shot prompt can
+                # honour, and picking a shot on the user's behalf would be
+                # inventing the answer. Approval waits for the placement.
+                raise CreativeSessionConflict(
+                    "this screenplay requires copy on screen without saying where: "
+                    + ", ".join(item.text for item in unplaced),
+                    reason_code=ReasonCode.REQUIRED_COPY_UNPLACED.value,
+                    details={
+                        "required_copy": [
+                            {"text": item.text, "beat": item.beat, "shot": item.shot}
+                            for item in unplaced
+                        ]
+                    },
+                )
+            if conformance.blocking and not accept_brief_violations:
+                raise CreativeSessionConflict(
+                    "this screenplay contradicts the approved brief: "
+                    + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                    reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                    details={"violations": [item.as_json() for item in conformance.blocking]},
+                )
             row.status = CreativeSessionStatus.SCREENPLAY_APPROVED.value
-            anchors = self._derive_anchors(session, row, brief, screenplay_row, screenplay)
+            anchors, derivation = self._derive_anchors(
+                session, row, brief, screenplay_row, screenplay
+            )
             actions = self._emit_visual_actions(session, row, anchors, dict(brief.fields_json))
             row.status = CreativeSessionStatus.VISUALS_IN_PROGRESS.value
             session.flush()
@@ -1490,6 +1928,8 @@ class CreativeDirectorService:
                 "screenplay": self._screenplay_view(screenplay_row),
                 "actions": actions,
                 "anchors": [_anchor_view(anchor) for anchor in anchors],
+                "coverage": derivation.coverage_json(),
+                "brief_conformance": conformance.as_json(),
                 "session_status": row.status,
             }
 
@@ -1501,16 +1941,20 @@ class CreativeDirectorService:
         brief: CreativeBriefRevision,
         screenplay_row: CreativeScreenplayRevision,
         screenplay: Screenplay,
-    ) -> list[CreativeVisualAnchor]:
+    ) -> tuple[list[CreativeVisualAnchor], AnchorDerivation]:
         """Anchors implied by brief and screenplay, versioned by content.
 
         A key whose depiction changed gets a new version and the old row is
         SUPERSEDED; a key that is no longer implied is SUPERSEDED too. Character
         anchors materialize project Character rows under the script name the
         narrative compiler will parse, so the compile binds the same entity.
+        Returns the anchors together with the derivation's coverage report, so
+        the caller can record which screenplay elements deliberately get no key
+        visual and why.
         """
 
-        specs = derive_anchor_specs(dict(brief.fields_json), screenplay)
+        derivation: AnchorDerivation = derive_anchors(dict(brief.fields_json), screenplay)
+        specs = list(derivation.specs)
         rows = list(
             session.scalars(select(CreativeVisualAnchor).where(CreativeVisualAnchor.session_id == row.id))
         )
@@ -1558,7 +2002,7 @@ class CreativeDirectorService:
                 anchor.status = CreativeAnchorStatus.SUPERSEDED.value
         session.flush()
         result.sort(key=lambda anchor: (not anchor.required, anchor.kind, anchor.anchor_key))
-        return result
+        return result, derivation
 
     def _emit_visual_actions(
         self,
@@ -1724,11 +2168,28 @@ class CreativeDirectorService:
             session.flush()
 
     def sync_visuals(self, session_id: str) -> dict[str, Any]:
-        """Bind finished generation jobs to their anchors. Idempotent."""
+        """Bind finished generation jobs to their anchors. Idempotent.
+
+        A job that failed *after* the provider accepted it used to move only
+        the anchor: its CreativeAction stayed EXECUTED, `pending_actions`
+        never returned it again, and Retry was a silent no-op. The action that
+        produced a failed job is reopened here, with the failure recorded on
+        it, so the retry endpoint has real work to do.
+        """
 
         with self.database.session() as session:
             row = self._session(session, session_id)
             anchors = self._current_anchors(session, session_id)
+            actions_by_anchor: dict[str, list[CreativeAction]] = {}
+            for action in session.scalars(
+                select(CreativeAction).where(
+                    CreativeAction.session_id == session_id,
+                    CreativeAction.kind == StructuredActionKind.GENERATE_KEY_VISUAL.value,
+                )
+            ):
+                anchor_id = str((action.payload_json or {}).get("anchor_id") or "")
+                if anchor_id:
+                    actions_by_anchor.setdefault(anchor_id, []).append(action)
             for anchor in anchors:
                 if anchor.status != CreativeAnchorStatus.GENERATING.value:
                     continue
@@ -1740,9 +2201,23 @@ class CreativeDirectorService:
                 if job.status == JobStatus.COMPLETED.value and job.output_asset_id:
                     anchor.status = CreativeAnchorStatus.READY.value
                     anchor.media_asset_id = job.output_asset_id
-                elif job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+                elif job.status in _TERMINAL_JOB_STATUSES:
                     anchor.status = CreativeAnchorStatus.FAILED.value
                     anchor.failure_code = (job.error_code or job.status)[:240]
+                    for action in actions_by_anchor.get(anchor.id, []):
+                        if action.status == CreativeActionStatus.FAILED.value:
+                            continue  # already reopened; syncing twice changes nothing
+                        if str((action.result_json or {}).get("job_id") or "") != job.id:
+                            continue
+                        action.status = CreativeActionStatus.FAILED.value
+                        action.result_json = {
+                            **dict(action.result_json or {}),
+                            "job_id": job.id,
+                            "job_status": job.status,
+                            "error": (job.error_code or job.status)[:240],
+                            "error_message": (job.error_message or "")[:2000],
+                            "failed_asynchronously": True,
+                        }
             session.flush()
             return {"session_status": row.status, **_anchor_summary(anchors)}
 
@@ -1958,7 +2433,11 @@ class CreativeDirectorService:
     # ---------------------------------------------------------- visual bible
     def propose_bible(self, session_id: str) -> dict[str, Any]:
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status not in {
                 CreativeSessionStatus.VISUALS_IN_PROGRESS.value,
                 CreativeSessionStatus.BIBLE_PROPOSED.value,
@@ -2017,6 +2496,10 @@ class CreativeDirectorService:
                     }
                     for anchor in anchors
                 ],
+                # Which screenplay elements deliberately carry no key visual,
+                # and why. A background-only character is a decision on record,
+                # never an element that quietly fell off a slice.
+                "coverage": derive_anchors(fields, validate_screenplay(screenplay_content)).coverage_json(),
                 "rules": {
                     "palette": get_path(fields, "visual_style.palette") or "",
                     "medium": get_path(fields, "visual_style.medium") or "",
@@ -2067,7 +2550,11 @@ class CreativeDirectorService:
         """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             bible = session.scalar(
                 select(VisualBibleVersion).where(
                     VisualBibleVersion.session_id == session_id,
@@ -2102,6 +2589,26 @@ class CreativeDirectorService:
             character_anchors = [
                 a for a in anchors if a.kind == "CHARACTER" and a.status == CreativeAnchorStatus.READY.value
             ]
+            # Scene, product and prop key visuals are canon too: without them
+            # the frame-anchor planner has no location plate to reconstruct
+            # from and the product a commerce film is about never reaches a
+            # reference set. Only READY anchors qualify - a SKIPPED optional
+            # anchor is a decision to go without, never a canonical asset.
+            supporting_anchors = [
+                {
+                    "id": a.id,
+                    "anchor_key": a.anchor_key,
+                    "version": a.version,
+                    "kind": a.kind,
+                    "title": a.title,
+                    "media_asset_id": a.media_asset_id,
+                    "subject": str((a.prompt_json or {}).get("subject") or a.title),
+                }
+                for a in anchors
+                if a.kind in _CANONICAL_ANCHOR_KINDS
+                and a.status == CreativeAnchorStatus.READY.value
+                and a.media_asset_id
+            ]
             anchor_snapshot = [
                 {
                     "id": a.id,
@@ -2123,7 +2630,10 @@ class CreativeDirectorService:
                 if style_anchor is not None
                 else None
             )
-            fields = dict(self._approved_brief(session, row).fields_json)
+            approved_brief = self._approved_brief(session, row)
+            fields = dict(approved_brief.fields_json)
+            brief_id = approved_brief.id
+            screenplay_id = self._approved_screenplay(session, row).id
 
         if self.styles is None or self.characters is None or self.asset_registry is None:
             raise CreativeSessionConflict(
@@ -2158,11 +2668,26 @@ class CreativeDirectorService:
             self._lock_identities(
                 session_id, project_id, bible_id, version, anchor_snapshot, lineage, codes, actor_user_id
             )
+            self._lock_supporting_assets(
+                session_id,
+                project_id,
+                bible_id,
+                version,
+                brief_id,
+                screenplay_id,
+                supporting_anchors,
+                lineage,
+                actor_user_id,
+            )
         except Exception as exc:  # noqa: BLE001 - every lock failure is recorded, then refused
             lineage["lock_status"] = "FAILED"
             lineage["error"] = str(exc)[:500]
             lineage["error_type"] = type(exc).__name__
             lineage["failed_at"] = _now().isoformat()
+            # Exactly which steps stand and which are missing: the recovery
+            # record. Canon here is append-only, so a retry continues; nothing
+            # is ever deleted to "undo" a partial lock.
+            lineage["steps"] = self._lock_steps(bible_id)
             with self.database.session() as session:
                 bible = session.get(VisualBibleVersion, bible_id)
                 if bible is not None:
@@ -2175,20 +2700,72 @@ class CreativeDirectorService:
                 retryable=True,
             ) from exc
 
+        steps = self._lock_steps(bible_id)
+        unfinished = [item for item in steps if item["status"] != "COMPLETED"]
+        if unfinished:
+            # Belt and braces: a step that neither raised nor completed must
+            # never leave a LOCKED bible behind it.
+            lineage["lock_status"] = "PARTIAL"
+            lineage["steps"] = steps
+            with self.database.session() as session:
+                bible = session.get(VisualBibleVersion, bible_id)
+                if bible is not None:
+                    bible.lineage_json = lineage
+                    session.flush()
+            raise CreativeSessionConflict(
+                "the visual bible lock did not finish every step: "
+                + ", ".join(f"{item['kind']}:{item['key']}" for item in unfinished),
+                reason_code=ReasonCode.BIBLE_LOCK_INCOMPLETE.value,
+                details={"steps": steps},
+                retryable=True,
+            )
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             bible = session.get(VisualBibleVersion, bible_id)
             if bible is None:
                 raise LookupError("visual bible version not found")
+            superseded = bible.status == "SUPERSEDED" or bible.version != row.current_bible_version
             lineage["lock_status"] = "LOCKED"
             lineage["reason_codes"] = codes
+            lineage["steps"] = steps
             bible.lineage_json = lineage
             bible.status = "LOCKED"
             bible.locked_at = _now()
             bible.locked_by = actor
             row.status = CreativeSessionStatus.BIBLE_LOCKED.value
-            session.flush()
-            return _bible_view(bible)
+            if not superseded:
+                # The bible is locked and its Canon is written. Remembering it
+                # is the last, weakest step: enqueued in this transaction, so a
+                # crash before the worker runs loses nothing, and embedded
+                # later, so a vendor outage cannot fail the lock.
+                self._enqueue_bible_memories(session, row, bible, lineage)
+            if superseded:
+                # A key visual was replaced while the lock ran, so this bible no
+                # longer describes the project. The Canon it produced stays (it
+                # is append-only and correctly recorded); the bible does not
+                # become LOCKED on top of a superseded draft. The refusal is
+                # raised outside this transaction so the record of *why*
+                # survives - raising inside it would roll the record back.
+                session.rollback()
+            else:
+                session.flush()
+                return _bible_view(bible)
+        lineage["lock_status"] = "SUPERSEDED_DURING_LOCK"
+        with self.database.session() as session:
+            bible = session.get(VisualBibleVersion, bible_id)
+            if bible is not None:
+                bible.lineage_json = lineage
+                session.flush()
+        raise CreativeSessionConflict(
+            f"visual bible version {version} was superseded while it was being locked",
+            reason_code=ReasonCode.REVISION_SUPERSEDED.value,
+            details={"steps": steps},
+            retryable=True,
+        )
 
     def _lock_style(  # noqa: PLR0913
         self,
@@ -2203,96 +2780,173 @@ class CreativeDirectorService:
         codes: list[str],
         actor_user_id: str,
     ) -> None:
+        """Lock the project's visual style on this bible's key plate, once.
+
+        One style lock exists per project and it is append-only, so this is the
+        step a half-finished lock could permanently spend. It runs through the
+        step ledger and, before doing anything, looks for what a previous
+        attempt may already have created.
+        """
+
         assert self.styles is not None and self.asset_registry is not None
-        if lineage.get("style_lock_id"):
-            return
-        with self.database.session() as session:
-            existing = session.scalar(
-                select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
-            )
-            existing_id = existing.id if existing is not None else None
-            existing_version = existing.style_version_id if existing is not None else None
-        if existing_id is not None:
-            # One style per project is the platform rule; a later session
-            # inherits the lock and says so.
-            lineage["style_lock_id"] = existing_id
-            lineage["style_version_id"] = existing_version
-            lineage["style_inherited"] = True
+        anchor_id = style_snapshot["id"]
+        media_asset_id = style_snapshot["media_asset_id"]
+
+        def existing_lock() -> tuple[Any, Any] | tuple[None, None]:
+            with self.database.session() as session:
+                lock = session.scalar(
+                    select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
+                )
+                if lock is None:
+                    return None, None
+                from production_domain.models import AssetVersion
+
+                version_row = (
+                    session.get(AssetVersion, lock.style_version_id) if lock.style_version_id else None
+                )
+                return lock, version_row
+
+        def own_style_version() -> Any | None:
+            """The style AssetVersion a previous attempt of *this* step made."""
+
+            from production_domain.models import AssetVersion
+
+            with self.database.session() as session:
+                return session.scalar(
+                    select(AssetVersion)
+                    .where(
+                        AssetVersion.primary_media_asset_id == media_asset_id,
+                        AssetVersion.source == "CREATIVE_KEY_VISUAL",
+                    )
+                    .order_by(AssetVersion.version.desc())
+                )
+
+        def discover() -> dict[str, Any] | None:
+            lock, version_row = existing_lock()
+            if lock is None:
+                # No lock yet - but this step writes the asset version and the
+                # promotion *before* it, so a failure inside styles.lock (a
+                # transient media decode, an unreachable semantic model) would
+                # otherwise make every retry append another version and another
+                # promotion. Finish the half that is missing instead.
+                mine = own_style_version()
+                if mine is None or dict(mine.metadata_json or {}).get("bible_id") != bible_id:
+                    return None
+                assert self.styles is not None
+                lock = self.styles.lock(
+                    project_id,
+                    mine.id,
+                    locked_by_user_id=actor_user_id,
+                    reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+                    explicit_confirmation=True,
+                )
+                return {
+                    "style_lock_id": lock.id,
+                    "style_asset_id": mine.asset_id,
+                    "style_version_id": mine.id,
+                    "style_inherited": False,
+                    "recovered": True,
+                }
+            metadata = dict(version_row.metadata_json or {}) if version_row is not None else {}
+            mine = metadata.get("bible_id") == bible_id and metadata.get("anchor_id") == anchor_id
+            if mine:
+                # A previous attempt of *this* lock already created it.
+                return {
+                    "style_lock_id": lock.id,
+                    "style_version_id": lock.style_version_id,
+                    "style_asset_id": version_row.asset_id if version_row is not None else None,
+                    "style_inherited": False,
+                    "recovered": True,
+                }
+            # Someone else's lock. One style per project is the platform rule,
+            # so this bible inherits it - but only ever on record, and never
+            # while pretending the plate is this bible's own.
+            inherited_from = metadata.get("creative_session_id")
             codes.append(ReasonCode.STYLE_LOCK_INHERITED.value)
-            self._record_lock_action(
-                session_id,
-                StructuredActionKind.LOCK_PROJECT_STYLE,
-                {"bible_id": bible_id, "style_lock_id": existing_id, "inherited": True},
-                idempotency_key=f"creative:{session_id}:lock:style:b{version}",
-                status=CreativeActionStatus.EXECUTED.value,
+            return {
+                "style_lock_id": lock.id,
+                "style_version_id": lock.style_version_id,
+                "style_asset_id": version_row.asset_id if version_row is not None else None,
+                "style_inherited": True,
+                "style_inherited_from_session_id": inherited_from,
+                "style_matches_this_bible": False,
+            }
+
+        def execute() -> dict[str, Any]:
+            assert self.asset_registry is not None and self.styles is not None
+            logical = next(
+                (
+                    item
+                    for item in self.asset_registry.list(project_id, asset_type="STYLE")
+                    if (item.canonical_metadata or {}).get("creative_session_id") == session_id
+                ),
+                None,
             )
-            return
-        logical = next(
-            (
-                item
-                for item in self.asset_registry.list(project_id, asset_type="STYLE")
-                if (item.canonical_metadata or {}).get("creative_session_id") == session_id
-            ),
-            None,
-        )
-        if logical is None:
-            logical = self.asset_registry.create(
-                project_id,
-                "STYLE",
-                f"{title[:180]} — style",
-                canonical_metadata={
+            if logical is None:
+                logical = self.asset_registry.create(
+                    project_id,
+                    "STYLE",
+                    f"{title[:180]} — style",
+                    canonical_metadata={
+                        "creative_session_id": session_id,
+                        "constraints": [
+                            item
+                            for item in [
+                                str(get_path(fields, "visual_style.medium") or ""),
+                                str(get_path(fields, "visual_style.palette") or ""),
+                            ]
+                            if item
+                        ],
+                    },
+                    created_by_user_id=actor_user_id,
+                )
+            style_version = self.asset_registry.add_version(
+                logical.id,
+                primary_media_asset_id=media_asset_id,
+                label=f"Visual bible v{version}",
+                source="CREATIVE_KEY_VISUAL",
+                metadata={
                     "creative_session_id": session_id,
-                    "constraints": [
-                        item
-                        for item in [
-                            str(get_path(fields, "visual_style.medium") or ""),
-                            str(get_path(fields, "visual_style.palette") or ""),
-                        ]
-                        if item
-                    ],
+                    "bible_id": bible_id,
+                    "anchor_id": anchor_id,
+                    "anchor_version": style_snapshot["version"],
                 },
                 created_by_user_id=actor_user_id,
             )
-        style_version = self.asset_registry.add_version(
-            logical.id,
-            primary_media_asset_id=style_snapshot["media_asset_id"],
-            label=f"Visual bible v{version}",
-            source="CREATIVE_KEY_VISUAL",
-            metadata={
-                "creative_session_id": session_id,
-                "bible_id": bible_id,
-                "anchor_id": style_snapshot["id"],
-                "anchor_version": style_snapshot["version"],
-            },
-            created_by_user_id=actor_user_id,
-        )
-        self.asset_registry.promote(
-            logical.id,
-            style_version.id,
-            promoted_by_user_id=actor_user_id,
-            reason=f"BestShiny Director visual bible v{version} approval",
-        )
-        lock = self.styles.lock(
-            project_id,
-            style_version.id,
-            locked_by_user_id=actor_user_id,
-            reason=f"BestShiny Director visual bible v{version} (session {session_id})",
-            explicit_confirmation=True,
-        )
-        lineage["style_lock_id"] = lock.id
-        lineage["style_asset_id"] = logical.id
-        lineage["style_version_id"] = style_version.id
-        lineage["style_inherited"] = False
-        self._record_lock_action(
-            session_id,
-            StructuredActionKind.LOCK_PROJECT_STYLE,
-            {
-                "bible_id": bible_id,
+            self.asset_registry.promote(
+                logical.id,
+                style_version.id,
+                promoted_by_user_id=actor_user_id,
+                reason=f"BestShiny Director visual bible v{version} approval",
+            )
+            lock = self.styles.lock(
+                project_id,
+                style_version.id,
+                locked_by_user_id=actor_user_id,
+                reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+                explicit_confirmation=True,
+            )
+            return {
                 "style_lock_id": lock.id,
                 "style_asset_id": logical.id,
                 "style_version_id": style_version.id,
-                "anchor_id": style_snapshot["id"],
-            },
+                "style_inherited": False,
+            }
+
+        produced = self._run_lock_step(
+            session_id=session_id,
+            bible_id=bible_id,
+            kind="STYLE",
+            step_key="style:master",
+            idempotency_key=f"creative:{session_id}:lock:style:b{version}",
+            discover=discover,
+            execute=execute,
+        )
+        lineage.update(produced)
+        self._record_lock_action(
+            session_id,
+            StructuredActionKind.LOCK_PROJECT_STYLE,
+            {"bible_id": bible_id, **produced},
             idempotency_key=f"creative:{session_id}:lock:style:b{version}",
             status=CreativeActionStatus.EXECUTED.value,
         )
@@ -2308,88 +2962,481 @@ class CreativeDirectorService:
         codes: list[str],
         actor_user_id: str,
     ) -> None:
+        """Confirm one CharacterIdentityVersion per character anchor, once each.
+
+        ``confirm_identity`` always appends a version, so a retry after a
+        partial failure used to mint a second identity for the same face. Each
+        character is now its own ledger step, and the step first looks for the
+        identity version this exact key visual already produced.
+        """
+
         assert self.characters is not None and self.asset_registry is not None
         identities: dict[str, Any] = lineage.setdefault("identities", {})
         for anchor in anchor_snapshot:
-            recorded = identities.get(anchor["anchor_key"])
-            if (
-                recorded
-                and recorded.get("media_asset_id") == anchor["media_asset_id"]
-                and recorded.get("identity_version_id")
-            ):
-                continue
             if not anchor["character_id"] or not anchor["media_asset_id"]:
                 raise LookupError(f"character anchor {anchor['title']} has no character or media")
-            identity = self.characters.confirm_identity(
-                anchor["character_id"],
-                anchor["media_asset_id"],
-                costume_signature=anchor["look"],
-            )
-            logical = next(
-                (
-                    item
-                    for item in self.asset_registry.list(project_id, asset_type="CHARACTER")
-                    if (item.canonical_metadata or {}).get("character_id") == anchor["character_id"]
+            produced = self._run_lock_step(
+                session_id=session_id,
+                bible_id=bible_id,
+                kind="CHARACTER_IDENTITY",
+                step_key=anchor["anchor_key"],
+                idempotency_key=(
+                    f"creative:{session_id}:lock:identity:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
                 ),
-                None,
+                discover=partial(self._discover_identity, project_id, bible_id, anchor),
+                execute=partial(
+                    self._confirm_identity, session_id, project_id, bible_id, anchor, actor_user_id
+                ),
             )
-            if logical is None:
-                logical = self.asset_registry.create(
-                    project_id,
-                    "CHARACTER",
-                    anchor["title"],
-                    canonical_metadata={"character_id": anchor["character_id"]},
-                    created_by_user_id=actor_user_id,
-                )
-            asset_version = self.asset_registry.add_version(
-                logical.id,
-                primary_media_asset_id=anchor["media_asset_id"],
-                label=f"Identity v{identity.version}",
-                source="CHARACTER_IDENTITY_CONFIRMATION",
-                metadata={
-                    "character_identity_version_id": identity.id,
-                    "creative_session_id": session_id,
-                    "bible_id": bible_id,
-                    "anchor_id": anchor["id"],
-                    "costume_signature": anchor["look"],
-                },
-                created_by_user_id=actor_user_id,
-            )
-            self.asset_registry.promote(
-                logical.id,
-                asset_version.id,
-                promoted_by_user_id=actor_user_id,
-                reason="BestShiny Director visual bible approval",
-            )
-            identities[anchor["anchor_key"]] = {
-                "identity_version_id": identity.id,
-                "identity_version": identity.version,
-                "character_id": anchor["character_id"],
-                "media_asset_id": anchor["media_asset_id"],
-                "anchor_id": anchor["id"],
-                "anchor_version": anchor["version"],
-                "logical_asset_version_id": asset_version.id,
-            }
+            identities[anchor["anchor_key"]] = produced
             self._record_lock_action(
                 session_id,
                 StructuredActionKind.LOCK_CHARACTER_IDENTITY,
-                {
-                    "bible_id": bible_id,
-                    "anchor_id": anchor["id"],
-                    "character_id": anchor["character_id"],
-                    "identity_version_id": identity.id,
-                },
-                idempotency_key=f"creative:{session_id}:lock:identity:{anchor['anchor_key']}:v{anchor['version']}:b{version}",
+                {"bible_id": bible_id, **produced},
+                idempotency_key=(
+                    f"creative:{session_id}:lock:identity:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
+                ),
                 status=CreativeActionStatus.EXECUTED.value,
             )
-            # Persist progress after each identity so a later failure retries
-            # only what is missing instead of minting duplicate versions.
             with self.database.session() as session:
                 bible = session.get(VisualBibleVersion, bible_id)
                 if bible is not None:
                     bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
                     session.flush()
         _ = codes
+
+    def _discover_identity(
+        self, project_id: str, bible_id: str, anchor: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """What a previous attempt of this identity step already produced."""
+
+        from production_domain.models import Asset, AssetVersion, CharacterIdentityVersion
+
+        with self.database.session() as session:
+            identity = session.scalar(
+                select(CharacterIdentityVersion)
+                .where(
+                    CharacterIdentityVersion.character_id == anchor["character_id"],
+                    CharacterIdentityVersion.master_asset_id == anchor["media_asset_id"],
+                )
+                .order_by(CharacterIdentityVersion.version.desc())
+            )
+            if identity is None:
+                return None
+            asset_version = session.scalar(
+                select(AssetVersion).where(
+                    AssetVersion.primary_media_asset_id == anchor["media_asset_id"],
+                    AssetVersion.source == "CHARACTER_IDENTITY_CONFIRMATION",
+                )
+            )
+            asset_version_id = asset_version.id if asset_version is not None else None
+            logical = (
+                session.get(Asset, asset_version.asset_id) if asset_version is not None else None
+            )
+            unpromoted = logical is not None and logical.canonical_version_id != asset_version.id
+            logical_id = logical.id if logical is not None else None
+        if asset_version_id is not None and unpromoted:
+            # The version exists but was never promoted: the previous attempt
+            # died between the two writes. Finish that half rather than
+            # declaring the step done with no canonical version.
+            assert self.asset_registry is not None
+            self.asset_registry.promote(
+                logical_id,
+                asset_version_id,
+                promoted_by_user_id=None,
+                reason=f"BestShiny Director visual bible resume (bible {bible_id})",
+            )
+        if asset_version_id is None:
+            # The identity exists but its canonical asset version does not: the
+            # previous attempt died between the two writes. Finish the half
+            # that is missing rather than re-confirming the identity.
+            asset_version_id, logical_id = self._promote_identity_asset(
+                project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=None
+            )
+        return {
+            "identity_version_id": identity.id,
+            "identity_version": identity.version,
+            "character_id": anchor["character_id"],
+            "media_asset_id": anchor["media_asset_id"],
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "logical_asset_id": logical_id,
+            "logical_asset_version_id": asset_version_id,
+            "recovered": True,
+        }
+
+    def _promote_identity_asset(
+        self,
+        project_id: str,
+        bible_id: str,
+        anchor: dict[str, Any],
+        *,
+        identity_id: str,
+        actor_user_id: str | None,
+    ) -> tuple[str, str]:
+        assert self.asset_registry is not None
+        logical = next(
+            (
+                item
+                for item in self.asset_registry.list(project_id, asset_type="CHARACTER")
+                if (item.canonical_metadata or {}).get("character_id") == anchor["character_id"]
+            ),
+            None,
+        )
+        if logical is None:
+            logical = self.asset_registry.create(
+                project_id,
+                "CHARACTER",
+                anchor["title"],
+                canonical_metadata={"character_id": anchor["character_id"]},
+                created_by_user_id=actor_user_id,
+            )
+        asset_version = self.asset_registry.add_version(
+            logical.id,
+            primary_media_asset_id=anchor["media_asset_id"],
+            label=f"Identity {identity_id}",
+            source="CHARACTER_IDENTITY_CONFIRMATION",
+            metadata={
+                "character_identity_version_id": identity_id,
+                "bible_id": bible_id,
+                "anchor_id": anchor["id"],
+                "costume_signature": anchor["look"],
+            },
+            created_by_user_id=actor_user_id,
+        )
+        self.asset_registry.promote(
+            logical.id,
+            asset_version.id,
+            promoted_by_user_id=actor_user_id,
+            reason="BestShiny Director visual bible approval",
+        )
+        return str(asset_version.id), str(logical.id)
+
+    def _confirm_identity(
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        anchor: dict[str, Any],
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        assert self.characters is not None
+        identity = self.characters.confirm_identity(
+            anchor["character_id"],
+            anchor["media_asset_id"],
+            costume_signature=anchor["look"],
+        )
+        asset_version_id, logical_asset_id = self._promote_identity_asset(
+            project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=actor_user_id
+        )
+        return {
+            "identity_version_id": identity.id,
+            "identity_version": identity.version,
+            "character_id": anchor["character_id"],
+            "media_asset_id": anchor["media_asset_id"],
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "logical_asset_id": logical_asset_id,
+            "logical_asset_version_id": asset_version_id,
+            "creative_session_id": session_id,
+        }
+
+    def _lock_supporting_assets(  # noqa: PLR0913 - the lineage this records needs every id
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        version: int,
+        brief_id: str,
+        screenplay_id: str,
+        anchors: list[dict[str, Any]],
+        lineage: dict[str, Any],
+        actor_user_id: str,
+    ) -> None:
+        """Promote the READY scene, product and prop key visuals into Canon.
+
+        Through the AssetRegistry's own create / add_version / promote, never
+        by writing ``assets`` directly. One logical asset per anchor key, so a
+        later bible whose depiction changed appends a *new* version and
+        promotes it rather than overwriting the old one - the old image stays
+        exactly what it was, and every version records the anchor, the anchor
+        version, the brief, the screenplay, the bible and the media it came
+        from. Each anchor is its own ledger step, and each step first looks for
+        the version a previous attempt may already have created.
+        """
+
+        assert self.asset_registry is not None
+        recorded: dict[str, Any] = lineage.setdefault("assets", {})
+        for anchor in anchors:
+            produced = self._run_lock_step(
+                session_id=session_id,
+                bible_id=bible_id,
+                kind="SUPPORTING_ASSET",
+                step_key=anchor["anchor_key"],
+                idempotency_key=(
+                    f"creative:{session_id}:lock:asset:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
+                ),
+                discover=partial(self._discover_supporting_asset, project_id, bible_id, anchor),
+                execute=partial(
+                    self._promote_supporting_asset,
+                    session_id,
+                    project_id,
+                    bible_id,
+                    version,
+                    brief_id,
+                    screenplay_id,
+                    anchor,
+                    actor_user_id,
+                ),
+            )
+            recorded[anchor["anchor_key"]] = produced
+            with self.database.session() as session:
+                bible = session.get(VisualBibleVersion, bible_id)
+                if bible is not None:
+                    bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
+                    session.flush()
+
+    def _supporting_asset(self, project_id: str, kind: str, anchor_key: str) -> Any:
+        assert self.asset_registry is not None
+        return next(
+            (
+                item
+                for item in self.asset_registry.list(project_id, asset_type=kind)
+                if (item.canonical_metadata or {}).get("creative_anchor_key") == anchor_key
+            ),
+            None,
+        )
+
+    def _discover_supporting_asset(
+        self, project_id: str, bible_id: str, anchor: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        from production_domain.models import AssetVersion
+
+        logical = self._supporting_asset(project_id, anchor["kind"], anchor["anchor_key"])
+        if logical is None:
+            return None
+        with self.database.session() as session:
+            found = session.scalar(
+                select(AssetVersion)
+                .where(
+                    AssetVersion.asset_id == logical.id,
+                    AssetVersion.primary_media_asset_id == anchor["media_asset_id"],
+                )
+                .order_by(AssetVersion.version.desc())
+            )
+            if found is None or dict(found.metadata_json or {}).get("bible_id") != bible_id:
+                return None
+            version_id = found.id
+            canonical = logical.canonical_version_id
+        if canonical != version_id:
+            # The version exists but was never promoted: finish that half.
+            assert self.asset_registry is not None
+            self.asset_registry.promote(
+                logical.id,
+                version_id,
+                reason=f"BestShiny Director visual bible resume (bible {bible_id})",
+            )
+        return {
+            "kind": anchor["kind"],
+            "asset_id": logical.id,
+            "asset_version_id": version_id,
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "media_asset_id": anchor["media_asset_id"],
+            "subject": anchor["subject"],
+            "bible_id": bible_id,
+            "recovered": True,
+        }
+
+    def _promote_supporting_asset(  # noqa: PLR0913 - the version records every origin
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        version: int,
+        brief_id: str,
+        screenplay_id: str,
+        anchor: dict[str, Any],
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        assert self.asset_registry is not None
+        logical = self._supporting_asset(project_id, anchor["kind"], anchor["anchor_key"])
+        if logical is None:
+            logical = self.asset_registry.create(
+                project_id,
+                anchor["kind"],
+                anchor["title"][:180] or anchor["subject"][:180] or anchor["anchor_key"],
+                canonical_metadata={
+                    "creative_anchor_key": anchor["anchor_key"],
+                    "creative_session_id": session_id,
+                    "subject": anchor["subject"],
+                },
+                created_by_user_id=actor_user_id,
+            )
+        asset_version = self.asset_registry.add_version(
+            logical.id,
+            primary_media_asset_id=anchor["media_asset_id"],
+            label=f"Visual bible v{version}",
+            source="CREATIVE_KEY_VISUAL",
+            metadata={
+                "creative_session_id": session_id,
+                "anchor_id": anchor["id"],
+                "anchor_key": anchor["anchor_key"],
+                "anchor_version": anchor["version"],
+                "brief_id": brief_id,
+                "screenplay_id": screenplay_id,
+                "bible_id": bible_id,
+                "media_asset_id": anchor["media_asset_id"],
+            },
+            created_by_user_id=actor_user_id,
+        )
+        self.asset_registry.promote(
+            logical.id,
+            asset_version.id,
+            promoted_by_user_id=actor_user_id,
+            reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+        )
+        return {
+            "kind": anchor["kind"],
+            "asset_id": logical.id,
+            "asset_version_id": asset_version.id,
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "media_asset_id": anchor["media_asset_id"],
+            "subject": anchor["subject"],
+            "brief_id": brief_id,
+            "screenplay_id": screenplay_id,
+            "bible_id": bible_id,
+        }
+
+    def _enqueue_bible_memories(
+        self,
+        session: Any,
+        row: CreativeSession,
+        bible: VisualBibleVersion,
+        lineage: dict[str, Any],
+    ) -> None:
+        """Queue every canonical artefact this lock produced, advisorily."""
+
+        if self.memory_outbox is None:
+            return
+        from .memory_index import bible_memories
+
+        for item in bible_memories(session, row, bible, lineage):
+            # In the caller's transaction: a memory is never queued for a lock
+            # that rolled back.
+            self.memory_outbox.enqueue(row.project_id, session=session, **item)
+
+    # ------------------------------------------------------- the lock saga
+    def _run_lock_step(  # noqa: PLR0913 - one runner for every lock step
+        self,
+        *,
+        session_id: str,
+        bible_id: str,
+        kind: str,
+        step_key: str,
+        idempotency_key: str,
+        discover: Callable[[], dict[str, Any] | None],
+        execute: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run one lock step exactly once, across process deaths.
+
+        Three things make that true. The step ledger records what has already
+        been done, so a retry skips it. ``discover`` re-reads the Canon for
+        this step's own output first, so a process that died between the write
+        and the COMPLETED stamp does not produce a second identity version or a
+        second canonical asset version. And a failure is recorded on the row
+        with its error, so a partially locked bible says exactly which steps
+        stand and which are missing - nothing is ever rolled back, because
+        Canon here is append-only by construction.
+        """
+
+        with self.database.session() as session:
+            row = session.scalar(
+                select(CreativeLockStep)
+                .where(CreativeLockStep.idempotency_key == idempotency_key)
+                .with_for_update()
+            )
+            if row is None:
+                row = CreativeLockStep(
+                    session_id=session_id,
+                    bible_id=bible_id,
+                    step_kind=kind,
+                    step_key=step_key[:160],
+                    idempotency_key=idempotency_key[:250],
+                    status="PENDING",
+                )
+                session.add(row)
+                session.flush()
+            if row.status == "COMPLETED":
+                return dict(row.produced_json)
+            if row.status == "RUNNING" and row.claimed_at is not None:
+                stale = _now() - _aware(row.claimed_at) > _LOCK_STEP_LEASE
+                if not stale:
+                    # Another approval is inside this exact step right now. The
+                    # ledger row is the claim: running it again concurrently is
+                    # what mints a second identity version, so the second
+                    # caller is refused rather than duplicating Canon. The
+                    # lease bounds a process that died mid-step.
+                    raise CreativeSessionConflict(
+                        f"this visual bible lock step is already running ({kind}:{step_key})",
+                        reason_code=ReasonCode.LOCK_IN_PROGRESS.value,
+                        details={"step_kind": kind, "step_key": step_key},
+                        retryable=True,
+                    )
+            row.status = "RUNNING"
+            row.attempts += 1
+            row.claimed_at = _now()
+            row.last_error = None
+            session.flush()
+        try:
+            recovered = discover()
+            produced = recovered if recovered is not None else execute()
+        except Exception as exc:
+            with self.database.session() as session:
+                failed = session.scalar(
+                    select(CreativeLockStep).where(
+                        CreativeLockStep.idempotency_key == idempotency_key
+                    )
+                )
+                if failed is not None:
+                    failed.status = "FAILED"
+                    failed.last_error = f"{type(exc).__name__}: {exc}"[:500]
+                    session.flush()
+            raise
+        with self.database.session() as session:
+            done = session.scalar(
+                select(CreativeLockStep).where(CreativeLockStep.idempotency_key == idempotency_key)
+            )
+            if done is not None:
+                done.status = "COMPLETED"
+                done.produced_json = produced
+                done.resolution = "RECOVERED" if recovered is not None else "EXECUTED"
+                done.completed_at = _now()
+                session.flush()
+        return produced
+
+    def _lock_steps(self, bible_id: str) -> list[dict[str, Any]]:
+        with self.database.session() as session:
+            return [
+                {
+                    "kind": row.step_kind,
+                    "key": row.step_key,
+                    "status": row.status,
+                    "attempts": row.attempts,
+                    "resolution": row.resolution,
+                    "produced": dict(row.produced_json),
+                    "error": row.last_error,
+                }
+                for row in session.scalars(
+                    select(CreativeLockStep)
+                    .where(CreativeLockStep.bible_id == bible_id)
+                    .order_by(CreativeLockStep.created_at, CreativeLockStep.id)
+                )
+            ]
 
     def _record_lock_action(
         self,
@@ -2533,6 +3580,27 @@ class CreativeDirectorService:
                 except ScreenplayInvalid as exc:
                     raise ValueError(f"edited beats rejected: {'; '.join(exc.details[:5])}") from exc
                 if changed:
+                    # A beat edit is a new screenplay revision, so it faces the
+                    # same brief check every other revision does - the user
+                    # cannot edit their way out of the brief they approved.
+                    conformance = self.brief_validator.validate(
+                        edited,
+                        fields,
+                        format_value=row.format,
+                        provenance=dict(brief.provenance_json),
+                        prohibitions=self._session_prohibitions(
+                            self._turn_views(session, session_id)
+                        ),
+                    )
+                    if conformance.blocking:
+                        raise CreativeSessionConflict(
+                            "the edited beats contradict the approved brief: "
+                            + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                            reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                            details={
+                                "violations": [item.as_json() for item in conformance.blocking]
+                            },
+                        )
                     screenplay_row.status = "SUPERSEDED"
                     screenplay = edited
                     planned = self._materialize_beats(screenplay, fields)
@@ -2568,12 +3636,43 @@ class CreativeDirectorService:
             assert approved_script is not None
             script = approved_script.script_text
             obligations = [item.model_dump() for item in screenplay.obligations]
-            anchor_ids_by_key = {
-                anchor.anchor_key: anchor.id for anchor in self._current_anchors(session, session_id)
+            # What holds for the whole piece becomes a narrative fact: it then
+            # travels through series context into every shot's prompt, and the
+            # ledger's own idempotency makes it unrewritable - a second
+            # establishment with different words is a conflict, not an update.
+            # That is what "the claim stays verbatim" is enforced by.
+            world_facts = [
+                {"key": f"invariant:{index}", "summary": text, "category": "INVARIANT"}
+                for index, text in enumerate(global_invariants(screenplay), 1)
+            ] + [
+                {"key": f"product_claim:{index}", "summary": claim.claim, "category": "PRODUCT_CLAIM"}
+                for index, claim in enumerate(screenplay.product_claims, 1)
+                if claim.must_preserve
+            ]
+            current_anchors = self._current_anchors(session, session_id)
+            anchor_ids_by_key = {anchor.anchor_key: anchor.id for anchor in current_anchors}
+            #: The key visual behind each anchor, so a shot's declared anchors
+            #: resolve to real reference media rather than staying names.
+            anchor_media_by_key = {
+                anchor.anchor_key: anchor.media_asset_id
+                for anchor in current_anchors
+                if anchor.media_asset_id
+                and anchor.status == CreativeAnchorStatus.READY.value
             }
             session.flush()
 
         _script_check, ordered_intents = render_script(beats_json)
+        # Fold the screenplay's own material into the per-shot intents: the
+        # invariants scoped to each shot, the product claims it must quote
+        # verbatim, and the copy placed in it. `shot_constraints` yields one
+        # entry per rendered shot, in the same order.
+        product_name = get_path(fields, "product.name")
+        for intent, constraint in zip(
+            ordered_intents,
+            shot_constraints(screenplay, product=str(product_name) if product_name else None),
+            strict=False,
+        ):
+            intent.update(constraint.as_json())
         if _script_check != script:
             raise CreativeSessionConflict(
                 "the approved screenplay's script and its beat plan disagree; re-propose the beats",
@@ -2637,7 +3736,24 @@ class CreativeDirectorService:
 
         result = self.orchestrator.compile_episode(episode_id)
         shot_ids = list(result.detail.get("shot_ids", []))
-        self._apply_intents(shot_ids, ordered_intents)
+        self._apply_intents(shot_ids, ordered_intents, anchor_media_by_key, screenplay_id)
+        # The frame-anchor plan reads shot type, state and references, all of
+        # which the intents just changed; re-planning here is what makes the
+        # director's staging reach the plan the generation preflight reuses.
+        # Script compilation is what mints the Location rows, so a canonical
+        # SCENE plate can only be bound to its location now. Do it before the
+        # frame anchors are planned: `FrameAnchorPlanner._scene_asset_id` looks
+        # the plate up by exactly this key.
+        self._bind_scene_locations(project_id, episode_id, lineage)
+        if bible_id is not None:
+            with self.database.session() as session:
+                bible_row = session.get(VisualBibleVersion, bible_id)
+                if bible_row is not None:
+                    bible_row.lineage_json = lineage
+                    session.flush()
+        replan = getattr(self.orchestrator, "plan_frame_anchors", None)
+        if callable(replan):
+            replan(episode_id)
         self._write_shot_lineage(
             session_id,
             episode_id=episode_id,
@@ -2651,7 +3767,13 @@ class CreativeDirectorService:
             anchor_ids_by_key=anchor_ids_by_key,
         )
         ledger_results = self._ledger_writes(
-            session_id, project_id, episode_number, beats_json, plan_revision, obligations
+            session_id,
+            project_id,
+            episode_number,
+            beats_json,
+            plan_revision,
+            obligations,
+            world_facts=world_facts,
         )
 
         with self.database.session() as session:
@@ -2686,13 +3808,76 @@ class CreativeDirectorService:
             view["ledger"] = ledger_results
             return view
 
-    def _apply_intents(self, shot_ids: list[str], intents: list[dict[str, Any]]) -> None:
+    def _apply_intents(
+        self,
+        shot_ids: list[str],
+        intents: list[dict[str, Any]],
+        anchor_media_by_key: dict[str, str] | None = None,
+        screenplay_id: str | None = None,
+    ) -> None:
         from .beats import ShotIntentMismatch, apply_shot_intents
 
         try:
-            apply_shot_intents(self.database, shot_ids, intents)
+            apply_shot_intents(
+                self.database,
+                shot_ids,
+                intents,
+                reference_asset_ids_by_anchor=anchor_media_by_key,
+                screenplay_id=screenplay_id,
+            )
         except ShotIntentMismatch as exc:
             raise CreativeSessionConflict(str(exc), reason_code="SHOT_INTENT_MISMATCH") from exc
+
+    def _bind_scene_locations(
+        self, project_id: str, episode_id: str, lineage: dict[str, Any]
+    ) -> None:
+        """Point each canonical SCENE asset at the Location the compiler made.
+
+        The frame-anchor planner resolves a shot's scene plate by matching
+        ``Asset.canonical_metadata["location_id"]`` against the scene's
+        location; without this the planner finds no canonical scene reference
+        and every RECONSTRUCT_FIRST_FRAME plan downgrades to a fresh start.
+        """
+
+        if self.asset_registry is None:
+            return
+        scenes = {
+            key: item
+            for key, item in (lineage.get("assets") or {}).items()
+            if isinstance(item, dict) and item.get("kind") == "SCENE" and item.get("asset_id")
+        }
+        if not scenes:
+            return
+        from production_domain.models import Location, Scene
+
+        with self.database.session() as session:
+            location_ids = {
+                str(name).casefold(): location_id
+                for location_id, name in session.execute(
+                    select(Location.id, Location.name).where(Location.project_id == project_id)
+                ).tuples()
+            }
+            scene_location_ids = set(
+                session.scalars(
+                    select(Scene.location_id).where(
+                        Scene.episode_id == episode_id, Scene.location_id.is_not(None)
+                    )
+                )
+            )
+        for key, item in scenes.items():
+            location_id = location_ids.get(str(item.get("subject") or "").casefold())
+            if location_id is None or location_id not in scene_location_ids:
+                # The compiler named the location differently than the anchor
+                # did; recorded as unbound rather than guessed at.
+                item["location_id"] = None
+                item["location_bound"] = False
+                continue
+            self.asset_registry.annotate(
+                item["asset_id"], canonical_metadata={"location_id": location_id}
+            )
+            item["location_id"] = location_id
+            item["location_bound"] = True
+            _ = key
 
     def _write_shot_lineage(  # noqa: PLR0913
         self,
@@ -2712,7 +3897,11 @@ class CreativeDirectorService:
         for beat in beats_json:
             for index, shot in enumerate(beat.get("shots", []), 1):
                 if str(shot.get("action") or "").strip():
-                    positions.append((int(beat.get("sequence", 0)), index))
+                    # The same identity `render_script` stamps on the intent, so
+                    # the lineage row and the shot's own intent agree.
+                    positions.append(
+                        (int(beat.get("sequence", 0)), int(shot.get("sequence") or index))
+                    )
         identities = {
             key: value for key, value in (lineage.get("identities") or {}).items() if isinstance(value, dict)
         }
@@ -2727,6 +3916,29 @@ class CreativeDirectorService:
                 if shot_id in existing:
                     continue
                 anchor_keys = [str(key) for key in intent.get("anchors") or []]
+                unresolved = [key for key in anchor_keys if key not in anchor_ids_by_key]
+                # Every character on screen must have a key visual behind it.
+                # An optional scene or prop the user skipped is a recorded
+                # decision; a character with no anchor is an unanchored face,
+                # and compiling one silently is the defect this refuses.
+                missing_characters = [
+                    key
+                    for key in unresolved
+                    if key.startswith("character:")
+                ] + [
+                    key
+                    for key in anchor_keys
+                    if key.startswith("character:")
+                    and key in anchor_ids_by_key
+                    and not (identities.get(key) or {}).get("identity_version_id")
+                ]
+                if missing_characters:
+                    raise CreativeSessionConflict(
+                        "compiled shots reference characters with no locked identity: "
+                        + ", ".join(sorted(set(missing_characters))),
+                        reason_code=ReasonCode.CHARACTER_IDENTITY_NOT_COVERED.value,
+                        details={"shot_id": shot_id, "anchor_keys": sorted(set(missing_characters))},
+                    )
                 session.add(
                     CreativeShotLineage(
                         session_id=session_id,
@@ -2746,7 +3958,7 @@ class CreativeDirectorService:
                             if key in identities and identities[key].get("identity_version_id")
                         ],
                         style_lock_id=lineage.get("style_lock_id"),
-                        intent_json=intent,
+                        intent_json={**intent, "unresolved_anchor_keys": unresolved},
                     )
                 )
             session.flush()
@@ -2759,12 +3971,60 @@ class CreativeDirectorService:
         beats_json: list[dict[str, Any]],
         plan_revision: int,
         obligations: list[dict[str, Any]] | None = None,
+        world_facts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Open the obligations the screenplay promises (cliffhanger, declared obligations)."""
+        """Open the obligations the screenplay promises, and establish what it fixes.
+
+        Obligations are promises the series owes; ``world_facts`` are the
+        screenplay's global invariants and its must-preserve product claims,
+        established as narrative facts so they reach every later shot through
+        series context *and* become part of the narrative context fence a
+        candidate commit re-checks.
+        """
 
         if self.ledger is None:
             return []
         results: list[dict[str, Any]] = []
+        for item in world_facts or []:
+            fact_key = f"creative:{session_id}:ep{episode_number}:{item['key']}"[:160]
+            try:
+                fact_id = self.ledger.establish_fact(
+                    project_id,
+                    fact_key=fact_key,
+                    summary=str(item["summary"]),
+                    episode=episode_number,
+                )
+            except ValueError as exc:
+                # The same key with different words: the screenplay tried to
+                # reword something already on the ledger. Recorded as the
+                # conflict it is, never applied.
+                results.append(
+                    {
+                        "kind": "ESTABLISH_FACT",
+                        "key": fact_key,
+                        "category": item.get("category"),
+                        "conflict": True,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "kind": "ESTABLISH_FACT",
+                    "id": fact_id,
+                    "key": fact_key,
+                    "category": item.get("category"),
+                }
+            )
+            with self.database.session() as session:
+                row = self._session(session, session_id)
+                self._emit_action(
+                    session,
+                    row,
+                    StructuredActionKind.ESTABLISH_FACT,
+                    {"fact_key": fact_key, "summary": item["summary"], "category": item.get("category")},
+                    idempotency_key=f"creative:{session_id}:fact:r{plan_revision}:{item['key']}"[:250],
+                )
         wanted: list[tuple[str, str, str]] = []
         cliffhanger = next((beat for beat in beats_json if beat.get("intent") == "CLIFFHANGER"), None)
         if cliffhanger is not None:
@@ -2859,6 +4119,35 @@ class CreativeDirectorService:
                 (item for item in screenplay_rows if item.revision == row.current_screenplay_revision), None
             )
             brief_view = self._brief_view(brief) if brief is not None else None
+            coverage: dict[str, Any] | None = None
+            conformance_json: list[dict[str, Any]] = []
+            approved_brief = None
+            if row.status not in _DIALOGUE_STATUSES:
+                approved_brief = session.scalar(
+                    select(CreativeBriefRevision)
+                    .where(
+                        CreativeBriefRevision.session_id == session_id,
+                        CreativeBriefRevision.status == "APPROVED",
+                    )
+                    .order_by(CreativeBriefRevision.revision.desc())
+                )
+            if current_screenplay is not None and brief is not None:
+                try:
+                    screenplay_model = validate_screenplay(
+                        _content_without_audit(current_screenplay.content_json)
+                    )
+                except ScreenplayInvalid:
+                    screenplay_model = None
+                if screenplay_model is not None:
+                    coverage = derive_anchors(dict(brief.fields_json), screenplay_model).coverage_json()
+                    if approved_brief is not None:
+                        conformance_json = self.brief_validator.validate(
+                            screenplay_model,
+                            dict(approved_brief.fields_json),
+                            format_value=row.format,
+                            provenance=dict(approved_brief.provenance_json),
+                            prohibitions=self._session_prohibitions(turns),
+                        ).as_json()
             return CreativeSessionState(
                 session={
                     "id": row.id,
@@ -2872,6 +4161,16 @@ class CreativeDirectorService:
                     "beat_revision": row.current_beat_revision,
                     "compiled_episode_id": row.compiled_episode_id,
                     "superseded_anchors": superseded,
+                    #: What the pipeline can carry end to end; the SPA reads
+                    #: this rather than mirroring the number in JS.
+                    "limits": {
+                        "max_cast": MAX_CAST,
+                        "max_scene_anchors": MAX_SCENE_ANCHORS,
+                        "max_prop_anchors": MAX_PROP_ANCHORS,
+                    },
+                    #: Which screenplay elements deliberately have no key
+                    #: visual, and why.
+                    "anchor_coverage": coverage,
                     "shot_lineage_count": int(
                         session.scalar(
                             select(func.count())
@@ -2887,9 +4186,14 @@ class CreativeDirectorService:
                 bible=_bible_view(bible_row) if bible_row is not None else None,
                 beats=beats,
                 actions=actions,
-                screenplay=self._screenplay_view(current_screenplay)
-                if current_screenplay is not None
-                else None,
+                screenplay=(
+                    {
+                        **self._screenplay_view(current_screenplay),
+                        "brief_conformance": conformance_json,
+                    }
+                    if current_screenplay is not None
+                    else None
+                ),
                 screenplays=[
                     {
                         "id": item.id,
@@ -2972,7 +4276,11 @@ class CreativeDirectorService:
         """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status == CreativeSessionStatus.COMPILED.value:
                 raise CreativeSessionConflict(
                     "a compiled session is part of an episode and cannot be deleted",

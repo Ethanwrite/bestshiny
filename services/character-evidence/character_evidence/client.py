@@ -21,12 +21,16 @@ from qa_core import (
     CharacterEvidenceAggregate,
     CharacterEvidenceReport,
     CharacterEvidenceSubmission,
+    CharacterSubmissionTarget,
     QAThresholdProfile,
 )
 
 from .schemas import AnalyzeRequest, CallbackEnvelope, CharacterInput, ReferenceAsset
 
 ANALYZE_PATH = "/v1/character-evidence/analyze"
+#: Matches ``AnalyzeRequest.characters`` max_length: one job, many characters,
+#: bounded because every extra character is more GPU comparison work.
+MAX_CHARACTERS_PER_ANALYSIS = 20
 
 
 class CharacterEvidenceRemoteError(RuntimeError):
@@ -125,13 +129,37 @@ class ModalCharacterEvidenceProducer:
         video_path: Path,
         *,
         candidate_id: str,
-        character_id: str,
-        references: Sequence[CanonicalIdentityReference],
+        character_id: str | None = None,
+        references: Sequence[CanonicalIdentityReference] = (),
+        characters: Sequence[CharacterSubmissionTarget] | None = None,
         shot_type: str = "DIALOGUE",
         sample_positions: tuple[float, ...] | None = None,
     ) -> CharacterEvidenceSubmission:
-        if not references:
+        """Submit one job that analyses every bound character of this candidate.
+
+        One job per candidate, several characters inside it: the Modal side
+        claims idempotency on ``job_id`` alone, so a per-character fan-out of
+        separate POSTs would be answered ``202 {duplicate: true}`` for every
+        character after the first and never run.
+        """
+
+        targets = (
+            [CharacterSubmissionTarget(item.character_id, tuple(item.references)) for item in characters]
+            if characters is not None
+            else (
+                [CharacterSubmissionTarget(character_id, tuple(references))]
+                if character_id
+                else []
+            )
+        )
+        if not targets or not all(target.references for target in targets):
             raise ValueError("canonical identity references are required")
+        if len({target.character_id for target in targets}) != len(targets):
+            raise ValueError("each character may appear once in one analysis request")
+        if len(targets) > MAX_CHARACTERS_PER_ANALYSIS:
+            raise ValueError(
+                f"at most {MAX_CHARACTERS_PER_ANALYSIS} characters can be analysed in one job"
+            )
         project_id, shot_id, output_asset, registered_path = self._submission_context(candidate_id)
         # A mismatched local path is a caller/data-lineage bug. It is never an
         # excuse to upload arbitrary bytes or run a local inference fallback.
@@ -143,17 +171,26 @@ class ModalCharacterEvidenceProducer:
             provider="modal_character_evidence",
             require_https=True,
         )
-        reference_assets: list[ReferenceAsset] = []
-        for reference in references:
-            url, version = self._reference_url(reference, project_id)
-            reference_assets.append(
-                ReferenceAsset.model_validate(
-                    {
-                        "asset_id": reference.reference_asset_id,
-                        "asset_version": version,
-                        "url": url,
-                        "view": reference.view,
-                    }
+        character_inputs: list[CharacterInput] = []
+        for target in targets:
+            reference_assets: list[ReferenceAsset] = []
+            for reference in target.references:
+                # The same project id for every reference, so the cross-project
+                # check inside `_reference_url` keeps holding per character.
+                url, version = self._reference_url(reference, project_id)
+                reference_assets.append(
+                    ReferenceAsset.model_validate(
+                        {
+                            "asset_id": reference.reference_asset_id,
+                            "asset_version": version,
+                            "url": url,
+                            "view": reference.view,
+                        }
+                    )
+                )
+            character_inputs.append(
+                CharacterInput(
+                    character_id=target.character_id, reference_assets=reference_assets
                 )
             )
         request = AnalyzeRequest.model_validate(
@@ -165,11 +202,7 @@ class ModalCharacterEvidenceProducer:
                 "project_id": project_id,
                 "shot_id": shot_id,
                 "video_url": video_url,
-                "characters": [
-                    CharacterInput(
-                        character_id=character_id, reference_assets=reference_assets
-                    )
-                ],
+                "characters": character_inputs,
                 "threshold_version": self.threshold_version,
                 "shot_type": shot_type,
                 "sample_positions": list(sample_positions) if sample_positions else None,

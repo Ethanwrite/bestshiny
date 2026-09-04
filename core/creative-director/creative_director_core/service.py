@@ -56,6 +56,7 @@ from production_domain.models import (
 )
 from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from . import evidence as evidence_module
 from .beats import render_script
@@ -3386,16 +3387,33 @@ class CreativeDirectorService:
                 .with_for_update()
             )
             if row is None:
-                row = CreativeLockStep(
-                    session_id=session_id,
-                    bible_id=bible_id,
-                    step_kind=kind,
-                    step_key=step_key[:160],
-                    idempotency_key=idempotency_key[:250],
-                    status="PENDING",
-                )
-                session.add(row)
-                session.flush()
+                # Two approvals arriving together both read None - the row they
+                # are racing for does not exist yet, so there is nothing for
+                # `FOR UPDATE` to lock. The loser hits the unique index on
+                # `idempotency_key`; inside a SAVEPOINT that rolls back only the
+                # insert, and re-reading finds the winner's row so the loser
+                # follows the normal RUNNING/COMPLETED path below instead of
+                # failing the whole lock with an IntegrityError.
+                try:
+                    with session.begin_nested():
+                        row = CreativeLockStep(
+                            session_id=session_id,
+                            bible_id=bible_id,
+                            step_kind=kind,
+                            step_key=step_key[:160],
+                            idempotency_key=idempotency_key[:250],
+                            status="PENDING",
+                        )
+                        session.add(row)
+                        session.flush()
+                except IntegrityError:
+                    row = session.scalar(
+                        select(CreativeLockStep)
+                        .where(CreativeLockStep.idempotency_key == idempotency_key)
+                        .with_for_update()
+                    )
+                    if row is None:  # pragma: no cover - the unique violation proves it exists
+                        raise
             if row.status == "COMPLETED":
                 return dict(row.produced_json)
             if row.status == "RUNNING" and row.claimed_at is not None:

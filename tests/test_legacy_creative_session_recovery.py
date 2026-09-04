@@ -16,6 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import tomllib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -301,8 +305,38 @@ def test_an_empty_database_upgrades_to_head_unchanged(tmp_path, monkeypatch) -> 
     assert _rows(database_url, "creative_sessions") == []
 
 
+def _alembic(database_url: str, *args: str) -> None:
+    """Run alembic in a subprocess, the way an operator applies a migration.
+
+    In-process alembic against a second engine leaves SQLAlchemy's global
+    mapper state configured for that dialect, which makes a *later* SQLite
+    autogenerate comparison in the same process report phantom foreign keys.
+    A subprocess is both hermetic and closer to how this is really run.
+    """
+
+    environment = {
+        **os.environ,
+        "DATABASE_URL": database_url,
+        "PYTHONPATH": os.pathsep.join(
+            str(ROOT / path)
+            for path in tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
+                "ini_options"
+            ]["pythonpath"]
+        ),
+    }
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-3000:]
+
+
 @pytest.mark.postgres_only
-def test_the_recovery_runs_on_postgresql_too(postgres_test_database, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_the_recovery_runs_on_postgresql_too(postgres_test_database) -> None:  # type: ignore[no-untyped-def]
     """The matrix's other half: the same repair against the real engine.
 
     A throwaway *database* rather than the usual throwaway schema: alembic's
@@ -321,19 +355,18 @@ def test_the_recovery_runs_on_postgresql_too(postgres_test_database, monkeypatch
     try:
         with sa.create_engine(database_url, isolation_level="AUTOCOMMIT").connect() as connection:
             connection.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
-        config = _config(database_url, monkeypatch)
-        command.upgrade(config, "0069_production_budget")
+        _alembic(database_url, "upgrade", "0069_production_budget")
         engine = sa.create_engine(database_url)
         _project, made = _seed_0069_sessions(engine)
         engine.dispose()
-        command.upgrade(config, "head")
+        _alembic(database_url, "upgrade", "head")
         for status, seeded in made.items():
             row = _rows(database_url, "creative_sessions", id=seeded["session_id"])[0]
             assert row["status"] == "BRIEF_APPROVED", status
             assert _rows(database_url, "creative_screenplays", session_id=seeded["session_id"]) == []
             anchor = _rows(database_url, "creative_visual_anchors", id=seeded["anchor_id"])[0]
             assert len(anchor["prompt_hash"]) == 64
-        command.downgrade(config, "0074_creative_lock_steps")
+        _alembic(database_url, "downgrade", "0074_creative_lock_steps")
         for status, seeded in made.items():
             assert (
                 _rows(database_url, "creative_sessions", id=seeded["session_id"])[0]["status"]

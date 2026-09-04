@@ -13,6 +13,7 @@ from entitlement_core import (
     WorkspaceModelResolver,
 )
 from memory_core import (
+    BoundedVideoFrameSampler,
     LocalTestEmbeddingProvider,
     MemoryEmbeddingUnavailable,
     MemoryQuery,
@@ -84,6 +85,13 @@ class _FixtureEmbeddingCapability(EmbeddingCapability):
             "data": [{"embedding": [1.0] * dimension}],
             "usage": {"prompt_tokens": 4, "total_tokens": 4, "cost": "0.02"},
         }
+
+
+def _no_ffmpeg(args: list[str], timeout: float) -> Any:
+    """A host with no ffmpeg on PATH, which must degrade rather than raise."""
+
+    del timeout
+    raise FileNotFoundError(args[0])
 
 
 def test_business_code_cannot_call_voyage_directly(container) -> None:  # type: ignore[no-untyped-def]
@@ -163,6 +171,13 @@ def test_model_role_embedding_returns_project_scoped_provenance(container, proje
 
 
 def test_model_role_embedding_rejects_unverified_direct_video_url(container, project) -> None:  # type: ignore[no-untyped-def]
+    """A video whose frames cannot be taken is never sent to Voyage as a video.
+
+    Workstream 13 replaced the blanket refusal with bounded frame extraction,
+    but the invariant underneath it did not move: no ``video_url`` reaches the
+    vendor, and a video that yields no frames costs nothing and embeds nothing.
+    """
+
     capability = _FixtureEmbeddingCapability()
     providers = ProviderCapabilityCatalog()
     providers.register(
@@ -176,9 +191,15 @@ def test_model_role_embedding_rejects_unverified_direct_video_url(container, pro
         providers,
         provider_mode="mock",
     )
-    adapter = ModelRoleEmbeddingProvider(runtime, dimension=256)
+    adapter = ModelRoleEmbeddingProvider(
+        runtime,
+        dimension=256,
+        # This host has no usable ffmpeg, which is the case the old code path
+        # made permanent for every video.
+        frame_sampler=BoundedVideoFrameSampler(runner=_no_ffmpeg),
+    )
 
-    with pytest.raises(MemoryEmbeddingUnavailable, match="extract bounded timestamped image frames"):
+    with pytest.raises(MemoryEmbeddingUnavailable, match="never sent a video_url"):
         adapter.embed_with_provenance(
             MultimodalContent(video_urls=["https://media.invalid/candidate.mp4"]),
             input_type="document",

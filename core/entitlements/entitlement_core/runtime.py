@@ -538,9 +538,20 @@ class ModelRoleRuntime:
         if actual_cost is not None:
             cost_source = "VERIFIED_PROVIDER"
         elif token_priced is not None:
-            # The provider reported token counts and no cost. Priced here from
-            # the dated canonical list rates — a real figure with a weaker
-            # provenance than a provider invoice, and it says which it is.
+            # The provider reported usage counts — tokens, pixels, or both —
+            # and no cost. Priced here from the dated canonical list rates: a
+            # real figure with a weaker provenance than a provider invoice,
+            # and it says which it is.
+            #
+            # "TOKENS_LIST" is deliberately not a `BillingEvidenceSource`
+            # member. That enum describes evidence about a *provider invoice*;
+            # this is the vendor's official list price applied to the
+            # provider's own reported usage, which is a different claim, and
+            # collapsing it into VERIFIED_PROVIDER would overstate it while
+            # ESTIMATED would understate it. The string is the shared vocabulary
+            # of `production_budget.SOURCE_TOKENS_LIST` and
+            # `live_canary._ROLE_SETTLEMENT_SOURCES`, both of which reject any
+            # source they do not know, so it stays exactly as written here.
             actual_cost = token_priced.cost_usd
             cost_source = "TOKENS_LIST"
         elif estimated_cost is not None:
@@ -578,7 +589,14 @@ class ModelRoleRuntime:
                         reported_actual_cost is not None and self.provider_mode is not ProviderMode.LIVE
                     ),
                     **(
-                        {"token_pricing_detail": token_priced.detail}
+                        {
+                            "token_pricing_detail": token_priced.detail,
+                            # A multimodal call is billed on pixels as well as
+                            # tokens, so the pixel counts travel beside the
+                            # line an operator reads.
+                            "token_pricing_image_pixels": token_priced.image_pixels,
+                            "token_pricing_video_pixels": token_priced.video_pixels,
+                        }
                         if token_priced is not None
                         else {}
                     ),

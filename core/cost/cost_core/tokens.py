@@ -13,7 +13,15 @@ from sqlalchemy import select
 # The unit every per-token pricing row is stored in (migration 0051): the
 # provider's own published per-1M-token rate, in the provider's own currency.
 TOKEN_BILLING_UNIT = "1M_tokens"
+# Multimodal input is not always billed per token. Voyage bills two axes at
+# once (migration 0071): text per 1M tokens and image input per 1B pixels. A
+# settlement that reads only the token row prices a call that was mostly
+# pixels at nearly nothing, which is how an embedding cost silently vanishes.
+PIXEL_BILLING_UNIT = "1B_pixels"
+SETTLEABLE_BILLING_UNITS = (TOKEN_BILLING_UNIT, PIXEL_BILLING_UNIT)
 _MILLION = Decimal(1_000_000)
+_BILLION = Decimal(1_000_000_000)
+_UNIT_DIVISORS = {TOKEN_BILLING_UNIT: _MILLION, PIXEL_BILLING_UNIT: _BILLION}
 _MONEY = Decimal("0.000001")
 
 # An unquoted live reservation must hold *something* strictly positive: a zero
@@ -33,11 +41,21 @@ def _aware(value: datetime) -> datetime:
 
 @dataclass(frozen=True)
 class TokenRates:
-    """USD-per-token list rates for one provider model, from dated rows."""
+    """USD-per-unit list rates for one provider model, from dated rows.
+
+    Per-token and per-pixel rates live on one object because a single
+    multimodal call is billed on both at once, and a settlement is only
+    traceable if it can name every row it used.
+    """
 
     input_usd_per_token: Decimal
     output_usd_per_token: Decimal | None
     cached_input_usd_per_token: Decimal | None
+    #: USD for one image pixel — the ``1B_pixels`` row divided by 1e9.
+    image_usd_per_pixel: Decimal | None
+    #: USD for one video pixel. No shipped migration prices one; a provider
+    #: that starts billing video pixels gets a dated row, not a code change.
+    video_usd_per_pixel: Decimal | None
     profile_ids: tuple[str, ...]
 
 
@@ -48,6 +66,10 @@ class TokenSettlement:
     cached_input_tokens: int
     output_tokens: int
     detail: str
+    #: The provider's own reported pixel counts, carried out so the execution
+    #: record and the budget evidence can show what was actually billed.
+    image_pixels: int = 0
+    video_pixels: int = 0
 
 
 class TokenCostEngine:
@@ -76,15 +98,21 @@ class TokenCostEngine:
                     select(ModelPricingProfile).where(
                         ModelPricingProfile.provider == provider,
                         ModelPricingProfile.provider_model_id == model,
-                        ModelPricingProfile.billing_unit == TOKEN_BILLING_UNIT,
+                        ModelPricingProfile.billing_unit.in_(SETTLEABLE_BILLING_UNITS),
                         ModelPricingProfile.effective_from <= now,
                     )
                 )
             )
         live = [row for row in rows if row.effective_until is None or _aware(row.effective_until) > now]
 
-        def current(direction: str) -> ModelPricingProfile | None:
-            candidates = [row for row in live if row.input_mode == direction]
+        def current(direction: str, billing_unit: str) -> ModelPricingProfile | None:
+            # The unit is part of the identity of a rate, not a detail of it:
+            # an `image_input` row is per-pixel and an `input_tokens` row is
+            # per-token, and reading either through the other's divisor would
+            # be wrong by a factor of a thousand.
+            candidates = [
+                row for row in live if row.input_mode == direction and row.billing_unit == billing_unit
+            ]
             if not candidates:
                 return None
             # Promotion before list, exactly as CreditPricingEngine selects: a
@@ -97,22 +125,35 @@ class TokenCostEngine:
             )
             return candidates[0]
 
-        def usd_per_token(row: ModelPricingProfile | None) -> Decimal | None:
+        def usd_per_unit(row: ModelPricingProfile | None) -> Decimal | None:
             if row is None:
                 return None
-            return Decimal(row.unit_price) * Decimal(row.usd_per_currency) / _MILLION
+            divisor = _UNIT_DIVISORS.get(row.billing_unit)
+            if divisor is None:  # pragma: no cover - the query filters on the units
+                return None
+            return Decimal(row.unit_price) * Decimal(row.usd_per_currency) / divisor
 
-        input_row = current("input_tokens")
-        input_rate = usd_per_token(input_row)
+        input_row = current("input_tokens", TOKEN_BILLING_UNIT)
+        input_rate = usd_per_unit(input_row)
         if input_row is None or input_rate is None:
             return None
-        output_row = current("output_tokens")
-        cached_row = current("cached_input_tokens")
+        output_row = current("output_tokens", TOKEN_BILLING_UNIT)
+        cached_row = current("cached_input_tokens", TOKEN_BILLING_UNIT)
+        image_row = current("image_input", PIXEL_BILLING_UNIT)
+        video_row = current("video_input", PIXEL_BILLING_UNIT)
         return TokenRates(
             input_usd_per_token=input_rate,
-            output_usd_per_token=usd_per_token(output_row),
-            cached_input_usd_per_token=usd_per_token(cached_row),
-            profile_ids=tuple(row.id for row in (input_row, output_row, cached_row) if row is not None),
+            output_usd_per_token=usd_per_unit(output_row),
+            cached_input_usd_per_token=usd_per_unit(cached_row),
+            image_usd_per_pixel=usd_per_unit(image_row),
+            video_usd_per_pixel=usd_per_unit(video_row),
+            # Every row that priced the call, so a figure stays traceable to
+            # both halves of a text-plus-image bill.
+            profile_ids=tuple(
+                row.id
+                for row in (input_row, output_row, cached_row, image_row, video_row)
+                if row is not None
+            ),
         )
 
     def estimate_call(
@@ -153,16 +194,26 @@ class TokenCostEngine:
     ) -> TokenSettlement | None:
         """The exact list-priced cost of a finished call, from its usage block.
 
+        Prices every axis the provider reported. A Voyage multimodal embedding
+        returns ``text_tokens`` with ``image_pixels`` and ``video_pixels``
+        beside them; before those were read, a live Voyage call settled
+        nothing and its authorization closed at the quote ceiling.
+
         Returns None — leaving the usage UNCERTAIN for an operator — whenever
-        the counts or the rates cannot support an honest figure: no input
-        count, no pricing row, or output tokens with no output rate. Cached
-        input tokens without a cached rate are billed at the full input rate;
-        overstating a settlement is safe where understating is not.
+        the counts or the rates cannot support an honest figure: no countable
+        usage at all, no pricing row, output tokens with no output rate, or
+        pixels reported with no pixel rate. An unpriced axis is never treated
+        as free. Cached input tokens without a cached rate are billed at the
+        full input rate; overstating a settlement is safe where understating
+        is not.
         """
 
-        input_tokens = _count(usage, "prompt_tokens", "input_tokens")
-        if input_tokens is None:
+        text_tokens = _count(usage, "prompt_tokens", "input_tokens", "text_tokens")
+        image_pixels = _count(usage, "image_pixels")
+        video_pixels = _count(usage, "video_pixels")
+        if text_tokens is None and image_pixels is None and video_pixels is None:
             return None
+        input_tokens = text_tokens or 0
         output_tokens = _count(usage, "completion_tokens", "output_tokens") or 0
         details = usage.get("prompt_tokens_details")
         cached = _count(details, "cached_tokens") or 0 if isinstance(details, Mapping) else 0
@@ -172,6 +223,14 @@ class TokenCostEngine:
             return None
         if output_tokens > 0 and rates.output_usd_per_token is None:
             return None
+        # A *nonzero* pixel count with no pixel row cannot be priced, and a
+        # partial figure that silently drops it would be read as the whole
+        # bill. Zero pixels cost zero at any rate, so a text-only call whose
+        # usage block still carries `"image_pixels": 0` settles normally.
+        if image_pixels and rates.image_usd_per_pixel is None:
+            return None
+        if video_pixels and rates.video_usd_per_pixel is None:
+            return None
         cached_rate = rates.cached_input_usd_per_token
         if cached_rate is None:
             cached_rate = rates.input_usd_per_token
@@ -179,17 +238,51 @@ class TokenCostEngine:
             Decimal(input_tokens - cached) * rates.input_usd_per_token
             + Decimal(cached) * cached_rate
             + Decimal(output_tokens) * (rates.output_usd_per_token or Decimal(0))
+            + Decimal(image_pixels or 0) * (rates.image_usd_per_pixel or Decimal(0))
+            + Decimal(video_pixels or 0) * (rates.video_usd_per_pixel or Decimal(0))
         ).quantize(_MONEY)
         return TokenSettlement(
             cost_usd=cost,
             input_tokens=input_tokens,
             cached_input_tokens=cached,
             output_tokens=output_tokens,
-            detail=(
-                f"{input_tokens}in+{cached}cached+{output_tokens}out"
-                f"@{provider}:{model}:{TOKEN_BILLING_UNIT}"
+            image_pixels=image_pixels or 0,
+            video_pixels=video_pixels or 0,
+            detail=_settlement_detail(
+                provider,
+                model,
+                input_tokens=input_tokens,
+                cached=cached,
+                output_tokens=output_tokens,
+                image_pixels=image_pixels,
+                video_pixels=video_pixels,
             ),
         )
+
+
+def _settlement_detail(
+    provider: str,
+    model: str,
+    *,
+    input_tokens: int,
+    cached: int,
+    output_tokens: int,
+    image_pixels: int | None,
+    video_pixels: int | None,
+) -> str:
+    """One line an operator can check a figure against, axis by axis.
+
+    The token prefix is stable: a call that reported no pixels reads exactly
+    as it did before pixels were priced at all.
+    """
+
+    detail = f"{input_tokens}in+{cached}cached+{output_tokens}out"
+    units = TOKEN_BILLING_UNIT
+    if image_pixels is not None or video_pixels is not None:
+        detail += f"+{image_pixels or 0}ipx+{video_pixels or 0}vpx"
+        if image_pixels or video_pixels:
+            units = f"{TOKEN_BILLING_UNIT}+{PIXEL_BILLING_UNIT}"
+    return f"{detail}@{provider}:{model}:{units}"
 
 
 def _count(payload: Mapping[str, Any] | None, *keys: str) -> int | None:
@@ -205,6 +298,8 @@ def _count(payload: Mapping[str, Any] | None, *keys: str) -> int | None:
 
 
 __all__ = [
+    "PIXEL_BILLING_UNIT",
+    "SETTLEABLE_BILLING_UNITS",
     "TOKEN_BILLING_UNIT",
     "TokenCostEngine",
     "TokenRates",

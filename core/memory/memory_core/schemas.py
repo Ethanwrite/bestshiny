@@ -56,6 +56,47 @@ def _enforce_advisory_use(
         )
 
 
+class VideoFrameStatus(StrEnum):
+    """Whether the frames a video memory should have been built from exist."""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    EXTRACTED = "EXTRACTED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class VideoFrameReference(BaseModel):
+    """One still frame an embedding was actually built from.
+
+    The embedding provider never sends a video to the vendor; it sends stills
+    taken at fixed positions.  Recording where each still came from is what
+    lets a retrieved memory say which moments of which video it represents,
+    rather than implying the whole clip was understood.
+    """
+
+    #: The content-addressed media URL the frame was sampled from. The memory
+    #: row's `asset_version_ids` carry the logical version binding.
+    source_video_url: str
+    frame_index: int = Field(ge=0)
+    normalized_position: float = Field(ge=0.0, le=1.0)
+    timestamp_seconds: float = Field(ge=0.0)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    byte_length: int = Field(ge=1)
+
+
+class VideoFrameLineage(BaseModel):
+    """Provenance for the frames one embedding call was built from."""
+
+    sampler_version: str = ""
+    status: VideoFrameStatus = VideoFrameStatus.NOT_APPLICABLE
+    source_video_urls: list[str] = Field(default_factory=list)
+    frames: list[VideoFrameReference] = Field(default_factory=list)
+    #: Why frames are missing or fewer than the fixed positions asked for.
+    reason_codes: list[str] = Field(default_factory=list)
+    total_pixels: int = Field(default=0, ge=0)
+    total_bytes: int = Field(default=0, ge=0)
+
+
 class MultimodalContent(BaseModel):
     text: str = ""
     image_urls: list[str] = Field(default_factory=list, max_length=16)
@@ -255,6 +296,9 @@ class EmbeddingProvenance(BaseModel):
     input_type: Literal["query", "document"]
     evidence_purpose: EvidencePurpose = EvidencePurpose.RETRIEVAL_HINT
     authority_level: AuthorityLevel = AuthorityLevel.ADVISORY
+    #: Present only where the embedded content carried video. `None` means the
+    #: call had no video input, not that extraction was skipped.
+    video_frame_lineage: VideoFrameLineage | None = None
 
     @model_validator(mode="after")
     def embeddings_are_advisory(self) -> EmbeddingProvenance:

@@ -239,6 +239,12 @@ class PromptCompilerService:
                 rendered.append(f"open_obligation: {fact.get('value', '')}")
             elif name == "director_continuity_obligation":
                 rendered.append(f"continuity_obligation: {fact.get('value', '')}")
+            elif name == "screenplay_invariant":
+                rendered.append(f"invariant: {fact.get('value', '')}")
+            elif name == "product_claim_verbatim":
+                rendered.append(f'product_claim (verbatim): "{fact.get("value", "")}"')
+            elif name == "required_copy_verbatim":
+                rendered.append(f'required_copy (verbatim): "{fact.get("value", "")}"')
             elif name == "known_fact":
                 rendered.append(f"known_fact[{fact.get('holder', '')}]: {fact.get('value', '')}")
             else:
@@ -475,6 +481,15 @@ class PromptCompilerService:
             for item in (director.get("continuity_obligations") or [])
             if str(item).strip()
         ]
+        director_invariants = [
+            str(item).strip() for item in (director.get("invariants") or []) if str(item).strip()
+        ]
+        director_claims = [
+            str(item).strip() for item in (director.get("product_claims") or []) if str(item).strip()
+        ]
+        director_copy = [
+            str(item).strip() for item in (director.get("required_copy") or []) if str(item).strip()
+        ]
         state_characters = start_state.get("characters", {})
         binding_by_character = {
             self._uuid_key(character_id) or str(character_id): binding
@@ -641,6 +656,16 @@ class PromptCompilerService:
         if director_staging:
             constraints.append(f"stage the approved action as: {director_staging}")
         constraints.extend(f"continuity obligation: {item}" for item in director_obligations)
+        # Scoped to this shot by the director, never every invariant on every
+        # shot. Claims and copy are quoted, because their wording is the thing
+        # being preserved: a paraphrase is a different claim.
+        constraints.extend(f"invariant that holds here: {item}" for item in director_invariants)
+        constraints.extend(
+            f'product claim, verbatim and unparaphrased: "{item}"' for item in director_claims
+        )
+        constraints.extend(
+            f'required on-screen copy, exactly these words: "{item}"' for item in director_copy
+        )
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -693,6 +718,18 @@ class PromptCompilerService:
                                     {"name": "director_continuity_obligation", "value": item}
                                     for item in director_obligations
                                 ),
+                                *(
+                                    {"name": "screenplay_invariant", "value": item}
+                                    for item in director_invariants
+                                ),
+                                *(
+                                    {"name": "product_claim_verbatim", "value": item}
+                                    for item in director_claims
+                                ),
+                                *(
+                                    {"name": "required_copy_verbatim", "value": item}
+                                    for item in director_copy
+                                ),
                             ],
                         )
                     )
@@ -735,6 +772,9 @@ class PromptCompilerService:
                 {"name": "director_continuity_obligation", "value": item}
                 for item in director_obligations
             ),
+            *({"name": "screenplay_invariant", "value": item} for item in director_invariants),
+            *({"name": "product_claim_verbatim", "value": item} for item in director_claims),
+            *({"name": "required_copy_verbatim", "value": item} for item in director_copy),
             *state_constraint_lines,
         ]
         compiler_input = PromptCompilerInput(

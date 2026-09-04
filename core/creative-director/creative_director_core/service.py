@@ -96,8 +96,10 @@ from .screenplay import (
     beats_from_screenplay,
     derive_anchors,
     deterministic_screenplay,
+    global_invariants,
     screenplay_hash,
     script_name,
+    shot_constraints,
     validate_screenplay,
 )
 from .screenplay_brief import ScreenplayBriefValidator
@@ -1821,6 +1823,22 @@ class CreativeDirectorService:
                 provenance=dict(brief.provenance_json),
                 prohibitions=self._session_prohibitions(self._turn_views(session, session_id)),
             )
+            unplaced = screenplay.unplaced_copy
+            if unplaced:
+                # "Somewhere in the film" is not something a shot prompt can
+                # honour, and picking a shot on the user's behalf would be
+                # inventing the answer. Approval waits for the placement.
+                raise CreativeSessionConflict(
+                    "this screenplay requires copy on screen without saying where: "
+                    + ", ".join(item.text for item in unplaced),
+                    reason_code=ReasonCode.REQUIRED_COPY_UNPLACED.value,
+                    details={
+                        "required_copy": [
+                            {"text": item.text, "beat": item.beat, "shot": item.shot}
+                            for item in unplaced
+                        ]
+                    },
+                )
             if conformance.blocking and not accept_brief_violations:
                 raise CreativeSessionConflict(
                     "this screenplay contradicts the approved brief: "
@@ -3081,6 +3099,19 @@ class CreativeDirectorService:
             assert approved_script is not None
             script = approved_script.script_text
             obligations = [item.model_dump() for item in screenplay.obligations]
+            # What holds for the whole piece becomes a narrative fact: it then
+            # travels through series context into every shot's prompt, and the
+            # ledger's own idempotency makes it unrewritable - a second
+            # establishment with different words is a conflict, not an update.
+            # That is what "the claim stays verbatim" is enforced by.
+            world_facts = [
+                {"key": f"invariant:{index}", "summary": text, "category": "INVARIANT"}
+                for index, text in enumerate(global_invariants(screenplay), 1)
+            ] + [
+                {"key": f"product_claim:{index}", "summary": claim.claim, "category": "PRODUCT_CLAIM"}
+                for index, claim in enumerate(screenplay.product_claims, 1)
+                if claim.must_preserve
+            ]
             current_anchors = self._current_anchors(session, session_id)
             anchor_ids_by_key = {anchor.anchor_key: anchor.id for anchor in current_anchors}
             #: The key visual behind each anchor, so a shot's declared anchors
@@ -3094,6 +3125,17 @@ class CreativeDirectorService:
             session.flush()
 
         _script_check, ordered_intents = render_script(beats_json)
+        # Fold the screenplay's own material into the per-shot intents: the
+        # invariants scoped to each shot, the product claims it must quote
+        # verbatim, and the copy placed in it. `shot_constraints` yields one
+        # entry per rendered shot, in the same order.
+        product_name = get_path(fields, "product.name")
+        for intent, constraint in zip(
+            ordered_intents,
+            shot_constraints(screenplay, product=str(product_name) if product_name else None),
+            strict=False,
+        ):
+            intent.update(constraint.as_json())
         if _script_check != script:
             raise CreativeSessionConflict(
                 "the approved screenplay's script and its beat plan disagree; re-propose the beats",
@@ -3188,7 +3230,13 @@ class CreativeDirectorService:
             anchor_ids_by_key=anchor_ids_by_key,
         )
         ledger_results = self._ledger_writes(
-            session_id, project_id, episode_number, beats_json, plan_revision, obligations
+            session_id,
+            project_id,
+            episode_number,
+            beats_json,
+            plan_revision,
+            obligations,
+            world_facts=world_facts,
         )
 
         with self.database.session() as session:
@@ -3382,12 +3430,60 @@ class CreativeDirectorService:
         beats_json: list[dict[str, Any]],
         plan_revision: int,
         obligations: list[dict[str, Any]] | None = None,
+        world_facts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Open the obligations the screenplay promises (cliffhanger, declared obligations)."""
+        """Open the obligations the screenplay promises, and establish what it fixes.
+
+        Obligations are promises the series owes; ``world_facts`` are the
+        screenplay's global invariants and its must-preserve product claims,
+        established as narrative facts so they reach every later shot through
+        series context *and* become part of the narrative context fence a
+        candidate commit re-checks.
+        """
 
         if self.ledger is None:
             return []
         results: list[dict[str, Any]] = []
+        for item in world_facts or []:
+            fact_key = f"creative:{session_id}:ep{episode_number}:{item['key']}"[:160]
+            try:
+                fact_id = self.ledger.establish_fact(
+                    project_id,
+                    fact_key=fact_key,
+                    summary=str(item["summary"]),
+                    episode=episode_number,
+                )
+            except ValueError as exc:
+                # The same key with different words: the screenplay tried to
+                # reword something already on the ledger. Recorded as the
+                # conflict it is, never applied.
+                results.append(
+                    {
+                        "kind": "ESTABLISH_FACT",
+                        "key": fact_key,
+                        "category": item.get("category"),
+                        "conflict": True,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            results.append(
+                {
+                    "kind": "ESTABLISH_FACT",
+                    "id": fact_id,
+                    "key": fact_key,
+                    "category": item.get("category"),
+                }
+            )
+            with self.database.session() as session:
+                row = self._session(session, session_id)
+                self._emit_action(
+                    session,
+                    row,
+                    StructuredActionKind.ESTABLISH_FACT,
+                    {"fact_key": fact_key, "summary": item["summary"], "category": item.get("category")},
+                    idempotency_key=f"creative:{session_id}:fact:r{plan_revision}:{item['key']}"[:250],
+                )
         wanted: list[tuple[str, str, str]] = []
         cliffhanger = next((beat for beat in beats_json if beat.get("intent") == "CLIFFHANGER"), None)
         if cliffhanger is not None:

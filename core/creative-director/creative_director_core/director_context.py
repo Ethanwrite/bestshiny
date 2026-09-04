@@ -90,7 +90,8 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                 "hook": {{"opening_question": str, "promise": str, "audience_feeling": str}},
                 "audience_expectation": str, "tone_direction": str, "visual_direction": str,
                 "ending": str}},
-  "invariants": [str], "variables": [str],
+  "invariants": [{{"text": str, "characters": [str], "scenes": [str]}}],  // scope, or omit for global
+  "variables": [str],
   "characters": [{{"name": str, "role": str, "look": str, "wants": str,
                   "relationships": [{{"with": str, "relation": str}}]}}],
   "scenes": [{{"key": str, "location": str, "time": "DAY"|"NIGHT"|"DUSK"|"DAWN",
@@ -104,7 +105,7 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                         "start_state": str, "end_state": str, "gaze_target": str,
                         "continuity_obligations": [str]}}]}}],
   "product_claims": [{{"claim": str, "must_preserve": bool}}],
-  "required_copy": [str],
+  "required_copy": [{{"text": str, "beat": int, "shot": int}}],  // where the words are on screen
   "obligations": [{{"key": str, "promise": str, "category": str}}],
   "unresolved": [str]
 }}
@@ -124,7 +125,13 @@ Shot contract (generation shots are single-action):
   screen - describe anyone who is merely referred to inside the prose instead.
 - State an explicit start_state, end_state and gaze_target for every shot. Nobody looks into the
   lens unless the client asked.
-- Product claims and required copy stay exact. Mark every open creative choice in "unresolved".
+- Product claims stay exact, word for word: they are recorded as narrative facts and cannot be
+  reworded later by you, by the prompt compiler, or by an edit.
+- Every "required_copy" entry must name the beat and shot the words appear in. Copy with no
+  placement blocks approval - say where it is on screen rather than leaving it to the platform.
+- Scope an invariant with "characters" and/or "scenes" when it is about them; leave both out only
+  when it holds for the whole piece. A scoped invariant constrains only the shots it applies to.
+- Mark every open creative choice in "unresolved".
 - Write real, specific dialogue for this story. No placeholders.
 """.strip()
 

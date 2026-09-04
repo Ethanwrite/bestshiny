@@ -128,7 +128,7 @@ def _text_of(screenplay: Screenplay) -> str:
         screenplay.treatment.tone_direction,
         screenplay.treatment.visual_direction,
         screenplay.treatment.ending,
-        *screenplay.invariants,
+        *screenplay.invariant_texts,
         *screenplay.required_copy_texts,
         *(claim.claim for claim in screenplay.product_claims),
         *(scene.location for scene in screenplay.scenes),

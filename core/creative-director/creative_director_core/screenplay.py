@@ -488,6 +488,124 @@ def derive_anchors(fields: dict[str, Any], screenplay: Screenplay) -> AnchorDeri
     return AnchorDerivation(tuple(unique), tuple(uncovered))
 
 
+@dataclass(frozen=True)
+class ShotConstraints:
+    """What a single shot must honour, scoped to that shot alone."""
+
+    beat_sequence: int
+    shot_sequence: int
+    invariants: tuple[str, ...] = ()
+    product_claims: tuple[str, ...] = ()
+    required_copy: tuple[str, ...] = ()
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "invariants": list(self.invariants),
+            "product_claims": list(self.product_claims),
+            "required_copy": list(self.required_copy),
+        }
+
+    def __bool__(self) -> bool:
+        return bool(self.invariants or self.product_claims or self.required_copy)
+
+
+def _invariant_scope(
+    invariant: Any, screenplay: Screenplay
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Which characters and scenes an invariant is about.
+
+    An explicit scope from the director wins. Otherwise the scope is read from
+    the invariant's own words: an invariant that names a character or a
+    location is about that character or that location, and one that names
+    neither holds for the whole piece. This is what stops every invariant from
+    being injected into every shot.
+    """
+
+    if invariant.characters or invariant.scenes:
+        return (
+            frozenset(normalize_name(name) for name in invariant.characters),
+            frozenset(str(key) for key in invariant.scenes),
+        )
+    text = invariant.text.casefold()
+    characters = frozenset(
+        normalize_name(character.name)
+        for character in screenplay.characters
+        if character.name and character.name.casefold() in text
+    )
+    scenes = frozenset(
+        scene.key
+        for scene in screenplay.scenes
+        if scene.location and scene.location.casefold() in text
+    )
+    return characters, scenes
+
+
+def global_invariants(screenplay: Screenplay) -> list[str]:
+    """Invariants that hold for the whole piece, by declared *or* read scope.
+
+    These are the ones worth putting on the narrative ledger: a fact about the
+    world, true in every shot. A scoped invariant is carried by the shots it
+    applies to instead, so the ledger does not fill up with rules about one
+    character's face.
+    """
+
+    return [
+        item.text
+        for item in screenplay.invariants
+        if not any(_invariant_scope(item, screenplay))
+    ]
+
+
+def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> list[ShotConstraints]:
+    """Per-shot invariants, product claims and required copy, in shot order.
+
+    The order matches ``render_script``'s: one entry per shot that renders an
+    action line, so the list zips with the compiled shots.
+    """
+
+    names = {normalize_name(character.name): character.name for character in screenplay.characters}
+    scoped = [(item, *_invariant_scope(item, screenplay)) for item in screenplay.invariants]
+    preserved = tuple(
+        claim.claim for claim in screenplay.product_claims if claim.must_preserve
+    )
+    product_key = normalize_name(product) if product else ""
+    copy_by_position: dict[tuple[int, int], list[str]] = {}
+    for item in screenplay.required_copy:
+        if item.placed:
+            copy_by_position.setdefault((int(item.beat), int(item.shot)), []).append(item.text)
+    result: list[ShotConstraints] = []
+    for beat in screenplay.beats:
+        beat_characters = {normalize_name(name) for name in beat.characters}
+        for index, shot in enumerate(beat.shots, 1):
+            speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
+            present = beat_characters | {normalize_name(speaker)}
+            applicable = tuple(
+                item.text
+                for item, characters, scenes in scoped
+                if (not characters or characters & present)
+                and (not scenes or beat.scene_key in scenes)
+            )
+            object_key = (
+                normalize_name(shot.action.object) if shot.action and shot.action.object else ""
+            )
+            claims = (
+                preserved
+                if preserved and product_key and object_key == product_key
+                else ()
+            )
+            result.append(
+                ShotConstraints(
+                    beat_sequence=beat.sequence,
+                    shot_sequence=index,
+                    invariants=applicable,
+                    product_claims=claims,
+                    required_copy=tuple(copy_by_position.get((beat.sequence, index), ())),
+                )
+            )
+            _ = names
+    return result
+
+
 def anchor_keys_for_shot(shot: dict[str, Any], beat: dict[str, Any], product: str | None) -> list[str]:
     keys: list[str] = []
     actor = shot.get("speaker") or shot.get("actor")

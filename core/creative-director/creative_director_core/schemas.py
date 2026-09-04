@@ -148,6 +148,9 @@ class ReasonCode(StrEnum):
     #: The screenplay departs from something the director itself inferred:
     #: enrichment, recorded and shown, never a blocked approval.
     SCREENPLAY_BRIEF_ADVISORY = "SCREENPLAY_BRIEF_ADVISORY"
+    #: Copy that must appear on screen without a shot to appear in. The
+    #: director or the user has to say where; the platform will not pick.
+    REQUIRED_COPY_UNPLACED = "REQUIRED_COPY_UNPLACED"
     REQUIRED_ANCHORS_NOT_READY = "REQUIRED_ANCHORS_NOT_READY"
     OPTIONAL_ANCHORS_NOT_TERMINAL = "OPTIONAL_ANCHORS_NOT_TERMINAL"
     ANCHOR_SKIPPED = "ANCHOR_SKIPPED"
@@ -754,6 +757,73 @@ class ProductClaim(BaseModel):
     must_preserve: bool = True
 
 
+class ScreenplayInvariant(BaseModel):
+    """One thing that must stay true, and where it applies.
+
+    An invariant that names no character and no scene holds for the whole
+    piece; one that names them holds only there. The scope is what keeps every
+    invariant out of every shot: a rule about the product's label has no
+    business constraining a two-shot in a stairwell.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = Field(min_length=1, max_length=400)
+    #: Character names this invariant is about; empty means every character.
+    characters: list[str] = Field(default_factory=list, max_length=MAX_CAST)
+    #: Scene keys this invariant is about; empty means every scene.
+    scenes: list[str] = Field(default_factory=list, max_length=MAX_SCENE_ANCHORS)
+
+    @property
+    def is_global(self) -> bool:
+        return not self.characters and not self.scenes
+
+    @field_validator("text")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+    @field_validator("characters", "scenes")
+    @classmethod
+    def _clean_scope(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 80) for item in value if _clean_text(item, 80)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_text(cls, value: Any) -> Any:
+        return {"text": value} if isinstance(value, str) else value
+
+
+class RequiredCopy(BaseModel):
+    """One line of copy that must survive, and the shot it appears in.
+
+    Copy with no declared placement is not approvable: the director has to say
+    where the words are on screen, because "somewhere in the film" is not a
+    thing a shot prompt can honour and picking a shot for the user would be
+    inventing the answer.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = Field(min_length=1, max_length=400)
+    beat: int | None = Field(default=None, ge=1, le=60)
+    shot: int | None = Field(default=None, ge=1, le=200)
+
+    @property
+    def placed(self) -> bool:
+        return self.beat is not None and self.shot is not None
+
+    @field_validator("text")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 400)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_text(cls, value: Any) -> Any:
+        return {"text": value} if isinstance(value, str) else value
+
+
 class ScreenplayObligation(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -779,17 +849,17 @@ class Screenplay(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     treatment: Treatment
-    invariants: list[str] = Field(default_factory=list, max_length=40)
+    invariants: list[ScreenplayInvariant] = Field(default_factory=list, max_length=40)
     variables: list[str] = Field(default_factory=list, max_length=40)
     characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=MAX_CAST)
     scenes: list[ScreenplayScene] = Field(min_length=1, max_length=MAX_SCENE_ANCHORS)
     beats: list[ScreenplayBeat] = Field(min_length=1, max_length=40)
     product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
-    required_copy: list[str] = Field(default_factory=list, max_length=20)
+    required_copy: list[RequiredCopy] = Field(default_factory=list, max_length=20)
     obligations: list[ScreenplayObligation] = Field(default_factory=list, max_length=20)
     unresolved: list[str] = Field(default_factory=list, max_length=20)
 
-    @field_validator("invariants", "variables", "required_copy", "unresolved")
+    @field_validator("variables", "unresolved")
     @classmethod
     def _clean_lists(cls, value: list[str]) -> list[str]:
         return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
@@ -798,7 +868,17 @@ class Screenplay(BaseModel):
     def required_copy_texts(self) -> list[str]:
         """The wording of every required copy line, however it is declared."""
 
-        return [str(item) for item in self.required_copy]
+        return [item.text for item in self.required_copy]
+
+    @property
+    def invariant_texts(self) -> list[str]:
+        return [item.text for item in self.invariants]
+
+    @property
+    def unplaced_copy(self) -> list[RequiredCopy]:
+        """Copy the director has not said where to show."""
+
+        return [item for item in self.required_copy if not item.placed]
 
     @model_validator(mode="after")
     def _cross_references(self) -> Screenplay:

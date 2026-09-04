@@ -387,6 +387,17 @@ def director_intent(
             str(item) for item in (intent.get("continuity_obligations") or []) if str(item).strip()
         ],
         "anchors": [str(item) for item in (intent.get("anchors") or []) if str(item).strip()],
+        # The screenplay-level material that applies to *this* shot: the
+        # invariants scoped to it, the product claims it must quote word for
+        # word, and the copy that appears in it. Never every invariant on
+        # every shot.
+        "invariants": [str(item) for item in (intent.get("invariants") or []) if str(item).strip()],
+        "product_claims": [
+            str(item) for item in (intent.get("product_claims") or []) if str(item).strip()
+        ],
+        "required_copy": [
+            str(item) for item in (intent.get("required_copy") or []) if str(item).strip()
+        ],
         "reference_asset_ids": list(dict.fromkeys(reference_asset_ids or [])),
         # Provenance: which approved screenplay revision, which beat, which
         # shot intent every field above came from.

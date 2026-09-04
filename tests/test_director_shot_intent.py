@@ -240,3 +240,79 @@ def test_the_deterministic_scaffold_produces_the_same_intent_shape():
         assert payload["version"] == "director-shot-intent-v1"
         assert payload["screenplay_id"] == "s1"
         assert payload["beat_sequence"] >= 1 and payload["shot_sequence"] >= 1
+
+
+
+def test_a_gaze_that_says_off_camera_does_not_approve_camera_gaze(container, project):  # type: ignore[no-untyped-def]
+    """Free director text must not flip the camera-gaze approval by accident."""
+
+    from production_domain.models import Character
+
+    with container.database.session() as session:
+        episode = Episode(
+            project_id=project.id,
+            title="E1",
+            episode_number=1,
+            script_source="INT. ROOM - NIGHT\nMira looks at the door.\n",
+        )
+        session.add(episode)
+        session.flush()
+        episode_id = episode.id
+    shot_id = container.narrative.compile_episode(episode_id).shot_ids[0]
+    with container.database.session() as session:
+        session.get(Shot, shot_id).director_intent_json = {
+            "version": "director-shot-intent-v1",
+            "gaze_target": "off-camera partner",
+        }
+        mira = session.scalar(select(Character).where(Character.project_id == project.id))
+        mira_id = mira.id
+    spec = container.video_prompt_compiler.compile(
+        shot_id,
+        character_bindings=[{"character_id": mira_id, "name": "Mira", "canonical_assets": []}],
+    ).spec
+    assert spec.allow_camera_gaze is False
+    assert "no subject acknowledges the camera" in spec.constraints
+    assert any(subject.eyeline_target == "off-camera partner" for subject in spec.subjects)
+
+
+def test_a_product_the_shot_is_not_bound_to_never_enters_its_props(container, project):  # type: ignore[no-untyped-def]
+    """The project's canonical list is not this shot's prop list."""
+
+    with container.database.session() as session:
+        episode = Episode(
+            project_id=project.id,
+            title="E1",
+            episode_number=1,
+            script_source="INT. ROOM - NIGHT\nMira looks at the door.\n",
+        )
+        session.add(episode)
+        session.flush()
+        episode_id = episode.id
+    shot_id = container.narrative.compile_episode(episode_id).shot_ids[0]
+    canonical = [
+        {
+            "id": "product-asset",
+            "version_id": "product-version",
+            "type": "PRODUCT",
+            "name": "Aurora Serum",
+            "canonical_metadata": {},
+            "version_metadata": {},
+            "continuity_state": {},
+            "image_urls": ["media-not-in-this-shot"],
+            "video_urls": [],
+            "constraints": [],
+        }
+    ]
+    spec = container.video_prompt_compiler.compile(shot_id, canonical_assets=canonical).spec
+    assert [prop for prop in spec.props if prop.get("kind") == "PRODUCT"] == []
+
+    with container.database.session() as session:
+        session.get(Shot, shot_id).director_intent_json = {
+            "version": "director-shot-intent-v1",
+            "anchors": ["product:aurora serum"],
+            "reference_asset_ids": ["media-not-in-this-shot"],
+        }
+    bound = container.video_prompt_compiler.compile(shot_id, canonical_assets=canonical).spec
+    assert [prop["asset_id"] for prop in bound.props if prop.get("kind") == "PRODUCT"] == [
+        "product-asset"
+    ]

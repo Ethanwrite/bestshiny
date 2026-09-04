@@ -31,8 +31,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from platform_database import Database
+from platform_shared import affected_rows
 from production_domain.models import MediaAsset, MemoryIndexOutbox, utcnow
-from sqlalchemy import or_, select
+from sqlalchemy import and_ as sa_and
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .schemas import (
@@ -49,6 +51,14 @@ SOURCE_CANDIDATE_COMMIT = "CANDIDATE_COMMIT"
 
 #: A queued memory is a nicety; it never deserves an unbounded retry budget.
 MAX_ATTEMPTS = 5
+#: How long a claimed row may stay CLAIMED before another worker may take it.
+#: A worker that is killed mid-embedding must not lose the memory for ever.
+CLAIM_LEASE_SECONDS = 900
+#: How long a row whose project has the flag off waits before it is looked at
+#: again. Short, so turning the flag on takes effect within a minute; non-zero,
+#: so a disabled project's backlog cannot hold the head of the queue and starve
+#: every other project for ever.
+DEFERRED_RETRY_SECONDS = 60
 #: Backoff between attempts, by attempt number.
 RETRY_BACKOFF_SECONDS = (30, 300, 1800, 7200)
 #: The flag that governs whether anything is embedded at all.
@@ -187,15 +197,24 @@ class MemoryIndexOutboxWorker:
             return False
 
     def drain(self, *, limit: int = 20) -> MemoryOutboxResult:
-        claim_id = uuid.uuid4().hex
         now = utcnow()
+        lease_cutoff = now - timedelta(seconds=CLAIM_LEASE_SECONDS)
         with self.database.session() as session:
             due = [
                 row.id
                 for row in session.scalars(
                     select(MemoryIndexOutbox)
                     .where(
-                        MemoryIndexOutbox.status == "PENDING",
+                        or_(
+                            MemoryIndexOutbox.status == "PENDING",
+                            # A worker that died mid-embedding leaves a row
+                            # CLAIMED for ever unless someone may take it over.
+                            sa_and(
+                                MemoryIndexOutbox.status == "CLAIMED",
+                                MemoryIndexOutbox.claimed_at.is_not(None),
+                                MemoryIndexOutbox.claimed_at <= lease_cutoff,
+                            ),
+                        ),
                         or_(
                             MemoryIndexOutbox.next_attempt_at.is_(None),
                             MemoryIndexOutbox.next_attempt_at <= now,
@@ -203,27 +222,52 @@ class MemoryIndexOutboxWorker:
                     )
                     .order_by(MemoryIndexOutbox.created_at)
                     .limit(max(1, limit))
-                    .with_for_update(skip_locked=True)
                 )
             ]
         claimed = indexed = deferred = failed = retried = 0
         for row_id in due:
+            claim_id = uuid.uuid4().hex
             with self.database.session() as session:
                 row = session.get(MemoryIndexOutbox, row_id)
-                if row is None or row.status != "PENDING":
+                if row is None:
                     continue
                 if not self._enabled(row.project_id):
                     # Waiting, not lost: enabling the flag later indexes it.
+                    # Pushed forward so a project whose flag is off cannot hold
+                    # the head of the queue and starve every other project.
+                    row.next_attempt_at = now + timedelta(seconds=DEFERRED_RETRY_SECONDS)
+                    session.flush()
                     deferred += 1
                     continue
-                row.status = "CLAIMED"
-                row.claim_id = claim_id
-                row.claimed_at = now
-                row.attempts += 1
-                attempts = row.attempts
                 project_id = row.project_id
                 payload = dict(row.payload_json)
+                attempts = row.attempts + 1
                 session.flush()
+            # The claim is a compare-and-set, not a read-modify-write: two
+            # workers reading the same PENDING row would otherwise both index
+            # it, writing two memories for one artefact and paying twice.
+            with self.database.session() as session:
+                won = session.execute(
+                    update(MemoryIndexOutbox)
+                    .where(
+                        MemoryIndexOutbox.id == row_id,
+                        or_(
+                            MemoryIndexOutbox.status == "PENDING",
+                            sa_and(
+                                MemoryIndexOutbox.status == "CLAIMED",
+                                MemoryIndexOutbox.claimed_at <= lease_cutoff,
+                            ),
+                        ),
+                    )
+                    .values(
+                        status="CLAIMED",
+                        claim_id=claim_id,
+                        claimed_at=utcnow(),
+                        attempts=attempts,
+                    )
+                )
+                if affected_rows(won) != 1:
+                    continue
             claimed += 1
             try:
                 value = self._build(project_id, payload)
@@ -231,7 +275,7 @@ class MemoryIndexOutboxWorker:
             except Exception as exc:  # noqa: BLE001 - advisory work never escapes
                 with self.database.session() as session:
                     row = session.get(MemoryIndexOutbox, row_id)
-                    if row is None:
+                    if row is None or row.claim_id != claim_id:
                         continue
                     row.last_error = f"{type(exc).__name__}: {exc}"[:500]
                     if attempts >= self.max_attempts:
@@ -253,7 +297,9 @@ class MemoryIndexOutboxWorker:
             )
             with self.database.session() as session:
                 row = session.get(MemoryIndexOutbox, row_id)
-                if row is None:
+                if row is None or row.claim_id != claim_id:
+                    # The lease expired and another worker took it over; its
+                    # result is the one that counts.
                     continue
                 row.status = "DONE"
                 row.claim_id = None
@@ -318,6 +364,8 @@ class MemoryIndexOutboxWorker:
 
 
 __all__ = [
+    "CLAIM_LEASE_SECONDS",
+    "DEFERRED_RETRY_SECONDS",
     "MAX_ATTEMPTS",
     "MEMORY_FEATURE_FLAG",
     "SOURCE_CANDIDATE_COMMIT",

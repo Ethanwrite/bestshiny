@@ -54,6 +54,59 @@ def test_normalization_ignores_case_spacing_and_punctuation_but_not_wording():
     assert normalize("A,  B!") == "a b"
 
 
+def test_a_fragment_is_not_a_quote():
+    """A letter inside a word cannot authorise moving a user fact."""
+
+    index = UserTextIndex(
+        [UserUtterance("t1", 1, "Make a short drama set in Tokyo at night, please.")]
+    )
+    # "a" occurs inside "Make"; "al" would occur inside "always".
+    assert not index.verify("a").verified
+    assert index.verify("a").reason == "NO_EVIDENCE"
+    assert not index.verify("to").verified
+    # A word the user actually wrote, aligned to its boundaries, still passes.
+    assert index.verify("Tokyo").verified
+    assert index.verify("short drama").verified
+    # And a mid-word match of a long-enough needle is refused.
+    assert not index.verify("leas").verified
+    # CJK carries more per character, so its floor is lower.
+    cjk = UserTextIndex([UserUtterance("t1", 1, "帮我做一个短剧")])
+    assert cjk.verify("短剧").verified
+    assert not cjk.verify("剧").verified
+
+
+def test_a_forged_one_character_quote_cannot_replace_a_user_fact(container, project):
+    """The end-to-end shape of the same defect, through the real turn path."""
+
+    def handler(latest: str, state: dict) -> dict:
+        if not state.get("brief"):
+            return _rich_turn(latest, state)
+        return {
+            "assistant_message": "Moved.",
+            "brief_operations": [
+                {
+                    "op": "REPLACE",
+                    "path": "setting.location",
+                    "value": "Paris",
+                    "evidence": "a",
+                    "confidence": "USER_STATED",
+                }
+            ],
+        }
+
+    container.creative_director.model_roles = ScriptedDirector(handler)
+    with _client(container) as client:
+        started = _start(client, project.id, RICH_IDEA)
+        session_id = started["session_id"]
+        reply = _turn(client, session_id, "what would you change?")
+        view = _state(client, session_id)
+
+    assert "EVIDENCE_UNVERIFIED" in reply["reason_codes"]
+    assert view["brief"]["fields"]["setting"]["location"] == "rooftop"
+    reasons = {item["reason"] for item in _last_director_turn(view)["result"]["rejected_operations"]}
+    assert "NO_EVIDENCE" in reasons
+
+
 def test_a_verified_quote_reports_the_turn_and_the_span_in_the_users_own_text():
     index = UserTextIndex([UserUtterance("turn-7", 5, "I want it on a rooftop at night.")])
     verdict = index.verify("on a rooftop")

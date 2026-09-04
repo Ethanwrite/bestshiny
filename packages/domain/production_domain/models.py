@@ -4547,6 +4547,18 @@ class CreativeSession(Base, TimestampMixin):
             "'MUSIC_VISUAL', 'FASHION_LOOKBOOK', 'BEAUTY_TUTORIAL', 'CONCEPT_FILM', 'UNSPECIFIED')",
             name="ck_creative_session_format",
         ),
+        # Opening a session is idempotent at the database, not just in a read:
+        # a retried create whose first attempt had not committed yet would
+        # otherwise open a second conversation and pay for a second director
+        # call. Per project, because that is how the browser scopes the key.
+        Index(
+            "uq_creative_session_create_client_id",
+            "project_id",
+            "create_client_turn_id",
+            unique=True,
+            postgresql_where=text("create_client_turn_id IS NOT NULL"),
+            sqlite_where=text("create_client_turn_id IS NOT NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(
@@ -4569,6 +4581,10 @@ class CreativeSession(Base, TimestampMixin):
     current_bible_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     current_beat_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     compiled_episode_id: Mapped[str | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
+    #: The client-minted key of the request that opened this session. Unique
+    #: per project, so a retried create returns this session rather than
+    #: opening a second one and paying for a second director call.
+    create_client_turn_id: Mapped[str | None] = mapped_column(String(120))
 
 
 class CreativeTurn(Base, TimestampMixin):
@@ -4913,6 +4929,11 @@ class CreativeLockStep(Base, TimestampMixin):
     #: What the step created or found: identity version id, asset version id,
     #: style lock id. The recovery record a partial lock is judged by.
     produced_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: When the current attempt claimed the step. A step that is RUNNING and
+    #: freshly claimed belongs to a live attempt, and a second approval is
+    #: refused rather than running it concurrently; past the lease, an attempt
+    #: whose process died can be taken over.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     #: How the step was satisfied: EXECUTED (this attempt did it) or
     #: RECOVERED (a previous attempt had already done it).
     resolution: Mapped[str | None] = mapped_column(String(20))

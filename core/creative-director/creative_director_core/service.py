@@ -24,7 +24,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -297,6 +297,11 @@ _DIALOGUE_STATUSES = {
 #: STYLE through ProjectStyleService, so both are handled on their own paths.
 _CANONICAL_ANCHOR_KINDS = ("SCENE", "PRODUCT", "PROP")
 
+#: How long a claimed lock step may stay RUNNING before another attempt may
+#: take it over. Long enough that a slow but live step is never stolen; short
+#: enough that a process that died mid-step does not wedge a bible for ever.
+_LOCK_STEP_LEASE = timedelta(minutes=15)
+
 #: Job states from which a key visual will never arrive. WORKER_NEEDS_USER_ACTION
 #: is terminal for the *user* - nothing further happens without them - so an
 #: anchor waiting on one is a failure to retry, not a generation in flight.
@@ -381,6 +386,12 @@ class _TurnReasoning:
     skill_version: str | None
     skill_content_hash: str | None
     fallback_message: str | None = None
+
+
+def _aware(value: datetime) -> datetime:
+    """A stored timestamp as UTC-aware. SQLite hands back naive datetimes."""
+
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _now() -> datetime:
@@ -571,6 +582,11 @@ class CreativeDirectorService:
                 project_id=project_id,
                 workspace_id=workspace_id or project.workspace_id,
                 title=title or (idea.strip()[:200] or "Untitled session"),
+                # The key that opened this session, unique per project: a
+                # retried create is refused by the database rather than
+                # opening a second conversation, and the caller answers from
+                # this one instead.
+                create_client_turn_id=client_turn_id,
             )
             session.add(row)
             session.flush()
@@ -2790,10 +2806,47 @@ class CreativeDirectorService:
                 )
                 return lock, version_row
 
+        def own_style_version() -> Any | None:
+            """The style AssetVersion a previous attempt of *this* step made."""
+
+            from production_domain.models import AssetVersion
+
+            with self.database.session() as session:
+                return session.scalar(
+                    select(AssetVersion)
+                    .where(
+                        AssetVersion.primary_media_asset_id == media_asset_id,
+                        AssetVersion.source == "CREATIVE_KEY_VISUAL",
+                    )
+                    .order_by(AssetVersion.version.desc())
+                )
+
         def discover() -> dict[str, Any] | None:
             lock, version_row = existing_lock()
             if lock is None:
-                return None
+                # No lock yet - but this step writes the asset version and the
+                # promotion *before* it, so a failure inside styles.lock (a
+                # transient media decode, an unreachable semantic model) would
+                # otherwise make every retry append another version and another
+                # promotion. Finish the half that is missing instead.
+                mine = own_style_version()
+                if mine is None or dict(mine.metadata_json or {}).get("bible_id") != bible_id:
+                    return None
+                assert self.styles is not None
+                lock = self.styles.lock(
+                    project_id,
+                    mine.id,
+                    locked_by_user_id=actor_user_id,
+                    reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+                    explicit_confirmation=True,
+                )
+                return {
+                    "style_lock_id": lock.id,
+                    "style_asset_id": mine.asset_id,
+                    "style_version_id": mine.id,
+                    "style_inherited": False,
+                    "recovered": True,
+                }
             metadata = dict(version_row.metadata_json or {}) if version_row is not None else {}
             mine = metadata.get("bible_id") == bible_id and metadata.get("anchor_id") == anchor_id
             if mine:
@@ -2959,7 +3012,7 @@ class CreativeDirectorService:
     ) -> dict[str, Any] | None:
         """What a previous attempt of this identity step already produced."""
 
-        from production_domain.models import AssetVersion, CharacterIdentityVersion
+        from production_domain.models import Asset, AssetVersion, CharacterIdentityVersion
 
         with self.database.session() as session:
             identity = session.scalar(
@@ -2979,11 +3032,27 @@ class CreativeDirectorService:
                 )
             )
             asset_version_id = asset_version.id if asset_version is not None else None
+            logical = (
+                session.get(Asset, asset_version.asset_id) if asset_version is not None else None
+            )
+            unpromoted = logical is not None and logical.canonical_version_id != asset_version.id
+            logical_id = logical.id if logical is not None else None
+        if asset_version_id is not None and unpromoted:
+            # The version exists but was never promoted: the previous attempt
+            # died between the two writes. Finish that half rather than
+            # declaring the step done with no canonical version.
+            assert self.asset_registry is not None
+            self.asset_registry.promote(
+                logical_id,
+                asset_version_id,
+                promoted_by_user_id=None,
+                reason=f"BestShiny Director visual bible resume (bible {bible_id})",
+            )
         if asset_version_id is None:
             # The identity exists but its canonical asset version does not: the
             # previous attempt died between the two writes. Finish the half
             # that is missing rather than re-confirming the identity.
-            asset_version_id = self._promote_identity_asset(
+            asset_version_id, logical_id = self._promote_identity_asset(
                 project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=None
             )
         return {
@@ -2993,6 +3062,7 @@ class CreativeDirectorService:
             "media_asset_id": anchor["media_asset_id"],
             "anchor_id": anchor["id"],
             "anchor_version": anchor["version"],
+            "logical_asset_id": logical_id,
             "logical_asset_version_id": asset_version_id,
             "recovered": True,
         }
@@ -3005,7 +3075,7 @@ class CreativeDirectorService:
         *,
         identity_id: str,
         actor_user_id: str | None,
-    ) -> str:
+    ) -> tuple[str, str]:
         assert self.asset_registry is not None
         logical = next(
             (
@@ -3042,7 +3112,7 @@ class CreativeDirectorService:
             promoted_by_user_id=actor_user_id,
             reason="BestShiny Director visual bible approval",
         )
-        return str(asset_version.id)
+        return str(asset_version.id), str(logical.id)
 
     def _confirm_identity(
         self,
@@ -3058,7 +3128,7 @@ class CreativeDirectorService:
             anchor["media_asset_id"],
             costume_signature=anchor["look"],
         )
-        asset_version_id = self._promote_identity_asset(
+        asset_version_id, logical_asset_id = self._promote_identity_asset(
             project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=actor_user_id
         )
         return {
@@ -3068,6 +3138,7 @@ class CreativeDirectorService:
             "media_asset_id": anchor["media_asset_id"],
             "anchor_id": anchor["id"],
             "anchor_version": anchor["version"],
+            "logical_asset_id": logical_asset_id,
             "logical_asset_version_id": asset_version_id,
             "creative_session_id": session_id,
         }
@@ -3302,8 +3373,23 @@ class CreativeDirectorService:
                 session.flush()
             if row.status == "COMPLETED":
                 return dict(row.produced_json)
+            if row.status == "RUNNING" and row.claimed_at is not None:
+                stale = _now() - _aware(row.claimed_at) > _LOCK_STEP_LEASE
+                if not stale:
+                    # Another approval is inside this exact step right now. The
+                    # ledger row is the claim: running it again concurrently is
+                    # what mints a second identity version, so the second
+                    # caller is refused rather than duplicating Canon. The
+                    # lease bounds a process that died mid-step.
+                    raise CreativeSessionConflict(
+                        f"this visual bible lock step is already running ({kind}:{step_key})",
+                        reason_code=ReasonCode.LOCK_IN_PROGRESS.value,
+                        details={"step_kind": kind, "step_key": step_key},
+                        retryable=True,
+                    )
             row.status = "RUNNING"
             row.attempts += 1
+            row.claimed_at = _now()
             row.last_error = None
             session.flush()
         try:
@@ -3811,7 +3897,11 @@ class CreativeDirectorService:
         for beat in beats_json:
             for index, shot in enumerate(beat.get("shots", []), 1):
                 if str(shot.get("action") or "").strip():
-                    positions.append((int(beat.get("sequence", 0)), index))
+                    # The same identity `render_script` stamps on the intent, so
+                    # the lineage row and the shot's own intent agree.
+                    positions.append(
+                        (int(beat.get("sequence", 0)), int(shot.get("sequence") or index))
+                    )
         identities = {
             key: value for key, value in (lineage.get("identities") or {}).items() if isinstance(value, dict)
         }

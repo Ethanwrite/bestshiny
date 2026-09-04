@@ -58,7 +58,18 @@ def bible_memories(
                     )
                     if item
                 ],
-                "entity_ids": [item for item in [identity.get("character_id")] if item],
+                # The logical asset id as well as the character id: the one
+                # production consumer filters retrieval on the canonical asset
+                # ids it is asking about, so a memory without one is dropped
+                # before it can help a shot.
+                "entity_ids": [
+                    item
+                    for item in [
+                        identity.get("logical_asset_id"),
+                        identity.get("character_id"),
+                    ]
+                    if item
+                ],
                 "asset_version_ids": [
                     item for item in [identity.get("logical_asset_version_id")] if item
                 ],
@@ -85,6 +96,14 @@ def bible_memories(
                     for item in [style_version.primary_media_asset_id if style_version else None]
                     if item
                 ],
+                "entity_ids": [
+                    item
+                    for item in [
+                        lineage.get("style_asset_id")
+                        or (style_version.asset_id if style_version else None)
+                    ]
+                    if item
+                ],
                 "asset_version_ids": [style_version_id],
                 "metadata": {
                     "creative_session_id": row.id,
@@ -108,6 +127,7 @@ def bible_memories(
                 "media_asset_ids": [
                     item for item in [asset.get("media_asset_id")] if item
                 ],
+                "entity_ids": [item for item in [asset.get("asset_id")] if item],
                 "asset_version_ids": [asset["asset_version_id"]],
                 "metadata": {
                     "creative_session_id": row.id,

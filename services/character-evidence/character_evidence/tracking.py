@@ -444,6 +444,12 @@ class CharacterEvidenceTracker:
                     character_id=character_id,
                 )
                 session.add(row)
+            elif row.status == "REPORTED":
+                # A resubmission must not rewrite a character that already
+                # reported back to REQUESTED while keeping its producer run and
+                # decision - the audit surface would then say "not analysed"
+                # about a run whose QAResult exists.
+                continue
             row.status = status
             row.skip_reason = (reason or "")[:240] or None
             row.reference_asset_ids = list(reference_ids)

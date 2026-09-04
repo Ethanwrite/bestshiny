@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 # schema it was not written for. Bump it in the same commit as the migration
 # that moves head — a test asserts the two agree, so forgetting is a gate
 # failure rather than a runtime surprise.
-REQUIRED_SCHEMA_REVISION = "0077_memory_index_outbox"
+REQUIRED_SCHEMA_REVISION = "0078_creative_session_create_idempotency"
 
 
 class SchemaRevisionMismatch(RuntimeError):

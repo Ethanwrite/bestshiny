@@ -26,12 +26,16 @@ The repair is deliberately conservative:
   silently different.
 * A session that has already compiled an episode is left completely alone: its
   source is history and must not be rewritten.
-* Legacy anchors were given ``prompt_hash = ''`` by 0070, which would make
-  ``_derive_anchors`` supersede every one of them and re-charge the user for
-  key visuals they already paid for. Their hash is backfilled with the same
-  formula the service uses, so an anchor whose depiction genuinely still
-  matches is *re-bound* rather than regenerated, and one whose depiction
-  changed gets a new version with the old kept.
+* Legacy anchors were given ``prompt_hash = ''`` by 0070, which is not the
+  hash of anything. Their hash is backfilled with the same formula the service
+  uses over the prompt they actually recorded, so ``_derive_anchors`` can
+  compare like with like: an anchor whose recorded depiction still hashes to
+  what the current derivation produces is *re-bound* rather than regenerated.
+  That is true for anchors written under the current ``creative-anchor-v2``
+  prompt - the sessions 0070 stranded for any reason other than age. An anchor
+  written under the older prompt shape describes a different depiction under
+  today's schema, so it gets a new version and the old row is kept as history:
+  the deliberate "otherwise" branch, never a silent overwrite.
 
 The downgrade restores each session's original stage from the recovery turn it
 wrote, and leaves the turn itself in place - it is dialogue history.

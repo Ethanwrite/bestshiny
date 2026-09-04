@@ -160,6 +160,8 @@ class ReasonCode(StrEnum):
     LOCK_SERVICES_UNAVAILABLE = "LOCK_SERVICES_UNAVAILABLE"
     LOCK_FAILED = "LOCK_FAILED"
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
+    #: Another approval is inside this exact lock step right now.
+    LOCK_IN_PROGRESS = "LOCK_IN_PROGRESS"
     CHARACTER_IDENTITY_NOT_COVERED = "CHARACTER_IDENTITY_NOT_COVERED"
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
     #: The brief head moved while the director was thinking, so the model's

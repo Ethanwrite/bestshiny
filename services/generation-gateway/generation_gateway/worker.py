@@ -265,6 +265,29 @@ def sweep_character_evidence_once(container) -> int:  # type: ignore[no-untyped-
     return result.dispatched
 
 
+def drain_memory_index_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Embed the advisory vector memories queued by whoever wrote Canon.
+
+    Deliberately the weakest sweep in the loop: it never touches Canon, and a
+    failure here leaves the rows queued for the next pass. Generation keeps
+    using the structured Canon, the timeline and the ledger regardless.
+    """
+
+    worker = getattr(container, "memory_outbox_worker", None)
+    if worker is None:
+        return 0
+    result = worker.drain(limit=max(1, container.settings.memory_index_sweep_limit))
+    if result.indexed or result.failed or result.retried:
+        logger.info(
+            "memory index outbox: %d indexed, %d retried, %d failed, %d deferred",
+            result.indexed,
+            result.retried,
+            result.failed,
+            result.deferred,
+        )
+    return result.indexed
+
+
 def sweep_eip3009_payments_once(container) -> int:  # type: ignore[no-untyped-def]
     """Finish gas-sponsored payments even after the buyer closes their browser."""
 
@@ -287,6 +310,9 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))
+    memory_index_interval = max(
+        0, int(getattr(container.settings, "memory_index_sweep_interval_seconds", 0))
+    )
     rendition_gc_interval = max(0, int(container.settings.rendition_gc_interval_seconds))
     verification_interval = max(0, int(container.settings.media_verification_interval_seconds))
     creation_media_interval = max(
@@ -303,6 +329,7 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     next_upload_sweep = asyncio.get_running_loop().time() if upload_interval else None
     next_staging_sweep = asyncio.get_running_loop().time() if staging_interval else None
     next_evidence_sweep = asyncio.get_running_loop().time() if evidence_interval else None
+    next_memory_index = asyncio.get_running_loop().time() if memory_index_interval else None
     next_rendition_gc = asyncio.get_running_loop().time() if rendition_gc_interval else None
     next_verification = asyncio.get_running_loop().time() if verification_interval else None
     next_creation_media = asyncio.get_running_loop().time() if creation_media_interval else None
@@ -364,6 +391,15 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("character evidence sweep failed")
             next_evidence_sweep = asyncio.get_running_loop().time() + evidence_interval
+        if (
+            next_memory_index is not None
+            and asyncio.get_running_loop().time() >= next_memory_index
+        ):
+            try:
+                await asyncio.to_thread(drain_memory_index_once, container)
+            except Exception:
+                logger.exception("memory index outbox drain failed")
+            next_memory_index = asyncio.get_running_loop().time() + memory_index_interval
         if not await process_next_job(container):
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

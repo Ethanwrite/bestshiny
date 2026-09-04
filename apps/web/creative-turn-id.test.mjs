@@ -140,3 +140,23 @@ test("beginCreativeTurn never mutates the store it was given", () => {
   assert.doesNotThrow(() => beginCreativeTurn(pending, SCOPE, "x", counter()));
   assert.deepEqual(pending, {});
 });
+
+test("a pending id is forgotten once its turn is visible on the record", () => {
+  // Mirrors app.js's releaseLandedCreativeTurns: the store is keyed by scope
+  // and each entry carries the id, so a turn the conversation already shows
+  // settles its entry and the next identical message mints a new id.
+  const scope = turnScopeKey({ userId: "u", projectId: "p", slot: "session:s" });
+  let pending = beginCreativeTurn({}, scope, "再短一点", () => "id-1").pending;
+  assert.equal(pending[scope].id, "id-1");
+
+  const turns = [{ speaker: "USER", client_turn_id: "id-1" }];
+  const landed = new Set(turns.filter((t) => t.speaker === "USER" && t.client_turn_id).map((t) => t.client_turn_id));
+  for (const [key, entry] of Object.entries(pending)) {
+    if (landed.has(entry.id)) delete pending[key];
+  }
+  assert.deepEqual(pending, {});
+
+  // The same words sent again are a new send, not a replay of the old reply.
+  const again = beginCreativeTurn(pending, scope, "再短一点", () => "id-2");
+  assert.equal(again.id, "id-2");
+});

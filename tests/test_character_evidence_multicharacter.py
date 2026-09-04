@@ -370,9 +370,11 @@ def test_the_shadow_contract_is_unchanged(container, project) -> None:  # type: 
         )
     assert submission.operating_mode == "SHADOW"
     assert {row.operating_mode for row in rows} == {"SHADOW"}
-    # A FAIL from the shadow analysis leaves the candidate exactly where it was.
+    # A FAIL from the shadow analysis leaves the candidate exactly where it was:
+    # unchanged status, and no QA result the commit path would read.
     assert candidate.status == "CREATED"
-    assert candidate.committed_at is None if hasattr(candidate, "committed_at") else True
+    assert candidate.qa_result_id is None
+    assert candidate.metadata_json.get("character_evidence_mode") in {None, "SHADOW"}
 
 
 # ------------------------------------------------------------------ webhook

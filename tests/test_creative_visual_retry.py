@@ -198,3 +198,62 @@ async def test_syncing_twice_reopens_the_action_once(openrouter_container):
         )
     # Nothing was duplicated by re-syncing.
     assert len(rows) == len(anchors)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_between_two_retries_does_not_resurrect_the_dead_job(
+    openrouter_container,
+):
+    """The burned job id has to survive a synchronous refusal.
+
+    Recording a plan or credit refusal used to replace the action's result
+    wholesale, erasing the job id that tells the next retry it may not reuse
+    the dead job's idempotency key - so the retry after a top-up replayed the
+    terminal job and reported success for a generation that never ran.
+    """
+
+    container = openrouter_container
+    _wire_openrouter_images(container)
+    container.creative_director.model_roles = ScriptedDirector(_rich_turn)
+    with _client(container) as client:
+        headers, project_id, _user = _registered_pro(client, container, "refusal@example.com")
+        session_id = await _session_with_visuals(container, client, headers, project_id)
+        view = _state(client, session_id, headers)
+        anchor = next(a for a in view["anchors"] if a["anchor_key"] == "character:mira")
+        first_job_id = anchor["generation_job_id"]
+        _fail_job(container, first_job_id)
+        client.post(f"/v1/creative/sessions/{session_id}/visuals/sync", headers=headers)
+
+        # A synchronous refusal: the workspace runs out of credits mid-retry.
+        original = container.generation_admission.admit_passenger
+
+        def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise ValueError("workspace has no credits")
+
+        container.generation_admission.admit_passenger = refuse  # type: ignore[method-assign]
+        refused = client.post(f"/v1/creative/sessions/{session_id}/visuals/execute", headers=headers)
+        assert refused.status_code == 200
+        assert any(entry["status"] == "FAILED" for entry in refused.json()["executions"])
+        container.generation_admission.admit_passenger = original  # type: ignore[method-assign]
+
+        after = _state(client, session_id, headers)
+        action = next(
+            item
+            for item in after["actions"]
+            if item["kind"] == "GENERATE_KEY_VISUAL" and item["payload"]["anchor_id"] == anchor["id"]
+        )
+        # The refusal is recorded, and the burned job is still on record.
+        assert action["status"] == "FAILED"
+        assert action["result"]["error_type"] == "ValueError"
+        assert action["result"]["job_id"] == first_job_id
+        assert action["result"]["failed_asynchronously"] is True
+
+        with container.database.session() as session:
+            jobs_before = len(list(session.scalars(select(GenerationJob))))
+        retried = client.post(f"/v1/creative/sessions/{session_id}/visuals/execute", headers=headers)
+        assert retried.status_code == 200, retried.text
+        executions = retried.json()["executions"]
+        assert [entry["status"] for entry in executions] == ["EXECUTED"]
+        assert executions[0]["job_id"] != first_job_id
+        with container.database.session() as session:
+            assert len(list(session.scalars(select(GenerationJob)))) == jobs_before + 1

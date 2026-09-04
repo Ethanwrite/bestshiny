@@ -132,6 +132,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                 line = dialogue_line(script_name(speaker), shot.dialogue.text)
                 shots.append(
                     {
+                        "sequence": shot.sequence,
                         "action": line,
                         "dialogue": shot.dialogue.text,
                         "speaker": speaker,
@@ -158,6 +159,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
             )
             shots.append(
                 {
+                    "sequence": shot.sequence,
                     "action": rendered,
                     "dialogue": None,
                     "actor": actor,
@@ -181,6 +183,11 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                 "summary": beat.summary,
                 "emotional_beat": beat.emotional_beat,
                 "location": location,
+                # The anchor key is minted from the scene's *raw* location, so
+                # a location carrying punctuation or over 60 characters still
+                # resolves to the plate the bible locked. `location` above is
+                # the compiler's own cleaned line vocabulary.
+                "location_key": normalize_name(scene.location),
                 "time": _scene_time(scene.time),
                 "scene_key": beat.scene_key,
                 "characters": [names.get(normalize_name(name), name) for name in beat.characters],
@@ -509,6 +516,35 @@ class ShotConstraints:
         return bool(self.invariants or self.product_claims or self.required_copy)
 
 
+#: Characters that can carry a word: everything else is a boundary. Explicit
+#: rather than \b, because \b is meaningless between two CJK characters and a
+#: CJK name is matched by position, not by spacing.
+_WORD_CHARACTERS = re.compile(r"[0-9A-Za-z_\u00c0-\u024f]")
+
+
+def _mentions(text: str, name: str) -> bool:
+    """Whether `text` names `name`, without matching it inside another word.
+
+    A one- or two-letter cast name is ordinary in this product's audience, and
+    a bare substring test made "Al" match inside "always" - which silently
+    turned a global invariant into a character-scoped one and dropped it from
+    the ledger and from most shots.
+    """
+
+    needle = " ".join(str(name or "").casefold().split())
+    if not needle:
+        return False
+    haystack = str(text or "").casefold()
+    start = haystack.find(needle)
+    while start >= 0:
+        before = haystack[start - 1] if start else ""
+        after = haystack[start + len(needle) : start + len(needle) + 1]
+        if not (_WORD_CHARACTERS.match(before) or _WORD_CHARACTERS.match(after)):
+            return True
+        start = haystack.find(needle, start + 1)
+    return False
+
+
 def _invariant_scope(
     invariant: Any, screenplay: Screenplay
 ) -> tuple[frozenset[str], frozenset[str]]:
@@ -526,16 +562,14 @@ def _invariant_scope(
             frozenset(normalize_name(name) for name in invariant.characters),
             frozenset(str(key) for key in invariant.scenes),
         )
-    text = invariant.text.casefold()
+    text = invariant.text
     characters = frozenset(
         normalize_name(character.name)
         for character in screenplay.characters
-        if character.name and character.name.casefold() in text
+        if _mentions(text, character.name)
     )
     scenes = frozenset(
-        scene.key
-        for scene in screenplay.scenes
-        if scene.location and scene.location.casefold() in text
+        scene.key for scene in screenplay.scenes if _mentions(text, scene.location)
     )
     return characters, scenes
 
@@ -576,8 +610,13 @@ def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> l
     result: list[ShotConstraints] = []
     for beat in screenplay.beats:
         beat_characters = {normalize_name(name) for name in beat.characters}
-        for index, shot in enumerate(beat.shots, 1):
+        for shot in beat.shots:
             speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
+            # `shot.sequence` is the shot's identity everywhere else, and it is
+            # what the director names when placing copy. Nothing renumbers it
+            # per beat, so matching on the list position would drop copy from a
+            # screenplay that numbers shots continuously across beats.
+            placed_here = copy_by_position.get((beat.sequence, shot.sequence), ())
             present = beat_characters | {normalize_name(speaker)}
             applicable = tuple(
                 item.text
@@ -596,10 +635,10 @@ def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> l
             result.append(
                 ShotConstraints(
                     beat_sequence=beat.sequence,
-                    shot_sequence=index,
+                    shot_sequence=shot.sequence,
                     invariants=applicable,
                     product_claims=claims,
-                    required_copy=tuple(copy_by_position.get((beat.sequence, index), ())),
+                    required_copy=tuple(placed_here),
                 )
             )
             _ = names
@@ -611,8 +650,9 @@ def anchor_keys_for_shot(shot: dict[str, Any], beat: dict[str, Any], product: st
     actor = shot.get("speaker") or shot.get("actor")
     if actor:
         keys.append(f"character:{normalize_name(str(actor))}")
-    if beat.get("location"):
-        keys.append(f"scene:{normalize_name(str(beat['location']))}")
+    location_key = str(beat.get("location_key") or "") or normalize_name(str(beat.get("location") or ""))
+    if location_key:
+        keys.append(f"scene:{location_key}")
     if shot.get("object"):
         object_key = normalize_name(str(shot["object"]))
         if product and object_key == normalize_name(product):

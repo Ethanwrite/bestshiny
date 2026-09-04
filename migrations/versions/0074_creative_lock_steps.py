@@ -13,7 +13,9 @@ idempotency key, the status, the attempt count and what the step produced. A
 retry continues the missing steps. The row alone is not the guarantee - a
 process can die between the Canon write and the COMPLETED stamp - so each step
 also re-discovers its own output from the Canon before acting; this table makes
-the resume cheap, ordered and auditable.
+the resume cheap, ordered and auditable. ``claimed_at`` is what stops two
+concurrent approvals from running the same step at once, with a lease so a
+process that died mid-step does not wedge the bible.
 
 Revision ID: 0074_creative_lock_steps
 Revises: 0073_director_shot_intent
@@ -66,6 +68,7 @@ def upgrade() -> None:
         sa.Column("idempotency_key", sa.String(length=250), nullable=False),
         sa.Column("status", sa.String(length=20), nullable=False, server_default="PENDING"),
         sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("produced_json", sa.JSON(), nullable=False, server_default="{}"),
         sa.Column("resolution", sa.String(length=20), nullable=True),
         sa.Column("last_error", sa.String(length=500), nullable=True),

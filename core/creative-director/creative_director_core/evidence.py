@@ -17,6 +17,7 @@ refused, because a director that misquotes is still allowed to have an opinion.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -31,6 +32,21 @@ NOT_VERIFIED = "NOT_VERIFIED"
 #: Unicode general categories that read as punctuation or symbols in both the
 #: Latin and CJK halves of this product's audience.
 _PUNCTUATION_CATEGORIES = frozenset({"Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps", "Sm", "Sk", "So"})
+
+#: The shortest normalized quote that can prove anything, by script. A
+#: one-character "quote" occurs in almost any message - "a" appears inside
+#: "Make" - so it would let the model authorise a REPLACE over a user fact by
+#: quoting a letter. CJK carries far more meaning per character than Latin
+#: does ("短剧" is a whole format), so the two floors differ; the alignment
+#: check below is what stops a fragment matching inside a longer word.
+MIN_QUOTE_CHARACTERS_CJK = 2
+MIN_QUOTE_CHARACTERS_LATIN = 4
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
+
+#: Characters that can carry a word. A match has to align to a boundary on
+#: both sides, so "a" cannot match inside "Make" and "al" cannot match inside
+#: "always". CJK has no spacing, so a CJK character is itself a boundary.
+_WORD_CHARACTERS = re.compile(r"[0-9A-Za-z_\u00c0-\u024f]")
 
 
 def _fold(text: str) -> tuple[str, list[int]]:
@@ -63,6 +79,19 @@ def normalize(text: str) -> str:
     """The comparison form of a quote: folded case, one space per separator run."""
 
     return _fold(text)[0]
+
+
+def _aligned_find(haystack: str, needle: str) -> int:
+    """The first occurrence of `needle` that is not inside a longer word."""
+
+    start = haystack.find(needle)
+    while start >= 0:
+        before = haystack[start - 1] if start else ""
+        after = haystack[start + len(needle) : start + len(needle) + 1]
+        if not (_WORD_CHARACTERS.match(before) or _WORD_CHARACTERS.match(after)):
+            return start
+        start = haystack.find(needle, start + 1)
+    return -1
 
 
 @dataclass(frozen=True)
@@ -122,7 +151,8 @@ class UserTextIndex:
         """
 
         needle = normalize(evidence)
-        if not needle:
+        floor = MIN_QUOTE_CHARACTERS_CJK if _CJK.search(needle) else MIN_QUOTE_CHARACTERS_LATIN
+        if len(needle) < floor:
             return EvidenceVerdict(False, NO_EVIDENCE)
         candidates = list(zip(self._utterances, self._folded, strict=True))
         if turn_id is not None:
@@ -132,7 +162,7 @@ class UserTextIndex:
         # Newest first: a quote the user has just repeated is attributed to the
         # message being answered rather than to its oldest occurrence.
         for utterance, (haystack, offsets) in reversed(candidates):
-            position = haystack.find(needle)
+            position = _aligned_find(haystack, needle)
             if position < 0:
                 continue
             start = offsets[position]
@@ -150,6 +180,8 @@ class UserTextIndex:
 
 __all__ = [
     "EVIDENCE_NOT_IN_USER_TEXT",
+    "MIN_QUOTE_CHARACTERS_CJK",
+    "MIN_QUOTE_CHARACTERS_LATIN",
     "EVIDENCE_TURN_NOT_FOUND",
     "NOT_VERIFIED",
     "NO_EVIDENCE",

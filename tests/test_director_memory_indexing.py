@@ -23,7 +23,7 @@ from memory_core.outbox import (
     MemoryIndexOutboxWorker,
     MemoryIndexOutboxWriter,
 )
-from production_domain.models import MemoryIndexOutbox, ShotMemory
+from production_domain.models import MemoryIndexOutbox, ShotMemory, utcnow
 from sqlalchemy import select
 from test_creative_director import (
     RICH_IDEA,
@@ -230,6 +230,14 @@ async def test_the_flag_governs_whether_anything_is_embedded(openrouter_containe
     # Waiting, not lost: enabling the flag later indexes exactly the same work.
     assert {row.status for row in rows} == {"PENDING"}
     assert memories == []
+    # A disabled project's backlog is pushed forward rather than left at the
+    # head of the queue, where it would starve every other project.
+    assert all(row.next_attempt_at is not None for row in rows)
+    with container.database.session() as session:
+        for row in session.scalars(
+            select(MemoryIndexOutbox).where(MemoryIndexOutbox.project_id == project_id)
+        ):
+            row.next_attempt_at = utcnow()
     on = MemoryIndexOutboxWorker(container.database, container.memory, flags=_AllowAll())
     assert on.drain(limit=50).indexed == len(rows)
 
@@ -339,3 +347,45 @@ def test_the_pipeline_is_wired_to_the_outbox(container) -> None:  # type: ignore
     assert container.candidates.memory_outbox is not None
     assert container.creative_director.memory_outbox is not None
     assert container.memory_outbox_worker.flags is container.feature_flags
+
+
+def test_something_actually_drains_the_queue(container) -> None:  # type: ignore[no-untyped-def]
+    """A queue nothing drains is a queue nothing remembers.
+
+    Both faces are pinned: the background worker's tick and the operator
+    endpoint, because the whole feature is silent if neither exists.
+    """
+
+    from fastapi.testclient import TestClient
+    from generation_gateway.worker import drain_memory_index_once
+    from video_platform_api.main import create_app
+
+    assert container.settings.memory_index_sweep_interval_seconds > 0
+    assert drain_memory_index_once(container) == 0  # nothing queued yet, and no error
+
+    writer = MemoryIndexOutboxWriter(container.database)
+    from production_domain.models import Project
+
+    with container.database.session() as session:
+        project = Project(title="Drain")
+        session.add(project)
+        session.flush()
+        project_id = project.id
+    writer.enqueue(
+        project_id,
+        idempotency_key="memory:test:drain",
+        source="VISUAL_BIBLE_LOCK",
+        memory_type="STYLE",
+        text="a locked style",
+    )
+    container.feature_flags.set(MEMORY_FEATURE_FLAG, True)
+    with TestClient(create_app(container)) as client:
+        response = client.post(
+            "/internal/maintenance/memory-index",
+            headers={"Authorization": f"Bearer {container.settings.platform_api_key}"},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["indexed"] == 1
+    with container.database.session() as session:
+        rows = list(session.scalars(select(MemoryIndexOutbox)))
+    assert [row.status for row in rows] == ["DONE"]

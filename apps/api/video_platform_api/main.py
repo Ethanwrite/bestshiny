@@ -562,7 +562,11 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
                 return {"status": "RECORDED", "reports": 0}
             reports = [report_from_payload(item) for item in callback.reports]
-            recorded: list[str] = []
+            # Validate the WHOLE envelope before recording any of it. Each
+            # report commits in its own transaction, so refusing at report k
+            # after applying 0..k-1 would leave a partly-applied callback that
+            # the sender then dead-letters (a 4xx is never redelivered), losing
+            # the remaining characters for good.
             for report in reports:
                 if report.candidate_id != callback.job_id:
                     raise ValueError("character evidence report belongs to a different candidate")
@@ -572,6 +576,8 @@ def create_app(container: Container | None = None) -> FastAPI:
                     raise ValueError(
                         "character evidence report is for a character this candidate did not submit"
                     )
+            recorded: list[str] = []
+            for report in reports:
                 if report.producer_run_id in completed_run_ids:
                     # Replayed envelope: already recorded, per character.
                     recorded.append(report.character_id)
@@ -2790,6 +2796,24 @@ def create_app(container: Container | None = None) -> FastAPI:
                 status=status, limit=limit
             )
         }
+
+    @app.post(
+        "/internal/maintenance/memory-index",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def drain_memory_index_endpoint(limit: int | None = None):
+        """The operator-triggered face of the advisory memory-index drain.
+
+        Same implementation the worker runs on
+        `MEMORY_INDEX_SWEEP_INTERVAL_SECONDS`: embed the memories queued by a
+        visual bible lock or a candidate commit. Advisory only - nothing here
+        can touch Canon, and a project whose `voyage_memory` flag is off simply
+        keeps waiting.
+        """
+
+        return container.memory_outbox_worker.drain(
+            limit=max(1, limit or container.settings.memory_index_sweep_limit)
+        ).as_dict()
 
     @app.get(
         "/internal/character-evidence/candidates/{candidate_id}/coverage",

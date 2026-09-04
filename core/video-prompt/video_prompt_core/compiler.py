@@ -571,15 +571,26 @@ class PromptCompilerService:
                     )
                 )
 
-        # A director gaze that names the lens still travels the ordinary
-        # approval route: it is a request, and `allow_camera_gaze` is what
-        # decides, so the constraint line and the spec stay consistent.
-        allow_camera_gaze = self._camera_gaze_requested(
-            f"{action} {director_gaze}".strip(), start_state, end_state
-        ) or any(
+        # The director's gaze is free text, and the token test below scans
+        # every subject eyeline - which now includes it. "off-camera partner"
+        # says the opposite of what the tokens would read, so the negative
+        # vocabulary has to cover it; the action line keeps its own test.
+        allow_camera_gaze = self._camera_gaze_requested(action, start_state, end_state) or any(
             any(token in subject.eyeline_target.lower() for token in ("camera", "lens", "镜头"))
             and not any(
-                token in subject.eyeline_target.lower() for token in ("never", "not", "不得", "不要", "不看")
+                token in subject.eyeline_target.lower()
+                for token in (
+                    "never",
+                    "not",
+                    "off-camera",
+                    "off camera",
+                    "away from camera",
+                    "不得",
+                    "不要",
+                    "不看",
+                    "画外",
+                    "镜头外",
+                )
             )
             for subject in subjects
         )
@@ -612,12 +623,26 @@ class PromptCompilerService:
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
         dialogue = str(end_state.get("dialogue") or start_state.get("dialogue") or "")
         props = self._canonical_props(start_state.get("props", []))
-        # A canonical PRODUCT or PROP is a thing the shot must render exactly,
-        # not just a reference image riding along in the asset list. It enters
-        # the spec's own prop list, so every adapter's prompt names it.
+        # A canonical PRODUCT or PROP the DIRECTOR bound to *this* shot is a
+        # thing the shot must render exactly, so it enters the spec's own prop
+        # list and every adapter's prompt names it. Only this shot's own
+        # anchors: `canonical_assets` is the whole project's canonical list, and
+        # putting all of it here would make the evaluator demand a product in
+        # every shot it does not appear in - a critical failure that buys a
+        # paid retry for a shot that was correct.
+        bound_media = {
+            str(item) for item in (director.get("reference_asset_ids") or []) if item
+        }
         known_prop_assets = {str(prop.get("asset_id")) for prop in props if prop.get("asset_id")}
         for asset in canonical_assets:
-            if asset.get("type") not in {"PRODUCT", "PROP"} or str(asset.get("id")) in known_prop_assets:
+            if asset.get("type") not in {"PRODUCT", "PROP"}:
+                continue
+            if str(asset.get("id")) in known_prop_assets:
+                continue
+            media = {str(item) for item in (asset.get("image_urls") or [])} | {
+                str(item) for item in (asset.get("video_urls") or [])
+            }
+            if not bound_media or not (media & bound_media):
                 continue
             props.append(
                 {

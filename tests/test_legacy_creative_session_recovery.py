@@ -242,16 +242,21 @@ def test_a_stranded_legacy_session_lands_in_a_stage_it_can_act_from(tmp_path, mo
 
 
 def test_legacy_key_visuals_are_rebound_by_hash_not_recharged(tmp_path, monkeypatch) -> None:
-    """0070 left prompt_hash empty, which would supersede and re-bill every anchor."""
+    """0070 left prompt_hash empty, which is not the hash of anything.
+
+    The backfill is what lets `_derive_anchors` compare like with like. This
+    test carries the whole claim: the stored hash is the one the service
+    computes, and an anchor whose recorded depiction still matches what the
+    current derivation produces is genuinely re-used rather than re-charged.
+    """
+
+    from creative_director_core.schemas import ANCHOR_PROMPT_VERSION
+    from creative_director_core.screenplay import derive_anchors, validate_screenplay
 
     database_url, _config_, _project, made = _upgraded(tmp_path, monkeypatch, "legacy-anchors.db")
     seeded = made["VISUALS_IN_PROGRESS"]
     anchor = _rows(database_url, "creative_visual_anchors", id=seeded["anchor_id"])[0]
     assert len(anchor["prompt_hash"]) == 64
-    # It is the hash the service itself would compute from the stored prompt,
-    # so an unchanged depiction is re-used rather than regenerated.
-    from creative_director_core.schemas import ANCHOR_PROMPT_VERSION
-
     expected = hashlib.sha256(
         json.dumps(
             {"version": ANCHOR_PROMPT_VERSION, **anchor["prompt_json"]},
@@ -261,6 +266,33 @@ def test_legacy_key_visuals_are_rebound_by_hash_not_recharged(tmp_path, monkeypa
         ).encode("utf-8")
     ).hexdigest()
     assert anchor["prompt_hash"] == expected
+
+    # And the re-bind it exists for: an anchor whose recorded prompt is what
+    # today's derivation produces keeps its hash, so the existing READY row is
+    # re-used instead of being superseded and paid for again.
+    from test_creative_director import SCREENPLAY
+
+    fields = {"format": "SHORT_DRAMA", "characters": [{"name": "Mira", "look": "black coat"}]}
+    spec = next(
+        item
+        for item in derive_anchors(fields, validate_screenplay(SCREENPLAY)).specs
+        if item.anchor_key == "character:mira"
+    )
+    matching = hashlib.sha256(
+        json.dumps(
+            {"version": ANCHOR_PROMPT_VERSION, **spec.prompt},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert matching == spec.prompt_hash
+
+    # An anchor recorded under the older prompt shape describes a different
+    # depiction today, so it is versioned rather than silently reused - the
+    # deliberate "otherwise" branch, with the old row kept as history.
+    assert anchor["prompt_hash"] != spec.prompt_hash
+    assert set(anchor["prompt_json"]) != set(spec.prompt)
 
 
 def test_a_session_that_already_compiled_is_left_completely_alone(tmp_path, monkeypatch) -> None:

@@ -113,6 +113,51 @@ def test_required_copy_lands_on_exactly_the_declared_shot():
     assert carrying[0].required_copy == (COPY,)
 
 
+def test_copy_is_placed_by_the_shots_own_sequence_not_its_position_in_the_list():
+    """Nothing renumbers shots per beat, so the list index is not the identity."""
+
+    content = copy.deepcopy(SCREENPLAY)
+    # A screenplay that numbers shots continuously across beats - schema-valid,
+    # and what a model writing "beat 3, shot 5" means.
+    running = 0
+    for beat in content["beats"]:
+        for shot in beat["shots"]:
+            running += 1
+            shot["sequence"] = running
+    content["required_copy"] = [{"text": COPY, "beat": 3, "shot": running}]
+    per_shot = shot_constraints(validate_screenplay(content))
+    carrying = [item for item in per_shot if item.required_copy]
+    assert len(carrying) == 1, [item.as_json() for item in per_shot]
+    assert carrying[0].shot_sequence == running
+    assert carrying[0].required_copy == (COPY,)
+
+
+def test_a_short_cast_name_inside_another_word_does_not_scope_an_invariant():
+    """"Al" must not match inside "always" and silently narrow a global rule."""
+
+    from creative_director_core.screenplay import global_invariants
+
+    content = copy.deepcopy(SCREENPLAY)
+    content["characters"][1]["name"] = "Al"
+    for beat in content["beats"]:
+        beat["characters"] = ["Al" if name == "Ren" else name for name in beat["characters"]]
+        for shot in beat["shots"]:
+            if shot.get("dialogue", {}).get("speaker") == "Ren":
+                shot["dialogue"]["speaker"] = "Al"
+        for character in content["characters"]:
+            for relation in character.get("relationships", []):
+                if relation["with"] == "Ren":
+                    relation["with"] = "Al"
+    content["invariants"] = ["the logo always appears bottom-right", "Al is never seen"]
+    screenplay = validate_screenplay(content)
+    assert global_invariants(screenplay) == ["the logo always appears bottom-right"]
+    per_shot = shot_constraints(screenplay)
+    # The global one holds everywhere; the scoped one only where Al is.
+    assert all("the logo always appears bottom-right" in item.invariants for item in per_shot)
+    assert any("Al is never seen" in item.invariants for item in per_shot)
+    assert not all("Al is never seen" in item.invariants for item in per_shot)
+
+
 # --------------------------------------------------------------- approval
 def test_copy_with_nowhere_to_appear_blocks_approval(container, project):
     content = copy.deepcopy(SCREENPLAY)

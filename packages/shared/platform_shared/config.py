@@ -161,6 +161,11 @@ class Settings(BaseSettings):
     # (enqueue -> dispatch -> ACCEPTED-timeout scan). 0 disables the sweep.
     character_evidence_sweep_interval_seconds: int = 300
     character_evidence_sweep_limit: int = 50
+    #: How often the advisory vector-memory outbox is drained, and how many
+    #: rows one pass takes. Zero disables the drain; the queue then simply
+    #: waits, which is what happens wherever `voyage_memory` is off anyway.
+    memory_index_sweep_interval_seconds: int = 120
+    memory_index_sweep_limit: int = 20
     # An ACCEPTED job whose signed callback has not arrived within this window
     # becomes RECONCILIATION_REQUIRED and waits for an operator.
     character_evidence_callback_timeout_seconds: int = 1800

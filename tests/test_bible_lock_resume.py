@@ -15,7 +15,10 @@ process dies between the write and the ledger stamp.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
+from creative_director_core import CreativeSessionConflict
 from production_domain.models import (
     AssetCanonicalPromotion,
     AssetVersion,
@@ -23,6 +26,7 @@ from production_domain.models import (
     CreativeLockStep,
     ProjectStyleLock,
     VisualBibleVersion,
+    utcnow,
 )
 from sqlalchemy import func, select
 from test_creative_director import (
@@ -342,3 +346,136 @@ async def test_a_bible_superseded_while_locking_does_not_become_locked(openroute
         )
     assert bible.status == "SUPERSEDED"
     assert bible.lineage_json["lock_status"] == "SUPERSEDED_DURING_LOCK"
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_approval_is_refused_rather_than_duplicating_a_step(
+    openrouter_container,
+):
+    """Two approvals must not run the same step at once.
+
+    The step ledger gives exactly-once against *sequential* retries by itself.
+    A second approval arriving while the first is inside a step - a double
+    click, a second tab, a re-click after the slow lock appears to hang - would
+    otherwise call confirm_identity twice for one face, because the row lock is
+    released before the step's own work begins.
+    """
+
+    container = openrouter_container
+    _wire_openrouter_images(container)
+    container.creative_director.model_roles = ScriptedDirector(_rich_turn)
+    service = container.creative_director
+    with _client(container) as client:
+        headers, project_id, _user = _registered_pro(client, container, "concurrent@example.com")
+        session_id, version = await _ready_to_lock(container, client, headers, project_id)
+
+        original = service._run_lock_step
+        claimed: list[dict] = []
+
+        def capture(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["kind"] == "CHARACTER_IDENTITY" and not claimed:
+                claimed.append(kwargs)
+            return original(**kwargs)
+
+        service._run_lock_step = capture  # type: ignore[method-assign]
+        locked = client.post(
+            f"/v1/creative/sessions/{session_id}/bible/approve",
+            headers=headers,
+            json={"version": version},
+        )
+        service._run_lock_step = original  # type: ignore[method-assign]
+        assert locked.status_code == 200, locked.text
+        assert claimed, "the identity step never ran"
+
+    # The interleaving, constructed directly: a second approval enters the
+    # identical step while the first still holds it.
+    with container.database.session() as session:
+        row = session.scalar(
+            select(CreativeLockStep).where(
+                CreativeLockStep.idempotency_key == claimed[0]["idempotency_key"]
+            )
+        )
+        row.status = "RUNNING"
+        row.claimed_at = utcnow()
+    with pytest.raises(CreativeSessionConflict) as raised:
+        service._run_lock_step(**claimed[0])
+    assert raised.value.as_detail()["reason_code"] == "LOCK_IN_PROGRESS"
+    assert raised.value.as_detail()["retryable"] is True
+
+    # A claim older than the lease is taken over rather than wedging the bible.
+    with container.database.session() as session:
+        row = session.scalar(
+            select(CreativeLockStep).where(
+                CreativeLockStep.idempotency_key == claimed[0]["idempotency_key"]
+            )
+        )
+        row.claimed_at = utcnow() - timedelta(hours=2)
+    produced = service._run_lock_step(**claimed[0])
+    assert produced["identity_version_id"]
+    with container.database.session() as session:
+        identities = session.execute(
+            select(CharacterIdentityVersion.character_id, func.count(CharacterIdentityVersion.id))
+            .group_by(CharacterIdentityVersion.character_id)
+        ).all()
+    # Taking over a dead claim recovers; it never mints a second identity.
+    assert all(count == 1 for _character, count in identities), identities
+
+
+@pytest.mark.asyncio
+async def test_a_style_lock_that_fails_after_its_asset_version_recovers_it(openrouter_container):
+    """The style step writes the asset version and the promotion before the lock."""
+
+    container = openrouter_container
+    _wire_openrouter_images(container)
+    container.creative_director.model_roles = ScriptedDirector(_rich_turn)
+    service = container.creative_director
+    real_lock = service.styles.lock
+    calls: list[int] = []
+
+    def failing_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        if len(calls) == 1:
+            raise _Boom("the semantic style model is unreachable")
+        return real_lock(*args, **kwargs)
+
+    with _client(container) as client:
+        headers, project_id, _user = _registered_pro(client, container, "style-half@example.com")
+        session_id, version = await _ready_to_lock(container, client, headers, project_id)
+        service.styles.lock = failing_lock  # type: ignore[method-assign]
+        failed = client.post(
+            f"/v1/creative/sessions/{session_id}/bible/approve",
+            headers=headers,
+            json={"version": version},
+        )
+        assert failed.status_code == 409, failed.text
+        service.styles.lock = real_lock  # type: ignore[method-assign]
+        locked = client.post(
+            f"/v1/creative/sessions/{session_id}/bible/approve",
+            headers=headers,
+            json={"version": version},
+        )
+        assert locked.status_code == 200, locked.text
+
+    with container.database.session() as session:
+        per_asset_media = session.execute(
+            select(
+                AssetVersion.asset_id,
+                AssetVersion.primary_media_asset_id,
+                func.count(AssetVersion.id),
+            ).group_by(AssetVersion.asset_id, AssetVersion.primary_media_asset_id)
+        ).all()
+        promotions = int(session.scalar(select(func.count(AssetCanonicalPromotion.id))) or 0)
+        versions = int(session.scalar(select(func.count(AssetVersion.id))) or 0)
+        locks = int(
+            session.scalar(
+                select(func.count(ProjectStyleLock.id)).where(
+                    ProjectStyleLock.project_id == project_id
+                )
+            )
+            or 0
+        )
+    # One style asset version, one promotion for it, one lock - the retry
+    # finished the half that was missing instead of appending another.
+    assert all(count == 1 for _asset, _media, count in per_asset_media), per_asset_media
+    assert promotions == versions
+    assert locks == 1

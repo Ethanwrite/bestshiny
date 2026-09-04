@@ -346,7 +346,10 @@ def render_script(beats: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]
                 {
                     **shot,
                     "beat_sequence": int(beat.get("sequence", 0)),
-                    "shot_sequence": index,
+                    # The shot's own sequence when it has one (a screenplay
+                    # shot always does); its position otherwise, for the
+                    # deterministic scaffold's plain dicts.
+                    "shot_sequence": int(shot.get("sequence") or index),
                 }
             )
     return "\n".join(lines), ordered_intents

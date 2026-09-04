@@ -306,6 +306,31 @@ async function sendWithClientTurnId(slot, content, attempt) {
   }
 }
 
+/**
+ * Forget a pending id whose turn is already on the record.
+ *
+ * A send whose response was lost leaves its id pending, which is the point -
+ * the retry has to reuse it. But once the conversation shows the turn landed,
+ * holding the id would make the *next* identical message replay the old reply
+ * instead of reaching the director. Seeing the turn is what settles it.
+ */
+function releaseLandedCreativeTurns(view) {
+  const landed = new Set(
+    (view?.turns || [])
+      .filter((turn) => turn.speaker === "USER" && turn.client_turn_id)
+      .map((turn) => turn.client_turn_id)
+  );
+  if (!landed.size) return;
+  const pending = readCreativeTurns();
+  let changed = false;
+  for (const [scopeKey, entry] of Object.entries(pending)) {
+    if (!landed.has(entry?.id)) continue;
+    delete pending[scopeKey];
+    changed = true;
+  }
+  if (changed) writeCreativeTurns(pending);
+}
+
 async function request(path, options = {}) {
   const method = options.method || "GET";
   const headers = csrfHeaders(method, { "Content-Type": "application/json", ...(options.headers || {}) });
@@ -3167,6 +3192,7 @@ async function openCreativeSession(id) {
     state.creative.revealedScreenplay = null;
   }
   state.creative.session = await request(`/v1/creative/sessions/${id}`);
+  releaseLandedCreativeTurns(state.creative.session);
   if (state.creative.revealedTurn === null) {
     // First paint of a session: everything before now is history.
     const lastDirector = [...(state.creative.session.turns || [])].reverse().find((turn) => turn.speaker === "DIRECTOR");
@@ -3611,6 +3637,17 @@ function renderScreenplay(view) {
     return `<div class="creative-beat"><b>${beat.sequence} · ${escapeHTML(beat.intent)}</b><p>${escapeHTML(beat.summary || "")}${beat.emotional_beat ? ` <i>(${escapeHTML(beat.emotional_beat)})</i>` : ""}</p><small>scene ${escapeHTML(beat.scene_key)} · ${(beat.characters || []).map(escapeHTML).join(", ")}</small>${shots}</div>`;
   }).join("");
   const claims = (content.product_claims || []).map((claim) => `${claim.claim}${claim.must_preserve ? " (must preserve)" : ""}`);
+  // Invariants and required copy are structured now: an invariant may name the
+  // characters and scenes it is about, and copy names the shot it appears in.
+  const invariants = (content.invariants || []).map((item) => {
+    if (typeof item === "string") return item;
+    const scope = [...(item.characters || []), ...(item.scenes || [])].join(", ");
+    return scope ? `${item.text} — only for ${scope}` : item.text;
+  });
+  const requiredCopy = (content.required_copy || []).map((item) =>
+    typeof item === "string"
+      ? `${item} — no placement`
+      : `${item.text} — beat ${item.beat ?? "?"}, shot ${item.shot ?? "?"}`);
   const obligations = (content.obligations || []).map((item) => `${item.key}: ${item.promise} [${item.category}]`);
   const revisions = (view.screenplays || []).map((item) =>
     `r${item.revision} · ${item.status.toLowerCase()} · ${REASONER_LABEL(item.reasoner)}`).join(" | ");
@@ -3623,13 +3660,13 @@ function renderScreenplay(view) {
     ${treatment.visual_direction ? `<p><b>Visual direction:</b> ${escapeHTML(treatment.visual_direction)}</p>` : ""}
     ${treatment.tone_direction ? `<p><b>Tone:</b> ${escapeHTML(treatment.tone_direction)}</p>` : ""}
     ${treatment.ending ? `<p><b>Ending:</b> ${escapeHTML(treatment.ending)}</p>` : ""}
-    <h4>Locked facts (invariants)</h4>${list(content.invariants)}
+    <h4>Locked facts (invariants)</h4>${list(invariants)}
     <h4>Open to exploration (variables)</h4>${list(content.variables)}
     <h4>Characters &amp; relationships</h4><ul>${characters}</ul>
     <h4>Scenes</h4><ul>${scenes}</ul>
     <h4>Beats, dialogue &amp; shots</h4>${beats}
     ${claims.length ? `<h4>Product claims</h4>${list(claims)}` : ""}
-    ${(content.required_copy || []).length ? `<h4>Copy that must survive</h4>${list(content.required_copy)}` : ""}
+    ${requiredCopy.length ? `<h4>Copy that must survive</h4>${list(requiredCopy)}` : ""}
     ${obligations.length ? `<h4>Continuity obligations opened</h4>${list(obligations)}` : ""}
     ${(content.unresolved || []).length ? `<h4>Unresolved creative choices</h4>${list(content.unresolved)}` : ""}
     <h4>Script as compiled</h4><pre class="mono" style="white-space:pre-wrap;font-size:11px">${escapeHTML(screenplay.script_text || "")}</pre>

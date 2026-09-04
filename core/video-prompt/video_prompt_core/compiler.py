@@ -237,6 +237,8 @@ class PromptCompilerService:
             name = fact.get("name")
             if name == "open_obligation":
                 rendered.append(f"open_obligation: {fact.get('value', '')}")
+            elif name == "director_continuity_obligation":
+                rendered.append(f"continuity_obligation: {fact.get('value', '')}")
             elif name == "known_fact":
                 rendered.append(f"known_fact[{fact.get('holder', '')}]: {fact.get('value', '')}")
             else:
@@ -403,6 +405,11 @@ class PromptCompilerService:
             scene_sequence = shot.scene.sequence
             shot_sequence = shot.sequence
             shot_type = shot.shot_type
+            # The approved director intent, written back onto the shot at
+            # compile time. Read here so the staged action, the gaze target,
+            # the states the shot moves between and the continuity it owes
+            # reach the prompt instead of stopping at the audit record.
+            director = dict(shot.director_intent_json or {})
             raw_action = shot.user_prompt or shot.prompt
             duration = shot.duration
             aspect_ratio = project.default_aspect_ratio
@@ -461,6 +468,13 @@ class PromptCompilerService:
             character_bindings,
         )
         action = self._single_action(raw_action)
+        director_gaze = str(director.get("gaze_target") or "").strip()
+        director_staging = str(director.get("description") or "").strip()
+        director_obligations = [
+            str(item).strip()
+            for item in (director.get("continuity_obligations") or [])
+            if str(item).strip()
+        ]
         state_characters = start_state.get("characters", {})
         binding_by_character = {
             self._uuid_key(character_id) or str(character_id): binding
@@ -499,6 +513,10 @@ class PromptCompilerService:
                         ),
                         eyeline_target=str(
                             state.get("eyeline_target")
+                            # The director said where this shot looks. It wins
+                            # over the compiler's inference and over the
+                            # default, but not over an explicit approved state.
+                            or director_gaze
                             or state.get("gaze_target")
                             or "approved scene partner or action target, never the camera"
                         ),
@@ -528,7 +546,8 @@ class PromptCompilerService:
                         name=str(binding.get("name") or f"subject {index}"),
                         asset_id=binding.get("character_id"),
                         asset_version_id=binding.get("identity_version_id"),
-                        eyeline_target="approved scene partner or action target, never the camera",
+                        eyeline_target=director_gaze
+                        or "approved scene partner or action target, never the camera",
                         identity_constraints=[
                             f"identity version {binding['identity_version_id']}"
                             for _ in [0]
@@ -537,7 +556,12 @@ class PromptCompilerService:
                     )
                 )
 
-        allow_camera_gaze = self._camera_gaze_requested(action, start_state, end_state) or any(
+        # A director gaze that names the lens still travels the ordinary
+        # approval route: it is a request, and `allow_camera_gaze` is what
+        # decides, so the constraint line and the spec stay consistent.
+        allow_camera_gaze = self._camera_gaze_requested(
+            f"{action} {director_gaze}".strip(), start_state, end_state
+        ) or any(
             any(token in subject.eyeline_target.lower() for token in ("camera", "lens", "镜头"))
             and not any(
                 token in subject.eyeline_target.lower() for token in ("never", "not", "不得", "不要", "不看")
@@ -595,6 +619,12 @@ class PromptCompilerService:
                 "contrast, texture, rendering medium, or edge treatment"
             )
         constraints.extend(state_constraint_lines)
+        # What the director approved for this exact shot, in the compiler's own
+        # constraint vocabulary. These are not suggestions the model may trade
+        # away: they are the staging and the continuity the user signed off.
+        if director_staging:
+            constraints.append(f"stage the approved action as: {director_staging}")
+        constraints.extend(f"continuity obligation: {item}" for item in director_obligations)
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -606,8 +636,19 @@ class PromptCompilerService:
             resolution=resolution,
             subjects=subjects,
             props=props,
-            start_state=start_state,
-            end_state=end_state,
+            # The authoritative state stays exactly what the timeline says;
+            # the director's own wording for how this shot starts and ends
+            # sits beside it rather than over it.
+            start_state=(
+                {**start_state, "director_staging": director["start_state"]}
+                if director.get("start_state")
+                else start_state
+            ),
+            end_state=(
+                {**end_state, "director_staging": director["end_state"]}
+                if director.get("end_state")
+                else end_state
+            ),
             blocking=start_state.get("blocking", {}),
             camera=camera_spec,
             lighting=lighting_spec,
@@ -627,7 +668,18 @@ class PromptCompilerService:
                 # repeats it.
                 **(
                     {"facts": prompt_facts}
-                    if (prompt_facts := self._prompt_facts(dependency_facts, series_facts))
+                    if (
+                        prompt_facts := self._prompt_facts(
+                            dependency_facts,
+                            [
+                                *series_facts,
+                                *(
+                                    {"name": "director_continuity_obligation", "value": item}
+                                    for item in director_obligations
+                                ),
+                            ],
+                        )
+                    )
                     else {}
                 ),
             },
@@ -659,10 +711,14 @@ class PromptCompilerService:
             )
         )
         continuity_facts: list[str | dict[str, Any]] = [
-            {"name": "approved_start_state", "value": start_state},
-            {"name": "approved_end_state", "value": end_state},
+            {"name": "approved_start_state", "value": spec.start_state},
+            {"name": "approved_end_state", "value": spec.end_state},
             *dependency_facts,
             *series_facts,
+            *(
+                {"name": "director_continuity_obligation", "value": item}
+                for item in director_obligations
+            ),
             *state_constraint_lines,
         ]
         compiler_input = PromptCompilerInput(

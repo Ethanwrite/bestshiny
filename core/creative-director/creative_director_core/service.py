@@ -2950,8 +2950,15 @@ class CreativeDirectorService:
             assert approved_script is not None
             script = approved_script.script_text
             obligations = [item.model_dump() for item in screenplay.obligations]
-            anchor_ids_by_key = {
-                anchor.anchor_key: anchor.id for anchor in self._current_anchors(session, session_id)
+            current_anchors = self._current_anchors(session, session_id)
+            anchor_ids_by_key = {anchor.anchor_key: anchor.id for anchor in current_anchors}
+            #: The key visual behind each anchor, so a shot's declared anchors
+            #: resolve to real reference media rather than staying names.
+            anchor_media_by_key = {
+                anchor.anchor_key: anchor.media_asset_id
+                for anchor in current_anchors
+                if anchor.media_asset_id
+                and anchor.status == CreativeAnchorStatus.READY.value
             }
             session.flush()
 
@@ -3019,7 +3026,13 @@ class CreativeDirectorService:
 
         result = self.orchestrator.compile_episode(episode_id)
         shot_ids = list(result.detail.get("shot_ids", []))
-        self._apply_intents(shot_ids, ordered_intents)
+        self._apply_intents(shot_ids, ordered_intents, anchor_media_by_key, screenplay_id)
+        # The frame-anchor plan reads shot type, state and references, all of
+        # which the intents just changed; re-planning here is what makes the
+        # director's staging reach the plan the generation preflight reuses.
+        replan = getattr(self.orchestrator, "plan_frame_anchors", None)
+        if callable(replan):
+            replan(episode_id)
         self._write_shot_lineage(
             session_id,
             episode_id=episode_id,
@@ -3068,11 +3081,23 @@ class CreativeDirectorService:
             view["ledger"] = ledger_results
             return view
 
-    def _apply_intents(self, shot_ids: list[str], intents: list[dict[str, Any]]) -> None:
+    def _apply_intents(
+        self,
+        shot_ids: list[str],
+        intents: list[dict[str, Any]],
+        anchor_media_by_key: dict[str, str] | None = None,
+        screenplay_id: str | None = None,
+    ) -> None:
         from .beats import ShotIntentMismatch, apply_shot_intents
 
         try:
-            apply_shot_intents(self.database, shot_ids, intents)
+            apply_shot_intents(
+                self.database,
+                shot_ids,
+                intents,
+                reference_asset_ids_by_anchor=anchor_media_by_key,
+                screenplay_id=screenplay_id,
+            )
         except ShotIntentMismatch as exc:
             raise CreativeSessionConflict(str(exc), reason_code="SHOT_INTENT_MISMATCH") from exc
 

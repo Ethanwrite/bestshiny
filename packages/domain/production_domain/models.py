@@ -1100,6 +1100,16 @@ class Shot(Base, TimestampMixin):
     user_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     compiled_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The approved director intent behind this shot: the staged action
+    #: description, start and end states, gaze target, per-shot continuity
+    #: obligations, the key-visual anchors it depends on and the reference
+    #: media those resolve to. Live input to prompt compilation - re-read on
+    #: every recompile and retry - as opposed to CreativeShotLineage.intent_json,
+    #: which is the immutable history of what was approved. Empty for shots
+    #: that did not come from a screenplay.
+    director_intent_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
     negative_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
     model: Mapped[str] = mapped_column(String(120), default="veo", nullable=False)

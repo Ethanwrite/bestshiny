@@ -62,7 +62,9 @@ def _filled(table: sa.Table, values: dict) -> dict:  # type: ignore[type-arg]
     return filled
 
 
-def _seed_0069_sessions(engine, *, statuses=STRANDED, compiled: bool = False):  # type: ignore[no-untyped-def]
+def _seed_0069_sessions(  # type: ignore[no-untyped-def]
+    engine, *, statuses=STRANDED, compiled: bool = False, brief_status: str = "APPROVED"
+):
     """A pre-0070 creative director database, written through reflection.
 
     The ORM cannot be used here: at 0069 the post-0070 columns do not exist.
@@ -131,7 +133,7 @@ def _seed_0069_sessions(engine, *, statuses=STRANDED, compiled: bool = False):  
                 id=brief_id,
                 session_id=session_id,
                 revision=2,
-                status="APPROVED",
+                status=brief_status,
                 fields_json={"format": "SHORT_DRAMA", "logline": "a legacy piece"},
                 completeness_json={},
                 content_hash="a" * 64,
@@ -314,6 +316,92 @@ def test_a_session_that_already_compiled_is_left_completely_alone(tmp_path, monk
     assert anchor["prompt_hash"] in ("", None), (
         "a compiled session's anchors must not be rewritten by the recovery"
     )
+
+
+def test_a_session_with_no_approved_brief_is_not_relabelled_as_approved(
+    tmp_path, monkeypatch
+) -> None:
+    """BRIEF_APPROVED is a claim about the brief, not a parking space.
+
+    Every consumer of that stage calls `_approved_brief` and answers 409
+    BRIEF_NOT_APPROVED without one - including `propose_screenplay`, the single
+    action this recovery exists to enable. Recovering such a session would
+    relabel it as approved, tell the user in writing that it had been
+    recovered, and leave it exactly as dead as it was.
+    """
+
+    database_url, _config_, _project, made = _upgraded(
+        tmp_path,
+        monkeypatch,
+        "legacy-unapproved.db",
+        statuses=("BIBLE_PROPOSED",),
+        brief_status="PROPOSED",
+    )
+    seeded = made["BIBLE_PROPOSED"]
+    session_row = _rows(database_url, "creative_sessions", id=seeded["session_id"])[0]
+    assert session_row["status"] == "BIBLE_PROPOSED", "left where it was, not falsely approved"
+    turns = _rows(database_url, "creative_turns", session_id=seeded["session_id"])
+    assert [turn for turn in turns if turn["reasoner"] == "MIGRATION"] == []
+
+
+def test_the_rerun_guard_is_keyed_on_this_revision_not_the_migration_marker(
+    tmp_path, monkeypatch
+) -> None:
+    """A future migration reusing reasoner='MIGRATION' must not mute this one.
+
+    On `reasoner` alone, a turn written by any other data migration counts as
+    "already recovered": the stage is rewound with no record of where it came
+    from, and the downgrade - which *does* filter on the revision - then has
+    nothing to restore it from.
+    """
+
+    database_url = f"sqlite:///{tmp_path / 'legacy-marker.db'}"
+    config = _config(database_url, monkeypatch)
+    command.upgrade(config, "0069_production_budget")
+    engine = sa.create_engine(database_url)
+    _project, made = _seed_0069_sessions(engine)
+    seeded = made["BIBLE_PROPOSED"]
+    engine.dispose()
+    # `context_json` arrives with 0070, so the competing turn can only be
+    # written once that has run - and it has to land before 0075 does.
+    command.upgrade(config, "0074_creative_lock_steps")
+    engine = sa.create_engine(database_url)
+    now = datetime.now(UTC)
+    # Some *other* migration's turn, carrying the same marker and a different
+    # revision, landing before this one runs.
+    with engine.begin() as connection:
+        turns = sa.Table("creative_turns", sa.MetaData(), autoload_with=connection)
+        connection.execute(
+            turns.insert().values(
+                _filled(
+                    turns,
+                    {
+                        "id": str(uuid.uuid4()),
+                        "session_id": seeded["session_id"],
+                        "sequence": 900,
+                        "speaker": "DIRECTOR",
+                        "content": "written by a different data migration",
+                        "reasoner": "MIGRATION",
+                        "context_json": {"migration": "0099_some_other_migration"},
+                        "brief_revision": 0,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            )
+        )
+    engine.dispose()
+    command.upgrade(config, "head")
+
+    session_row = _rows(database_url, "creative_sessions", id=seeded["session_id"])[0]
+    assert session_row["status"] == "BRIEF_APPROVED"
+    mine = [
+        turn
+        for turn in _rows(database_url, "creative_turns", session_id=seeded["session_id"])
+        if turn["reasoner"] == "MIGRATION"
+        and (turn["context_json"] or {}).get("migration") == "0075_legacy_creative_session_recovery"
+    ]
+    assert len(mine) == 1, "the other migration's marker suppressed this one's recovery turn"
 
 
 def test_the_recovery_is_reversible_and_a_fresh_database_is_untouched(

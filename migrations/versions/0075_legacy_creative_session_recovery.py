@@ -78,8 +78,8 @@ RECOVERY_MESSAGE = (
     "This conversation started before the screenplay stage existed, so it has no approved "
     "screenplay. Nothing has been lost - your brief, your key visuals and your visual bible "
     "are all still here. Ask me to write the screenplay from your approved brief, approve it, "
-    "and we carry straight on; key visuals whose look has not changed are re-used rather than "
-    "generated again."
+    "and we carry straight on. A key visual is re-used when the new screenplay describes it the "
+    "same way; where the description changes it is generated again, and the old one is kept."
 )
 
 #: Mirrors creative_director_core.schemas.ANCHOR_PROMPT_VERSION and
@@ -117,11 +117,26 @@ def upgrade() -> None:
     screenplays = sa.Table("creative_screenplays", metadata, autoload_with=connection)
     anchors = sa.Table("creative_visual_anchors", metadata, autoload_with=connection)
 
+    briefs = sa.Table("creative_briefs", metadata, autoload_with=connection)
+
     stranded = connection.execute(
         sa.select(sessions.c.id, sessions.c.status).where(
             sessions.c.current_screenplay_revision == 0,
             sessions.c.status.in_(STRANDED_STATUSES),
             sessions.c.compiled_episode_id.is_(None),
+            # A stage literally named BRIEF_APPROVED must not be written onto a
+            # session that has no approved brief. Every consumer of that stage
+            # calls ``_approved_brief`` and answers 409 BRIEF_NOT_APPROVED
+            # without one - including ``propose_screenplay``, the single action
+            # this recovery exists to enable. Such a session would be
+            # relabelled as approved, told in writing that it had been
+            # recovered, and still be just as dead.
+            sa.exists(
+                sa.select(briefs.c.id).where(
+                    briefs.c.session_id == sessions.c.id,
+                    briefs.c.status == "APPROVED",
+                )
+            ),
         )
     ).all()
     now = datetime.now(UTC)
@@ -138,7 +153,17 @@ def upgrade() -> None:
         already = connection.execute(
             sa.select(sa.func.count())
             .select_from(turns)
-            .where(turns.c.session_id == session_id, turns.c.reasoner == "MIGRATION")
+            .where(
+                turns.c.session_id == session_id,
+                turns.c.reasoner == "MIGRATION",
+                # Keyed on *this* revision, the way the downgrade below already
+                # filters. On ``reasoner`` alone, the next data migration to
+                # reuse the MIGRATION marker would make this one silently skip
+                # writing its own recovery turn while still rewinding the
+                # stage: a stage change with no record of where it came from,
+                # and nothing left for the downgrade to restore.
+                turns.c.context_json["migration"].as_string() == revision,
+            )
         ).scalar()
         if already:
             # Recovered once already (a downgrade/upgrade round trip). Move the

@@ -305,6 +305,15 @@ def test_a_session_that_already_compiled_is_left_completely_alone(tmp_path, monk
     assert session_row["compiled_episode_id"]
     turns = _rows(database_url, "creative_turns", session_id=seeded["session_id"])
     assert [turn for turn in turns if turn["reasoner"] == "MIGRATION"] == []
+    # "Completely alone" includes its key visuals. The first version of this
+    # migration backfilled every empty prompt hash in the database rather than
+    # the ones belonging to sessions it was repairing, and so rewrote anchors
+    # on compiled sessions it had just decided not to touch - which is what it
+    # did to three anchors on bestshiny.com.
+    anchor = _rows(database_url, "creative_visual_anchors", id=seeded["anchor_id"])[0]
+    assert anchor["prompt_hash"] in ("", None), (
+        "a compiled session's anchors must not be rewritten by the recovery"
+    )
 
 
 def test_the_recovery_is_reversible_and_a_fresh_database_is_untouched(
@@ -327,6 +336,102 @@ def test_the_recovery_is_reversible_and_a_fresh_database_is_untouched(
         # Re-running the recovery does not append a second recovery turn.
         turns = _rows(database_url, "creative_turns", session_id=seeded["session_id"])
         assert len([turn for turn in turns if turn["reasoner"] == "MIGRATION"]) == 1
+
+
+def test_the_whole_0073_to_0078_range_downgrades_and_comes_back(tmp_path, monkeypatch) -> None:
+    """The rollback path, which nothing exercised before this test.
+
+    A code rollback past this range is not optional-extra work: the pre-0073
+    image pins ``REQUIRED_SCHEMA_REVISION = 0072_creation_soft_delete`` and
+    refuses to start against anything else, so rolling the code back *requires*
+    this downgrade to run. Five of the six ``downgrade()`` bodies had never
+    been executed at all, which made the documented rollback a hypothesis.
+
+    Rows are written into each new table and column first, so the downgrade is
+    run against data rather than against an empty schema - the case where a
+    DROP with a dependent row actually fails.
+    """
+
+    database_url, config, _project, made = _upgraded(tmp_path, monkeypatch, "roundtrip.db")
+    seeded = made["BIBLE_PROPOSED"]
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        for table_name, values in (
+            (
+                "creative_lock_steps",
+                {
+                    "id": str(uuid.uuid4()),
+                    "session_id": seeded["session_id"],
+                    "step_kind": "IDENTITY",
+                    "step_key": "character:mira",
+                    "idempotency_key": "roundtrip:identity:mira",
+                    "status": "COMPLETED",
+                    "attempts": 1,
+                    "produced_json": {"identity_version_id": "iv-1"},
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+            (
+                "memory_index_outbox",
+                {
+                    "id": str(uuid.uuid4()),
+                    "project_id": _project,
+                    "idempotency_key": "roundtrip:memory",
+                    "source": "VISUAL_BIBLE_LOCK",
+                    "payload_json": {"memory_type": "STYLE", "text": "kept"},
+                    "status": "PENDING",
+                    "attempts": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+        ):
+            table = sa.Table(table_name, metadata, autoload_with=connection)
+            known = {key: value for key, value in values.items() if key in table.c}
+            connection.execute(table.insert().values(_filled(table, known)))
+        sessions = sa.Table("creative_sessions", metadata, autoload_with=connection)
+        connection.execute(
+            sessions.update()
+            .where(sessions.c.id == seeded["session_id"])
+            .values(create_client_turn_id="roundtrip-create-key")
+        )
+    engine.dispose()
+
+    command.downgrade(config, "0072_creation_soft_delete")
+    assert _version(database_url) == "0072_creation_soft_delete"
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        present = set(sa.inspect(connection).get_table_names())
+        assert not present & {
+            "creative_lock_steps",
+            "memory_index_outbox",
+            "character_evidence_coverage",
+        }
+        columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("creative_sessions")
+        }
+        assert "create_client_turn_id" not in columns
+        assert "director_intent_json" not in {
+            column["name"] for column in sa.inspect(connection).get_columns("shots")
+        }
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    command.check(config)
+    assert _version(database_url) == "0078_creative_session_create_idempotency"
+
+
+def _version(database_url: str) -> str:
+    engine = sa.create_engine(database_url)
+    try:
+        with engine.begin() as connection:
+            return str(connection.execute(sa.text("select version_num from alembic_version")).scalar())
+    finally:
+        engine.dispose()
 
 
 def test_an_empty_database_upgrades_to_head_unchanged(tmp_path, monkeypatch) -> None:

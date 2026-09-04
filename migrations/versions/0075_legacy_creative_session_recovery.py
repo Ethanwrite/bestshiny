@@ -190,9 +190,23 @@ def upgrade() -> None:
     # Legacy anchors carry an empty prompt hash, which would supersede every one
     # of them on the next derivation and re-charge the user. Give them the hash
     # their own recorded prompt produces, so an unchanged depiction is re-bound.
+    #
+    # Scoped to sessions that can still act. An earlier revision of this
+    # migration selected every empty-hash anchor in the database, which reached
+    # sessions this migration promises to leave completely alone - on
+    # bestshiny.com it rewrote three anchors belonging to a COMPILED session.
+    # The value it wrote there was harmless (a compiled session re-derives
+    # nothing) and it is not undone here, because rewriting it back to '' would
+    # be a second unasked-for edit to the same rows. New databases get the
+    # scoped behaviour the docstring describes.
     for anchor_id, prompt_json in connection.execute(
-        sa.select(anchors.c.id, anchors.c.prompt_json).where(
-            sa.or_(anchors.c.prompt_hash == "", anchors.c.prompt_hash.is_(None))
+        sa.select(anchors.c.id, anchors.c.prompt_json)
+        .select_from(
+            anchors.join(sessions, sessions.c.id == anchors.c.session_id)
+        )
+        .where(
+            sa.or_(anchors.c.prompt_hash == "", anchors.c.prompt_hash.is_(None)),
+            sessions.c.compiled_episode_id.is_(None),
         )
     ).all():
         prompt = prompt_json if isinstance(prompt_json, dict) else {}

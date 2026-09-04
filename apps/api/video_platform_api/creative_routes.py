@@ -209,6 +209,25 @@ def register_creative_routes(
                         ) from exc
                     named_provider = resolved.provider
                     named_model = resolved.provider_model_id
+                # A retry after an asynchronous failure must not reuse the key
+                # that already burned a job: the gateway would replay the dead
+                # one and rebind the anchor to it. Chaining the previous job's
+                # id keeps the retry itself idempotent - pressing Retry twice
+                # replays the same *new* job rather than paying twice - and
+                # leaves CreativeAction.idempotency_key untouched, so the
+                # action dedupe and its unique constraint still hold.
+                result_json = action.get("result") or {}
+                previous_job_id = str(result_json.get("job_id") or "")
+                # Only a job that actually reached a terminal state is dead. An
+                # action reopened for any other reason still owns its job, and
+                # replaying the same key correctly returns it instead of paying
+                # for a second one.
+                burned_job = bool(result_json.get("failed_asynchronously")) and bool(previous_job_id)
+                generation_key = (
+                    f"{action['idempotency_key']}:after:{previous_job_id}"[:250]
+                    if burned_job
+                    else action["idempotency_key"]
+                )
                 generation = GenerationRequest(
                     project_id=project_id,
                     type="image",
@@ -217,7 +236,7 @@ def register_creative_routes(
                     prompt=payload["prompt"],
                     aspect_ratio=payload.get("aspect_ratio", "1:1"),
                     image_count=int(payload.get("image_count", 1)),
-                    idempotency_key=action["idempotency_key"],
+                    idempotency_key=generation_key,
                 )
                 admitted = container.generation_admission.admit_passenger(
                     generation,
@@ -264,6 +283,10 @@ def register_creative_routes(
                     "job_id": job.id,
                     "replayed": replayed,
                     "estimated_credits": admitted.estimate.credits,
+                    # Which attempt this is, and what the previous one was, so
+                    # the audit and the UI can say "attempt 2 after <job>".
+                    "attempt": int(result_json.get("attempt") or 0) + 1,
+                    **({"previous_job_id": previous_job_id} if burned_job else {}),
                 },
             )
             results.append(

@@ -288,6 +288,17 @@ _DIALOGUE_STATUSES = {
 #: STYLE through ProjectStyleService, so both are handled on their own paths.
 _CANONICAL_ANCHOR_KINDS = ("SCENE", "PRODUCT", "PROP")
 
+#: Job states from which a key visual will never arrive. WORKER_NEEDS_USER_ACTION
+#: is terminal for the *user* - nothing further happens without them - so an
+#: anchor waiting on one is a failure to retry, not a generation in flight.
+_TERMINAL_JOB_STATUSES = frozenset(
+    {
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.WORKER_NEEDS_USER_ACTION.value,
+    }
+)
+
 #: The only stages a screenplay revision may be written from. Once the
 #: screenplay is approved and its key visuals are derived, a redraft that was
 #: started earlier is stale by definition.
@@ -2098,11 +2109,28 @@ class CreativeDirectorService:
             session.flush()
 
     def sync_visuals(self, session_id: str) -> dict[str, Any]:
-        """Bind finished generation jobs to their anchors. Idempotent."""
+        """Bind finished generation jobs to their anchors. Idempotent.
+
+        A job that failed *after* the provider accepted it used to move only
+        the anchor: its CreativeAction stayed EXECUTED, `pending_actions`
+        never returned it again, and Retry was a silent no-op. The action that
+        produced a failed job is reopened here, with the failure recorded on
+        it, so the retry endpoint has real work to do.
+        """
 
         with self.database.session() as session:
             row = self._session(session, session_id)
             anchors = self._current_anchors(session, session_id)
+            actions_by_anchor: dict[str, list[CreativeAction]] = {}
+            for action in session.scalars(
+                select(CreativeAction).where(
+                    CreativeAction.session_id == session_id,
+                    CreativeAction.kind == StructuredActionKind.GENERATE_KEY_VISUAL.value,
+                )
+            ):
+                anchor_id = str((action.payload_json or {}).get("anchor_id") or "")
+                if anchor_id:
+                    actions_by_anchor.setdefault(anchor_id, []).append(action)
             for anchor in anchors:
                 if anchor.status != CreativeAnchorStatus.GENERATING.value:
                     continue
@@ -2114,9 +2142,23 @@ class CreativeDirectorService:
                 if job.status == JobStatus.COMPLETED.value and job.output_asset_id:
                     anchor.status = CreativeAnchorStatus.READY.value
                     anchor.media_asset_id = job.output_asset_id
-                elif job.status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}:
+                elif job.status in _TERMINAL_JOB_STATUSES:
                     anchor.status = CreativeAnchorStatus.FAILED.value
                     anchor.failure_code = (job.error_code or job.status)[:240]
+                    for action in actions_by_anchor.get(anchor.id, []):
+                        if action.status == CreativeActionStatus.FAILED.value:
+                            continue  # already reopened; syncing twice changes nothing
+                        if str((action.result_json or {}).get("job_id") or "") != job.id:
+                            continue
+                        action.status = CreativeActionStatus.FAILED.value
+                        action.result_json = {
+                            **dict(action.result_json or {}),
+                            "job_id": job.id,
+                            "job_status": job.status,
+                            "error": (job.error_code or job.status)[:240],
+                            "error_message": (job.error_message or "")[:2000],
+                            "failed_asynchronously": True,
+                        }
             session.flush()
             return {"session_status": row.status, **_anchor_summary(anchors)}
 

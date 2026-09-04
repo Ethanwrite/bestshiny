@@ -3583,6 +3583,14 @@ function renderAnchors(view) {
   const anchors = view.anchors || [];
   const status = view.session.status;
   const actionable = ["VISUALS_IN_PROGRESS", "BIBLE_PROPOSED"].includes(status);
+  // The key-visual action behind each anchor carries which attempt this is and
+  // why the last one failed; the anchor row alone only knows a failure code.
+  const attemptByAnchor = new Map();
+  for (const action of view.actions || []) {
+    if (action.kind !== "GENERATE_KEY_VISUAL") continue;
+    const anchorId = action.payload?.anchor_id;
+    if (anchorId) attemptByAnchor.set(anchorId, action);
+  }
   return anchors.map((anchor) => {
     const buttons = [];
     if (actionable && anchor.status === "FAILED") {
@@ -3596,10 +3604,14 @@ function renderAnchors(view) {
     }
     const thumbClass = anchor.status === "GENERATING" ? " is-generating" : anchor.status === "FAILED" ? " is-failed" : "";
     const thumbLabel = anchor.status === "READY" ? "…" : anchor.status === "GENERATING" ? "Rendering…" : escapeHTML(simpleLabel(anchor.status) || anchor.status);
+    const action = attemptByAnchor.get(anchor.id);
+    const attempt = Number(action?.result?.attempt || 0);
+    const failure = action?.result?.error_message || action?.result?.error || anchor.failure_code;
     const detail = [
       anchor.kind.toLowerCase(), `v${anchor.version}`,
       anchor.required ? "required" : "optional",
-      anchor.failure_code ? `failed: ${anchor.failure_code}` : "",
+      attempt > 1 ? `attempt ${attempt}` : "",
+      anchor.status === "FAILED" && failure ? `failed: ${failure}` : "",
       anchor.skip_reason ? `skipped: ${anchor.skip_reason}` : "",
     ].filter(Boolean).join(" · ");
     return `
@@ -4008,7 +4020,8 @@ async function creativeApproveScreenplay() {
     }),
   });
   const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
-  if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
+  if (!(result.executions || []).length) toast("Nothing to retry — refresh the visuals first.");
+  else if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);
   else toast(`Screenplay approved. ${(result.executions || []).length} key visual(s) are being generated.`);
   await openCreativeSession(view.session.id);
 }
@@ -4024,8 +4037,11 @@ async function creativeRetryVisuals() {
   const view = state.creative.session;
   if (!view) return;
   const result = await request(`/v1/creative/sessions/${view.session.id}/visuals/execute`, { method: "POST", body: "{}" });
-  const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
-  if (failed.length) toast(`${failed.length} key visual(s) still could not start: ${failed[0].error}`);
+  const executions = result.executions || [];
+  const failed = executions.filter((entry) => entry.status === "FAILED");
+  if (!executions.length) toast("Nothing to retry — the failed visuals may already be running.");
+  else if (failed.length) toast(`${failed.length} key visual(s) still could not start: ${failed[0].error}`);
+  else toast(`Retrying ${executions.length} key visual(s).`);
   await openCreativeSession(view.session.id);
 }
 

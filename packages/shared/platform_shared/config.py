@@ -166,6 +166,11 @@ class Settings(BaseSettings):
     #: waits, which is what happens wherever `voyage_memory` is off anyway.
     memory_index_sweep_interval_seconds: int = 120
     memory_index_sweep_limit: int = 20
+    #: How long a settled outbox row (DONE or FAILED) is kept before the drain
+    #: prunes it. Nothing reads a settled row except an operator diagnosing a
+    #: past index, so this is a debugging window, not a retention guarantee.
+    #: Zero disables pruning. Unsettled rows are never touched by it.
+    memory_index_retention_days: int = 30
     # An ACCEPTED job whose signed callback has not arrived within this window
     # becomes RECONCILIATION_REQUIRED and waits for an operator.
     character_evidence_callback_timeout_seconds: int = 1800

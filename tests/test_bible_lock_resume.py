@@ -300,6 +300,28 @@ async def test_a_style_lock_from_another_session_is_inherited_on_record_not_clai
         )
     assert len(locks) == 1 and locks[0].id == lineage["style_lock_id"]
 
+    # And the second session was never charged for the plate that inheritance
+    # discards. One style per project is the rule, so generating a second one
+    # only ever satisfied the required-anchor gate before being thrown away:
+    # the user paid for a plate, and the film used the first session's style.
+    from production_domain.models import CreativeVisualAnchor
+
+    with container.database.session() as session:
+        style_anchors = list(
+            session.scalars(
+                select(CreativeVisualAnchor).where(
+                    CreativeVisualAnchor.session_id == second_session,
+                    CreativeVisualAnchor.kind == "STYLE",
+                )
+            )
+        )
+        assert style_anchors, "the derivation still names the style anchor"
+        assert all(anchor.status == "SKIPPED" for anchor in style_anchors)
+        assert all(
+            anchor.skip_reason == "PROJECT_STYLE_ALREADY_LOCKED" for anchor in style_anchors
+        )
+        assert all(anchor.required is False for anchor in style_anchors)
+
 
 @pytest.mark.asyncio
 async def test_a_bible_superseded_while_locking_does_not_become_locked(openrouter_container):

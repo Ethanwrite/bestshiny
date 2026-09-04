@@ -399,6 +399,22 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _flat_texts(value: Any) -> list[str]:
+    """The `text` of each entry, for renderers that expect plain strings."""
+
+    if not isinstance(value, list):
+        return []
+    texts: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            texts.append(item)
+        elif isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            if text:
+                texts.append(text)
+    return texts
+
+
 def _uncovered_character_keys(
     anchor_keys: list[str],
     anchor_ids_by_key: dict[str, str],
@@ -852,14 +868,32 @@ class CreativeDirectorService:
                 )
             if row.status not in _DIALOGUE_STATUSES:
                 # The brief was approved (or the session moved further) while
-                # the director was thinking. Writing this turn would supersede
-                # the APPROVED revision and drag the session back to
-                # BRIEF_PROPOSED - a state no single-threaded path produces.
+                # the director was thinking. Writing this turn *into the brief*
+                # would supersede the APPROVED revision and drag the session
+                # back to BRIEF_PROPOSED - a state no single-threaded path
+                # produces. So the brief is left alone.
+                #
+                # The dialogue is not. Discarding here threw away two things
+                # that were not ours to throw away: the words the user typed,
+                # and a DIRECTOR model call that has already been billed. Both
+                # are recorded as a superseded exchange - no brief revision, no
+                # operations applied - so the spend has something to point at
+                # and the user's message survives the race.
+                current_status = row.status
+                session.rollback()
+                self._record_superseded_turn(
+                    session_id,
+                    content=content,
+                    client_turn_id=client_turn_id,
+                    reasoning=reasoning,
+                    status_before=status_before,
+                    status_now=current_status,
+                )
                 raise CreativeSessionConflict(
-                    f"the session moved from {status_before} to {row.status} while the director "
-                    "was answering; the brief is no longer in dialogue",
+                    f"the session moved from {status_before} to {current_status} while the "
+                    "director was answering; the brief is no longer in dialogue",
                     reason_code=ReasonCode.SESSION_STAGE_CHANGED.value,
-                    details={"expected_status": status_before, "status": row.status},
+                    details={"expected_status": status_before, "status": current_status},
                 )
             if (
                 expected_brief_revision is not None
@@ -2026,9 +2060,49 @@ class CreativeDirectorService:
         for key, anchor in current.items():
             if key not in wanted_keys:
                 anchor.status = CreativeAnchorStatus.SUPERSEDED.value
+        self._settle_inherited_style_anchor(session, row, result)
         session.flush()
         result.sort(key=lambda anchor: (not anchor.required, anchor.kind, anchor.anchor_key))
         return result, derivation
+
+    @staticmethod
+    def _settle_inherited_style_anchor(
+        session: Any, row: CreativeSession, anchors: list[CreativeVisualAnchor]
+    ) -> None:
+        """Don't charge for a style plate the lock is going to discard.
+
+        One style per project is the platform rule, so a project that already
+        holds a ProjectStyleLock inherits it: `_lock_style` sees a lock whose
+        AssetVersion belongs to another bible and records
+        `style_inherited=True, style_matches_this_bible=False` *without*
+        promoting this session's plate. Generating that plate was therefore
+        billed for nothing - it satisfied the required-anchor gate and was then
+        thrown away, and the resulting film used the older style Canon while
+        the user looked at a plate they had paid for.
+
+        The anchor is kept (the derivation still names it, and the record of
+        why it was not generated is worth having) but marked SKIPPED and
+        optional, so no GENERATE_KEY_VISUAL action is emitted for it and the
+        readiness gate treats it as the settled decision it is.
+        """
+
+        lock = session.scalar(
+            select(ProjectStyleLock).where(ProjectStyleLock.project_id == row.project_id)
+        )
+        if lock is None:
+            return
+        for anchor in anchors:
+            if anchor.kind != "STYLE":
+                continue
+            if anchor.status not in {
+                CreativeAnchorStatus.PENDING.value,
+                CreativeAnchorStatus.FAILED.value,
+            }:
+                # Already generated, skipped or superseded - leave it alone.
+                continue
+            anchor.status = CreativeAnchorStatus.SKIPPED.value
+            anchor.required = False
+            anchor.skip_reason = "PROJECT_STYLE_ALREADY_LOCKED"
 
     def _emit_visual_actions(
         self,
@@ -2672,9 +2746,20 @@ class CreativeDirectorService:
                 reason_code=ReasonCode.STYLE_LOCK_REQUIRES_USER.value,
             )
         if style_snapshot is None or not style_snapshot["media_asset_id"]:
-            raise CreativeSessionConflict(
-                "the style key plate is not ready", reason_code=ReasonCode.REQUIRED_ANCHORS_NOT_READY.value
-            )
+            # No plate of our own. That is only acceptable when the project
+            # already holds a style lock for this bible to inherit - which is
+            # exactly when `_settle_inherited_style_anchor` skipped generating
+            # one, rather than billing for a plate the lock would discard.
+            with self.database.session() as probe:
+                inheritable = probe.scalar(
+                    select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
+                )
+            if inheritable is None:
+                raise CreativeSessionConflict(
+                    "the style key plate is not ready",
+                    reason_code=ReasonCode.REQUIRED_ANCHORS_NOT_READY.value,
+                )
+            style_snapshot = None
 
         lineage.setdefault("identities", {})
         codes: list[str] = []
@@ -2801,7 +2886,7 @@ class CreativeDirectorService:
         version: int,
         title: str,
         fields: dict[str, Any],
-        style_snapshot: dict[str, Any],
+        style_snapshot: dict[str, Any] | None,
         lineage: dict[str, Any],
         codes: list[str],
         actor_user_id: str,
@@ -2815,8 +2900,8 @@ class CreativeDirectorService:
         """
 
         assert self.styles is not None and self.asset_registry is not None
-        anchor_id = style_snapshot["id"]
-        media_asset_id = style_snapshot["media_asset_id"]
+        anchor_id = style_snapshot["id"] if style_snapshot else None
+        media_asset_id = style_snapshot["media_asset_id"] if style_snapshot else None
 
         def existing_lock() -> tuple[Any, Any] | tuple[None, None]:
             with self.database.session() as session:
@@ -2837,6 +2922,11 @@ class CreativeDirectorService:
 
             from production_domain.models import AssetVersion
 
+            if media_asset_id is None:
+                # Pure inheritance: this bible never had a plate of its own, so
+                # there is nothing a previous attempt could have made from one.
+                # Without this guard the query below would match on IS NULL.
+                return None
             with self.database.session() as session:
                 return session.scalar(
                     select(AssetVersion)
@@ -3930,6 +4020,73 @@ class CreativeDirectorService:
             item["location_bound"] = True
             _ = key
 
+    def _record_superseded_turn(  # noqa: PLR0913 - one exchange, recorded whole
+        self,
+        session_id: str,
+        *,
+        content: str,
+        client_turn_id: str | None,
+        reasoning: _TurnReasoning,
+        status_before: str,
+        status_now: str,
+    ) -> None:
+        """Keep a paid exchange that arrived too late to change the brief.
+
+        Written in its own transaction, after the caller has released its row
+        lock and before it raises: the caller's transaction is about to be
+        rolled back by the raise, and these two rows must survive it.
+
+        No brief revision, no applied operations, no questions - this exchange
+        never touched the brief and must not read as though it did. It exists
+        so the billed model call has a record, and so the user's own words are
+        not silently dropped by a race they could not see.
+        """
+
+        try:
+            with self.database.session() as session:
+                sequence = self._next_turn_sequence(session, session_id)
+                session.add(
+                    CreativeTurn(
+                        session_id=session_id,
+                        sequence=sequence,
+                        speaker="USER",
+                        content=content,
+                        reasoner="USER",
+                        client_turn_id=client_turn_id,
+                        reason_codes=[ReasonCode.SESSION_STAGE_CHANGED.value],
+                    )
+                )
+                session.flush()
+                session.add(
+                    CreativeTurn(
+                        session_id=session_id,
+                        sequence=sequence + 1,
+                        speaker="DIRECTOR",
+                        content=(
+                            reasoning.result.assistant_message
+                            if reasoning.result is not None
+                            else (reasoning.fallback_message or "")
+                        ),
+                        reasoner=reasoning.reasoner,
+                        reason_codes=[ReasonCode.SESSION_STAGE_CHANGED.value],
+                        model_execution_record_id=reasoning.execution_record_id,
+                        skill_version=reasoning.skill_version,
+                        skill_content_hash=reasoning.skill_content_hash,
+                        context_json=reasoning.audit or {},
+                        result_json={
+                            "superseded": True,
+                            "status_before": status_before,
+                            "status_now": status_now,
+                            "applied": False,
+                        },
+                    )
+                )
+                session.flush()
+        except Exception:  # noqa: BLE001 - never turn a 409 into a 500
+            # Recording history is strictly better-than-nothing work. If it
+            # fails, the caller still gets its stage-changed conflict.
+            logger.exception("could not record the superseded turn for session %s", session_id)
+
     def _assert_character_identity_coverage(
         self,
         ordered_intents: list[dict[str, Any]],
@@ -4486,6 +4643,15 @@ class CreativeDirectorService:
     def _screenplay_view(row: CreativeScreenplayRevision) -> dict[str, Any]:
         content = dict(row.content_json or {})
         audit = content.pop("_context", None)
+        # Invariants and required copy are stored as objects ({text, scope}).
+        # A renderer that predates that shape - a browser tab still holding the
+        # bundle from before the deploy that introduced it - does
+        # `String(item)` over them and prints "[object Object]" in the two
+        # panes a user reads before approving a screenplay that then spends
+        # credits. These flat mirrors cost a few bytes and mean an old
+        # renderer degrades to readable text rather than to noise.
+        content["invariant_texts"] = _flat_texts(content.get("invariants"))
+        content["required_copy_texts"] = _flat_texts(content.get("required_copy"))
         return {
             "id": row.id,
             "revision": row.revision,

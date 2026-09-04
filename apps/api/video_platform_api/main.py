@@ -2815,6 +2815,55 @@ def create_app(container: Container | None = None) -> FastAPI:
             limit=max(1, limit or container.settings.memory_index_sweep_limit)
         ).as_dict()
 
+    @app.post(
+        "/internal/maintenance/release-lock-steps",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def release_stale_lock_steps(older_than_seconds: int = 60):
+        """Free visual-bible lock steps a dead process left RUNNING.
+
+        `_run_lock_step` marks its ledger row RUNNING before doing the work, so
+        a process killed mid-step - which a deploy does, since `up -d` is not
+        zero-downtime - leaves the row claimed. Every retry is then refused
+        with LOCK_IN_PROGRESS until the 15-minute lease expires, and the user's
+        bible sits at PARTIAL with no way to force it.
+
+        Releasing is safe rather than merely convenient: each step's own
+        `discover()` re-reads the Canon it would create before creating any, so
+        a released step resumes rather than duplicating an identity version or
+        an asset version. Only rows whose claim is already older than
+        `older_than_seconds` are touched, so a genuinely running step is not
+        yanked out from under itself.
+        """
+
+        from datetime import timedelta
+
+        from production_domain.models import CreativeLockStep, utcnow
+
+        cutoff = utcnow() - timedelta(seconds=max(1, older_than_seconds))
+        released: list[dict[str, str]] = []
+        with container.database.session() as session:
+            for row in session.scalars(
+                select(CreativeLockStep).where(
+                    CreativeLockStep.status == "RUNNING",
+                    CreativeLockStep.claimed_at.is_not(None),
+                    CreativeLockStep.claimed_at < cutoff,
+                )
+            ):
+                row.status = "PENDING"
+                row.claimed_at = None
+                row.last_error = "RELEASED_BY_OPERATOR"
+                released.append(
+                    {
+                        "id": row.id,
+                        "session_id": row.session_id,
+                        "step_kind": row.step_kind,
+                        "step_key": row.step_key,
+                    }
+                )
+            session.flush()
+        return {"released": len(released), "steps": released}
+
     @app.get(
         "/internal/character-evidence/candidates/{candidate_id}/coverage",
         dependencies=[Depends(verify_api_key)],

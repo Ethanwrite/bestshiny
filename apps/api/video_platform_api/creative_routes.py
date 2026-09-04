@@ -60,6 +60,10 @@ class CreativeSessionCreate(BaseModel):
 class CreativeMessage(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
     client_turn_id: str | None = Field(default=None, max_length=120)
+    #: The brief revision the client was looking at. When it is no longer the
+    #: head, the turn is refused with BRIEF_REVISION_CHANGED instead of being
+    #: re-based onto someone else's newer brief.
+    expected_brief_revision: int | None = Field(default=None, ge=0)
 
 
 _APPROVAL_PHRASES = frozenset(
@@ -405,7 +409,10 @@ def register_creative_routes(
                 }
         try:
             reply = await creative.post_message(
-                session_id, body.content, client_turn_id=body.client_turn_id
+                session_id,
+                body.content,
+                client_turn_id=body.client_turn_id,
+                expected_brief_revision=body.expected_brief_revision,
             )
         except CreativeTurnLimitReached as exc:
             raise HTTPException(403, exc.as_detail()) from exc
@@ -483,6 +490,8 @@ def register_creative_routes(
             )
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/screenplay/edit")
     def edit_creative_screenplay(
@@ -495,6 +504,8 @@ def register_creative_routes(
             return creative.edit_screenplay(session_id, body.content, actor=_actor(principal))
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 

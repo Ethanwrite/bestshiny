@@ -153,6 +153,20 @@ class ReasonCode(StrEnum):
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
     CHARACTER_IDENTITY_NOT_COVERED = "CHARACTER_IDENTITY_NOT_COVERED"
     IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY"
+    #: The brief head moved while the director was thinking, so the model's
+    #: operations were re-applied to the newer revision under the same
+    #: provenance rules instead of overwriting it.
+    BRIEF_REBASED = "BRIEF_REBASED"
+    #: The caller pinned a brief revision that is no longer the head.
+    BRIEF_REVISION_CHANGED = "BRIEF_REVISION_CHANGED"
+    #: The session left the stage this operation was reasoned against.
+    SESSION_STAGE_CHANGED = "SESSION_STAGE_CHANGED"
+    #: A screenplay was written against a revision that is no longer head.
+    SCREENPLAY_REVISION_CHANGED = "SCREENPLAY_REVISION_CHANGED"
+    #: A screenplay was written against a stage the session has left.
+    SCREENPLAY_STAGE_CHANGED = "SCREENPLAY_STAGE_CHANGED"
+    #: The approved brief moved under a screenplay while it was being written.
+    SCREENPLAY_BRIEF_CHANGED = "SCREENPLAY_BRIEF_CHANGED"
     #: At least one USER_STATED claim could not be found in the user's own
     #: words and was recorded as the director's inference instead.
     EVIDENCE_UNVERIFIED = "EVIDENCE_UNVERIFIED"

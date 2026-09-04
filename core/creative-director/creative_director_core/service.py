@@ -278,6 +278,15 @@ _DIALOGUE_STATUSES = {
     CreativeSessionStatus.CLARIFYING.value,
     CreativeSessionStatus.BRIEF_PROPOSED.value,
 }
+#: The only stages a screenplay revision may be written from. Once the
+#: screenplay is approved and its key visuals are derived, a redraft that was
+#: started earlier is stale by definition.
+_SCREENPLAY_DRAFT_STATUSES = frozenset(
+    {
+        CreativeSessionStatus.BRIEF_APPROVED.value,
+        CreativeSessionStatus.SCREENPLAY_PROPOSED.value,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -535,15 +544,59 @@ class CreativeDirectorService:
         return await self._user_turn(session_id, idea, format_hint=format_hint, client_turn_id=client_turn_id)
 
     async def post_message(
-        self, session_id: str, content: str, *, client_turn_id: str | None = None
+        self,
+        session_id: str,
+        content: str,
+        *,
+        client_turn_id: str | None = None,
+        expected_brief_revision: int | None = None,
     ) -> DirectorReply:
+        """One dialogue round. The pre-flight read takes the same lock phase 3 will.
+
+        Reading the row unlocked let a session close (or be approved) between
+        the check and the model call, so the user paid for a call phase 3 then
+        refused. ``expected_brief_revision`` lets a client pin the revision it
+        was looking at and be told the head moved rather than have its message
+        rebased onto someone else's newer brief.
+        """
+
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status in _CLOSED_STATUSES:
                 raise CreativeSessionConflict(
                     f"session is {row.status}; the dialogue is closed", reason_code="DIALOGUE_CLOSED"
                 )
-        return await self._user_turn(session_id, content, format_hint=None, client_turn_id=client_turn_id)
+            if row.status not in _DIALOGUE_STATUSES:
+                raise CreativeSessionConflict(
+                    f"the brief is no longer in dialogue; session is {row.status}",
+                    reason_code=ReasonCode.SESSION_STAGE_CHANGED.value,
+                    details={"status": row.status},
+                )
+            if (
+                expected_brief_revision is not None
+                and expected_brief_revision != row.current_brief_revision
+            ):
+                raise CreativeSessionConflict(
+                    f"brief revision {expected_brief_revision} is superseded by "
+                    f"{row.current_brief_revision}",
+                    reason_code=ReasonCode.BRIEF_REVISION_CHANGED.value,
+                    details={
+                        "expected_brief_revision": expected_brief_revision,
+                        "brief_revision": row.current_brief_revision,
+                    },
+                    retryable=True,
+                )
+        return await self._user_turn(
+            session_id,
+            content,
+            format_hint=None,
+            client_turn_id=client_turn_id,
+            expected_brief_revision=expected_brief_revision,
+        )
 
     def _assert_turn_budget(self, session, row) -> None:  # type: ignore[no-untyped-def]
         """FREE workspaces get a bounded number of dialogue rounds per session."""
@@ -613,7 +666,20 @@ class CreativeDirectorService:
         *,
         format_hint: str | None,
         client_turn_id: str | None,
+        expected_brief_revision: int | None = None,
     ) -> DirectorReply:
+        """One dialogue round: read, reason outside any transaction, then write.
+
+        Phase 2 is deliberately outside a transaction - a model failure must
+        never leave a user message without its result - so phase 3 has to
+        assume the world moved. It re-reads the head brief under the row lock
+        and re-applies the model's operations to *that* revision under the same
+        provenance rules, rather than writing the phase-1 snapshot back over a
+        concurrent edit. The rebase is recorded as BRIEF_REBASED; a session
+        that left the dialogue stage during the call is refused outright, so an
+        in-flight turn can never un-approve an approved brief.
+        """
+
         # Phase 1 - read. Nothing is written until the director has answered.
         with self.database.session() as session:
             row = self._session(session, session_id)
@@ -623,6 +689,7 @@ class CreativeDirectorService:
             self._assert_turn_budget(session, row)
             project_id = row.project_id
             status_before = row.status
+            brief_revision_at_read = row.current_brief_revision
             head = self._head_brief(session, row)
             fields = dict(head.fields_json) if head is not None else {}
             provenance = dict(head.provenance_json) if head is not None else {}
@@ -675,6 +742,42 @@ class CreativeDirectorService:
                 raise CreativeSessionConflict(
                     f"session is {row.status}; the dialogue is closed", reason_code="DIALOGUE_CLOSED"
                 )
+            if row.status not in _DIALOGUE_STATUSES:
+                # The brief was approved (or the session moved further) while
+                # the director was thinking. Writing this turn would supersede
+                # the APPROVED revision and drag the session back to
+                # BRIEF_PROPOSED - a state no single-threaded path produces.
+                raise CreativeSessionConflict(
+                    f"the session moved from {status_before} to {row.status} while the director "
+                    "was answering; the brief is no longer in dialogue",
+                    reason_code=ReasonCode.SESSION_STAGE_CHANGED.value,
+                    details={"expected_status": status_before, "status": row.status},
+                )
+            if (
+                expected_brief_revision is not None
+                and expected_brief_revision != row.current_brief_revision
+            ):
+                raise CreativeSessionConflict(
+                    f"brief revision {expected_brief_revision} is superseded by "
+                    f"{row.current_brief_revision}",
+                    reason_code=ReasonCode.BRIEF_REVISION_CHANGED.value,
+                    details={
+                        "expected_brief_revision": expected_brief_revision,
+                        "brief_revision": row.current_brief_revision,
+                    },
+                    retryable=True,
+                )
+            if row.current_brief_revision != brief_revision_at_read:
+                # Someone else's edit landed during the model call. Re-base on
+                # it: `apply_operations` will refuse anything the model may not
+                # move now that the fact belongs to the user.
+                head = self._head_brief(session, row)
+                fields = dict(head.fields_json) if head is not None else {}
+                provenance = dict(head.provenance_json) if head is not None else {}
+                question_states = dict(head.question_state_json) if head is not None else {}
+                rebased_from = brief_revision_at_read
+            else:
+                rebased_from = None
             user_sequence = self._next_turn_sequence(session, session_id)
             user_turn = CreativeTurn(
                 session_id=session_id,
@@ -691,20 +794,20 @@ class CreativeDirectorService:
             now = _now().isoformat()
             result = reasoning.result
             reason_codes = list(reasoning.reason_codes)
+            if rebased_from is not None:
+                reason_codes.append(ReasonCode.BRIEF_REBASED.value)
 
             # The user's own words for this session, newest last: what a
-            # USER_STATED claim has to be found in.
+            # USER_STATED claim has to be found in. Read under the lock, not
+            # from the phase-1 snapshot, so a turn that landed during the model
+            # call still counts as something the user said.
             evidence_index = UserTextIndex(
-                [
-                    UserUtterance(
-                        turn_id=str(turn.get("id") or ""),
-                        turn_sequence=int(turn.get("sequence") or 0),
-                        text=str(turn.get("content") or ""),
-                    )
-                    for turn in turns
-                    if turn.get("speaker") == "USER"
-                ]
-                + [UserUtterance(turn_id=user_turn.id, turn_sequence=user_sequence, text=content)]
+                UserUtterance(turn_id=turn.id, turn_sequence=turn.sequence, text=turn.content)
+                for turn in session.scalars(
+                    select(CreativeTurn)
+                    .where(CreativeTurn.session_id == session_id, CreativeTurn.speaker == "USER")
+                    .order_by(CreativeTurn.sequence)
+                )
             )
             # The format the client chose in the request body is the client's
             # own act, like a brief-editor edit - not a quote to be found in
@@ -1308,14 +1411,23 @@ class CreativeDirectorService:
     async def propose_screenplay(
         self, session_id: str, *, notes: str = "", actor: str = ""
     ) -> dict[str, Any]:
-        """The director writes (or rewrites) the screenplay from the approved brief."""
+        """The director writes (or rewrites) the screenplay from the approved brief.
+
+        The model call is slow and an approval is not, so everything this
+        redraft assumes - the stage, the approved brief and its hash, the
+        revision it branches from - is captured here and re-checked under the
+        row lock before anything is written. A redraft that comes back after
+        the old screenplay was approved and its key visuals were derived is
+        refused, not applied.
+        """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
-            if row.status not in {
-                CreativeSessionStatus.BRIEF_APPROVED.value,
-                CreativeSessionStatus.SCREENPLAY_PROPOSED.value,
-            }:
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
+            if row.status not in _SCREENPLAY_DRAFT_STATUSES:
                 raise CreativeSessionConflict(
                     f"a screenplay cannot be drafted from {row.status}", reason_code="INVALID_TRANSITION"
                 )
@@ -1329,6 +1441,8 @@ class CreativeDirectorService:
             previous_content = dict(current.content_json) if current is not None else None
             previous_revision = current.revision if current is not None else None
             brief_id = brief.id
+            brief_hash = brief.content_hash
+            expected_revision = row.current_screenplay_revision
 
         screenplay, reasoner, reason_codes, audit, execution_id, skill = await self._reason_screenplay(
             project_id,
@@ -1350,6 +1464,9 @@ class CreativeDirectorService:
             skill=skill,
             execution_id=execution_id,
             audit=audit,
+            expected_status=_SCREENPLAY_DRAFT_STATUSES,
+            expected_revision=expected_revision,
+            expected_brief_hash=brief_hash,
         )
 
     async def _reason_screenplay(
@@ -1449,7 +1566,11 @@ class CreativeDirectorService:
         except ScreenplayInvalid as exc:
             raise ValueError(f"screenplay rejected: {'; '.join(exc.details[:5])}") from exc
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status != CreativeSessionStatus.SCREENPLAY_PROPOSED.value:
                 raise CreativeSessionConflict(
                     f"the screenplay can only be edited while proposed; session is {row.status}",
@@ -1458,6 +1579,7 @@ class CreativeDirectorService:
             current = self._screenplay_at(session, session_id, row.current_screenplay_revision)
             brief = self._approved_brief(session, row)
             brief_id = brief.id
+            brief_hash = brief.content_hash
             parent = current.revision if current is not None else None
         return self._write_screenplay(
             session_id,
@@ -1470,9 +1592,12 @@ class CreativeDirectorService:
             skill=None,
             execution_id=None,
             audit={},
+            expected_status=frozenset({CreativeSessionStatus.SCREENPLAY_PROPOSED.value}),
+            expected_revision=parent,
+            expected_brief_hash=brief_hash,
         )
 
-    def _write_screenplay(
+    def _write_screenplay(  # noqa: PLR0913 - one guarded writer for every screenplay revision
         self,
         session_id: str,
         screenplay: Screenplay,
@@ -1486,7 +1611,22 @@ class CreativeDirectorService:
         execution_id: str | None,
         audit: dict[str, Any],
         status: str = "PROPOSED",
+        expected_status: frozenset[str],
+        expected_revision: int | None,
+        expected_brief_hash: str | None = None,
     ) -> dict[str, Any]:
+        """Append one screenplay revision, but only onto the state it was written for.
+
+        A redraft takes seconds of model time; an approval takes none. Without
+        these checks a slow redraft landing after an approval superseded
+        nothing (the loop below only touches PROPOSED rows), moved the head
+        past the APPROVED revision and reset the session to
+        SCREENPLAY_PROPOSED - from which approving again derives and pays for a
+        second full set of key visuals. The preconditions are therefore
+        re-validated under the row lock, and a stale write is refused with the
+        reason code that says which one moved.
+        """
+
         content = screenplay.model_dump(by_alias=True)
         beats = beats_from_screenplay(screenplay)
         script, _intents = render_script(beats)
@@ -1496,6 +1636,34 @@ class CreativeDirectorService:
             )
             if row is None:
                 raise LookupError("creative session not found")
+            if row.status not in expected_status:
+                raise CreativeSessionConflict(
+                    f"a screenplay cannot be written from {row.status}; it was drafted for "
+                    + " or ".join(sorted(expected_status)),
+                    reason_code=ReasonCode.SCREENPLAY_STAGE_CHANGED.value,
+                    details={"status": row.status, "expected_status": sorted(expected_status)},
+                )
+            if expected_revision is not None and expected_revision != row.current_screenplay_revision:
+                raise CreativeSessionConflict(
+                    f"screenplay revision {expected_revision} is superseded by "
+                    f"{row.current_screenplay_revision}",
+                    reason_code=ReasonCode.SCREENPLAY_REVISION_CHANGED.value,
+                    details={
+                        "expected_revision": expected_revision,
+                        "screenplay_revision": row.current_screenplay_revision,
+                    },
+                    retryable=True,
+                )
+            approved_brief = self._approved_brief(session, row)
+            if approved_brief.id != brief_id or (
+                expected_brief_hash is not None and approved_brief.content_hash != expected_brief_hash
+            ):
+                raise CreativeSessionConflict(
+                    "the approved brief moved while the screenplay was being written",
+                    reason_code=ReasonCode.SCREENPLAY_BRIEF_CHANGED.value,
+                    details={"brief_id": approved_brief.id, "expected_brief_id": brief_id},
+                    retryable=True,
+                )
             for stale in session.scalars(
                 select(CreativeScreenplayRevision).where(
                     CreativeScreenplayRevision.session_id == session_id,
@@ -2058,7 +2226,11 @@ class CreativeDirectorService:
     # ---------------------------------------------------------- visual bible
     def propose_bible(self, session_id: str) -> dict[str, Any]:
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status not in {
                 CreativeSessionStatus.VISUALS_IN_PROGRESS.value,
                 CreativeSessionStatus.BIBLE_PROPOSED.value,
@@ -2171,7 +2343,11 @@ class CreativeDirectorService:
         """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             bible = session.scalar(
                 select(VisualBibleVersion).where(
                     VisualBibleVersion.session_id == session_id,
@@ -3118,7 +3294,11 @@ class CreativeDirectorService:
         """
 
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             if row.status == CreativeSessionStatus.COMPILED.value:
                 raise CreativeSessionConflict(
                     "a compiled session is part of an episode and cannot be deleted",

@@ -37,11 +37,17 @@ FIELDS: dict[str, Any] = {
 }
 
 
+def _cast_names(count: int) -> list[str]:
+    """The brief's protagonist first, so the cast still obeys the approved brief."""
+
+    return ["Mira", *(f"Cast{index}" for index in range(2, count + 1))][:count]
+
+
 def _cast_screenplay(count: int, *, on_screen: int | None = None) -> dict[str, Any]:
     """A screenplay with `count` named characters, `on_screen` of them acting."""
 
     on_screen = count if on_screen is None else on_screen
-    names = [f"Cast{index}" for index in range(1, count + 1)]
+    names = _cast_names(count)
     content = copy.deepcopy(SCREENPLAY)
     content["characters"] = [
         {"name": name, "role": "ensemble", "look": f"{name} in grey"} for name in names
@@ -109,14 +115,17 @@ def test_a_background_only_character_is_recorded_as_uncovered_rather_than_droppe
     screenplay = validate_screenplay(_cast_screenplay(8, on_screen=5))
     derivation = derive_anchors(FIELDS, screenplay)
     anchored = {spec.anchor_key for spec in derivation.specs if spec.kind == "CHARACTER"}
-    assert anchored == {f"character:cast{index}" for index in range(1, 6)}
+    assert anchored == {"character:mira", *(f"character:cast{index}" for index in range(2, 6))}
     uncovered = {item.title: item.reason for item in derivation.uncovered if item.kind == "CHARACTER"}
     assert uncovered == {
         "Cast6": "NOT_IN_ANY_BEAT_OR_SHOT",
         "Cast7": "NOT_IN_ANY_BEAT_OR_SHOT",
         "Cast8": "NOT_IN_ANY_BEAT_OR_SHOT",
     }
-    assert appearing_character_keys(screenplay) == {f"cast{index}" for index in range(1, 6)}
+    assert appearing_character_keys(screenplay) == {
+        "mira",
+        *(f"cast{index}" for index in range(2, 6)),
+    }
 
 
 def test_character_order_cannot_hide_a_late_character_from_the_identity_lock():
@@ -186,13 +195,13 @@ def test_props_beyond_the_budget_are_recorded_rather_than_silently_sliced():
             "intent": "BEAT",
             "summary": "objects",
             "scene_key": "roof",
-            "characters": ["Cast1"],
+            "characters": ["Mira"],
             "shots": [
                 {
                     "sequence": index + 1,
                     "shot_type": "CLOSE",
                     "duration": 2,
-                    "action": {"actor": "Cast1", "verb": "pick_up", "object": f"prop{index}"},
+                    "action": {"actor": "Mira", "verb": "pick_up", "object": f"prop{index}"},
                 }
                 for index in range(MAX_PROP_ANCHORS + 2)
             ],
@@ -264,7 +273,10 @@ async def test_a_seven_character_screenplay_locks_seven_identities_end_to_end(op
         )
         assert locked.status_code == 200, locked.text
         lineage = locked.json()["lineage"]
-        assert set(lineage["identities"]) == {f"character:cast{index}" for index in range(1, cast + 1)}
+        assert set(lineage["identities"]) == {
+            "character:mira",
+            *(f"character:cast{index}" for index in range(2, cast + 1)),
+        }
 
         with container.database.session() as session:
             identities = list(session.scalars(select(CharacterIdentityVersion)))
@@ -274,7 +286,7 @@ async def test_a_seven_character_screenplay_locks_seven_identities_end_to_end(op
                 row.name
                 for row in session.scalars(select(Character).where(Character.project_id == project_id))
             }
-            assert names == {f"Cast{index}" for index in range(1, cast + 1)}
+            assert names == set(_cast_names(cast))
 
         client.post(f"/v1/creative/sessions/{session_id}/beats/propose", headers=headers)
         compiled = client.post(

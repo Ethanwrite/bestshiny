@@ -97,6 +97,9 @@ class ScreenplayEdit(BaseModel):
 class ScreenplayApprove(BaseModel):
     revision: int = Field(ge=1)
     accept_deterministic: bool = False
+    #: Approve despite a recorded contradiction with the approved brief. The
+    #: user is the only one who may overrule their own brief.
+    accept_brief_violations: bool = False
 
 
 class AnchorSkip(BaseModel):
@@ -522,6 +525,7 @@ def register_creative_routes(
                 revision=body.revision,
                 actor=_actor(principal),
                 accept_deterministic=body.accept_deterministic,
+                accept_brief_violations=body.accept_brief_violations,
             )
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc

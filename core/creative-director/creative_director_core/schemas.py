@@ -142,6 +142,12 @@ class ReasonCode(StrEnum):
     ASSUMPTIONS_UNCONFIRMED = "ASSUMPTIONS_UNCONFIRMED"
     REVISION_SUPERSEDED = "REVISION_SUPERSEDED"
     DETERMINISTIC_SCREENPLAY_UNCONFIRMED = "DETERMINISTIC_SCREENPLAY_UNCONFIRMED"
+    #: The screenplay disagrees with a fact the user established in the
+    #: approved brief. A redraft is the remedy, never a plain retry.
+    SCREENPLAY_CONTRADICTS_BRIEF = "SCREENPLAY_CONTRADICTS_BRIEF"
+    #: The screenplay departs from something the director itself inferred:
+    #: enrichment, recorded and shown, never a blocked approval.
+    SCREENPLAY_BRIEF_ADVISORY = "SCREENPLAY_BRIEF_ADVISORY"
     REQUIRED_ANCHORS_NOT_READY = "REQUIRED_ANCHORS_NOT_READY"
     OPTIONAL_ANCHORS_NOT_TERMINAL = "OPTIONAL_ANCHORS_NOT_TERMINAL"
     ANCHOR_SKIPPED = "ANCHOR_SKIPPED"
@@ -787,6 +793,12 @@ class Screenplay(BaseModel):
     @classmethod
     def _clean_lists(cls, value: list[str]) -> list[str]:
         return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
+
+    @property
+    def required_copy_texts(self) -> list[str]:
+        """The wording of every required copy line, however it is declared."""
+
+        return [str(item) for item in self.required_copy]
 
     @model_validator(mode="after")
     def _cross_references(self) -> Screenplay:

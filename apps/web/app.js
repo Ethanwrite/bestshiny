@@ -3754,13 +3754,23 @@ function renderCreative() {
     if (editing && !$("creativeScreenplayJson").value) {
       $("creativeScreenplayJson").value = JSON.stringify(screenplay?.content || {}, null, 2);
     }
-    if (screenplay?.deterministic) {
+    const conflicts = (screenplay?.brief_conformance || []).filter((item) => item.severity === "BLOCKING");
+    const enrichments = (screenplay?.brief_conformance || []).filter((item) => item.severity !== "BLOCKING");
+    if (conflicts.length) {
+      const rows = conflicts.map((item) =>
+        `<li><b>${escapeHTML(item.brief_path)}</b> — brief: <i>${escapeHTML(JSON.stringify(item.brief_value))}</i>; screenplay: <i>${escapeHTML(JSON.stringify(item.screenplay_value))}</i><br><small>${escapeHTML(item.reason)}</small></li>`).join("");
+      setNotice("creativeScreenplayNotice", `<b>This screenplay contradicts your approved brief</b>Ask the director to redraft, or approve anyway to overrule your own brief.<ul>${rows}</ul>`, "is-error");
+    } else if (screenplay?.deterministic) {
       const codes = (screenplay.reason_codes || []).filter((code) => !["SKILL_LOADED", "DETERMINISTIC_FALLBACK"].includes(code)).join(", ");
       setNotice("creativeScreenplayNotice", `<b>Deterministic scaffold — not the director's writing</b>The director model was unavailable (${escapeHTML(codes)}). Every line is a placeholder. Redraft with the director, or approve knowing this.`, "is-error");
     } else if (screenplay?.reasoner === "USER_EDIT") {
       setNotice("creativeScreenplayNotice", `<b>Your revision</b>This revision was edited by you from r${screenplay.parent_revision ?? "?"}.`);
     } else if (screenplay) {
-      setNotice("creativeScreenplayNotice", (screenplay.content?.unresolved || []).length ? `<b>Unresolved choices</b>The director left ${screenplay.content.unresolved.length} creative choice(s) open; see the list below.` : "");
+      const unresolved = (screenplay.content?.unresolved || []).length;
+      const enriched = enrichments.length
+        ? `<b>The director went beyond the brief</b>${enrichments.length} point(s) depart from what the director itself assumed, not from anything you fixed: ${escapeHTML(enrichments.map((item) => item.brief_path).join(", "))}.`
+        : "";
+      setNotice("creativeScreenplayNotice", unresolved ? `<b>Unresolved choices</b>The director left ${unresolved} creative choice(s) open; see the list below.` : enriched);
     } else {
       setNotice("creativeScreenplayNotice", `<b>Drafting</b>The director is writing the treatment and screenplay from the approved brief.`, "is-warning");
     }
@@ -3769,6 +3779,7 @@ function renderCreative() {
     $("creativeSaveScreenplayBtn").hidden = !editing;
     $("creativeCancelScreenplayBtn").hidden = !editing;
     $("creativeAcceptDeterministicLabel").hidden = !(status === "SCREENPLAY_PROPOSED" && screenplay?.deterministic && !editing);
+    $("creativeAcceptBriefViolationsLabel").hidden = !(status === "SCREENPLAY_PROPOSED" && conflicts.length && !editing);
     $("creativeApproveScreenplayBtn").hidden = status !== "SCREENPLAY_PROPOSED" || editing;
   }
 
@@ -3987,9 +3998,14 @@ async function creativeApproveScreenplay() {
   const view = state.creative.session;
   if (!view?.screenplay) return;
   const accept = $("creativeAcceptDeterministic")?.checked === true;
+  const overrule = $("creativeAcceptBriefViolations")?.checked === true;
   const result = await request(`/v1/creative/sessions/${view.session.id}/screenplay/approve`, {
     method: "POST",
-    body: JSON.stringify({ revision: view.screenplay.revision, accept_deterministic: accept }),
+    body: JSON.stringify({
+      revision: view.screenplay.revision,
+      accept_deterministic: accept,
+      accept_brief_violations: overrule,
+    }),
   });
   const failed = (result.executions || []).filter((entry) => entry.status === "FAILED");
   if (failed.length) toast(`${failed.length} key visual(s) could not start: ${failed[0].error}`);

@@ -100,6 +100,7 @@ from .screenplay import (
     script_name,
     validate_screenplay,
 )
+from .screenplay_brief import ScreenplayBriefValidator
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +388,8 @@ class CreativeDirectorService:
         self.asset_registry = asset_registry
         self.free_plan_turn_limit = max(0, int(free_plan_turn_limit))
         self.briefs = BriefEngine()
+        #: Compares every screenplay revision with the brief the user approved.
+        self.brief_validator = ScreenplayBriefValidator()
 
     # ------------------------------------------------------------- the skill
     def _skill(self) -> tuple[SkillText, list[str]]:
@@ -1052,6 +1055,21 @@ class CreativeDirectorService:
             )
 
     @staticmethod
+    def _session_prohibitions(turns: list[dict[str, Any]]) -> list[str]:
+        """Every sentence in which the user forbade something, verbatim.
+
+        The director is already shown these; the validator checks the finished
+        screenplay against them so a prohibition is enforced, not just quoted.
+        """
+
+        found: list[str] = []
+        for turn in turns:
+            if turn.get("speaker") != "USER":
+                continue
+            found.extend(BriefEngine.prohibitions(str(turn.get("content") or "")))
+        return found
+
+    @staticmethod
     def _verified_skips(
         result: DirectorTurnResult | None,
         question_states: dict[str, Any],
@@ -1442,7 +1460,9 @@ class CreativeDirectorService:
             previous_revision = current.revision if current is not None else None
             brief_id = brief.id
             brief_hash = brief.content_hash
+            brief_provenance = dict(brief.provenance_json)
             expected_revision = row.current_screenplay_revision
+            prohibitions = self._session_prohibitions(turns)
 
         screenplay, reasoner, reason_codes, audit, execution_id, skill = await self._reason_screenplay(
             project_id,
@@ -1467,6 +1487,9 @@ class CreativeDirectorService:
             expected_status=_SCREENPLAY_DRAFT_STATUSES,
             expected_revision=expected_revision,
             expected_brief_hash=brief_hash,
+            brief_fields=fields,
+            brief_provenance=brief_provenance,
+            prohibitions=prohibitions,
         )
 
     async def _reason_screenplay(
@@ -1580,6 +1603,9 @@ class CreativeDirectorService:
             brief = self._approved_brief(session, row)
             brief_id = brief.id
             brief_hash = brief.content_hash
+            brief_fields = dict(brief.fields_json)
+            brief_provenance = dict(brief.provenance_json)
+            prohibitions = self._session_prohibitions(self._turn_views(session, session_id))
             parent = current.revision if current is not None else None
         return self._write_screenplay(
             session_id,
@@ -1595,6 +1621,10 @@ class CreativeDirectorService:
             expected_status=frozenset({CreativeSessionStatus.SCREENPLAY_PROPOSED.value}),
             expected_revision=parent,
             expected_brief_hash=brief_hash,
+            brief_fields=brief_fields,
+            brief_provenance=brief_provenance,
+            prohibitions=prohibitions,
+            refuse_blocking=True,
         )
 
     def _write_screenplay(  # noqa: PLR0913 - one guarded writer for every screenplay revision
@@ -1614,6 +1644,10 @@ class CreativeDirectorService:
         expected_status: frozenset[str],
         expected_revision: int | None,
         expected_brief_hash: str | None = None,
+        brief_fields: dict[str, Any],
+        brief_provenance: dict[str, Any],
+        prohibitions: list[str] | None = None,
+        refuse_blocking: bool = False,
     ) -> dict[str, Any]:
         """Append one screenplay revision, but only onto the state it was written for.
 
@@ -1664,6 +1698,27 @@ class CreativeDirectorService:
                     details={"brief_id": approved_brief.id, "expected_brief_id": brief_id},
                     retryable=True,
                 )
+            conformance = self.brief_validator.validate(
+                screenplay,
+                brief_fields,
+                format_value=row.format,
+                provenance=brief_provenance,
+                prohibitions=prohibitions,
+            )
+            reason_codes = list(reason_codes)
+            if conformance.blocking:
+                reason_codes.append(ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value)
+                if refuse_blocking:
+                    # A screenplay the *user* wrote or edited is refused rather
+                    # than recorded: the user is the one who can fix it now.
+                    raise CreativeSessionConflict(
+                        "this screenplay contradicts the approved brief: "
+                        + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                        reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                        details={"violations": [item.as_json() for item in conformance.blocking]},
+                    )
+            if conformance.advisory:
+                reason_codes.append(ReasonCode.SCREENPLAY_BRIEF_ADVISORY.value)
             for stale in session.scalars(
                 select(CreativeScreenplayRevision).where(
                     CreativeScreenplayRevision.session_id == session_id,
@@ -1693,7 +1748,9 @@ class CreativeDirectorService:
             if status == "PROPOSED":
                 row.status = CreativeSessionStatus.SCREENPLAY_PROPOSED.value
             session.flush()
-            return self._screenplay_view(screenplay_row)
+            view = self._screenplay_view(screenplay_row)
+            view["brief_conformance"] = conformance.as_json()
+            return view
 
     def approve_screenplay(
         self,
@@ -1702,8 +1759,17 @@ class CreativeDirectorService:
         revision: int,
         actor: str,
         accept_deterministic: bool = False,
+        accept_brief_violations: bool = False,
     ) -> dict[str, Any]:
-        """Approve exactly one screenplay revision; derive and emit the key visuals."""
+        """Approve exactly one screenplay revision; derive and emit the key visuals.
+
+        This is the last gate before real money: approval derives the key
+        visuals and emits their paid generation actions. A screenplay that
+        contradicts a fact the user established in the approved brief is
+        refused here with the conflicting paths, the brief's value and the
+        screenplay's, so the user can redraft rather than pay for a story they
+        did not approve.
+        """
 
         with self.database.session() as session:
             row = session.scalar(
@@ -1741,6 +1807,20 @@ class CreativeDirectorService:
             screenplay_row.approved_at = _now()
             brief = self._approved_brief(session, row)
             screenplay = validate_screenplay(_content_without_audit(screenplay_row.content_json))
+            conformance = self.brief_validator.validate(
+                screenplay,
+                dict(brief.fields_json),
+                format_value=row.format,
+                provenance=dict(brief.provenance_json),
+                prohibitions=self._session_prohibitions(self._turn_views(session, session_id)),
+            )
+            if conformance.blocking and not accept_brief_violations:
+                raise CreativeSessionConflict(
+                    "this screenplay contradicts the approved brief: "
+                    + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                    reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                    details={"violations": [item.as_json() for item in conformance.blocking]},
+                )
             row.status = CreativeSessionStatus.SCREENPLAY_APPROVED.value
             anchors, derivation = self._derive_anchors(
                 session, row, brief, screenplay_row, screenplay
@@ -1754,6 +1834,7 @@ class CreativeDirectorService:
                 "actions": actions,
                 "anchors": [_anchor_view(anchor) for anchor in anchors],
                 "coverage": derivation.coverage_json(),
+                "brief_conformance": conformance.as_json(),
                 "session_status": row.status,
             }
 
@@ -2813,6 +2894,27 @@ class CreativeDirectorService:
                 except ScreenplayInvalid as exc:
                     raise ValueError(f"edited beats rejected: {'; '.join(exc.details[:5])}") from exc
                 if changed:
+                    # A beat edit is a new screenplay revision, so it faces the
+                    # same brief check every other revision does - the user
+                    # cannot edit their way out of the brief they approved.
+                    conformance = self.brief_validator.validate(
+                        edited,
+                        fields,
+                        format_value=row.format,
+                        provenance=dict(brief.provenance_json),
+                        prohibitions=self._session_prohibitions(
+                            self._turn_views(session, session_id)
+                        ),
+                    )
+                    if conformance.blocking:
+                        raise CreativeSessionConflict(
+                            "the edited beats contradict the approved brief: "
+                            + ", ".join(sorted({item.brief_path for item in conformance.blocking})),
+                            reason_code=ReasonCode.SCREENPLAY_CONTRADICTS_BRIEF.value,
+                            details={
+                                "violations": [item.as_json() for item in conformance.blocking]
+                            },
+                        )
                     screenplay_row.status = "SUPERSEDED"
                     screenplay = edited
                     planned = self._materialize_beats(screenplay, fields)
@@ -3163,14 +3265,34 @@ class CreativeDirectorService:
             )
             brief_view = self._brief_view(brief) if brief is not None else None
             coverage: dict[str, Any] | None = None
+            conformance_json: list[dict[str, Any]] = []
+            approved_brief = None
+            if row.status not in _DIALOGUE_STATUSES:
+                approved_brief = session.scalar(
+                    select(CreativeBriefRevision)
+                    .where(
+                        CreativeBriefRevision.session_id == session_id,
+                        CreativeBriefRevision.status == "APPROVED",
+                    )
+                    .order_by(CreativeBriefRevision.revision.desc())
+                )
             if current_screenplay is not None and brief is not None:
                 try:
-                    coverage = derive_anchors(
-                        dict(brief.fields_json),
-                        validate_screenplay(_content_without_audit(current_screenplay.content_json)),
-                    ).coverage_json()
+                    screenplay_model = validate_screenplay(
+                        _content_without_audit(current_screenplay.content_json)
+                    )
                 except ScreenplayInvalid:
-                    coverage = None
+                    screenplay_model = None
+                if screenplay_model is not None:
+                    coverage = derive_anchors(dict(brief.fields_json), screenplay_model).coverage_json()
+                    if approved_brief is not None:
+                        conformance_json = self.brief_validator.validate(
+                            screenplay_model,
+                            dict(approved_brief.fields_json),
+                            format_value=row.format,
+                            provenance=dict(approved_brief.provenance_json),
+                            prohibitions=self._session_prohibitions(turns),
+                        ).as_json()
             return CreativeSessionState(
                 session={
                     "id": row.id,
@@ -3209,9 +3331,14 @@ class CreativeDirectorService:
                 bible=_bible_view(bible_row) if bible_row is not None else None,
                 beats=beats,
                 actions=actions,
-                screenplay=self._screenplay_view(current_screenplay)
-                if current_screenplay is not None
-                else None,
+                screenplay=(
+                    {
+                        **self._screenplay_view(current_screenplay),
+                        "brief_conformance": conformance_json,
+                    }
+                    if current_screenplay is not None
+                    else None
+                ),
                 screenplays=[
                     {
                         "id": item.id,

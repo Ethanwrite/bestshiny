@@ -32,6 +32,13 @@ from .screenplay import (
     deterministic_screenplay,
     validate_screenplay,
 )
+from .screenplay_brief import (
+    ADVISORY,
+    BLOCKING,
+    BriefConformance,
+    BriefViolation,
+    ScreenplayBriefValidator,
+)
 from .service import (
     CreativeDirectorService,
     CreativeSessionConflict,
@@ -41,7 +48,9 @@ from .service import (
 )
 
 __all__ = [
+    "ADVISORY",
     "ANCHOR_PROMPT_VERSION",
+    "BLOCKING",
     "BRIEF_FIELD_SPECS",
     "FORMAT_DEFAULTS",
     "MAX_CAST",
@@ -52,9 +61,11 @@ __all__ = [
     "BeatPlanner",
     "BriefAnalysis",
     "BriefEngine",
+    "BriefConformance",
     "BriefFieldSpec",
     "BriefOperation",
     "BriefOperationKind",
+    "BriefViolation",
     "CreativeDirectorService",
     "CreativeSessionConflict",
     "CreativeSessionState",
@@ -67,6 +78,7 @@ __all__ = [
     "QuestionStatus",
     "ReasonCode",
     "Screenplay",
+    "ScreenplayBriefValidator",
     "ScreenplayCastOverflow",
     "ScreenplayInvalid",
     "StructuredActionKind",

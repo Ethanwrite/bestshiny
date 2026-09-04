@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -52,6 +53,9 @@ MODEL = "voyage-multimodal-3.5"
 # vendor's own units. Nothing here is a discount, a promotion or a conversion.
 TEXT_USD_PER_1M_TOKENS = Decimal("0.12")
 IMAGE_USD_PER_1B_PIXELS = Decimal("0.60")
+# 0079. The same rate, because the vendor counts each video frame as an
+# image: "For pricing purposes, each video frame is considered an image."
+VIDEO_USD_PER_1B_PIXELS = Decimal("0.60")
 
 # One recorded multimodal embedding: 18 text tokens beside a single 224x224
 # frame (50_176 pixels) and no video pixels.
@@ -70,12 +74,16 @@ USAGE: dict[str, Any] = {
 EXPECTED_COST = Decimal("0.000032")
 
 
-def _seed_voyage_pricing(container, *, image: bool = True) -> list[str]:  # type: ignore[no-untyped-def]
-    """The 0071 rows, as the migration writes them."""
+def _seed_voyage_pricing(  # type: ignore[no-untyped-def]
+    container, *, image: bool = True, video: bool = False
+) -> list[str]:
+    """The 0071 rows, plus 0079's video row, as the migrations write them."""
 
     rows = [("input_tokens", TOKEN_BILLING_UNIT, TEXT_USD_PER_1M_TOKENS)]
     if image:
         rows.append(("image_input", PIXEL_BILLING_UNIT, IMAGE_USD_PER_1B_PIXELS))
+    if video:
+        rows.append(("video_input", PIXEL_BILLING_UNIT, VIDEO_USD_PER_1B_PIXELS))
     created: list[str] = []
     with container.database.session() as session:
         for input_mode, billing_unit, price in rows:
@@ -181,7 +189,8 @@ def test_both_pricing_rows_stay_traceable_on_the_rates(container) -> None:  # ty
     assert rates is not None
     assert rates.input_usd_per_token == TEXT_USD_PER_1M_TOKENS / Decimal(1_000_000)
     assert rates.image_usd_per_pixel == IMAGE_USD_PER_1B_PIXELS / Decimal(1_000_000_000)
-    # No shipped row prices video pixels, and the engine does not invent one.
+    # This seed carries only 0071's two rows, and the engine invents nothing
+    # from them: the video rate comes from 0079's row or from nowhere.
     assert rates.video_usd_per_pixel is None
     assert set(rates.profile_ids) == set(seeded)
 
@@ -205,6 +214,13 @@ def test_unpriced_pixels_are_never_settled_as_free(container) -> None:  # type: 
 
 
 def test_video_pixels_without_a_video_rate_refuse_to_settle(container) -> None:  # type: ignore[no-untyped-def]
+    """Still true for any model whose video price is genuinely unknown.
+
+    0079 prices this one, so the seed here deliberately omits that row: what
+    is pinned is that a *missing* price refuses to settle rather than
+    silently pricing video pixels off the image row.
+    """
+
     _seed_voyage_pricing(container)
     engine = TokenCostEngine(container.database)
 
@@ -354,3 +370,109 @@ def test_an_operator_can_see_the_usage_the_cost_was_derived_from(container, proj
         "video_pixels": 0,
         "total_tokens": 66,
     }
+
+
+# --- 0079: the video-pixel rate -------------------------------------------
+
+
+def test_video_pixels_settle_at_the_official_rate_once_0079_prices_them(container) -> None:  # type: ignore[no-untyped-def]
+    """All three axes, at the vendor's own list prices, to the exact cent-fraction.
+
+    The frame path the platform actually uses never produces video pixels -
+    `BoundedVideoFrameSampler` sends stills, which the provider bills as image
+    pixels. This covers the case where a usage block reports video pixels
+    directly, which before 0079 settled to nothing at all.
+    """
+
+    _seed_voyage_pricing(container, video=True)
+    engine = TokenCostEngine(container.database)
+
+    settlement = engine.settle_from_usage(
+        PROVIDER,
+        MODEL,
+        {"text_tokens": 18, "image_pixels": 50_176, "video_pixels": 921_600},
+    )
+
+    assert settlement is not None
+    # 18 * 0.12 / 1e6        = 0.00000216
+    # 50_176 * 0.60 / 1e9    = 0.0000301056
+    # 921_600 * 0.60 / 1e9   = 0.00055296
+    # ------------------------------------- +
+    #                          0.0005852256, at the column's six decimals:
+    expected = (
+        Decimal(18) * TEXT_USD_PER_1M_TOKENS / Decimal(1_000_000)
+        + Decimal(50_176) * IMAGE_USD_PER_1B_PIXELS / Decimal(1_000_000_000)
+        + Decimal(921_600) * VIDEO_USD_PER_1B_PIXELS / Decimal(1_000_000_000)
+    ).quantize(Decimal("0.000001"))
+    assert expected == Decimal("0.000585")
+    assert settlement.cost_usd == Decimal("0.000585")
+    assert (settlement.input_tokens, settlement.image_pixels, settlement.video_pixels) == (
+        18,
+        50_176,
+        921_600,
+    )
+    assert settlement.detail == (
+        f"18in+0cached+0out+50176ipx+921600vpx"
+        f"@{PROVIDER}:{MODEL}:{TOKEN_BILLING_UNIT}+{PIXEL_BILLING_UNIT}"
+    )
+
+
+def test_the_video_rate_is_traceable_to_its_own_row(container) -> None:  # type: ignore[no-untyped-def]
+    seeded = _seed_voyage_pricing(container, video=True)
+
+    rates = TokenCostEngine(container.database).rates_for(PROVIDER, MODEL)
+
+    assert rates is not None
+    assert rates.video_usd_per_pixel == VIDEO_USD_PER_1B_PIXELS / Decimal(1_000_000_000)
+    # Same number as the image rate, but its own row: nothing here falls back
+    # from one input mode to another, so a model whose video price is unknown
+    # stays UNCERTAIN rather than being priced off its image row.
+    assert rates.video_usd_per_pixel == rates.image_usd_per_pixel
+    assert len(set(rates.profile_ids)) == 3
+    assert set(rates.profile_ids) == set(seeded)
+
+
+def test_migration_0079_writes_the_video_row_and_takes_it_away_again(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The row an operator actually gets, written by alembic rather than a fixture."""
+
+    import sqlalchemy as sa
+    from alembic import command
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parents[1]
+    database_url = f"sqlite:///{tmp_path / 'voyage-pricing.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    config.set_main_option("sqlalchemy.url", database_url)
+
+    def _row() -> dict[str, Any] | None:
+        engine = sa.create_engine(database_url)
+        try:
+            with engine.begin() as connection:
+                found = connection.execute(
+                    sa.text(
+                        "select input_mode, billing_unit, unit_price, currency, source_url "
+                        "from model_pricing_profiles "
+                        "where provider = 'voyage' and provider_model_id = :model "
+                        "and input_mode = 'video_input'"
+                    ),
+                    {"model": MODEL},
+                ).mappings().one_or_none()
+                return dict(found) if found else None
+        finally:
+            engine.dispose()
+
+    command.upgrade(config, "head")
+    row = _row()
+    assert row is not None, "0079 did not write the voyage video-pixel price"
+    assert row["billing_unit"] == PIXEL_BILLING_UNIT
+    assert Decimal(str(row["unit_price"])) == VIDEO_USD_PER_1B_PIXELS
+    assert row["currency"] == "USD"
+    assert row["source_url"] == "https://docs.voyageai.com/docs/pricing"
+
+    # Re-running must not write a second row for the same input mode.
+    command.downgrade(config, "0078_creative_session_create_idempotency")
+    assert _row() is None
+    command.upgrade(config, "head")
+    assert _row() is not None

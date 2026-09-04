@@ -29,6 +29,7 @@ from typing import Any
 from platform_database import Database
 from production_domain.models import (
     Character,
+    CharacterEvidenceCoverage,
     CharacterEvidenceSubmission,
     CharacterIdentityVersion,
     GenerationCandidate,
@@ -37,11 +38,11 @@ from production_domain.models import (
     Shot,
     utcnow,
 )
-from qa_core import CanonicalIdentityReference
+from qa_core import CanonicalIdentityReference, CharacterSubmissionTarget
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .client import CharacterEvidenceRemoteError
+from .client import MAX_CHARACTERS_PER_ANALYSIS, CharacterEvidenceRemoteError
 
 _IDENTITY_VIEWS: tuple[tuple[str, str], ...] = (
     ("front_asset_id", "FRONT"),
@@ -203,27 +204,48 @@ class CharacterEvidenceTracker:
 
     def _dispatch_target(
         self, session, submission: CharacterEvidenceSubmission  # type: ignore[no-untyped-def]
-    ) -> tuple[str, list[CanonicalIdentityReference], list[str], str] | str:
-        """The character, references and profile for one submission, or a skip reason."""
+    ) -> tuple[list[CharacterSubmissionTarget], list[dict[str, str]], str] | str:
+        """Every bound character with references, plus the ones without, or a skip reason.
+
+        The old version returned on its first hit: a two-hander produced
+        evidence for one face and silence for the other, and the remaining
+        characters went into a metadata key nothing read.
+        """
 
         candidate = session.get(GenerationCandidate, submission.candidate_id)
         if candidate is None or candidate.output_asset_id is None:
             return "CANDIDATE_OUTPUT_MISSING"
-        bound_character_ids = [
-            str(entry.get("character_id"))
-            for entry in candidate.metadata_json.get("character_state_context", [])
-            if entry.get("character_id")
-        ]
+        bound_character_ids = list(
+            dict.fromkeys(
+                str(entry.get("character_id"))
+                for entry in candidate.metadata_json.get("character_state_context", [])
+                if entry.get("character_id")
+            )
+        )
         if not bound_character_ids:
             return "NO_CHARACTER_BINDINGS"
         shot = session.get(Shot, candidate.shot_id)
         profile = shot.shot_type if shot and shot.shot_type in {"DIALOGUE", "ACTION"} else "DIALOGUE"
+        covered: list[CharacterSubmissionTarget] = []
+        uncovered: list[dict[str, str]] = []
         for character_id in bound_character_ids:
             references = self._identity_references(session, character_id)
-            if references:
-                uncovered = [item for item in bound_character_ids if item != character_id]
-                return character_id, references, uncovered, profile
-        return "NO_CONFIRMED_IDENTITY_REFERENCES"
+            if not references:
+                # No confirmed identity to compare against. Recorded per
+                # character, so the others are still analysed.
+                uncovered.append(
+                    {"character_id": character_id, "reason": "NO_CONFIRMED_IDENTITY_REFERENCES"}
+                )
+                continue
+            if len(covered) >= MAX_CHARACTERS_PER_ANALYSIS:
+                uncovered.append(
+                    {"character_id": character_id, "reason": "ANALYSIS_CHARACTER_LIMIT"}
+                )
+                continue
+            covered.append(CharacterSubmissionTarget(character_id, tuple(references)))
+        if not covered:
+            return "NO_CONFIRMED_IDENTITY_REFERENCES"
+        return covered, uncovered, profile
 
     def dispatch_pending(self, *, limit: int = 20) -> CharacterEvidenceSweepResult:
         """POST each PENDING submission once, through the configured producer.
@@ -264,13 +286,15 @@ class CharacterEvidenceTracker:
                     skipped += 1
                     details.append({"submission_id": submission_id, "skipped": target})
                     continue
-                character_id, references, uncovered, profile = target
+                covered, uncovered, profile = target
                 candidate_id = submission.candidate_id
             try:
+                # One job, every character: the Modal side claims idempotency
+                # on job_id alone, so a per-character fan-out would be answered
+                # `202 {duplicate: true}` for every character after the first.
                 self.qa.submit_character_evidence(
                     candidate_id,
-                    character_id=character_id,
-                    references=references,
+                    characters=covered,
                     profile=profile,
                 )
             except (CharacterEvidenceRemoteError, LookupError, ValueError) as exc:
@@ -297,8 +321,11 @@ class CharacterEvidenceTracker:
                 if submission is None:
                     continue
                 now = utcnow()
+                covered_ids = [target.character_id for target in covered]
                 submission.status = "ACCEPTED"
-                submission.character_id = character_id
+                #: Kept for readers that predate per-character coverage; the
+                #: coverage rows below are the whole truth.
+                submission.character_id = covered_ids[0]
                 submission.submission_count += 1
                 submission.last_submitted_at = now
                 if submission.first_submitted_at is None:
@@ -308,10 +335,13 @@ class CharacterEvidenceTracker:
                 submission.error_message = None
                 submission.metadata_json = {
                     **submission.metadata_json,
-                    "covered_character_id": character_id,
-                    "uncovered_character_ids": uncovered,
+                    "covered_character_id": covered_ids[0],
+                    "covered_character_ids": covered_ids,
+                    "uncovered_character_ids": [item["character_id"] for item in uncovered],
+                    "uncovered_characters": uncovered,
                     "profile": profile,
                 }
+                self._record_coverage(session, submission, covered=covered, uncovered=uncovered)
                 candidate = session.get(GenerationCandidate, submission.candidate_id)
                 if candidate is not None and candidate.generation_job_id:
                     session.add(
@@ -320,7 +350,9 @@ class CharacterEvidenceTracker:
                             event_type="CHARACTER_EVIDENCE_SHADOW_SUBMITTED",
                             detail={
                                 "candidate_id": submission.candidate_id,
-                                "character_id": character_id,
+                                "character_id": covered_ids[0],
+                                "character_ids": covered_ids,
+                                "uncovered_characters": uncovered,
                                 "operating_mode": "SHADOW",
                                 "submission_count": submission.submission_count,
                             },
@@ -365,12 +397,142 @@ class CharacterEvidenceTracker:
         return timed_out
 
     # --------------------------------------------------------------- callback
-    def record_callback(self, candidate_id: str, *, status: str, error_code: str | None = None) -> None:
+    @staticmethod
+    def _record_coverage(  # type: ignore[no-untyped-def]
+        session,
+        submission: CharacterEvidenceSubmission,
+        *,
+        covered: list[CharacterSubmissionTarget],
+        uncovered: list[dict[str, str]],
+    ) -> None:
+        """One row per character this job was asked about, covered or not.
+
+        The parent row holds a single character_id, so without these a
+        candidate's second character had nowhere to record its references, its
+        producer run, its similarity evidence or why it got none.
+        """
+
+        existing = {
+            row.character_id: row
+            for row in session.scalars(
+                select(CharacterEvidenceCoverage).where(
+                    CharacterEvidenceCoverage.submission_id == submission.id
+                )
+            )
+        }
+        wanted: list[tuple[str, str, str | None, list[str]]] = [
+            *(
+                (
+                    target.character_id,
+                    "REQUESTED",
+                    None,
+                    [reference.reference_asset_id for reference in target.references],
+                )
+                for target in covered
+            ),
+            *(
+                (item["character_id"], "SKIPPED", item.get("reason"), [])
+                for item in uncovered
+            ),
+        ]
+        for character_id, status, reason, reference_ids in wanted:
+            row = existing.get(character_id)
+            if row is None:
+                row = CharacterEvidenceCoverage(
+                    submission_id=submission.id,
+                    candidate_id=submission.candidate_id,
+                    character_id=character_id,
+                )
+                session.add(row)
+            row.status = status
+            row.skip_reason = (reason or "")[:240] or None
+            row.reference_asset_ids = list(reference_ids)
+            row.operating_mode = "SHADOW"
+        session.flush()
+
+    def record_character_report(  # noqa: PLR0913 - one row records the whole report
+        self,
+        candidate_id: str,
+        *,
+        character_id: str,
+        producer_run_id: str,
+        decision: str,
+        qa_result_id: str | None,
+        similarity: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one character's shadow result. Idempotent per (job, character)."""
+
+        with self.database.session() as session:
+            submission = session.scalar(
+                select(CharacterEvidenceSubmission).where(
+                    CharacterEvidenceSubmission.candidate_id == candidate_id
+                )
+            )
+            if submission is None:
+                return
+            row = session.scalar(
+                select(CharacterEvidenceCoverage).where(
+                    CharacterEvidenceCoverage.submission_id == submission.id,
+                    CharacterEvidenceCoverage.character_id == character_id,
+                )
+            )
+            if row is None:
+                row = CharacterEvidenceCoverage(
+                    submission_id=submission.id,
+                    candidate_id=candidate_id,
+                    character_id=character_id,
+                )
+                session.add(row)
+            row.status = "REPORTED"
+            row.producer_run_id = producer_run_id[:64]
+            row.decision = decision[:40]
+            row.qa_result_id = qa_result_id
+            row.similarity_json = dict(similarity or {})
+            row.operating_mode = "SHADOW"
+            row.reported_at = utcnow()
+            session.flush()
+
+    def coverage(self, candidate_id: str) -> list[dict[str, Any]]:
+        """Which characters this candidate's shadow analysis covered, and how."""
+
+        with self.database.session() as session:
+            return [
+                {
+                    "character_id": row.character_id,
+                    "status": row.status,
+                    "skip_reason": row.skip_reason,
+                    "reference_asset_ids": list(row.reference_asset_ids or []),
+                    "producer_run_id": row.producer_run_id,
+                    "qa_result_id": row.qa_result_id,
+                    "decision": row.decision,
+                    "similarity": dict(row.similarity_json or {}),
+                    "failure_reason": row.failure_reason,
+                    "operating_mode": row.operating_mode,
+                    "reported_at": row.reported_at.isoformat() if row.reported_at else None,
+                }
+                for row in session.scalars(
+                    select(CharacterEvidenceCoverage)
+                    .where(CharacterEvidenceCoverage.candidate_id == candidate_id)
+                    .order_by(CharacterEvidenceCoverage.character_id)
+                )
+            ]
+
+    def record_callback(
+        self,
+        candidate_id: str,
+        *,
+        status: str,
+        error_code: str | None = None,
+        character_ids: list[str] | None = None,
+    ) -> None:
         """Reflect a verified callback onto the submission row.
 
         Tolerates an absent row (a submission made before this table existed);
         never creates one, because a callback for a job this table never
-        dispatched is already rejected upstream by the lineage checks.
+        dispatched is already rejected upstream by the lineage checks. A
+        character missing from the envelope never blocks the REPORTED
+        transition - that would turn a shadow observation into a gate - but it
+        is recorded, so partial coverage is visible.
         """
 
         with self.database.session() as session:
@@ -383,6 +545,11 @@ class CharacterEvidenceTracker:
                 return
             now = utcnow()
             submission.last_callback_at = now
+            if character_ids is not None:
+                submission.metadata_json = {
+                    **submission.metadata_json,
+                    "reported_character_ids": list(character_ids),
+                }
             if status == "SUCCEEDED":
                 submission.status = "REPORTED"
                 submission.reported_at = now
@@ -391,6 +558,14 @@ class CharacterEvidenceTracker:
             else:
                 submission.status = "FAILED"
                 submission.error_code = (error_code or "REMOTE_FAILURE")[:120]
+                for row in session.scalars(
+                    select(CharacterEvidenceCoverage).where(
+                        CharacterEvidenceCoverage.submission_id == submission.id,
+                        CharacterEvidenceCoverage.status == "REQUESTED",
+                    )
+                ):
+                    row.status = "FAILED"
+                    row.failure_reason = (error_code or "REMOTE_FAILURE")[:500]
             session.flush()
 
     # ----------------------------------------------------------- reconcile

@@ -540,6 +540,16 @@ def create_app(container: Container | None = None) -> FastAPI:
                 completed_run_ids = set(
                     candidate.metadata_json.get("character_evidence_run_ids", [])
                 )
+                # Which characters this job was actually asked about. A report
+                # for anyone else is not evidence about this candidate.
+                submitted_character_ids = {
+                    str(item)
+                    for item in candidate.metadata_json.get("character_evidence_character_ids", [])
+                } or {
+                    str(entry.get("character_id"))
+                    for entry in candidate.metadata_json.get("character_state_context", [])
+                    if entry.get("character_id")
+                }
             if callback.status == "FAILED":
                 container.qa.record_character_evidence_failure(
                     callback.job_id,
@@ -552,22 +562,45 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
                 return {"status": "RECORDED", "reports": 0}
             reports = [report_from_payload(item) for item in callback.reports]
+            recorded: list[str] = []
             for report in reports:
                 if report.candidate_id != callback.job_id:
                     raise ValueError("character evidence report belongs to a different candidate")
                 if report.operating_mode != "SHADOW":
                     raise ValueError("character evidence callback attempted a non-shadow decision")
+                if submitted_character_ids and report.character_id not in submitted_character_ids:
+                    raise ValueError(
+                        "character evidence report is for a character this candidate did not submit"
+                    )
                 if report.producer_run_id in completed_run_ids:
+                    # Replayed envelope: already recorded, per character.
+                    recorded.append(report.character_id)
                     continue
-                container.qa.validate_candidate(
+                result = container.qa.validate_candidate(
                     callback.job_id,
                     character_evidence=report,
                     observation_only=True,
                 )
+                container.character_evidence_tracker.record_character_report(
+                    callback.job_id,
+                    character_id=report.character_id,
+                    producer_run_id=report.producer_run_id,
+                    decision=report.decision,
+                    qa_result_id=getattr(result, "id", None),
+                    similarity=asdict(report.aggregate),
+                )
+                recorded.append(report.character_id)
             container.character_evidence_tracker.record_callback(
-                callback.job_id, status="SUCCEEDED"
+                callback.job_id, status="SUCCEEDED", character_ids=recorded
             )
-            return {"status": "RECORDED", "reports": len(reports)}
+            # Partial coverage is visible to the caller: which characters
+            # reported, and which the analysis was asked about.
+            return {
+                "status": "RECORDED",
+                "reports": len(reports),
+                "characters": recorded,
+                "submitted_characters": sorted(submitted_character_ids),
+            }
         except CharacterEvidenceCallbackAuthenticationError as exc:
             raise HTTPException(401, str(exc)) from exc
         except CharacterEvidenceCallbackPayloadError as exc:
@@ -2756,6 +2789,26 @@ def create_app(container: Container | None = None) -> FastAPI:
             "submissions": container.character_evidence_tracker.list_submissions(
                 status=status, limit=limit
             )
+        }
+
+    @app.get(
+        "/internal/character-evidence/candidates/{candidate_id}/coverage",
+        dependencies=[Depends(verify_api_key)],
+    )
+    def character_evidence_coverage(candidate_id: str):
+        """Which characters this candidate's shadow analysis covered, and how.
+
+        One row per character the job was asked about: covered with its
+        references and producer run, skipped for want of a confirmed identity,
+        or failed with the reason. Observation only - nothing here can move a
+        candidate's commit.
+        """
+
+        return {
+            "candidate_id": candidate_id,
+            "operating_mode": "SHADOW",
+            "observation_only": True,
+            "characters": container.character_evidence_tracker.coverage(candidate_id),
         }
 
     @app.post(

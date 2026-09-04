@@ -104,11 +104,28 @@ def _seed_candidate(container, project, *, with_binding: bool, suffix: str = "1"
 class _AcceptingProducer:
     def __init__(self) -> None:
         self.submissions: list[str] = []
+        #: Every character each submission was asked about, in request order.
+        self.characters: list[list[str]] = []
 
-    def submit(self, video_path, *, candidate_id, character_id, references, shot_type, sample_positions=None):  # type: ignore[no-untyped-def]
-        del video_path, character_id, shot_type, sample_positions
-        assert references, "dispatch must supply confirmed identity references"
+    def submit(  # type: ignore[no-untyped-def]
+        self,
+        video_path,
+        *,
+        candidate_id,
+        character_id=None,
+        references=(),
+        characters=None,
+        shot_type="DIALOGUE",
+        sample_positions=None,
+    ):
+        del video_path, shot_type, sample_positions
+        targets = list(characters) if characters is not None else []
+        assert targets or references, "dispatch must supply confirmed identity references"
+        assert all(target.references for target in targets)
         self.submissions.append(candidate_id)
+        self.characters.append(
+            [target.character_id for target in targets] or [character_id]
+        )
         return SubmissionResult(
             job_id=candidate_id,
             candidate_id=candidate_id,

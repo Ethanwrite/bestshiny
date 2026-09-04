@@ -1630,6 +1630,63 @@ class CharacterEvidenceSubmission(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class CharacterEvidenceCoverage(Base, TimestampMixin):
+    """What the shadow analysis was asked about, per character, and what came back.
+
+    One remote GPU job still runs per candidate - the parent's unique candidate
+    key is that guarantee and is untouched - but a candidate can bind several
+    characters, and the parent row can hold only one. Without this table the
+    second character's references, producer run, similarity evidence and
+    failure reason had nowhere to live, so the pipeline analysed the first
+    bound character and recorded the rest in a metadata key nothing read.
+
+    Shadow-only by check constraint, exactly like the parent: nothing in this
+    table can express an operating mode that would gate a candidate commit.
+    """
+
+    __tablename__ = "character_evidence_coverage"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "character_id", name="uq_character_evidence_coverage_character"
+        ),
+        CheckConstraint(
+            "status IN ('REQUESTED', 'SKIPPED', 'REPORTED', 'FAILED')",
+            name="ck_character_evidence_coverage_status",
+        ),
+        CheckConstraint(
+            "operating_mode = 'SHADOW'",
+            name="ck_character_evidence_coverage_shadow_only",
+        ),
+        Index("ix_character_evidence_coverage_candidate", "candidate_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("character_evidence_submissions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_candidates.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    character_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    #: REQUESTED once the character is on the AnalyzeRequest; SKIPPED when it
+    #: had no confirmed identity references to compare against; REPORTED when
+    #: a signed callback carried its evidence; FAILED when the job failed.
+    status: Mapped[str] = mapped_column(String(40), default="REQUESTED", nullable=False)
+    skip_reason: Mapped[str | None] = mapped_column(String(240))
+    #: The references this character was analysed against, and the producer run
+    #: and similarity evidence that came back for it.
+    reference_asset_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    producer_run_id: Mapped[str | None] = mapped_column(String(64))
+    qa_result_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    decision: Mapped[str | None] = mapped_column(String(40))
+    similarity_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(String(500))
+    operating_mode: Mapped[str] = mapped_column(String(20), default="SHADOW", nullable=False)
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class CharacterStateVersion(Base, TimestampMixin):
     """Immutable, fully materialized narrative state for one timeline scope."""
 

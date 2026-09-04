@@ -232,14 +232,17 @@ class CharacterEvidencePipeline:
             )
         return results, reasons
 
-    def _sample(
-        self,
-        track: TrackedPerson,
-        frame: Any,
-        faces: list[DetectedFace],
-        references: list[ReferenceEmbedding],
-        sample_time: float,
-    ) -> EvidenceSample:
+    def _encode_track(
+        self, track: TrackedPerson, frame: Any, faces: list[DetectedFace]
+    ) -> tuple[Any, Any, float, float, float]:
+        """The encoder work for one (frame, track): body, face, and quality.
+
+        Split out of ``_sample`` because none of it depends on which character
+        is being compared. Encoding once per (frame, track) rather than once
+        per (frame, track, character) is what keeps a two-hander from costing
+        twice the GPU time of a single on a one-container T4.
+        """
+
         import cv2
 
         body_embedding = self.appearance.encode(_crop(frame, track.box))
@@ -266,6 +269,18 @@ class CharacterEvidencePipeline:
                 face_embedding = self.face_identity.encode_aligned(frame, face)
             else:
                 visibility *= 0.25
+        return body_embedding, face_embedding, visibility, blur, yaw
+
+    def _sample(  # noqa: PLR0913 - the scoring step needs the whole encoded track
+        self,
+        track: TrackedPerson,
+        encoded: tuple[Any, Any, float, float, float],
+        references: list[ReferenceEmbedding],
+        sample_time: float,
+    ) -> EvidenceSample:
+        """Score one already-encoded track against one character's references."""
+
+        body_embedding, face_embedding, visibility, blur, yaw = encoded
         ranked: list[tuple[float, ReferenceEmbedding, float | None, float]] = []
         for reference in references:
             identity = (
@@ -467,12 +482,15 @@ class CharacterEvidencePipeline:
                 )
                 faces = self.face_detector.detect(frame)
                 for track in tracks:
+                    # Encode once, compare per character: the embeddings depend
+                    # on the frame and the track, never on who we are asking
+                    # about.
+                    encoded = self._encode_track(track, frame, faces)
                     for character in request.characters:
                         candidates[character.character_id][track.track_id].append(
                             self._sample(
                                 track,
-                                frame,
-                                faces,
+                                encoded,
                                 references[character.character_id],
                                 sample_time,
                             )

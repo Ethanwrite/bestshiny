@@ -33,6 +33,7 @@ from .evidence import (
     CharacterEvidenceProducer,
     CharacterEvidenceReport,
     CharacterEvidenceSubmission,
+    CharacterSubmissionTarget,
 )
 
 TERMINAL_CANDIDATE_STATUSES = {
@@ -383,13 +384,30 @@ class QAPipeline:
         self,
         candidate_id: str,
         *,
-        character_id: str,
-        references: Sequence[CanonicalIdentityReference],
+        character_id: str | None = None,
+        references: Sequence[CanonicalIdentityReference] = (),
+        characters: Sequence[CharacterSubmissionTarget] | None = None,
         profile: str = "DIALOGUE",
         sample_positions: tuple[float, ...] | None = None,
     ) -> CharacterEvidenceSubmission:
-        """Submit production Modal work without treating HTTP acceptance as evidence."""
+        """Submit production Modal work without treating HTTP acceptance as evidence.
 
+        ``characters`` carries every bound character with confirmed references;
+        a single ``character_id``/``references`` pair is accepted as the
+        one-character case. One remote job still runs per candidate.
+        """
+
+        targets = (
+            list(characters)
+            if characters is not None
+            else (
+                [CharacterSubmissionTarget(character_id, tuple(references))]
+                if character_id
+                else []
+            )
+        )
+        if not targets:
+            raise ValueError("character evidence submission needs at least one character")
         submit = getattr(self.evidence_producer, "submit", None)
         if submit is None:
             raise RuntimeError("asynchronous CharacterEvidenceProducer is not configured")
@@ -404,8 +422,9 @@ class QAPipeline:
         submission = submit(
             video_path,
             candidate_id=candidate_id,
-            character_id=character_id,
-            references=references,
+            character_id=targets[0].character_id,
+            references=targets[0].references,
+            characters=targets,
             shot_type=profile,
             sample_positions=sample_positions,
         )
@@ -419,6 +438,11 @@ class QAPipeline:
                 "character_evidence_status": "ACCEPTED",
                 "character_evidence_mode": "SHADOW",
                 "character_evidence_submitted_at": submission.submitted_at,
+                # Which characters this one job was asked about, so a report
+                # for a character nobody submitted can be refused.
+                "character_evidence_character_ids": [
+                    target.character_id for target in targets
+                ],
             }
             session.flush()
         return submission
@@ -972,6 +996,20 @@ class QAPipeline:
                     and character_evidence.producer_run_id not in completed_run_ids
                 ):
                     completed_run_ids.append(character_evidence.producer_run_id)
+                # One callback can carry a report per character, and this
+                # branch runs once per report. The scalar keys stay as the
+                # most recent value for existing readers; the per-character map
+                # is what stops the last report from silently describing the
+                # whole candidate.
+                by_character = dict(
+                    candidate.metadata_json.get("character_evidence_by_character") or {}
+                )
+                if character_evidence is not None:
+                    by_character[character_evidence.character_id] = {
+                        "producer_run_id": character_evidence.producer_run_id,
+                        "decision": character_evidence.decision,
+                        "qa_result_id": result.id,
+                    }
                 candidate.metadata_json = {
                     **candidate.metadata_json,
                     "character_evidence_status": "SUCCEEDED",
@@ -983,6 +1021,7 @@ class QAPipeline:
                     "character_evidence_decision": (
                         character_evidence.decision if character_evidence is not None else "ABSTAIN"
                     ),
+                    "character_evidence_by_character": by_character,
                 }
                 session.flush()
                 return result

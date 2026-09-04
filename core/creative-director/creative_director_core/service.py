@@ -592,6 +592,12 @@ class CreativeDirectorService:
             )
             if row is None:
                 raise LookupError("creative session not found")
+            # A replay comes first: it returns what already happened, so it is
+            # answerable from any stage. Gating it on the stage would turn a
+            # lost response into a 409 for a turn the user already paid for.
+            replay = self._replay(session, row, client_turn_id, content)
+            if replay is not None:
+                return replay
             if row.status in _CLOSED_STATUSES:
                 raise CreativeSessionConflict(
                     f"session is {row.status}; the dialogue is closed", reason_code="DIALOGUE_CLOSED"
@@ -644,7 +650,23 @@ class CreativeDirectorService:
                 reason_code="FREE_TURN_LIMIT",
             )
 
-    def _replay(self, session: Any, row: CreativeSession, client_turn_id: str | None) -> DirectorReply | None:
+    def _replay(
+        self,
+        session: Any,
+        row: CreativeSession,
+        client_turn_id: str | None,
+        content: str | None = None,
+    ) -> DirectorReply | None:
+        """Replay the reply a recorded ``client_turn_id`` already produced.
+
+        The key identifies *one* message, not "whatever the client sends
+        next". Replaying a recorded reply for different words would answer a
+        question the user never asked - and, worse, hide a real turn the user
+        meant to pay for - so the stored user turn's content has to match. A
+        mismatch is a client bug (an id reused across an edit, or a collision),
+        and is refused as a conflict rather than served from the record.
+        """
+
         if not client_turn_id:
             return None
         user_turn = session.scalar(
@@ -656,6 +678,16 @@ class CreativeDirectorService:
         )
         if user_turn is None:
             return None
+        if content is not None and user_turn.content != content:
+            raise CreativeSessionConflict(
+                "this client_turn_id already recorded a different message; a retry has to "
+                "send the same words, and edited words need a new client_turn_id",
+                reason_code="CLIENT_TURN_ID_CONTENT_MISMATCH",
+                details={
+                    "client_turn_id": client_turn_id,
+                    "turn_sequence": user_turn.sequence,
+                },
+            )
         director_turn = session.scalar(
             select(CreativeTurn).where(
                 CreativeTurn.session_id == row.id,
@@ -709,7 +741,7 @@ class CreativeDirectorService:
         # Phase 1 - read. Nothing is written until the director has answered.
         with self.database.session() as session:
             row = self._session(session, session_id)
-            replay = self._replay(session, row, client_turn_id)
+            replay = self._replay(session, row, client_turn_id, content)
             if replay is not None:
                 return replay
             self._assert_turn_budget(session, row)
@@ -760,7 +792,7 @@ class CreativeDirectorService:
             )
             if row is None:
                 raise LookupError("creative session not found")
-            replay = self._replay(session, row, client_turn_id)
+            replay = self._replay(session, row, client_turn_id, content)
             if replay is not None:
                 return replay
             self._assert_turn_budget(session, row)

@@ -6,6 +6,13 @@
  * one object-centric shell (sidebar / canvas / inspector / action bar) instead
  * of three pages of stacked forms.
  */
+import {
+  beginCreativeTurn,
+  isRetryableSendFailure,
+  pruneCreativeTurns,
+  settleCreativeTurn,
+  turnScopeKey,
+} from "./creative-turn-id.js";
 import { currentRoute, isAdminRoute, navigate, onRoute, setAuth } from "./router.js";
 
 const API = window.AI_DIRECTOR_API
@@ -13,6 +20,7 @@ const API = window.AI_DIRECTOR_API
     ? "http://127.0.0.1:18080"
     : "/api");
 const SUBMISSION_STORAGE_KEY = "aiDirectorPendingSubmissions";
+const CREATIVE_TURN_STORAGE_KEY = "aiDirectorPendingCreativeTurns";
 const CSRF_COOKIE_NAME = "ai_director_csrf";
 sessionStorage.removeItem("aiDirectorAccessToken");
 
@@ -239,6 +247,65 @@ function finishSubmission(slot, key, succeeded) {
   sessionStorage.setItem(SUBMISSION_STORAGE_KEY, JSON.stringify(state.submissions));
 }
 
+/* ---- the director's send idempotency -------------------------------------
+   `creative-turn-id.js` owns the rule; this owns where it is kept and what a
+   "scope" is here. The store is sessionStorage, so a reload mid-retry still
+   re-sends the id the server may already have committed. */
+
+function readCreativeTurns() {
+  try {
+    return pruneCreativeTurns(JSON.parse(sessionStorage.getItem(CREATIVE_TURN_STORAGE_KEY) || "{}"));
+  } catch (_error) {
+    sessionStorage.removeItem(CREATIVE_TURN_STORAGE_KEY);
+    return {};
+  }
+}
+
+function writeCreativeTurns(pending) {
+  try {
+    sessionStorage.setItem(CREATIVE_TURN_STORAGE_KEY, JSON.stringify(pending));
+  } catch (_error) { /* a full or blocked store must never break the send */ }
+}
+
+/** This account, this project, this request slot - and nothing else's. */
+function creativeTurnScope(slot) {
+  return turnScopeKey({
+    userId: state.authUser?.id || state.authUser?.email || "",
+    projectId: state.project?.id || "",
+    slot,
+  });
+}
+
+function newClientTurnId() {
+  return (window.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+/**
+ * Run one send under the id that belongs to *these words in this slot*.
+ *
+ * `attempt(clientTurnId)` performs a single HTTP request. Every retry of the
+ * same words - after a timeout, a dropped connection, a 5xx, or a refusal the
+ * server marked retryable - is handed the identical id, so a reply lost on the
+ * way back is replayed from the record instead of paying for a second turn.
+ * The id is released on success, and on a refusal that will not change.
+ */
+async function sendWithClientTurnId(slot, content, attempt) {
+  const scopeKey = creativeTurnScope(slot);
+  const begun = beginCreativeTurn(readCreativeTurns(), scopeKey, content, newClientTurnId);
+  writeCreativeTurns(begun.pending);
+  let outcome = "terminal";
+  try {
+    const reply = await attempt(begun.id);
+    outcome = "success";
+    return reply;
+  } catch (error) {
+    outcome = isRetryableSendFailure(error) ? "retryable" : "terminal";
+    throw error;
+  } finally {
+    writeCreativeTurns(settleCreativeTurn(readCreativeTurns(), scopeKey, begun.id, outcome));
+  }
+}
+
 async function request(path, options = {}) {
   const method = options.method || "GET";
   const headers = csrfHeaders(method, { "Content-Type": "application/json", ...(options.headers || {}) });
@@ -320,6 +387,9 @@ function clearWorkspaceState() {
   state.thumbCache.clear();
   stopPassengerPolling();
   sessionStorage.removeItem(SUBMISSION_STORAGE_KEY);
+  // The scope key already isolates accounts; dropping the store on sign-out
+  // means a shared browser does not even keep the previous user's words.
+  sessionStorage.removeItem(CREATIVE_TURN_STORAGE_KEY);
   state.confirmedAssets.clear();
   $("projectSelect").innerHTML = '<option value="">No projects yet</option>';
   $("characterList").innerHTML = CHARACTERS_EMPTY;
@@ -3117,10 +3187,13 @@ async function startCreativeSession() {
   button.textContent = "The director is thinking…";
   let started;
   try {
-    started = await request("/v1/creative/sessions", {
+    // The id is the whole create's idempotency key, not just its first turn's:
+    // a retry after a lost response returns the session that already exists
+    // instead of opening a second conversation about the same idea.
+    started = await sendWithClientTurnId("session:new", idea, (clientTurnId) => request("/v1/creative/sessions", {
       method: "POST",
-      body: JSON.stringify({ project_id: state.project.id, idea, client_turn_id: newClientTurnId() }),
-    });
+      body: JSON.stringify({ project_id: state.project.id, idea, client_turn_id: clientTurnId }),
+    }));
   } finally {
     button.disabled = false;
     button.textContent = "Start with BestShiny Director";
@@ -3130,10 +3203,6 @@ async function startCreativeSession() {
   state.creative.revealedTurn = 0; // reveal the director's first words as they arrive
   state.creative.revealedScreenplay = null;
   await openCreativeSession(started.session_id);
-}
-
-function newClientTurnId() {
-  return (window.crypto?.randomUUID?.() || `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
 
 function reportDirectorReply(reply) {
@@ -3152,18 +3221,20 @@ async function sendCreativeReply() {
   const input = $("creativeReplyInput");
   const content = input.value.trim();
   if (!content) return;
-  // One turn at a time, and one idempotency key per attempt: a retried send
-  // replays the recorded reply instead of paying for a second one.
+  // One turn at a time, and one idempotency key per *send*, not per attempt:
+  // the words the user typed once carry the same id through every retry, so a
+  // reply lost on the way back is replayed instead of paid for twice.
   creativeReplyInFlight = true;
   input.disabled = true;
   $("creativeReplyBtn").disabled = true;
   input.value = "";
   showCreativeThinking(content, "The director is thinking");
   try {
-    const reply = await request(`/v1/creative/sessions/${session.session.id}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content, client_turn_id: newClientTurnId() }),
-    });
+    const reply = await sendWithClientTurnId(`session:${session.session.id}`, content, (clientTurnId) =>
+      request(`/v1/creative/sessions/${session.session.id}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content, client_turn_id: clientTurnId }),
+      }));
     state.creative.thinking = null; // the reply is in; the real turns replace the placeholder
     reportDirectorReply(reply);
     await openCreativeSession(session.session.id);

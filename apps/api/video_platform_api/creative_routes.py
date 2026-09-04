@@ -54,6 +54,11 @@ class CreativeSessionCreate(BaseModel):
     idea: str = Field(min_length=1, max_length=8000)
     format: str | None = None
     title: str = ""
+    #: The idempotency key for the whole create, not only for its first turn.
+    #: A retry carrying the key of a create that already landed returns that
+    #: session's recorded opening reply instead of opening a second
+    #: conversation; the same key with different words is a 409
+    #: (CLIENT_TURN_ID_CONTENT_MISMATCH), never a replay of other words.
     client_turn_id: str | None = Field(default=None, max_length=120)
 
 
@@ -329,15 +334,49 @@ def register_creative_routes(
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
         project = auth.require_project(principal, body.project_id, write=True)
+        # `client_turn_id` makes the first *turn* replayable, but until now
+        # nothing guarded the session row: a create whose response was lost on
+        # the way back opened a second CreativeSession on retry - a duplicate
+        # conversation and a second paid director call - because the replay
+        # guard only ever looks inside the session it was handed. The recorded
+        # opening user turn is the idempotency record, so this needs no column
+        # and no migration: if one already carries this key for this project,
+        # the session exists, and the retry is answered from it.
+        from production_domain.models import CreativeTurn
+
+        replayed_session_id: str | None = None
+        if body.client_turn_id:
+            with container.database.session() as session:
+                replayed_session_id = session.scalar(
+                    select(CreativeTurn.session_id)
+                    .join(CreativeSession, CreativeSession.id == CreativeTurn.session_id)
+                    .where(
+                        CreativeSession.project_id == body.project_id,
+                        CreativeTurn.speaker == "USER",
+                        CreativeTurn.sequence == 1,
+                        CreativeTurn.client_turn_id == body.client_turn_id,
+                    )
+                    .order_by(CreativeTurn.session_id)
+                    .limit(1)
+                )
         try:
-            reply = await creative.start_session(
-                body.project_id,
-                idea=body.idea,
-                workspace_id=project.workspace_id,
-                format_hint=body.format,
-                title=body.title,
-                client_turn_id=body.client_turn_id,
-            )
+            if replayed_session_id:
+                # Answer from the recorded turn through the same idempotency
+                # path a retried message takes, so the same key sent with
+                # different words is refused there rather than served someone
+                # else's reply.
+                reply = await creative.post_message(
+                    replayed_session_id, body.idea, client_turn_id=body.client_turn_id
+                )
+            else:
+                reply = await creative.start_session(
+                    body.project_id,
+                    idea=body.idea,
+                    workspace_id=project.workspace_id,
+                    format_hint=body.format,
+                    title=body.title,
+                    client_turn_id=body.client_turn_id,
+                )
         except CreativeTurnLimitReached as exc:
             raise HTTPException(403, exc.as_detail()) from exc
         except CreativeSessionConflict as exc:

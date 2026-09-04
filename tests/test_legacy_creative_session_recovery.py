@@ -338,7 +338,7 @@ def test_the_recovery_is_reversible_and_a_fresh_database_is_untouched(
         assert len([turn for turn in turns if turn["reasoner"] == "MIGRATION"]) == 1
 
 
-def test_the_whole_0073_to_0078_range_downgrades_and_comes_back(tmp_path, monkeypatch) -> None:
+def test_the_whole_post_0072_range_downgrades_and_comes_back(tmp_path, monkeypatch) -> None:
     """The rollback path, which nothing exercised before this test.
 
     A code rollback past this range is not optional-extra work: the pre-0073
@@ -422,7 +422,16 @@ def test_the_whole_0073_to_0078_range_downgrades_and_comes_back(tmp_path, monkey
 
     command.upgrade(config, "head")
     command.check(config)
-    assert _version(database_url) == "0078_creative_session_create_idempotency"
+    # Whatever head is today. Pinning a literal here would mean every new
+    # migration "breaks" this test, which is how a rollback test stops being
+    # run and starts being edited.
+    assert _version(database_url) == _script_head(config)
+
+
+def _script_head(config) -> str:  # type: ignore[no-untyped-def]
+    from alembic.script import ScriptDirectory
+
+    return str(ScriptDirectory.from_config(config).get_current_head())
 
 
 def _version(database_url: str) -> str:

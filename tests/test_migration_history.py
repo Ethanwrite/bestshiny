@@ -267,7 +267,15 @@ def test_0071_moves_multimodal_embedding_to_official_voyage(tmp_path, monkeypatc
                 )
             )
         )
-        assert {row.input_mode for row in pricing} == {"input_tokens", "image_input"}
+        # At head, not at 0071: `input_tokens` and `image_input` are 0071's own
+        # two rows, and `video_input` is 0079's, added once the vendor's rule
+        # for video ("each video frame is considered an image") was read off
+        # the same page. All three are official list prices from that page.
+        assert {row.input_mode for row in pricing} == {
+            "input_tokens",
+            "image_input",
+            "video_input",
+        }
         assert all("docs.voyageai.com" in row.source_url for row in pricing)
     database.engine.dispose()
 

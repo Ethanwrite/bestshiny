@@ -597,6 +597,22 @@ class PromptCompilerService:
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
         dialogue = str(end_state.get("dialogue") or start_state.get("dialogue") or "")
         props = self._canonical_props(start_state.get("props", []))
+        # A canonical PRODUCT or PROP is a thing the shot must render exactly,
+        # not just a reference image riding along in the asset list. It enters
+        # the spec's own prop list, so every adapter's prompt names it.
+        known_prop_assets = {str(prop.get("asset_id")) for prop in props if prop.get("asset_id")}
+        for asset in canonical_assets:
+            if asset.get("type") not in {"PRODUCT", "PROP"} or str(asset.get("id")) in known_prop_assets:
+                continue
+            props.append(
+                {
+                    "asset_id": str(asset.get("id")),
+                    "asset_version_id": asset.get("version_id"),
+                    "name": asset.get("name"),
+                    "kind": asset.get("type"),
+                    "state": "canonical appearance is fixed",
+                }
+            )
         constraints = [
             "one shot contains exactly one dominant action",
             "one dominant camera movement only",

@@ -259,6 +259,8 @@ class LogicalAssets(Protocol):
         reason: str = "",
     ) -> Any: ...
 
+    def annotate(self, asset_id: str, *, canonical_metadata: Any) -> Any: ...
+
 
 DIRECTOR_SKILL_NAME = "director"
 
@@ -279,6 +281,11 @@ _DIALOGUE_STATUSES = {
     CreativeSessionStatus.CLARIFYING.value,
     CreativeSessionStatus.BRIEF_PROPOSED.value,
 }
+#: Anchor kinds whose READY key visual becomes a canonical logical asset when
+#: the visual bible locks. CHARACTER goes through CharacterIdentityService and
+#: STYLE through ProjectStyleService, so both are handled on their own paths.
+_CANONICAL_ANCHOR_KINDS = ("SCENE", "PRODUCT", "PROP")
+
 #: The only stages a screenplay revision may be written from. Once the
 #: screenplay is approved and its key visuals are derived, a redraft that was
 #: started earlier is stale by definition.
@@ -2463,6 +2470,26 @@ class CreativeDirectorService:
             character_anchors = [
                 a for a in anchors if a.kind == "CHARACTER" and a.status == CreativeAnchorStatus.READY.value
             ]
+            # Scene, product and prop key visuals are canon too: without them
+            # the frame-anchor planner has no location plate to reconstruct
+            # from and the product a commerce film is about never reaches a
+            # reference set. Only READY anchors qualify - a SKIPPED optional
+            # anchor is a decision to go without, never a canonical asset.
+            supporting_anchors = [
+                {
+                    "id": a.id,
+                    "anchor_key": a.anchor_key,
+                    "version": a.version,
+                    "kind": a.kind,
+                    "title": a.title,
+                    "media_asset_id": a.media_asset_id,
+                    "subject": str((a.prompt_json or {}).get("subject") or a.title),
+                }
+                for a in anchors
+                if a.kind in _CANONICAL_ANCHOR_KINDS
+                and a.status == CreativeAnchorStatus.READY.value
+                and a.media_asset_id
+            ]
             anchor_snapshot = [
                 {
                     "id": a.id,
@@ -2484,7 +2511,10 @@ class CreativeDirectorService:
                 if style_anchor is not None
                 else None
             )
-            fields = dict(self._approved_brief(session, row).fields_json)
+            approved_brief = self._approved_brief(session, row)
+            fields = dict(approved_brief.fields_json)
+            brief_id = approved_brief.id
+            screenplay_id = self._approved_screenplay(session, row).id
 
         if self.styles is None or self.characters is None or self.asset_registry is None:
             raise CreativeSessionConflict(
@@ -2518,6 +2548,17 @@ class CreativeDirectorService:
             )
             self._lock_identities(
                 session_id, project_id, bible_id, version, anchor_snapshot, lineage, codes, actor_user_id
+            )
+            self._lock_supporting_assets(
+                session_id,
+                project_id,
+                bible_id,
+                version,
+                brief_id,
+                screenplay_id,
+                supporting_anchors,
+                lineage,
+                actor_user_id,
             )
         except Exception as exc:  # noqa: BLE001 - every lock failure is recorded, then refused
             lineage["lock_status"] = "FAILED"
@@ -2751,6 +2792,96 @@ class CreativeDirectorService:
                     bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
                     session.flush()
         _ = codes
+
+    def _lock_supporting_assets(  # noqa: PLR0913 - the lineage this records needs every id
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        version: int,
+        brief_id: str,
+        screenplay_id: str,
+        anchors: list[dict[str, Any]],
+        lineage: dict[str, Any],
+        actor_user_id: str,
+    ) -> None:
+        """Promote the READY scene, product and prop key visuals into Canon.
+
+        Through the AssetRegistry's own create / add_version / promote, never
+        by writing ``assets`` directly. One logical asset per anchor key, so a
+        later bible whose depiction changed appends a *new* version and
+        promotes it rather than overwriting the old one - the old image stays
+        exactly what it was, and every version records the anchor, the anchor
+        version, the brief, the screenplay, the bible and the media it came
+        from.
+        """
+
+        assert self.asset_registry is not None
+        recorded: dict[str, Any] = lineage.setdefault("assets", {})
+        existing_by_key: dict[tuple[str, str], Any] = {}
+        for kind in _CANONICAL_ANCHOR_KINDS:
+            for item in self.asset_registry.list(project_id, asset_type=kind):
+                anchor_key = (item.canonical_metadata or {}).get("creative_anchor_key")
+                if anchor_key:
+                    existing_by_key[(kind, str(anchor_key))] = item
+        for anchor in anchors:
+            key = anchor["anchor_key"]
+            already = recorded.get(key)
+            if already and already.get("media_asset_id") == anchor["media_asset_id"]:
+                continue
+            logical = existing_by_key.get((anchor["kind"], key))
+            if logical is None:
+                logical = self.asset_registry.create(
+                    project_id,
+                    anchor["kind"],
+                    anchor["title"][:180] or anchor["subject"][:180] or key,
+                    canonical_metadata={
+                        "creative_anchor_key": key,
+                        "creative_session_id": session_id,
+                        "subject": anchor["subject"],
+                    },
+                    created_by_user_id=actor_user_id,
+                )
+            asset_version = self.asset_registry.add_version(
+                logical.id,
+                primary_media_asset_id=anchor["media_asset_id"],
+                label=f"Visual bible v{version}",
+                source="CREATIVE_KEY_VISUAL",
+                metadata={
+                    "creative_session_id": session_id,
+                    "anchor_id": anchor["id"],
+                    "anchor_key": key,
+                    "anchor_version": anchor["version"],
+                    "brief_id": brief_id,
+                    "screenplay_id": screenplay_id,
+                    "bible_id": bible_id,
+                    "media_asset_id": anchor["media_asset_id"],
+                },
+                created_by_user_id=actor_user_id,
+            )
+            self.asset_registry.promote(
+                logical.id,
+                asset_version.id,
+                promoted_by_user_id=actor_user_id,
+                reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+            )
+            recorded[key] = {
+                "kind": anchor["kind"],
+                "asset_id": logical.id,
+                "asset_version_id": asset_version.id,
+                "anchor_id": anchor["id"],
+                "anchor_version": anchor["version"],
+                "media_asset_id": anchor["media_asset_id"],
+                "subject": anchor["subject"],
+                "brief_id": brief_id,
+                "screenplay_id": screenplay_id,
+                "bible_id": bible_id,
+            }
+            with self.database.session() as session:
+                bible = session.get(VisualBibleVersion, bible_id)
+                if bible is not None:
+                    bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
+                    session.flush()
 
     def _record_lock_action(
         self,
@@ -3030,6 +3161,17 @@ class CreativeDirectorService:
         # The frame-anchor plan reads shot type, state and references, all of
         # which the intents just changed; re-planning here is what makes the
         # director's staging reach the plan the generation preflight reuses.
+        # Script compilation is what mints the Location rows, so a canonical
+        # SCENE plate can only be bound to its location now. Do it before the
+        # frame anchors are planned: `FrameAnchorPlanner._scene_asset_id` looks
+        # the plate up by exactly this key.
+        self._bind_scene_locations(project_id, episode_id, lineage)
+        if bible_id is not None:
+            with self.database.session() as session:
+                bible_row = session.get(VisualBibleVersion, bible_id)
+                if bible_row is not None:
+                    bible_row.lineage_json = lineage
+                    session.flush()
         replan = getattr(self.orchestrator, "plan_frame_anchors", None)
         if callable(replan):
             replan(episode_id)
@@ -3100,6 +3242,57 @@ class CreativeDirectorService:
             )
         except ShotIntentMismatch as exc:
             raise CreativeSessionConflict(str(exc), reason_code="SHOT_INTENT_MISMATCH") from exc
+
+    def _bind_scene_locations(
+        self, project_id: str, episode_id: str, lineage: dict[str, Any]
+    ) -> None:
+        """Point each canonical SCENE asset at the Location the compiler made.
+
+        The frame-anchor planner resolves a shot's scene plate by matching
+        ``Asset.canonical_metadata["location_id"]`` against the scene's
+        location; without this the planner finds no canonical scene reference
+        and every RECONSTRUCT_FIRST_FRAME plan downgrades to a fresh start.
+        """
+
+        if self.asset_registry is None:
+            return
+        scenes = {
+            key: item
+            for key, item in (lineage.get("assets") or {}).items()
+            if isinstance(item, dict) and item.get("kind") == "SCENE" and item.get("asset_id")
+        }
+        if not scenes:
+            return
+        from production_domain.models import Location, Scene
+
+        with self.database.session() as session:
+            location_ids = {
+                str(name).casefold(): location_id
+                for location_id, name in session.execute(
+                    select(Location.id, Location.name).where(Location.project_id == project_id)
+                ).tuples()
+            }
+            scene_location_ids = set(
+                session.scalars(
+                    select(Scene.location_id).where(
+                        Scene.episode_id == episode_id, Scene.location_id.is_not(None)
+                    )
+                )
+            )
+        for key, item in scenes.items():
+            location_id = location_ids.get(str(item.get("subject") or "").casefold())
+            if location_id is None or location_id not in scene_location_ids:
+                # The compiler named the location differently than the anchor
+                # did; recorded as unbound rather than guessed at.
+                item["location_id"] = None
+                item["location_bound"] = False
+                continue
+            self.asset_registry.annotate(
+                item["asset_id"], canonical_metadata={"location_id": location_id}
+            )
+            item["location_id"] = location_id
+            item["location_bound"] = True
+            _ = key
 
     def _write_shot_lineage(  # noqa: PLR0913
         self,

@@ -176,7 +176,60 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `aa8d5d3` (branch `claude/bestshiny-director-workflow-1a6b59`), deployed
+- **Current release.** `d491870` (`main`, [#46](https://github.com/Ethanwrite/bestshiny/pull/46)
+  the creative-director production chain: director intent reaches generation, Scene/Product/Prop
+  become real Canon, brief↔screenplay conformance, server-verified USER_STATED, optimistic
+  concurrency on dialogue and screenplay, a resumable visual-bible lock, legacy-session recovery,
+  full character identity coverage, key-visual retry, browser turn-id idempotency, Voyage frames
+  and pixel settlement, an advisory memory outbox, and multi-character Modal shadow analysis),
+  deployed 2026-09-04 ≈13:40Z. `DEPLOYED_SHA.prev = be6e10d`. Six migrations applied by the api
+  container's own `alembic upgrade head`, `0072_creation_soft_delete` → **`0078_creative_session_create_idempotency`**:
+  `0073` shot intent, `0074` lock steps, `0075` legacy session recovery (data), `0076` character
+  evidence coverage, `0077` memory index outbox, `0078` session create idempotency. No `.env`
+  change and no new required environment variable; the two new settings
+  (`memory_index_sweep_interval_seconds`, `memory_index_sweep_limit`) carry defaults.
+
+  **The worker was stopped before extraction and started only after the api reported head.**
+  That is a deliberate departure from the blanket `up -d` in §4: `0073` takes an ACCESS EXCLUSIVE
+  lock on `shots`, all six migrations run in one transaction, and the new candidate-commit path
+  enqueues into `memory_index_outbox` — a table that does not exist until `0077`. A worker left
+  running on the old image can block the DDL or commit into a missing table. Prefer
+  `stop worker` → `up -d api web` → wait for head → `up -d worker` whenever a release carries DDL.
+
+  `0075` acted on exactly one session on this host: `743d34cd-8ab2-4b07-bda8-79bf3cee44f0`,
+  stranded at BIBLE_PROPOSED with `current_screenplay_revision = 0`, no `creative_screenplays`
+  row and no compiled episode, moved to BRIEF_APPROVED with one appended MIGRATION turn. Its
+  approved brief was confirmed to exist *before* the deploy. All 6 `creative_visual_anchors`
+  had their empty `prompt_hash` backfilled — note that the backfill is **unscoped**, so 3 of
+  those 6 belong to the COMPILED session `49c9e983`, which the migration's own docstring says
+  it leaves alone. On a compiled session the hash has no behavioural effect, but the docstring
+  overstates the scope and the backfill is not restored by `downgrade`.
+
+  Verified after: `alembic current` = `0078` (head), api healthy, `127.0.0.1:8080/health` 200 and
+  `:3000` 200, public `api.bestshiny.com/health` 200 and `bestshiny.com` 200, all three running
+  image IDs equal the built ones, `docker-compose.prod.yml` byte-identical after extraction
+  (`COMPOSE_UNCHANGED`), the three new tables present, `memory_index_outbox` empty, and zero
+  tracebacks in api or worker. `voyage_memory` is **off** (no `feature_flags` rows exist at all),
+  so the 120-second outbox sweep defers every row without an embedding call; enabling it later
+  drains whatever backlog has accumulated, so check
+  `SELECT count(*) FROM memory_index_outbox WHERE status='PENDING'` first and enable per project.
+
+  **Rollback caveat, recorded because nothing downgrades it.** `0073`–`0078` have never had their
+  `downgrade()` bodies run against a populated database, and a code rollback to `be6e10d` *requires*
+  a downgrade to `0072` because the old image pins `REQUIRED_SCHEMA_REVISION = 0072_creation_soft_delete`.
+  Separately, any screenplay written after this deploy stores `invariants` / `required_copy` as
+  objects, which the pre-`d491870` schema cannot parse; rolling back needs those rows rewritten to
+  arrays of their `text` values (`SELECT id, session_id FROM creative_screenplays WHERE created_at > '<deploy time>'`)
+  or they are unreadable. Restore from `backups/` is the safer path, and it is still unrehearsed.
+
+- **Previous release.** `be6e10d` (`main`, [#44](https://github.com/Ethanwrite/bestshiny/pull/44)
+  delete a creation without rewriting what it cost, on top of
+  [#45](https://github.com/Ethanwrite/bestshiny/pull/45) the role runtime's capability catalogue),
+  deployed 2026-09-03 ≈22:54Z, Alembic `0072_creation_soft_delete`. This line was written
+  retrospectively on 2026-09-04 from `DEPLOYED_SHA.prev`: the release itself was never recorded
+  here, which is the same drift §6 warns about two entries down.
+
+- **Previous release.** `aa8d5d3` (branch `claude/bestshiny-director-workflow-1a6b59`), deployed
   2026-09-03 with the §4 backup/build/recreate procedure. Migration
   `0071_voyage_official_provider` moved `MULTIMODAL_EMBEDDING` from the retired
   `openrouter / voyageai/voyage-multimodal-3.5` definition to

@@ -261,7 +261,12 @@ def _bounded_frame(png_bytes: bytes) -> tuple[str, int, int, int] | None:
                         frame.height,
                         len(data),
                     )
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - None here means "no usable frame", never a 500
+        # Deliberately wider than OSError/ValueError. Pillow raises
+        # `DecompressionBombError`, which derives from Exception directly, for a
+        # frame whose pixel count exceeds its own ceiling - and an advisory
+        # frame that cannot be decoded must degrade to "no frame", not escape
+        # into the caller and surface as a business 500 on asset confirmation.
         return None
     return None
 

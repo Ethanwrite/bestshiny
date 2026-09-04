@@ -55,10 +55,15 @@ MAX_ATTEMPTS = 5
 #: A worker that is killed mid-embedding must not lose the memory for ever.
 CLAIM_LEASE_SECONDS = 900
 #: How long a row whose project has the flag off waits before it is looked at
-#: again. Short, so turning the flag on takes effect within a minute; non-zero,
-#: so a disabled project's backlog cannot hold the head of the queue and starve
-#: every other project for ever.
-DEFERRED_RETRY_SECONDS = 60
+#: again. Non-zero so a disabled project's backlog cannot hold the head of the
+#: queue and starve every other project for ever - and *longer than the sweep
+#: interval*, or it fails to do that: a deferral shorter than the interval is
+#: due again by the time the next sweep runs, so the same flag-off rows refill
+#: the `limit` every pass and an enabled project behind them is never reached.
+#: Turning the flag on therefore takes up to this long to start indexing on its
+#: own; drain it at once with `POST /internal/maintenance/memory-index` rather
+#: than shortening this below `memory_index_sweep_interval_seconds`.
+DEFERRED_RETRY_SECONDS = 300
 #: Backoff between attempts, by attempt number.
 RETRY_BACKOFF_SECONDS = (30, 300, 1800, 7200)
 #: The flag that governs whether anything is embedded at all.
@@ -160,7 +165,19 @@ class MemoryIndexOutboxWriter:
             # Enqueued inside the caller's own transaction: a memory is never
             # queued for Canon that rolled back, and the caller's transaction
             # is never blocked on a second connection.
-            return _insert(session)
+            #
+            # Inside a SAVEPOINT, because the caller is a visual-bible lock or
+            # a *paid* candidate commit. Two concurrent callers racing on the
+            # same idempotency key raise IntegrityError on flush, and without
+            # the savepoint that error escapes into the caller's transaction
+            # and rolls back the business write - losing Canon, or a commit the
+            # user has already been charged for, over an advisory vector row.
+            # Nothing in this module may fail a business request.
+            try:
+                with session.begin_nested():
+                    return _insert(session)
+            except IntegrityError:
+                return None
         try:
             with self.database.session() as owned:
                 return _insert(owned)
@@ -301,16 +318,30 @@ class MemoryIndexOutboxWorker:
                     # The lease expired and another worker took it over; its
                     # result is the one that counts.
                     continue
-                row.status = "DONE"
-                row.claim_id = None
-                row.completed_at = utcnow()
                 row.shot_memory_id = getattr(memory, "id", None)
-                # The engine writes the structurally retrievable row even when
-                # the embedding provider is down, and marks the vector
-                # degraded. That is DONE, not a retry: re-indexing would append
-                # a second ShotMemory for the same artefact, and one artefact
-                # is meant to have one memory. The degradation is recorded here
-                # and on the row itself, so a re-embed can be driven from it.
+                row.claim_id = None
+                if degraded and attempts < self.max_attempts:
+                    # The engine writes the structurally retrievable row even
+                    # when the embedding provider is down, and marks the vector
+                    # degraded. Leaving that DONE means an outage during a
+                    # deploy window silently costs those artefacts their vector
+                    # for ever. Retry instead - the memory's own idempotency
+                    # key is what stops a second ShotMemory being appended, so
+                    # a retry re-embeds rather than duplicating.
+                    backoff = RETRY_BACKOFF_SECONDS[
+                        min(attempts - 1, len(RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    row.status = "PENDING"
+                    row.last_error = "VECTOR_DEGRADED"
+                    row.next_attempt_at = datetime.now(UTC) + timedelta(seconds=backoff)
+                    session.flush()
+                    retried += 1
+                    continue
+                row.status = "DONE"
+                row.completed_at = utcnow()
+                # Out of attempts, or embedded cleanly. Either way the row is
+                # closed; `last_error` says which, so a re-embed can still be
+                # driven from it.
                 row.last_error = "VECTOR_DEGRADED" if degraded else None
                 session.flush()
             indexed += 1

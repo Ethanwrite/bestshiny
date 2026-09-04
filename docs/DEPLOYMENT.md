@@ -176,6 +176,40 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
+- **Current release.** `75ea271` (`main`, [#48](https://github.com/Ethanwrite/bestshiny/pull/48)
+  the four defects a pre-deploy audit found in the shipped tree, and
+  [#49](https://github.com/Ethanwrite/bestshiny/pull/49) the voyage video-pixel price), deployed
+  2026-09-04 ≈23:05Z. `DEPLOYED_SHA.prev = d491870`. One migration ran,
+  `0078` → **`0079_voyage_video_pixel_price`**: a single guarded INSERT, no DDL. No `.env` change.
+
+  `0075` is *modified* in this delta but was already applied here, so alembic did not re-run it —
+  its scoping fix reaches fresh databases only, which is what its commit says. Read the delta as
+  `git diff --name-status d491870 75ea271`: modified migrations in a delta are not re-applied
+  migrations, and confusing the two is how a release gets credited with a repair it did not make.
+
+  **`up -d` skipped `web` again — the fourth time on record.** It reported success while `web` sat
+  at `Up 9 hours` on the previous image (`14907147…` against a freshly built `c361392c…`).
+  `up -d --force-recreate --no-deps web` fixed it. The web bundle was byte-identical either way
+  (nothing under `apps/web/` changed in this delta), so nothing user-visible was stale — but the
+  container was running an image built from the *previous* commit while `DEPLOYED_SHA` claimed this
+  one. **Compare every container's running image ID against the built one, every deploy.**
+
+  Verified after: markers both written, `alembic current` = `0079`, all three running image IDs
+  equal the built ones, api healthy, local 8080/3000 200, public `api.bestshiny.com/health` and
+  `bestshiny.com` 200, `COMPOSE_UNCHANGED`, zero tracebacks in api or worker, `memory_index_outbox`
+  empty, and data untouched (14 sessions, 28 jobs, 6 anchors — the same counts as before). The three
+  official voyage-multimodal-3.5 list prices now all exist:
+
+  | input_mode | billing_unit | unit_price | effective_from |
+  | --- | --- | ---: | --- |
+  | `input_tokens` | `1M_tokens` | 0.12 USD | 2026-09-02 (0071) |
+  | `image_input` | `1B_pixels` | 0.60 USD | 2026-09-02 (0071) |
+  | `video_input` | `1B_pixels` | 0.60 USD | 2026-09-04 (0079) |
+
+  Video is the image rate because the vendor counts each frame as an image, which is also how this
+  platform sends video: as extracted stills. `settle_from_usage` no longer returns UNCERTAIN for a
+  usage block reporting video pixels.
+
 - **Current release.** `d491870` (`main`, [#46](https://github.com/Ethanwrite/bestshiny/pull/46)
   the creative-director production chain: director intent reaches generation, Scene/Product/Prop
   become real Canon, brief↔screenplay conformance, server-verified USER_STATED, optimistic

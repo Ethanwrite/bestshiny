@@ -1630,6 +1630,52 @@ class CharacterEvidenceSubmission(Base, TimestampMixin):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class MemoryIndexOutbox(Base, TimestampMixin):
+    """Work waiting to be embedded into the advisory vector memory.
+
+    Embedding is an external HTTPS call to a third party. Making it inside the
+    transaction that locks a visual bible or commits a candidate would put
+    Voyage's availability on the critical path of Canon, which is exactly
+    backwards: the memory is ADVISORY and the Canon is not. So the writer
+    enqueues a row here in its own transaction and a worker drains it
+    afterwards.
+
+    The idempotency key is what makes a replayed lock or a re-run worker
+    produce one ShotMemory rather than several. A row that cannot be embedded
+    backs off and is retried; when the ``voyage_memory`` flag is off it simply
+    waits, because a queue that is not being drained is a queue, not a loss.
+    """
+
+    __tablename__ = "memory_index_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_memory_index_outbox_key"),
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'DONE', 'FAILED')",
+            name="ck_memory_index_outbox_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_memory_index_outbox_attempts"),
+        Index("ix_memory_index_outbox_due", "status", "next_attempt_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(250), nullable=False)
+    #: What produced this work: VISUAL_BIBLE_LOCK or CANDIDATE_COMMIT.
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The ShotMemoryInput this row will build, minus the media URLs, which are
+    #: resolved when the row is drained so a re-signed URL is never stale.
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_id: Mapped[str | None] = mapped_column(String(36))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    shot_memory_id: Mapped[str | None] = mapped_column(String(36))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+
+
 class CharacterEvidenceCoverage(Base, TimestampMixin):
     """What the shadow analysis was asked about, per character, and what came back.
 

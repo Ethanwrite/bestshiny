@@ -22,6 +22,8 @@ from generation_policy_core import (
     CapabilityResolver,
     GenerationPolicyEngine,
 )
+from memory_core import MemoryLayer
+from memory_core.outbox import MemoryIndexOutboxWriter
 from narrative_core import AuthoritativeTimelineStateEngine
 from narrative_ledger_core import (
     LedgerWriteConflict,
@@ -108,6 +110,7 @@ class CandidatePipeline:
         characters: CharacterIdentityService | None = None,
         narrative_ledger: NarrativeLedgerService | None = None,
         shot_dependencies: ShotDependencyService | None = None,
+        memory_outbox: MemoryIndexOutboxWriter | None = None,
     ):
         self.database = database
         self.gateway = gateway
@@ -124,6 +127,9 @@ class CandidatePipeline:
         self.characters = characters
         self.narrative_ledger = narrative_ledger
         self.shot_dependencies = shot_dependencies
+        #: Advisory vector memory, enqueued in the commit transaction and
+        #: embedded later. Optional: nothing here depends on it.
+        self.memory_outbox = memory_outbox
         self.timeline = AuthoritativeTimelineStateEngine(database)
         self.policy = GenerationPolicyEngine(database)
 
@@ -1547,6 +1553,28 @@ class CandidatePipeline:
                     model_version="commit-pipeline-v3-narrative",
                 )
             )
+            if self.memory_outbox is not None:
+                # The shot is canon now. Remembering it is advisory and
+                # deliberately last: the row is queued inside this transaction,
+                # so it cannot be written for a commit that rolled back, and
+                # the external embedding happens off the hot path afterwards.
+                self.memory_outbox.enqueue(
+                    shot.scene.episode.project_id,
+                    session=session,
+                    idempotency_key=f"memory:shot:{shot.id}:candidate:{candidate_id}",
+                    source="CANDIDATE_COMMIT",
+                    memory_type="SHOT_RESULT",
+                    text=shot.compiled_prompt or shot.prompt or "",
+                    layer=MemoryLayer.EPISODIC,
+                    media_asset_ids=[item for item in [asset.id, current_end_frame.id] if item],
+                    shot_id=shot.id,
+                    scene_id=shot.scene_id,
+                    metadata={
+                        "candidate_id": candidate_id,
+                        "episode_id": shot.scene.episode_id,
+                        "qa_result_id": candidate.qa_result_id,
+                    },
+                )
             session.flush()
             return session.get(GenerationCandidate, candidate_id)
 

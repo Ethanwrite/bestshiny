@@ -26,7 +26,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:  # the director enqueues advisory memory; it never embeds
+    from memory_core.outbox import MemoryIndexOutboxWriter
 
 from platform_database import Database
 from production_domain.models import (
@@ -267,6 +270,9 @@ class LogicalAssets(Protocol):
     def annotate(self, asset_id: str, *, canonical_metadata: Any) -> Any: ...
 
 
+
+
+
 DIRECTOR_SKILL_NAME = "director"
 
 #: The system prompt used only when the Skill registry cannot supply the
@@ -399,6 +405,7 @@ class CreativeDirectorService:
         characters: IdentityLocker | None = None,
         styles: StyleLocker | None = None,
         asset_registry: LogicalAssets | None = None,
+        memory_outbox: MemoryIndexOutboxWriter | None = None,
         free_plan_turn_limit: int = 10,
     ):
         self.database = database
@@ -409,6 +416,7 @@ class CreativeDirectorService:
         self.characters = characters
         self.styles = styles
         self.asset_registry = asset_registry
+        self.memory_outbox = memory_outbox
         self.free_plan_turn_limit = max(0, int(free_plan_turn_limit))
         self.briefs = BriefEngine()
         #: Compares every screenplay revision with the brief the user approved.
@@ -2713,6 +2721,12 @@ class CreativeDirectorService:
             bible.locked_at = _now()
             bible.locked_by = actor
             row.status = CreativeSessionStatus.BIBLE_LOCKED.value
+            if not superseded:
+                # The bible is locked and its Canon is written. Remembering it
+                # is the last, weakest step: enqueued in this transaction, so a
+                # crash before the worker runs loses nothing, and embedded
+                # later, so a vendor outage cannot fail the lock.
+                self._enqueue_bible_memories(session, row, bible, lineage)
             if superseded:
                 # A key visual was replaced while the lock ran, so this bible no
                 # longer describes the project. The Canon it produced stays (it
@@ -3226,6 +3240,24 @@ class CreativeDirectorService:
             "screenplay_id": screenplay_id,
             "bible_id": bible_id,
         }
+
+    def _enqueue_bible_memories(
+        self,
+        session: Any,
+        row: CreativeSession,
+        bible: VisualBibleVersion,
+        lineage: dict[str, Any],
+    ) -> None:
+        """Queue every canonical artefact this lock produced, advisorily."""
+
+        if self.memory_outbox is None:
+            return
+        from .memory_index import bible_memories
+
+        for item in bible_memories(session, row, bible, lineage):
+            # In the caller's transaction: a memory is never queued for a lock
+            # that rolled back.
+            self.memory_outbox.enqueue(row.project_id, session=session, **item)
 
     # ------------------------------------------------------- the lock saga
     def _run_lock_step(  # noqa: PLR0913 - one runner for every lock step

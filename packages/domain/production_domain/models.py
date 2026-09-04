@@ -4765,6 +4765,58 @@ class CreativeBeat(Base, TimestampMixin):
     screenplay_id: Mapped[str | None] = mapped_column(ForeignKey("creative_screenplays.id"))
 
 
+class CreativeLockStep(Base, TimestampMixin):
+    """One step of the visual-bible lock, and what it produced.
+
+    Locking a bible writes real, immutable Canon through three services -
+    ProjectStyleService, CharacterIdentityService and the AssetRegistry - none
+    of which can share one transaction. A failure part-way therefore leaves
+    Canon that cannot be rolled back (asset versions, promotions and style
+    locks are append-only by database trigger, and a project has exactly one
+    style lock). The answer is not a rollback but a resume: each step has a
+    stable idempotency key and records what it produced, so a retry continues
+    the missing steps instead of minting a second identity version or a second
+    canonical asset version.
+
+    The row alone is not the guarantee - a process can die between the write
+    and the COMPLETED stamp - so every step also re-discovers its own output
+    from the Canon before doing the work. This table is what makes the resume
+    cheap and auditable; discovery is what makes it exactly-once.
+    """
+
+    __tablename__ = "creative_lock_steps"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_creative_lock_step_key"),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED')",
+            name="ck_creative_lock_step_status",
+        ),
+        Index("ix_creative_lock_step_bible", "bible_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    bible_id: Mapped[str] = mapped_column(
+        ForeignKey("visual_bibles.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    #: STYLE, CHARACTER_IDENTITY or SUPPORTING_ASSET.
+    step_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The anchor key (or "style:master") this step is about.
+    step_key: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(250), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: What the step created or found: identity version id, asset version id,
+    #: style lock id. The recovery record a partial lock is judged by.
+    produced_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: How the step was satisfied: EXECUTED (this attempt did it) or
+    #: RECOVERED (a previous attempt had already done it).
+    resolution: Mapped[str | None] = mapped_column(String(20))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CreativeShotLineage(Base, TimestampMixin):
     """Where one compiled shot came from: brief, screenplay, bible, anchors, locks.
 

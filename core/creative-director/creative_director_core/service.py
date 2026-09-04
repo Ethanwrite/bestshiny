@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, Protocol
 
 from platform_database import Database
@@ -35,6 +37,7 @@ from production_domain.models import (
     CreativeBeat,
     CreativeBriefRevision,
     CreativeFormat,
+    CreativeLockStep,
     CreativeScreenplayRevision,
     CreativeSession,
     CreativeSessionStatus,
@@ -2625,6 +2628,10 @@ class CreativeDirectorService:
             lineage["error"] = str(exc)[:500]
             lineage["error_type"] = type(exc).__name__
             lineage["failed_at"] = _now().isoformat()
+            # Exactly which steps stand and which are missing: the recovery
+            # record. Canon here is append-only, so a retry continues; nothing
+            # is ever deleted to "undo" a partial lock.
+            lineage["steps"] = self._lock_steps(bible_id)
             with self.database.session() as session:
                 bible = session.get(VisualBibleVersion, bible_id)
                 if bible is not None:
@@ -2637,20 +2644,66 @@ class CreativeDirectorService:
                 retryable=True,
             ) from exc
 
+        steps = self._lock_steps(bible_id)
+        unfinished = [item for item in steps if item["status"] != "COMPLETED"]
+        if unfinished:
+            # Belt and braces: a step that neither raised nor completed must
+            # never leave a LOCKED bible behind it.
+            lineage["lock_status"] = "PARTIAL"
+            lineage["steps"] = steps
+            with self.database.session() as session:
+                bible = session.get(VisualBibleVersion, bible_id)
+                if bible is not None:
+                    bible.lineage_json = lineage
+                    session.flush()
+            raise CreativeSessionConflict(
+                "the visual bible lock did not finish every step: "
+                + ", ".join(f"{item['kind']}:{item['key']}" for item in unfinished),
+                reason_code=ReasonCode.BIBLE_LOCK_INCOMPLETE.value,
+                details={"steps": steps},
+                retryable=True,
+            )
         with self.database.session() as session:
-            row = self._session(session, session_id)
+            row = session.scalar(
+                select(CreativeSession).where(CreativeSession.id == session_id).with_for_update()
+            )
+            if row is None:
+                raise LookupError("creative session not found")
             bible = session.get(VisualBibleVersion, bible_id)
             if bible is None:
                 raise LookupError("visual bible version not found")
+            superseded = bible.status == "SUPERSEDED" or bible.version != row.current_bible_version
             lineage["lock_status"] = "LOCKED"
             lineage["reason_codes"] = codes
+            lineage["steps"] = steps
             bible.lineage_json = lineage
             bible.status = "LOCKED"
             bible.locked_at = _now()
             bible.locked_by = actor
             row.status = CreativeSessionStatus.BIBLE_LOCKED.value
-            session.flush()
-            return _bible_view(bible)
+            if superseded:
+                # A key visual was replaced while the lock ran, so this bible no
+                # longer describes the project. The Canon it produced stays (it
+                # is append-only and correctly recorded); the bible does not
+                # become LOCKED on top of a superseded draft. The refusal is
+                # raised outside this transaction so the record of *why*
+                # survives - raising inside it would roll the record back.
+                session.rollback()
+            else:
+                session.flush()
+                return _bible_view(bible)
+        lineage["lock_status"] = "SUPERSEDED_DURING_LOCK"
+        with self.database.session() as session:
+            bible = session.get(VisualBibleVersion, bible_id)
+            if bible is not None:
+                bible.lineage_json = lineage
+                session.flush()
+        raise CreativeSessionConflict(
+            f"visual bible version {version} was superseded while it was being locked",
+            reason_code=ReasonCode.REVISION_SUPERSEDED.value,
+            details={"steps": steps},
+            retryable=True,
+        )
 
     def _lock_style(  # noqa: PLR0913
         self,
@@ -2665,96 +2718,136 @@ class CreativeDirectorService:
         codes: list[str],
         actor_user_id: str,
     ) -> None:
+        """Lock the project's visual style on this bible's key plate, once.
+
+        One style lock exists per project and it is append-only, so this is the
+        step a half-finished lock could permanently spend. It runs through the
+        step ledger and, before doing anything, looks for what a previous
+        attempt may already have created.
+        """
+
         assert self.styles is not None and self.asset_registry is not None
-        if lineage.get("style_lock_id"):
-            return
-        with self.database.session() as session:
-            existing = session.scalar(
-                select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
-            )
-            existing_id = existing.id if existing is not None else None
-            existing_version = existing.style_version_id if existing is not None else None
-        if existing_id is not None:
-            # One style per project is the platform rule; a later session
-            # inherits the lock and says so.
-            lineage["style_lock_id"] = existing_id
-            lineage["style_version_id"] = existing_version
-            lineage["style_inherited"] = True
+        anchor_id = style_snapshot["id"]
+        media_asset_id = style_snapshot["media_asset_id"]
+
+        def existing_lock() -> tuple[Any, Any] | tuple[None, None]:
+            with self.database.session() as session:
+                lock = session.scalar(
+                    select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id)
+                )
+                if lock is None:
+                    return None, None
+                from production_domain.models import AssetVersion
+
+                version_row = (
+                    session.get(AssetVersion, lock.style_version_id) if lock.style_version_id else None
+                )
+                return lock, version_row
+
+        def discover() -> dict[str, Any] | None:
+            lock, version_row = existing_lock()
+            if lock is None:
+                return None
+            metadata = dict(version_row.metadata_json or {}) if version_row is not None else {}
+            mine = metadata.get("bible_id") == bible_id and metadata.get("anchor_id") == anchor_id
+            if mine:
+                # A previous attempt of *this* lock already created it.
+                return {
+                    "style_lock_id": lock.id,
+                    "style_version_id": lock.style_version_id,
+                    "style_asset_id": version_row.asset_id if version_row is not None else None,
+                    "style_inherited": False,
+                    "recovered": True,
+                }
+            # Someone else's lock. One style per project is the platform rule,
+            # so this bible inherits it - but only ever on record, and never
+            # while pretending the plate is this bible's own.
+            inherited_from = metadata.get("creative_session_id")
             codes.append(ReasonCode.STYLE_LOCK_INHERITED.value)
-            self._record_lock_action(
-                session_id,
-                StructuredActionKind.LOCK_PROJECT_STYLE,
-                {"bible_id": bible_id, "style_lock_id": existing_id, "inherited": True},
-                idempotency_key=f"creative:{session_id}:lock:style:b{version}",
-                status=CreativeActionStatus.EXECUTED.value,
+            return {
+                "style_lock_id": lock.id,
+                "style_version_id": lock.style_version_id,
+                "style_asset_id": version_row.asset_id if version_row is not None else None,
+                "style_inherited": True,
+                "style_inherited_from_session_id": inherited_from,
+                "style_matches_this_bible": False,
+            }
+
+        def execute() -> dict[str, Any]:
+            assert self.asset_registry is not None and self.styles is not None
+            logical = next(
+                (
+                    item
+                    for item in self.asset_registry.list(project_id, asset_type="STYLE")
+                    if (item.canonical_metadata or {}).get("creative_session_id") == session_id
+                ),
+                None,
             )
-            return
-        logical = next(
-            (
-                item
-                for item in self.asset_registry.list(project_id, asset_type="STYLE")
-                if (item.canonical_metadata or {}).get("creative_session_id") == session_id
-            ),
-            None,
-        )
-        if logical is None:
-            logical = self.asset_registry.create(
-                project_id,
-                "STYLE",
-                f"{title[:180]} — style",
-                canonical_metadata={
+            if logical is None:
+                logical = self.asset_registry.create(
+                    project_id,
+                    "STYLE",
+                    f"{title[:180]} — style",
+                    canonical_metadata={
+                        "creative_session_id": session_id,
+                        "constraints": [
+                            item
+                            for item in [
+                                str(get_path(fields, "visual_style.medium") or ""),
+                                str(get_path(fields, "visual_style.palette") or ""),
+                            ]
+                            if item
+                        ],
+                    },
+                    created_by_user_id=actor_user_id,
+                )
+            style_version = self.asset_registry.add_version(
+                logical.id,
+                primary_media_asset_id=media_asset_id,
+                label=f"Visual bible v{version}",
+                source="CREATIVE_KEY_VISUAL",
+                metadata={
                     "creative_session_id": session_id,
-                    "constraints": [
-                        item
-                        for item in [
-                            str(get_path(fields, "visual_style.medium") or ""),
-                            str(get_path(fields, "visual_style.palette") or ""),
-                        ]
-                        if item
-                    ],
+                    "bible_id": bible_id,
+                    "anchor_id": anchor_id,
+                    "anchor_version": style_snapshot["version"],
                 },
                 created_by_user_id=actor_user_id,
             )
-        style_version = self.asset_registry.add_version(
-            logical.id,
-            primary_media_asset_id=style_snapshot["media_asset_id"],
-            label=f"Visual bible v{version}",
-            source="CREATIVE_KEY_VISUAL",
-            metadata={
-                "creative_session_id": session_id,
-                "bible_id": bible_id,
-                "anchor_id": style_snapshot["id"],
-                "anchor_version": style_snapshot["version"],
-            },
-            created_by_user_id=actor_user_id,
-        )
-        self.asset_registry.promote(
-            logical.id,
-            style_version.id,
-            promoted_by_user_id=actor_user_id,
-            reason=f"BestShiny Director visual bible v{version} approval",
-        )
-        lock = self.styles.lock(
-            project_id,
-            style_version.id,
-            locked_by_user_id=actor_user_id,
-            reason=f"BestShiny Director visual bible v{version} (session {session_id})",
-            explicit_confirmation=True,
-        )
-        lineage["style_lock_id"] = lock.id
-        lineage["style_asset_id"] = logical.id
-        lineage["style_version_id"] = style_version.id
-        lineage["style_inherited"] = False
-        self._record_lock_action(
-            session_id,
-            StructuredActionKind.LOCK_PROJECT_STYLE,
-            {
-                "bible_id": bible_id,
+            self.asset_registry.promote(
+                logical.id,
+                style_version.id,
+                promoted_by_user_id=actor_user_id,
+                reason=f"BestShiny Director visual bible v{version} approval",
+            )
+            lock = self.styles.lock(
+                project_id,
+                style_version.id,
+                locked_by_user_id=actor_user_id,
+                reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+                explicit_confirmation=True,
+            )
+            return {
                 "style_lock_id": lock.id,
                 "style_asset_id": logical.id,
                 "style_version_id": style_version.id,
-                "anchor_id": style_snapshot["id"],
-            },
+                "style_inherited": False,
+            }
+
+        produced = self._run_lock_step(
+            session_id=session_id,
+            bible_id=bible_id,
+            kind="STYLE",
+            step_key="style:master",
+            idempotency_key=f"creative:{session_id}:lock:style:b{version}",
+            discover=discover,
+            execute=execute,
+        )
+        lineage.update(produced)
+        self._record_lock_action(
+            session_id,
+            StructuredActionKind.LOCK_PROJECT_STYLE,
+            {"bible_id": bible_id, **produced},
             idempotency_key=f"creative:{session_id}:lock:style:b{version}",
             status=CreativeActionStatus.EXECUTED.value,
         )
@@ -2770,88 +2863,168 @@ class CreativeDirectorService:
         codes: list[str],
         actor_user_id: str,
     ) -> None:
+        """Confirm one CharacterIdentityVersion per character anchor, once each.
+
+        ``confirm_identity`` always appends a version, so a retry after a
+        partial failure used to mint a second identity for the same face. Each
+        character is now its own ledger step, and the step first looks for the
+        identity version this exact key visual already produced.
+        """
+
         assert self.characters is not None and self.asset_registry is not None
         identities: dict[str, Any] = lineage.setdefault("identities", {})
         for anchor in anchor_snapshot:
-            recorded = identities.get(anchor["anchor_key"])
-            if (
-                recorded
-                and recorded.get("media_asset_id") == anchor["media_asset_id"]
-                and recorded.get("identity_version_id")
-            ):
-                continue
             if not anchor["character_id"] or not anchor["media_asset_id"]:
                 raise LookupError(f"character anchor {anchor['title']} has no character or media")
-            identity = self.characters.confirm_identity(
-                anchor["character_id"],
-                anchor["media_asset_id"],
-                costume_signature=anchor["look"],
-            )
-            logical = next(
-                (
-                    item
-                    for item in self.asset_registry.list(project_id, asset_type="CHARACTER")
-                    if (item.canonical_metadata or {}).get("character_id") == anchor["character_id"]
+            produced = self._run_lock_step(
+                session_id=session_id,
+                bible_id=bible_id,
+                kind="CHARACTER_IDENTITY",
+                step_key=anchor["anchor_key"],
+                idempotency_key=(
+                    f"creative:{session_id}:lock:identity:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
                 ),
-                None,
+                discover=partial(self._discover_identity, project_id, bible_id, anchor),
+                execute=partial(
+                    self._confirm_identity, session_id, project_id, bible_id, anchor, actor_user_id
+                ),
             )
-            if logical is None:
-                logical = self.asset_registry.create(
-                    project_id,
-                    "CHARACTER",
-                    anchor["title"],
-                    canonical_metadata={"character_id": anchor["character_id"]},
-                    created_by_user_id=actor_user_id,
-                )
-            asset_version = self.asset_registry.add_version(
-                logical.id,
-                primary_media_asset_id=anchor["media_asset_id"],
-                label=f"Identity v{identity.version}",
-                source="CHARACTER_IDENTITY_CONFIRMATION",
-                metadata={
-                    "character_identity_version_id": identity.id,
-                    "creative_session_id": session_id,
-                    "bible_id": bible_id,
-                    "anchor_id": anchor["id"],
-                    "costume_signature": anchor["look"],
-                },
-                created_by_user_id=actor_user_id,
-            )
-            self.asset_registry.promote(
-                logical.id,
-                asset_version.id,
-                promoted_by_user_id=actor_user_id,
-                reason="BestShiny Director visual bible approval",
-            )
-            identities[anchor["anchor_key"]] = {
-                "identity_version_id": identity.id,
-                "identity_version": identity.version,
-                "character_id": anchor["character_id"],
-                "media_asset_id": anchor["media_asset_id"],
-                "anchor_id": anchor["id"],
-                "anchor_version": anchor["version"],
-                "logical_asset_version_id": asset_version.id,
-            }
+            identities[anchor["anchor_key"]] = produced
             self._record_lock_action(
                 session_id,
                 StructuredActionKind.LOCK_CHARACTER_IDENTITY,
-                {
-                    "bible_id": bible_id,
-                    "anchor_id": anchor["id"],
-                    "character_id": anchor["character_id"],
-                    "identity_version_id": identity.id,
-                },
-                idempotency_key=f"creative:{session_id}:lock:identity:{anchor['anchor_key']}:v{anchor['version']}:b{version}",
+                {"bible_id": bible_id, **produced},
+                idempotency_key=(
+                    f"creative:{session_id}:lock:identity:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
+                ),
                 status=CreativeActionStatus.EXECUTED.value,
             )
-            # Persist progress after each identity so a later failure retries
-            # only what is missing instead of minting duplicate versions.
             with self.database.session() as session:
                 bible = session.get(VisualBibleVersion, bible_id)
                 if bible is not None:
                     bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
                     session.flush()
         _ = codes
+
+    def _discover_identity(
+        self, project_id: str, bible_id: str, anchor: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """What a previous attempt of this identity step already produced."""
+
+        from production_domain.models import AssetVersion, CharacterIdentityVersion
+
+        with self.database.session() as session:
+            identity = session.scalar(
+                select(CharacterIdentityVersion)
+                .where(
+                    CharacterIdentityVersion.character_id == anchor["character_id"],
+                    CharacterIdentityVersion.master_asset_id == anchor["media_asset_id"],
+                )
+                .order_by(CharacterIdentityVersion.version.desc())
+            )
+            if identity is None:
+                return None
+            asset_version = session.scalar(
+                select(AssetVersion).where(
+                    AssetVersion.primary_media_asset_id == anchor["media_asset_id"],
+                    AssetVersion.source == "CHARACTER_IDENTITY_CONFIRMATION",
+                )
+            )
+            asset_version_id = asset_version.id if asset_version is not None else None
+        if asset_version_id is None:
+            # The identity exists but its canonical asset version does not: the
+            # previous attempt died between the two writes. Finish the half
+            # that is missing rather than re-confirming the identity.
+            asset_version_id = self._promote_identity_asset(
+                project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=None
+            )
+        return {
+            "identity_version_id": identity.id,
+            "identity_version": identity.version,
+            "character_id": anchor["character_id"],
+            "media_asset_id": anchor["media_asset_id"],
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "logical_asset_version_id": asset_version_id,
+            "recovered": True,
+        }
+
+    def _promote_identity_asset(
+        self,
+        project_id: str,
+        bible_id: str,
+        anchor: dict[str, Any],
+        *,
+        identity_id: str,
+        actor_user_id: str | None,
+    ) -> str:
+        assert self.asset_registry is not None
+        logical = next(
+            (
+                item
+                for item in self.asset_registry.list(project_id, asset_type="CHARACTER")
+                if (item.canonical_metadata or {}).get("character_id") == anchor["character_id"]
+            ),
+            None,
+        )
+        if logical is None:
+            logical = self.asset_registry.create(
+                project_id,
+                "CHARACTER",
+                anchor["title"],
+                canonical_metadata={"character_id": anchor["character_id"]},
+                created_by_user_id=actor_user_id,
+            )
+        asset_version = self.asset_registry.add_version(
+            logical.id,
+            primary_media_asset_id=anchor["media_asset_id"],
+            label=f"Identity {identity_id}",
+            source="CHARACTER_IDENTITY_CONFIRMATION",
+            metadata={
+                "character_identity_version_id": identity_id,
+                "bible_id": bible_id,
+                "anchor_id": anchor["id"],
+                "costume_signature": anchor["look"],
+            },
+            created_by_user_id=actor_user_id,
+        )
+        self.asset_registry.promote(
+            logical.id,
+            asset_version.id,
+            promoted_by_user_id=actor_user_id,
+            reason="BestShiny Director visual bible approval",
+        )
+        return str(asset_version.id)
+
+    def _confirm_identity(
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        anchor: dict[str, Any],
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        assert self.characters is not None
+        identity = self.characters.confirm_identity(
+            anchor["character_id"],
+            anchor["media_asset_id"],
+            costume_signature=anchor["look"],
+        )
+        asset_version_id = self._promote_identity_asset(
+            project_id, bible_id, anchor, identity_id=identity.id, actor_user_id=actor_user_id
+        )
+        return {
+            "identity_version_id": identity.id,
+            "identity_version": identity.version,
+            "character_id": anchor["character_id"],
+            "media_asset_id": anchor["media_asset_id"],
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "logical_asset_version_id": asset_version_id,
+            "creative_session_id": session_id,
+        }
 
     def _lock_supporting_assets(  # noqa: PLR0913 - the lineage this records needs every id
         self,
@@ -2873,75 +3046,247 @@ class CreativeDirectorService:
         promotes it rather than overwriting the old one - the old image stays
         exactly what it was, and every version records the anchor, the anchor
         version, the brief, the screenplay, the bible and the media it came
-        from.
+        from. Each anchor is its own ledger step, and each step first looks for
+        the version a previous attempt may already have created.
         """
 
         assert self.asset_registry is not None
         recorded: dict[str, Any] = lineage.setdefault("assets", {})
-        existing_by_key: dict[tuple[str, str], Any] = {}
-        for kind in _CANONICAL_ANCHOR_KINDS:
-            for item in self.asset_registry.list(project_id, asset_type=kind):
-                anchor_key = (item.canonical_metadata or {}).get("creative_anchor_key")
-                if anchor_key:
-                    existing_by_key[(kind, str(anchor_key))] = item
         for anchor in anchors:
-            key = anchor["anchor_key"]
-            already = recorded.get(key)
-            if already and already.get("media_asset_id") == anchor["media_asset_id"]:
-                continue
-            logical = existing_by_key.get((anchor["kind"], key))
-            if logical is None:
-                logical = self.asset_registry.create(
+            produced = self._run_lock_step(
+                session_id=session_id,
+                bible_id=bible_id,
+                kind="SUPPORTING_ASSET",
+                step_key=anchor["anchor_key"],
+                idempotency_key=(
+                    f"creative:{session_id}:lock:asset:{anchor['anchor_key']}"
+                    f":v{anchor['version']}:b{version}"
+                ),
+                discover=partial(self._discover_supporting_asset, project_id, bible_id, anchor),
+                execute=partial(
+                    self._promote_supporting_asset,
+                    session_id,
                     project_id,
-                    anchor["kind"],
-                    anchor["title"][:180] or anchor["subject"][:180] or key,
-                    canonical_metadata={
-                        "creative_anchor_key": key,
-                        "creative_session_id": session_id,
-                        "subject": anchor["subject"],
-                    },
-                    created_by_user_id=actor_user_id,
-                )
-            asset_version = self.asset_registry.add_version(
-                logical.id,
-                primary_media_asset_id=anchor["media_asset_id"],
-                label=f"Visual bible v{version}",
-                source="CREATIVE_KEY_VISUAL",
-                metadata={
-                    "creative_session_id": session_id,
-                    "anchor_id": anchor["id"],
-                    "anchor_key": key,
-                    "anchor_version": anchor["version"],
-                    "brief_id": brief_id,
-                    "screenplay_id": screenplay_id,
-                    "bible_id": bible_id,
-                    "media_asset_id": anchor["media_asset_id"],
-                },
-                created_by_user_id=actor_user_id,
+                    bible_id,
+                    version,
+                    brief_id,
+                    screenplay_id,
+                    anchor,
+                    actor_user_id,
+                ),
             )
-            self.asset_registry.promote(
-                logical.id,
-                asset_version.id,
-                promoted_by_user_id=actor_user_id,
-                reason=f"BestShiny Director visual bible v{version} (session {session_id})",
-            )
-            recorded[key] = {
-                "kind": anchor["kind"],
-                "asset_id": logical.id,
-                "asset_version_id": asset_version.id,
-                "anchor_id": anchor["id"],
-                "anchor_version": anchor["version"],
-                "media_asset_id": anchor["media_asset_id"],
-                "subject": anchor["subject"],
-                "brief_id": brief_id,
-                "screenplay_id": screenplay_id,
-                "bible_id": bible_id,
-            }
+            recorded[anchor["anchor_key"]] = produced
             with self.database.session() as session:
                 bible = session.get(VisualBibleVersion, bible_id)
                 if bible is not None:
                     bible.lineage_json = {**lineage, "lock_status": "PARTIAL"}
                     session.flush()
+
+    def _supporting_asset(self, project_id: str, kind: str, anchor_key: str) -> Any:
+        assert self.asset_registry is not None
+        return next(
+            (
+                item
+                for item in self.asset_registry.list(project_id, asset_type=kind)
+                if (item.canonical_metadata or {}).get("creative_anchor_key") == anchor_key
+            ),
+            None,
+        )
+
+    def _discover_supporting_asset(
+        self, project_id: str, bible_id: str, anchor: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        from production_domain.models import AssetVersion
+
+        logical = self._supporting_asset(project_id, anchor["kind"], anchor["anchor_key"])
+        if logical is None:
+            return None
+        with self.database.session() as session:
+            found = session.scalar(
+                select(AssetVersion)
+                .where(
+                    AssetVersion.asset_id == logical.id,
+                    AssetVersion.primary_media_asset_id == anchor["media_asset_id"],
+                )
+                .order_by(AssetVersion.version.desc())
+            )
+            if found is None or dict(found.metadata_json or {}).get("bible_id") != bible_id:
+                return None
+            version_id = found.id
+            canonical = logical.canonical_version_id
+        if canonical != version_id:
+            # The version exists but was never promoted: finish that half.
+            assert self.asset_registry is not None
+            self.asset_registry.promote(
+                logical.id,
+                version_id,
+                reason=f"BestShiny Director visual bible resume (bible {bible_id})",
+            )
+        return {
+            "kind": anchor["kind"],
+            "asset_id": logical.id,
+            "asset_version_id": version_id,
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "media_asset_id": anchor["media_asset_id"],
+            "subject": anchor["subject"],
+            "bible_id": bible_id,
+            "recovered": True,
+        }
+
+    def _promote_supporting_asset(  # noqa: PLR0913 - the version records every origin
+        self,
+        session_id: str,
+        project_id: str,
+        bible_id: str,
+        version: int,
+        brief_id: str,
+        screenplay_id: str,
+        anchor: dict[str, Any],
+        actor_user_id: str,
+    ) -> dict[str, Any]:
+        assert self.asset_registry is not None
+        logical = self._supporting_asset(project_id, anchor["kind"], anchor["anchor_key"])
+        if logical is None:
+            logical = self.asset_registry.create(
+                project_id,
+                anchor["kind"],
+                anchor["title"][:180] or anchor["subject"][:180] or anchor["anchor_key"],
+                canonical_metadata={
+                    "creative_anchor_key": anchor["anchor_key"],
+                    "creative_session_id": session_id,
+                    "subject": anchor["subject"],
+                },
+                created_by_user_id=actor_user_id,
+            )
+        asset_version = self.asset_registry.add_version(
+            logical.id,
+            primary_media_asset_id=anchor["media_asset_id"],
+            label=f"Visual bible v{version}",
+            source="CREATIVE_KEY_VISUAL",
+            metadata={
+                "creative_session_id": session_id,
+                "anchor_id": anchor["id"],
+                "anchor_key": anchor["anchor_key"],
+                "anchor_version": anchor["version"],
+                "brief_id": brief_id,
+                "screenplay_id": screenplay_id,
+                "bible_id": bible_id,
+                "media_asset_id": anchor["media_asset_id"],
+            },
+            created_by_user_id=actor_user_id,
+        )
+        self.asset_registry.promote(
+            logical.id,
+            asset_version.id,
+            promoted_by_user_id=actor_user_id,
+            reason=f"BestShiny Director visual bible v{version} (session {session_id})",
+        )
+        return {
+            "kind": anchor["kind"],
+            "asset_id": logical.id,
+            "asset_version_id": asset_version.id,
+            "anchor_id": anchor["id"],
+            "anchor_version": anchor["version"],
+            "media_asset_id": anchor["media_asset_id"],
+            "subject": anchor["subject"],
+            "brief_id": brief_id,
+            "screenplay_id": screenplay_id,
+            "bible_id": bible_id,
+        }
+
+    # ------------------------------------------------------- the lock saga
+    def _run_lock_step(  # noqa: PLR0913 - one runner for every lock step
+        self,
+        *,
+        session_id: str,
+        bible_id: str,
+        kind: str,
+        step_key: str,
+        idempotency_key: str,
+        discover: Callable[[], dict[str, Any] | None],
+        execute: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run one lock step exactly once, across process deaths.
+
+        Three things make that true. The step ledger records what has already
+        been done, so a retry skips it. ``discover`` re-reads the Canon for
+        this step's own output first, so a process that died between the write
+        and the COMPLETED stamp does not produce a second identity version or a
+        second canonical asset version. And a failure is recorded on the row
+        with its error, so a partially locked bible says exactly which steps
+        stand and which are missing - nothing is ever rolled back, because
+        Canon here is append-only by construction.
+        """
+
+        with self.database.session() as session:
+            row = session.scalar(
+                select(CreativeLockStep)
+                .where(CreativeLockStep.idempotency_key == idempotency_key)
+                .with_for_update()
+            )
+            if row is None:
+                row = CreativeLockStep(
+                    session_id=session_id,
+                    bible_id=bible_id,
+                    step_kind=kind,
+                    step_key=step_key[:160],
+                    idempotency_key=idempotency_key[:250],
+                    status="PENDING",
+                )
+                session.add(row)
+                session.flush()
+            if row.status == "COMPLETED":
+                return dict(row.produced_json)
+            row.status = "RUNNING"
+            row.attempts += 1
+            row.last_error = None
+            session.flush()
+        try:
+            recovered = discover()
+            produced = recovered if recovered is not None else execute()
+        except Exception as exc:
+            with self.database.session() as session:
+                failed = session.scalar(
+                    select(CreativeLockStep).where(
+                        CreativeLockStep.idempotency_key == idempotency_key
+                    )
+                )
+                if failed is not None:
+                    failed.status = "FAILED"
+                    failed.last_error = f"{type(exc).__name__}: {exc}"[:500]
+                    session.flush()
+            raise
+        with self.database.session() as session:
+            done = session.scalar(
+                select(CreativeLockStep).where(CreativeLockStep.idempotency_key == idempotency_key)
+            )
+            if done is not None:
+                done.status = "COMPLETED"
+                done.produced_json = produced
+                done.resolution = "RECOVERED" if recovered is not None else "EXECUTED"
+                done.completed_at = _now()
+                session.flush()
+        return produced
+
+    def _lock_steps(self, bible_id: str) -> list[dict[str, Any]]:
+        with self.database.session() as session:
+            return [
+                {
+                    "kind": row.step_kind,
+                    "key": row.step_key,
+                    "status": row.status,
+                    "attempts": row.attempts,
+                    "resolution": row.resolution,
+                    "produced": dict(row.produced_json),
+                    "error": row.last_error,
+                }
+                for row in session.scalars(
+                    select(CreativeLockStep)
+                    .where(CreativeLockStep.bible_id == bible_id)
+                    .order_by(CreativeLockStep.created_at, CreativeLockStep.id)
+                )
+            ]
 
     def _record_lock_action(
         self,

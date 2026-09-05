@@ -21,7 +21,7 @@ from typing import Any
 
 from production_domain.models import CreativeFormat
 
-from .evidence import EvidenceVerdict, UserTextIndex
+from .evidence import VALUE_NOT_IN_EVIDENCE, EvidenceVerdict, UserTextIndex, normalize
 from .schemas import (
     ASPECT_RATIOS,
     ASSUMED_SOURCES,
@@ -112,6 +112,129 @@ _TIME_CUES: tuple[tuple[tuple[str, ...], str], ...] = (
 
 #: Sentences the context builder must never compress away.
 PROHIBITION_CUES = ("不要", "不能", "不准", "禁止", "别", "never", "don't", "do not", "must not", "no ")
+
+_ASPECT_CUES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("9:16", "竖屏", "竖版", "vertical", "portrait"), "9:16"),
+    (("16:9", "横屏", "横版", "horizontal", "landscape", "widescreen"), "16:9"),
+    (("1:1", "方形", "正方形", "square"), "1:1"),
+    (("4:3",), "4:3"),
+    (("3:4",), "3:4"),
+    (("21:9", "超宽", "ultrawide", "ultra-wide", "cinemascope"), "21:9"),
+    (("3:2",), "3:2"),
+    (("2:3",), "2:3"),
+)
+
+#: How the user may have named an enum-like value in their own words. The
+#: deterministic extractor reads these cues forwards (text -> value); the
+#: evidence check reads them backwards (value -> the cues that can prove it),
+#: so "改成动画" proves ``visual_style.medium = "anime"`` and "vertical" proves
+#: ``aspect_ratio = "9:16"`` without the user having to type the canonical form.
+_VALUE_CUES: dict[str, tuple[tuple[tuple[str, ...], str], ...]] = {
+    "format": tuple((cues, value.value) for cues, value in _FORMAT_CUES),
+    "platform": _PLATFORM_CUES,
+    "tone": _TONE_CUES,
+    "visual_style.medium": _MEDIUM_CUES,
+    "setting.time": _TIME_CUES,
+    "aspect_ratio": _ASPECT_CUES,
+}
+#: Paths whose value has to be the user's own term, verbatim: a place, a
+#: product, a claim about it. Downstream the screenplay is held to that exact
+#: wording, so a translation or a paraphrase of these is the director's
+#: reading of the user, not the user's word.
+_LITERAL_VALUE_PATHS = frozenset({"setting.location", "product.name", "product.selling_points"})
+
+_CJK_DIGITS = {
+    "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+_CJK_UNITS = {"十": 10, "百": 100, "千": 1000}
+_CJK_NUMBER = re.compile(r"[零〇一二两三四五六七八九十百千]+")
+_ARABIC_NUMBER = re.compile(r"\d{1,4}")
+_MINUTE_CUE = re.compile(r"分钟|分\b|\bmins?\b|\bminutes?\b", re.IGNORECASE)
+
+
+def _cjk_numbers(text: str) -> set[int]:
+    """Every number written in Chinese numerals: 三十 -> 30, 一百二十 -> 120."""
+
+    values: set[int] = set()
+    for match in _CJK_NUMBER.findall(text):
+        total = 0
+        current = 0
+        for character in match:
+            if character in _CJK_DIGITS:
+                current = _CJK_DIGITS[character]
+            else:
+                total += (current or 1) * _CJK_UNITS[character]
+                current = 0
+        values.add(total + current)
+    return values
+
+
+def _numbers_in(text: str) -> set[int]:
+    numbers = {int(item) for item in _ARABIC_NUMBER.findall(text)} | _cjk_numbers(text)
+    if _MINUTE_CUE.search(text):
+        # "两分钟" and "2 min" both say 120 seconds; the value is in seconds.
+        numbers |= {item * 60 for item in list(numbers)}
+    return numbers
+
+
+def _quoted(item: Any, evidence_folded: str, evidence_raw: str, cues: Any = None) -> bool:
+    text = " ".join(str(item if item is not None else "").split())
+    if not text:
+        return True
+    if normalize(text) and normalize(text) in evidence_folded:
+        return True
+    if cues:
+        wanted = text.casefold()
+        for phrases, value in cues:
+            if str(value).casefold() == wanted and any(
+                phrase.casefold() in evidence_raw for phrase in phrases
+            ):
+                return True
+    return False
+
+
+def value_supported_by_evidence(path: str, op: BriefOperationKind, value: Any, evidence: str) -> bool:
+    """Does the quoted evidence actually say the value this operation writes?
+
+    The quote check proves the sentence is the user's; this proves the
+    sentence is *about* the value. Without it a genuine "the rooftop is
+    perfect" could carry ``REPLACE setting.location = "subway"`` as if the
+    user had said so. It is deliberately literal: a place, a product or a
+    claim has to appear in the quote; an enum-like value may appear through
+    any of the cues the extractor itself understands; a number may be written
+    in digits or in Chinese numerals. Prose the director is expected to phrase
+    (the logline, the hook, the call to action) is not held to this, because
+    it is a summary by nature and the quote check already says whose words
+    justified it.
+    """
+
+    if op is BriefOperationKind.KEEP or value is None:
+        return True
+    evidence_raw = str(evidence or "").casefold()
+    evidence_folded = normalize(str(evidence or ""))
+    if path == CHARACTER_LIST_PATH:
+        members = value if isinstance(value, list) else [value]
+        names = [
+            member.get("name") if isinstance(member, dict) else member for member in members
+        ]
+        return all(_quoted(name, evidence_folded, evidence_raw) for name in names if name)
+    if op is BriefOperationKind.REMOVE:
+        return True
+    if path in _LITERAL_VALUE_PATHS:
+        items = value if isinstance(value, list) else [value]
+        return all(_quoted(item, evidence_folded, evidence_raw) for item in items)
+    cues = _VALUE_CUES.get(path)
+    if cues is not None:
+        items = value if isinstance(value, list) else [value]
+        return all(_quoted(item, evidence_folded, evidence_raw, cues) for item in items)
+    if path in INTEGER_PATHS:
+        try:
+            number = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return False
+        return number in _numbers_in(str(evidence or ""))
+    return True
 
 
 def brief_hash(fields: dict[str, Any]) -> str:
@@ -389,6 +512,20 @@ def apply_operations(
             verdict = actor.evidence_index.verify(
                 operation.evidence, turn_id=operation.evidence_turn_id
             )
+            if verdict.verified and not value_supported_by_evidence(
+                operation.path, operation.op, operation.value, operation.evidence
+            ):
+                # The user did say this - but not about this value. The span
+                # is kept so the audit shows the real sentence that was
+                # offered as proof of something else.
+                verdict = EvidenceVerdict(
+                    False,
+                    VALUE_NOT_IN_EVIDENCE,
+                    turn_id=verdict.turn_id,
+                    turn_sequence=verdict.turn_sequence,
+                    span=verdict.span,
+                    quote=verdict.quote,
+                )
             if verdict.verified:
                 verdicts[id(operation)] = verdict
                 verified.append(operation)

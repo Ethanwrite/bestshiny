@@ -71,7 +71,12 @@ MEMORY_FEATURE_FLAG = "voyage_memory"
 
 
 class MemoryIndexer(Protocol):
-    """The slice of ``MultimodalMemoryEngine`` this worker needs."""
+    """The slice of ``MultimodalMemoryEngine`` this worker needs.
+
+    ``reindex`` is optional: an indexer that lacks it is retried through
+    ``index``, which is how the queue behaved before degraded rows could be
+    re-embedded in place.
+    """
 
     def index(self, value: ShotMemoryInput) -> Any: ...
 
@@ -295,6 +300,9 @@ class MemoryIndexOutboxWorker:
                 project_id = row.project_id
                 payload = dict(row.payload_json)
                 attempts = row.attempts + 1
+                #: The memory a previous attempt wrote without a vector. A
+                #: retry re-embeds *that* row rather than appending a second.
+                degraded_memory_id = row.shot_memory_id
                 session.flush()
             # The claim is a compare-and-set, not a read-modify-write: two
             # workers reading the same PENDING row would otherwise both index
@@ -324,7 +332,12 @@ class MemoryIndexOutboxWorker:
             claimed += 1
             try:
                 value = self._build(project_id, payload)
-                memory = self.memory.index(value)
+                reindex = getattr(self.memory, "reindex", None)
+                memory = (
+                    reindex(degraded_memory_id, value)
+                    if degraded_memory_id and callable(reindex)
+                    else self.memory.index(value)
+                )
             except Exception as exc:  # noqa: BLE001 - advisory work never escapes
                 with self.database.session() as session:
                     row = session.get(MemoryIndexOutbox, row_id)
@@ -361,9 +374,9 @@ class MemoryIndexOutboxWorker:
                     # when the embedding provider is down, and marks the vector
                     # degraded. Leaving that DONE means an outage during a
                     # deploy window silently costs those artefacts their vector
-                    # for ever. Retry instead - the memory's own idempotency
-                    # key is what stops a second ShotMemory being appended, so
-                    # a retry re-embeds rather than duplicating.
+                    # for ever. Retry instead: `shot_memory_id` is kept on the
+                    # row, and the retry re-embeds that memory in place through
+                    # `reindex` rather than appending a second one.
                     backoff = RETRY_BACKOFF_SECONDS[
                         min(attempts - 1, len(RETRY_BACKOFF_SECONDS) - 1)
                     ]

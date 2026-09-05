@@ -3963,13 +3963,27 @@ function renderCreative() {
       ["Character identities", identities.length ? identities.map(([key, entry]) => `${key.replace("character:", "")} v${entry.identity_version}`).join(", ") : null],
     ].filter(([, value]) => value).map(([label, value]) =>
       `<div class="kv"><span>${label}</span><b>${escapeHTML(String(value))}</b></div>`).join("");
+    const inheritance = content.style_inheritance;
+    const styleConflict = Boolean(inheritance && inheritance.inherited && !inheritance.matches_brief);
     if (lineage.lock_status === "FAILED") {
       setNotice("creativeBibleNotice", `<b>Lock failed — compilation is blocked</b>${escapeHTML(lineage.error || "unknown error")} (${escapeHTML(lineage.error_type || "")}). Fix the cause and approve again; completed identities are kept.`, "is-error");
     } else if (bible.status === "LOCKED") {
       setNotice("creativeBibleNotice", `<b>Locked</b>Identities and style are bound through the platform's own locks.`);
+    } else if (styleConflict) {
+      // A project keeps one style lock. This brief asks for a different
+      // look than the one already locked, so the lock refuses until the
+      // user says, on record, that the new characters and scenes may render
+      // in the existing style.
+      const locked = inheritance.locked_style || {};
+      const wanted = inheritance.brief_style || {};
+      const describe = (style) => style.unknown
+        ? "a look this project locked outside the director (not recorded)"
+        : [style.medium, style.palette, (style.tone || []).join("/")].filter(Boolean).join(" · ");
+      setNotice("creativeBibleNotice", `<b>This project already has a locked style</b>Locked: ${escapeHTML(describe(locked))}. This brief asks for: ${escapeHTML(describe(wanted))}. Locking will render this bible's characters and scenes in the existing style — tick the box below to accept that, or start a new project for the new look.`, "is-warning");
     } else {
       setNotice("creativeBibleNotice", "");
     }
+    $("creativeAcceptInheritedStyleLabel").hidden = !(bible.status === "DRAFT" && styleConflict);
     $("creativeLockBibleBtn").hidden = bible.status !== "DRAFT";
     $("creativeLockBibleBtn").textContent = lineage.lock_status === "FAILED" ? "Retry lock" : "Approve & lock this version";
   }
@@ -4231,9 +4245,10 @@ async function creativeProposeBible() {
 async function creativeLockBible() {
   const view = state.creative.session;
   if (!view?.bible) return;
+  const acceptInheritedStyle = $("creativeAcceptInheritedStyle")?.checked === true;
   const result = await request(`/v1/creative/sessions/${view.session.id}/bible/approve`, {
     method: "POST",
-    body: JSON.stringify({ version: view.bible.version }),
+    body: JSON.stringify({ version: view.bible.version, accept_inherited_style: acceptInheritedStyle }),
   });
   const identities = Object.keys(result.lineage?.identities || {}).length;
   toast(`Visual bible locked: ${identities} character identit${identities === 1 ? "y" : "ies"} and the project style${result.lineage?.style_inherited ? " (inherited)" : ""} are bound.`);

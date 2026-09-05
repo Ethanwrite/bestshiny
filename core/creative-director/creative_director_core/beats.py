@@ -401,6 +401,20 @@ def director_intent(
         "required_copy": [
             str(item) for item in (intent.get("required_copy") or []) if str(item).strip()
         ],
+        # What the user forbade, whole and as the things it forbids. The
+        # compiler turns these into constraints, a QC line and negative
+        # prompt terms, so a prohibition holds at generation and at review,
+        # not only at the screenplay gate that can read no action semantics.
+        "prohibitions": [
+            str(item) for item in (intent.get("prohibitions") or []) if str(item).strip()
+        ],
+        "prohibited_terms": [
+            str(item) for item in (intent.get("prohibited_terms") or []) if str(item).strip()
+        ],
+        # The frame the user approved in the brief. The project default is a
+        # setting for shots made outside a session; a compiled shot renders
+        # (and is billed) at the aspect the brief and the key visuals used.
+        "aspect_ratio": str(intent.get("aspect_ratio") or ""),
         "reference_asset_ids": list(dict.fromkeys(reference_asset_ids or [])),
         # Provenance: which approved screenplay revision, which beat, which
         # shot intent every field above came from.

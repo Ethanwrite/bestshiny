@@ -19,3 +19,6 @@ from .shot import (
 from .shot import (
     PassengerGenerationCommand as PassengerGenerationCommand,
 )
+from .shot import (
+    approved_aspect_ratio as approved_aspect_ratio,
+)

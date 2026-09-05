@@ -122,6 +122,11 @@ class AnchorReplace(BaseModel):
 
 class BibleApprove(BaseModel):
     version: int = Field(ge=1)
+    #: Lock this bible onto the project's existing style lock even though its
+    #: look is not the one the brief asks for. Refused as STYLE_LOCK_CONFLICT
+    #: without it; the user is the only one who may decide that the new
+    #: characters and scenes render in the older style.
+    accept_inherited_style: bool = False
 
 
 class BeatsApprove(BaseModel):
@@ -712,6 +717,7 @@ def register_creative_routes(
                 version=body.version,
                 actor=_actor(principal),
                 actor_user_id=_actor_user_id(principal),
+                accept_inherited_style=body.accept_inherited_style,
             )
         except CreativeSessionConflict as exc:
             raise _conflict(exc) from exc

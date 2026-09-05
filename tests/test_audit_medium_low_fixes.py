@@ -236,7 +236,7 @@ def test_a_new_table_that_already_exists_skips_instead_of_crash_looping(tmp_path
             head = connection.execute(sa.text("select version_num from alembic_version")).scalar()
     finally:
         engine.dispose()
-    assert head is not None and head.startswith("0079")
+    assert head is not None and head >= "0079"
 
 
 # --------------------------------------------------------------------------

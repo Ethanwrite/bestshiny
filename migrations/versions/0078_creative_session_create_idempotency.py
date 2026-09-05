@@ -18,6 +18,7 @@ Revises: 0077_memory_index_outbox
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -27,6 +28,8 @@ revision: str = "0078_creative_session_create_idempotency"
 down_revision: str | None = "0077_memory_index_outbox"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+logger = logging.getLogger("alembic.runtime.migration")
 
 COLUMN = "create_client_turn_id"
 INDEX_NAME = "uq_creative_session_create_client_id"
@@ -45,8 +48,18 @@ def upgrade() -> None:
         # Historical integrity fixtures carry only the tables owned by the
         # revision under test; they are not deployable platform databases.
         return
+        # Present already. This used to raise, which is the wrong shape of
+        # loud: the api's start command is `alembic upgrade head && uvicorn`
+        # under `restart: unless-stopped`, so raising here means the container
+        # never reaches uvicorn and restarts for ever with no health endpoint -
+        # a permanent outage needing an SSH session to clear. Anything that
+        # could create this outside alembic (a `create_all` against production,
+        # a half-applied manual fix, a restore from a snapshot taken between
+        # the DDL and the alembic_version commit) leaves the schema in the
+        # state this migration wanted anyway, so it is skipped and logged.
     if COLUMN in columns:
-        raise RuntimeError(f"creative_sessions.{COLUMN} already exists before its own migration")
+        logger.warning("creative_sessions.%s already exists; skipping its migration", COLUMN)
+        return
     op.add_column("creative_sessions", sa.Column(COLUMN, sa.String(length=120), nullable=True))
     op.create_index(
         INDEX_NAME,

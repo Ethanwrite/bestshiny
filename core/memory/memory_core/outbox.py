@@ -34,7 +34,7 @@ from platform_database import Database
 from platform_shared import affected_rows
 from production_domain.models import MediaAsset, MemoryIndexOutbox, utcnow
 from sqlalchemy import and_ as sa_and
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .schemas import (
@@ -87,6 +87,7 @@ class MemoryOutboxResult:
     deferred: int = 0
     failed: int = 0
     retried: int = 0
+    pruned: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -95,6 +96,7 @@ class MemoryOutboxResult:
             "deferred": self.deferred,
             "failed": self.failed,
             "retried": self.retried,
+            "pruned": self.pruned,
         }
 
 
@@ -212,6 +214,40 @@ class MemoryIndexOutboxWorker:
             # An unregistered flag is not permission to spend money on a
             # third-party embedding call.
             return False
+
+    def prune(self, *, older_than_days: int, limit: int = 500) -> int:
+        """Delete settled rows past the debugging window. Returns how many.
+
+        `memory_index_outbox` gains a row per locked bible and per committed
+        candidate and nothing ever removed one, so DONE and FAILED rows
+        accumulated for the life of the database - and the drain's own
+        `ORDER BY created_at` sorted more of them every week. Only settled rows
+        are eligible: anything PENDING or CLAIMED is still work.
+        """
+
+        if older_than_days <= 0:
+            return 0
+        cutoff = utcnow() - timedelta(days=older_than_days)
+        with self.database.session() as session:
+            stale = [
+                row_id
+                for row_id in session.scalars(
+                    select(MemoryIndexOutbox.id)
+                    .where(
+                        MemoryIndexOutbox.status.in_(("DONE", "FAILED")),
+                        MemoryIndexOutbox.updated_at < cutoff,
+                    )
+                    .order_by(MemoryIndexOutbox.updated_at)
+                    .limit(max(1, limit))
+                )
+            ]
+            if not stale:
+                return 0
+            session.execute(
+                delete(MemoryIndexOutbox).where(MemoryIndexOutbox.id.in_(stale))
+            )
+            session.flush()
+        return len(stale)
 
     def drain(self, *, limit: int = 20) -> MemoryOutboxResult:
         now = utcnow()

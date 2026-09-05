@@ -282,13 +282,24 @@ def drain_memory_index_once(container) -> int:  # type: ignore[no-untyped-def]
     if worker is None:
         return 0
     result = worker.drain(limit=max(1, container.settings.memory_index_sweep_limit))
-    if result.indexed or result.failed or result.retried:
+    # Settled rows are a debugging window, not a record anything reads. Pruning
+    # them here rather than in a sweep of its own keeps the table the drain
+    # sorts from growing without bound for the life of the database.
+    pruned = 0
+    try:
+        pruned = worker.prune(
+            older_than_days=int(getattr(container.settings, "memory_index_retention_days", 0))
+        )
+    except Exception:  # noqa: BLE001 - housekeeping never fails the drain
+        logger.exception("memory index outbox prune failed")
+    if result.indexed or result.failed or result.retried or pruned:
         logger.info(
-            "memory index outbox: %d indexed, %d retried, %d failed, %d deferred",
+            "memory index outbox: %d indexed, %d retried, %d failed, %d deferred, %d pruned",
             result.indexed,
             result.retried,
             result.failed,
             result.deferred,
+            pruned,
         )
     return result.indexed
 

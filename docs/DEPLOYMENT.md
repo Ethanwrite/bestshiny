@@ -176,6 +176,50 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
+- **Current release.** `4ab15cb` (`main`, [#52](https://github.com/Ethanwrite/bestshiny/pull/52)
+  the creative-director audit's P1/P2 findings, on top of
+  [#51](https://github.com/Ethanwrite/bestshiny/pull/51) the audit's medium/low findings and
+  [#50](https://github.com/Ethanwrite/bestshiny/pull/50) the `75ea271` release record), deployed
+  2026-09-05 ≈04:47Z. `DEPLOYED_SHA.prev = 75ea271`. One migration ran, `0079` →
+  **`0080_creative_turn_claims`**: a single `CREATE TABLE` (unique `(session_id, client_turn_id)`,
+  FK to `creative_sessions`, one index), no data migration. No `.env` change: #51's
+  `memory_index_retention_days` and everything #52 adds carry defaults. The six migrations
+  `0073`–`0078` are *modified* in this delta (#51 made them skip-if-present) and were already
+  applied here, so alembic did not re-run them.
+
+  **The DDL ordering from the `d491870` deploy was used again, plus an explicit upgrade.** The
+  host script (`deploy_remote.sh`, log `deploy-4ab15cb.log`, `DEPLOY_EXIT=0`, ~2 min) ran
+  backups → extract → build → `stop worker` →
+  `docker compose run -T --rm --no-deps api alembic upgrade head` on the *new* image →
+  `up -d api web` → `up -d --force-recreate --no-deps web` → wait for `/health` → `up -d worker`.
+  The api container's own startup upgrade was then a no-op, which is the point: the migration
+  ran once, deliberately, with no worker on the old image and before the old api was replaced.
+
+  Verified after: markers both written, `alembic current` = `0080`, all three running image IDs
+  equal the freshly built ones (`up -d` skipped nothing this time; `web` was force-recreated
+  anyway), `RestartCount=0` on all three, api healthy, local 8080/3000 200, public
+  `api.bestshiny.com/health` and `bestshiny.com` 200 from the host, `COMPOSE_UNCHANGED`, the
+  OpenAPI document carries `accept_inherited_style`, the new bundle `/assets/index-DOOyYWG0.js`
+  carries the style-conflict notice and its checkbox, `creative_turn_claims` exists and is empty,
+  `memory_index_outbox` empty, zero tracebacks in api or worker, and data untouched (14 sessions,
+  28 jobs, 6 anchors — the same counts as the previous release).
+
+  **What operators will see that they did not before.** A duplicate `client_turn_id` sent while
+  the first request is still being answered gets `409 TURN_IN_PROGRESS` (retryable) instead of a
+  second paid director call. A bible whose brief asks for a look other than the project's locked
+  style is refused with `STYLE_LOCK_CONFLICT` until the approval carries `accept_inherited_style`
+  (the web page shows both looks and a checkbox). A USER_STATED claim whose quote does not say the
+  value is demoted (`VALUE_NOT_IN_EVIDENCE`), so a few more brief values may surface as assumptions
+  to confirm. A Modal callback that reports only some characters leaves the submission ACCEPTED
+  under its deadline rather than REPORTED. Prohibitions now reach every shot's prompt, negative
+  prompt and QC checklist.
+
+  **Rollback caveat.** A code rollback to `75ea271` requires a downgrade to `0079` (that image pins
+  `REQUIRED_SCHEMA_REVISION = 0079_voyage_video_pixel_price`); `0080`'s `downgrade()` only drops the
+  new table and has been exercised in the migration round-trip test, never on this populated
+  database. The pre-extraction `bestshiny-backup` dump and the `*.bak-20260905-044537` copies of
+  `.env` and the compose file are the safer path.
+
 - **Current release.** `75ea271` (`main`, [#48](https://github.com/Ethanwrite/bestshiny/pull/48)
   the four defects a pre-deploy audit found in the shipped tree, and
   [#49](https://github.com/Ethanwrite/bestshiny/pull/49) the voyage video-pixel price), deployed

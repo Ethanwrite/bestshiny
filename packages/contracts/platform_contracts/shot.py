@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from provider_sdk import AssetCriticality
 from pydantic import AliasChoices, BaseModel, Field, model_validator
+
+_ASPECT_RATIO = re.compile(r"^\d{1,2}:\d{1,2}$")
+
+
+def approved_aspect_ratio(director_intent: dict[str, Any] | None) -> str | None:
+    """The frame the approved brief fixed for a shot, if its director intent carries one.
+
+    A shot compiled from a creative session records the aspect ratio its
+    brief and key visuals were approved at on ``Shot.director_intent_json``;
+    the project's default aspect is a setting for shots made outside a
+    session. Both the prompt compiler and the generation request read this
+    first, so what was approved is what is rendered and billed.
+    """
+
+    value = str((director_intent or {}).get("aspect_ratio") or "").strip()
+    return value if _ASPECT_RATIO.match(value) else None
 
 
 class CanonicalSubjectSpec(BaseModel):

@@ -27,6 +27,10 @@ QUOTED_BY_USER = "QUOTED_BY_USER"
 NO_EVIDENCE = "NO_EVIDENCE"
 EVIDENCE_NOT_IN_USER_TEXT = "EVIDENCE_NOT_IN_USER_TEXT"
 EVIDENCE_TURN_NOT_FOUND = "EVIDENCE_TURN_NOT_FOUND"
+#: The quote is the user's, but it does not say the value the operation
+#: writes: a genuine sentence about the rooftop cannot move the story to the
+#: subway. Recorded on the demotion so the audit shows which check failed.
+VALUE_NOT_IN_EVIDENCE = "VALUE_NOT_IN_EVIDENCE"
 NOT_VERIFIED = "NOT_VERIFIED"
 
 #: Unicode general categories that read as punctuation or symbols in both the
@@ -81,10 +85,10 @@ def normalize(text: str) -> str:
     return _fold(text)[0]
 
 
-def _aligned_find(haystack: str, needle: str) -> int:
-    """The first occurrence of `needle` that is not inside a longer word."""
+def _aligned_find(haystack: str, needle: str, start: int = 0) -> int:
+    """The first occurrence of `needle` at or after `start` that is not inside a longer word."""
 
-    start = haystack.find(needle)
+    start = haystack.find(needle, start)
     while start >= 0:
         before = haystack[start - 1] if start else ""
         after = haystack[start + len(needle) : start + len(needle) + 1]
@@ -92,6 +96,32 @@ def _aligned_find(haystack: str, needle: str) -> int:
             return start
         start = haystack.find(needle, start + 1)
     return -1
+
+
+def aligned_occurrences(text: str, term: str) -> list[int]:
+    """Every word-aligned occurrence of `term` in `text`, both in comparison form.
+
+    Offsets are into ``normalize(text)``. A CJK term is matched by position,
+    because CJK has no word boundary to align to; a Latin term must not sit
+    inside a longer word, so "arm" never matches inside "warm".
+    """
+
+    haystack = normalize(text)
+    needle = normalize(term)
+    if not needle or not haystack:
+        return []
+    found: list[int] = []
+    position = 0
+    while True:
+        position = (
+            haystack.find(needle, position)
+            if _CJK.search(needle)
+            else _aligned_find(haystack, needle, position)
+        )
+        if position < 0:
+            return found
+        found.append(position)
+        position += 1
 
 
 @dataclass(frozen=True)
@@ -186,8 +216,10 @@ __all__ = [
     "NOT_VERIFIED",
     "NO_EVIDENCE",
     "QUOTED_BY_USER",
+    "VALUE_NOT_IN_EVIDENCE",
     "EvidenceVerdict",
     "UserTextIndex",
     "UserUtterance",
+    "aligned_occurrences",
     "normalize",
 ]

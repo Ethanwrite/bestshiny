@@ -292,7 +292,11 @@ async def test_a_style_lock_from_another_session_is_inherited_on_record_not_clai
         lineage = locked.json()["lineage"]
 
     assert lineage["style_inherited"] is True
-    assert lineage["style_matches_this_bible"] is False
+    # Same brief, same look: inherited without a decision, and recorded as
+    # matching. A brief that asked for another look would have been refused
+    # with STYLE_LOCK_CONFLICT until the user accepted the inheritance.
+    assert lineage["style_matches_this_bible"] is True
+    assert lineage["style_conflict_accepted"] is False
     assert lineage["style_inherited_from_session_id"] == first_session
     with container.database.session() as session:
         locks = list(

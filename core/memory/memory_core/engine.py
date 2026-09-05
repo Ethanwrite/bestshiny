@@ -161,6 +161,61 @@ class MultimodalMemoryEngine:
             session.flush()
             return memory
 
+    def reindex(self, memory_id: str, value: ShotMemoryInput) -> ShotMemory:
+        """Give an existing degraded memory its vector, in place.
+
+        ``index`` writes the structurally retrievable row even when the
+        embedding provider is down and marks the vector degraded; the outbox
+        then retries. Retrying through ``index`` again appended a *second*
+        row per artefact and left the degraded one behind for ever. The
+        retry re-embeds the row it already has: same id, same references,
+        the vector and its provenance filled in. A row that is not degraded
+        is returned untouched, and a row that no longer exists is indexed
+        afresh.
+        """
+
+        with self.database.session() as session:
+            existing = session.get(ShotMemory, memory_id)
+            if existing is None:
+                return self.index(value)
+            if not (existing.metadata_json or {}).get("vector_degraded"):
+                return existing
+            self._validate_project_links(session, value)
+        try:
+            embedded = self.embeddings.embed_with_provenance(
+                value.content,
+                input_type="document",
+                project_id=value.project_id,
+            )
+        except MemoryEmbeddingUnavailable as exc:
+            # Still down. The row stays degraded and the outbox backs off
+            # again; nothing is duplicated and nothing is rolled back.
+            self._record_vector_degraded(value.project_id, exc)
+            return existing
+        provenance = embedded.provenance
+        with self.database.session() as session:
+            self._validate_project_links(session, value)
+            memory = session.get(ShotMemory, memory_id)
+            if memory is None:
+                return self.index(value)
+            metadata = {
+                key: item
+                for key, item in dict(memory.metadata_json or {}).items()
+                if key not in {"vector_degraded", "degradation_reason_codes"}
+            }
+            metadata["evidence_purpose"] = provenance.evidence_purpose.value
+            metadata["authority_level"] = provenance.authority_level.value
+            if provenance.video_frame_lineage is not None:
+                metadata["video_frame_lineage"] = provenance.video_frame_lineage.model_dump(mode="json")
+            metadata["reembedded"] = True
+            memory.embedding = list(embedded.values)
+            memory.embedding_dimension = len(embedded.values)
+            memory.embedding_provider = provenance.provider
+            memory.embedding_model = provenance.model
+            memory.metadata_json = metadata
+            session.flush()
+            return memory
+
     def search(self, query: MemoryQuery) -> list[RetrievedMemory]:
         if not self.enabled:
             return []

@@ -36,6 +36,7 @@ from platform_contracts import (
     TIMELINE_FENCE_METADATA_KEY,
     AuthoritativeTimelineFence,
     GenerationRequest,
+    approved_aspect_ratio,
     authoritative_timeline_state_hash,
 )
 from platform_database import Database
@@ -474,7 +475,14 @@ class CandidatePipeline:
             shot_type = shot.shot_type
             scene_sequence = shot.scene.sequence
             duration = shot.duration
-            aspect_ratio = shot.scene.episode.project.default_aspect_ratio
+            # The frame the approved brief fixed for a director-session shot;
+            # the project default only for shots made outside one. The
+            # request is what the provider bills, so it has to be the
+            # approved frame, not the setting.
+            aspect_ratio = (
+                approved_aspect_ratio(shot.director_intent_json)
+                or shot.scene.episode.project.default_aspect_ratio
+            )
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             continuity_mode = shot.continuity_mode
@@ -1567,6 +1575,10 @@ class CandidatePipeline:
                     text=shot.compiled_prompt or shot.prompt or "",
                     layer=MemoryLayer.EPISODIC,
                     media_asset_ids=[item for item in [asset.id, current_end_frame.id] if item],
+                    # The canonical entities this shot rendered. Retrieval
+                    # filters on the canonical asset ids a later shot asks
+                    # about, so a memory that named none was never returned.
+                    entity_ids=self._shot_memory_entity_ids(session, shot, candidate),
                     shot_id=shot.id,
                     scene_id=shot.scene_id,
                     metadata={
@@ -1577,6 +1589,44 @@ class CandidatePipeline:
                 )
             session.flush()
             return session.get(GenerationCandidate, candidate_id)
+
+    @staticmethod
+    def _shot_memory_entity_ids(  # type: ignore[no-untyped-def]
+        session, shot: Shot, candidate: GenerationCandidate
+    ) -> list[str]:
+        """The canonical entities a committed shot's memory is about.
+
+        The characters bound to the candidate, the canonical CHARACTER assets
+        that stand for them, and every canonical asset whose plate this shot
+        was bound to (the reference media on the director intent). These are
+        the ids the production runtime filters retrieval on, so without them
+        the memory of an official shot could never be recalled by a later one.
+        """
+
+        character_ids = list(
+            dict.fromkeys(
+                str(entry.get("character_id"))
+                for entry in candidate.metadata_json.get("character_state_context", [])
+                if entry.get("character_id")
+            )
+        )
+        bound_media = {
+            str(item)
+            for item in (shot.director_intent_json or {}).get("reference_asset_ids", [])
+            if item
+        }
+        entity_ids = list(character_ids)
+        for asset_id, metadata, primary_media_id in session.execute(
+            select(Asset.id, Asset.canonical_metadata, AssetVersion.primary_media_asset_id)
+            .join(AssetVersion, AssetVersion.id == Asset.canonical_version_id)
+            .where(Asset.project_id == shot.scene.episode.project_id)
+        ).all():
+            metadata = metadata if isinstance(metadata, dict) else {}
+            if str(metadata.get("character_id") or "") in character_ids or (
+                primary_media_id and str(primary_media_id) in bound_media
+            ):
+                entity_ids.append(str(asset_id))
+        return list(dict.fromkeys(entity_ids))[:40]
 
     def _upsert_decision_outcome(
         self,

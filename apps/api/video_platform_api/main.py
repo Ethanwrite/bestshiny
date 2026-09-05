@@ -600,12 +600,21 @@ def create_app(container: Container | None = None) -> FastAPI:
                 callback.job_id, status="SUCCEEDED", character_ids=recorded
             )
             # Partial coverage is visible to the caller: which characters
-            # reported, and which the analysis was asked about.
+            # reported, which the analysis was asked about, and which are
+            # still owed. The job is REPORTED only once none are owed; until
+            # then it stays under the accepted deadline.
+            missing = sorted(
+                item["character_id"]
+                for item in container.character_evidence_tracker.coverage(callback.job_id)
+                if item["status"] == "REQUESTED"
+            )
             return {
                 "status": "RECORDED",
                 "reports": len(reports),
                 "characters": recorded,
                 "submitted_characters": sorted(submitted_character_ids),
+                "complete": not missing,
+                "missing_characters": missing,
             }
         except CharacterEvidenceCallbackAuthenticationError as exc:
             raise HTTPException(401, str(exc)) from exc

@@ -156,7 +156,14 @@ class ReasonCode(StrEnum):
     ANCHOR_SKIPPED = "ANCHOR_SKIPPED"
     ANCHOR_SUPERSEDED = "ANCHOR_SUPERSEDED"
     STYLE_LOCK_INHERITED = "STYLE_LOCK_INHERITED"
+    #: The project already holds a style lock whose look is not the one this
+    #: brief asks for. Inheriting it is a decision the user has to make on
+    #: record; it is never made for them by the lock.
+    STYLE_LOCK_CONFLICT = "STYLE_LOCK_CONFLICT"
     STYLE_LOCK_REQUIRES_USER = "STYLE_LOCK_REQUIRES_USER"
+    #: This exact message (same client_turn_id) is being answered by another
+    #: request right now. Retrying after it lands replays the recorded reply.
+    TURN_IN_PROGRESS = "TURN_IN_PROGRESS"
     LOCK_SERVICES_UNAVAILABLE = "LOCK_SERVICES_UNAVAILABLE"
     LOCK_FAILED = "LOCK_FAILED"
     BIBLE_LOCK_INCOMPLETE = "BIBLE_LOCK_INCOMPLETE"
@@ -891,12 +898,14 @@ class Screenplay(BaseModel):
         if len(names) != len(self.characters):
             raise ValueError("character names must be unique")
         expected_sequence = 1
+        shots_by_beat: dict[int, set[int]] = {}
         for beat in self.beats:
             if beat.scene_key not in scene_keys:
                 raise ValueError(f"beat {beat.sequence} references unknown scene {beat.scene_key!r}")
             if beat.sequence != expected_sequence:
                 raise ValueError(f"beats must be numbered consecutively from 1; got {beat.sequence}")
             expected_sequence += 1
+            shots_by_beat[beat.sequence] = {shot.sequence for shot in beat.shots}
             for shot in beat.shots:
                 speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
                 if _normalize_name(speaker) not in names:
@@ -906,6 +915,33 @@ class Screenplay(BaseModel):
             for name in beat.characters:
                 if _normalize_name(name) not in names:
                     raise ValueError(f"beat {beat.sequence} lists unknown character {name!r}")
+        # A scoped invariant applies only where its scope points. A scope that
+        # points at nobody - a misspelt name, a scene key that is not one -
+        # used to make the invariant apply nowhere, silently: the rule the
+        # director wrote was simply gone from every shot. It is a reference
+        # like any other and is refused like any other.
+        for index, invariant in enumerate(self.invariants, 1):
+            for name in invariant.characters:
+                if _normalize_name(name) not in names:
+                    raise ValueError(f"invariant {index} is scoped to unknown character {name!r}")
+            for key in invariant.scenes:
+                if key not in scene_keys:
+                    raise ValueError(f"invariant {index} is scoped to unknown scene {key!r}")
+        # Placed copy has to name a shot that exists. "beat 3 shot 2" of a
+        # two-beat screenplay passed the placement gate and then landed in no
+        # shot at all - the words were approved and never compiled anywhere.
+        for item in self.required_copy:
+            if not item.placed:
+                continue
+            if item.beat not in shots_by_beat:
+                raise ValueError(
+                    f"required copy {item.text!r} is placed in beat {item.beat}, which does not exist"
+                )
+            if item.shot not in shots_by_beat[item.beat]:
+                raise ValueError(
+                    f"required copy {item.text!r} is placed in beat {item.beat} shot {item.shot}, "
+                    "which does not exist"
+                )
         return self
 
 

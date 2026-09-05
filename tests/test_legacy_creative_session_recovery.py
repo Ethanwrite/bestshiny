@@ -476,6 +476,19 @@ def test_the_whole_post_0072_range_downgrades_and_comes_back(tmp_path, monkeypat
                     "updated_at": now,
                 },
             ),
+            (
+                "creative_turn_claims",
+                {
+                    "id": str(uuid.uuid4()),
+                    "session_id": seeded["session_id"],
+                    "client_turn_id": "roundtrip-turn-key",
+                    "claim_token": str(uuid.uuid4()),
+                    "content_hash": "0" * 64,
+                    "claimed_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
         ):
             table = sa.Table(table_name, metadata, autoload_with=connection)
             known = {key: value for key, value in values.items() if key in table.c}
@@ -497,6 +510,7 @@ def test_the_whole_post_0072_range_downgrades_and_comes_back(tmp_path, monkeypat
             "creative_lock_steps",
             "memory_index_outbox",
             "character_evidence_coverage",
+            "creative_turn_claims",
         }
         columns = {
             column["name"]

@@ -4640,6 +4640,37 @@ class CreativeTurn(Base, TimestampMixin):
     result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class CreativeTurnClaim(Base, TimestampMixin):
+    """A client_turn_id that is being answered right now.
+
+    The turn itself is written only after the director has answered (so a
+    crash leaves no orphan message and spends no FREE round), which left a
+    window: two requests carrying the same key both found no recorded turn,
+    both paid for a director call, and only then did the unique key on the
+    turn stop the second write. This row closes the window before the call.
+    It lives for one round - deleted in the transaction that records the
+    turn, or freed by the request that failed - and a claim older than its
+    lease belongs to a process that died and may be taken over.
+    """
+
+    __tablename__ = "creative_turn_claims"
+    __table_args__ = (
+        UniqueConstraint("session_id", "client_turn_id", name="uq_creative_turn_claim_key"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("creative_sessions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    client_turn_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    #: Identifies the request holding the claim, so a release or a take-over
+    #: by lease acts on exactly the claim it means.
+    claim_token: Mapped[str] = mapped_column(String(36), nullable=False)
+    #: The message being answered, so the same key sent with different words
+    #: is refused as a mismatch rather than waited on.
+    content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CreativeBriefRevision(Base, TimestampMixin):
     """Append-only CreativeBrief revisions; approval freezes one.
 

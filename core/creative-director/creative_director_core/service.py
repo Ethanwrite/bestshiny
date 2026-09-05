@@ -20,8 +20,10 @@ counts only rounds that landed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -32,6 +34,7 @@ if TYPE_CHECKING:  # the director enqueues advisory memory; it never embeds
     from memory_core.outbox import MemoryIndexOutboxWriter
 
 from platform_database import Database
+from platform_shared import affected_rows
 from production_domain.models import (
     Character,
     CreativeAction,
@@ -46,6 +49,7 @@ from production_domain.models import (
     CreativeSessionStatus,
     CreativeShotLineage,
     CreativeTurn,
+    CreativeTurnClaim,
     CreativeVisualAnchor,
     GenerationJob,
     JobStatus,
@@ -55,7 +59,8 @@ from production_domain.models import (
     Workspace,
 )
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from . import evidence as evidence_module
@@ -94,6 +99,7 @@ from .schemas import (
     ReasonCode,
     Screenplay,
     StructuredActionKind,
+    normalize_name,
 )
 from .screenplay import (
     AnchorDerivation,
@@ -101,15 +107,18 @@ from .screenplay import (
     anchor_keys_for_shot,
     apply_beat_edits,
     beats_from_screenplay,
+    compiler_location,
     derive_anchors,
     deterministic_screenplay,
     global_invariants,
+    merge_shot_anchors,
+    preserved_product_claims,
     screenplay_hash,
     script_name,
     shot_constraints,
     validate_screenplay,
 )
-from .screenplay_brief import ScreenplayBriefValidator
+from .screenplay_brief import ScreenplayBriefValidator, enforceable_prohibition, prohibited_terms
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +311,23 @@ _CANONICAL_ANCHOR_KINDS = ("SCENE", "PRODUCT", "PROP")
 #: take it over. Long enough that a slow but live step is never stolen; short
 #: enough that a process that died mid-step does not wedge a bible for ever.
 _LOCK_STEP_LEASE = timedelta(minutes=15)
+#: How long a claim on a client_turn_id belongs to the request that made it.
+#: Longer than any director call that lands; a claim older than this belongs
+#: to a process that died mid-call, and the next retry takes it over.
+_TURN_CLAIM_LEASE = timedelta(minutes=5)
+
+
+@dataclass(frozen=True)
+class _TurnSnapshot:
+    """What phase 1 of a dialogue round read, for phases 2 and 3 to reason against."""
+
+    project_id: str
+    status_before: str
+    brief_revision_at_read: int
+    fields: dict[str, Any]
+    provenance: dict[str, Any]
+    question_states: dict[str, Any]
+    turns: list[dict[str, Any]]
 
 #: Job states from which a key visual will never arrive. WORKER_NEEDS_USER_ACTION
 #: is terminal for the *user* - nothing further happens without them - so an
@@ -804,21 +830,158 @@ class CreativeDirectorService:
         in-flight turn can never un-approve an approved brief.
         """
 
-        # Phase 1 - read. Nothing is written until the director has answered.
+        # Phase 1 - read. Nothing is written until the director has answered,
+        # except the claim on this client_turn_id: the one row that says "this
+        # message is being answered right now", so a duplicate request that
+        # arrives during the model call is refused instead of paying for a
+        # second call and replaying the first only after both were billed.
         with self.database.session() as session:
             row = self._session(session, session_id)
             replay = self._replay(session, row, client_turn_id, content)
             if replay is not None:
                 return replay
             self._assert_turn_budget(session, row)
-            project_id = row.project_id
-            status_before = row.status
-            brief_revision_at_read = row.current_brief_revision
+            claim_token = self._claim_turn(session, session_id, client_turn_id, content)
             head = self._head_brief(session, row)
-            fields = dict(head.fields_json) if head is not None else {}
-            provenance = dict(head.provenance_json) if head is not None else {}
-            question_states = dict(head.question_state_json) if head is not None else {}
-            turns = self._turn_views(session, session_id)
+            snapshot = _TurnSnapshot(
+                project_id=row.project_id,
+                status_before=row.status,
+                brief_revision_at_read=row.current_brief_revision,
+                fields=dict(head.fields_json) if head is not None else {},
+                provenance=dict(head.provenance_json) if head is not None else {},
+                question_states=dict(head.question_state_json) if head is not None else {},
+                turns=self._turn_views(session, session_id),
+            )
+        try:
+            return await self._answer_turn(
+                session_id,
+                content,
+                snapshot,
+                format_hint=format_hint,
+                client_turn_id=client_turn_id,
+                claim_token=claim_token,
+                expected_brief_revision=expected_brief_revision,
+            )
+        finally:
+            # A refused or failed round frees the key for a retry; a round
+            # that landed already deleted its claim in its own transaction,
+            # and this finds nothing. A crash leaves the claim to its lease.
+            self._release_turn_claim(session_id, client_turn_id, claim_token)
+
+    def _claim_turn(
+        self, session: Any, session_id: str, client_turn_id: str | None, content: str
+    ) -> str | None:
+        """Claim ``client_turn_id`` for this request, or refuse it.
+
+        The claim row is unique per (session, key). Losing the insert means
+        another request is answering this very message: a fresh claim is
+        refused as TURN_IN_PROGRESS (retryable - once that request lands, a
+        retry replays its reply); a claim past the lease belongs to a process
+        that died mid-call and is taken over with a compare-and-set, so two
+        take-overs cannot both proceed. Returns the token that identifies
+        this request's claim, or None when no key was sent.
+        """
+
+        if not client_turn_id:
+            return None
+        now = _now()
+        token = str(uuid.uuid4())
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        try:
+            with session.begin_nested():
+                session.add(
+                    CreativeTurnClaim(
+                        session_id=session_id,
+                        client_turn_id=client_turn_id,
+                        claim_token=token,
+                        content_hash=content_hash,
+                        claimed_at=now,
+                    )
+                )
+                session.flush()
+            return token
+        except IntegrityError:
+            pass
+        holder = session.scalar(
+            select(CreativeTurnClaim).where(
+                CreativeTurnClaim.session_id == session_id,
+                CreativeTurnClaim.client_turn_id == client_turn_id,
+            )
+        )
+        if holder is not None and holder.content_hash != content_hash:
+            raise CreativeSessionConflict(
+                "this client_turn_id is already being answered for a different message; "
+                "a retry has to send the same words, and edited words need a new client_turn_id",
+                reason_code="CLIENT_TURN_ID_CONTENT_MISMATCH",
+                details={"client_turn_id": client_turn_id},
+            )
+        taken = session.execute(
+            update(CreativeTurnClaim)
+            .where(
+                CreativeTurnClaim.session_id == session_id,
+                CreativeTurnClaim.client_turn_id == client_turn_id,
+                CreativeTurnClaim.claimed_at <= now - _TURN_CLAIM_LEASE,
+            )
+            .values(claim_token=token, claimed_at=now, content_hash=content_hash)
+            # The row is loaded in this session; the ORM must not re-evaluate
+            # the lease predicate in Python against a naive SQLite datetime.
+            .execution_options(synchronize_session=False)
+        )
+        if affected_rows(taken) == 1:
+            return token
+        raise CreativeSessionConflict(
+            "this message is already being answered; retry in a moment and the recorded "
+            "reply will be replayed",
+            reason_code=ReasonCode.TURN_IN_PROGRESS.value,
+            details={"client_turn_id": client_turn_id},
+            retryable=True,
+        )
+
+    @staticmethod
+    def _release_turn_claim_in(
+        session: Any, session_id: str, client_turn_id: str | None, token: str | None
+    ) -> None:
+        if not client_turn_id or not token:
+            return
+        session.execute(
+            sql_delete(CreativeTurnClaim)
+            .where(
+                CreativeTurnClaim.session_id == session_id,
+                CreativeTurnClaim.client_turn_id == client_turn_id,
+                CreativeTurnClaim.claim_token == token,
+            )
+            .execution_options(synchronize_session=False)
+        )
+
+    def _release_turn_claim(self, session_id: str, client_turn_id: str | None, token: str | None) -> None:
+        if not client_turn_id or not token:
+            return
+        try:
+            with self.database.session() as session:
+                self._release_turn_claim_in(session, session_id, client_turn_id, token)
+        except Exception:  # noqa: BLE001 - the lease bounds a claim this could not free
+            logger.exception("could not release the turn claim for session %s", session_id)
+
+    async def _answer_turn(  # noqa: PLR0913 - one round, every input it was read against
+        self,
+        session_id: str,
+        content: str,
+        snapshot: _TurnSnapshot,
+        *,
+        format_hint: str | None,
+        client_turn_id: str | None,
+        claim_token: str | None,
+        expected_brief_revision: int | None,
+    ) -> DirectorReply:
+        """Phases 2 and 3 of a dialogue round: reason, then write everything or nothing."""
+
+        project_id = snapshot.project_id
+        status_before = snapshot.status_before
+        brief_revision_at_read = snapshot.brief_revision_at_read
+        fields = dict(snapshot.fields)
+        provenance = dict(snapshot.provenance)
+        question_states = dict(snapshot.question_states)
+        turns = snapshot.turns
 
         hint_operations: list[BriefOperation] = []
         if format_hint:
@@ -1176,6 +1339,10 @@ class CreativeDirectorService:
                 },
             )
             session.add(director_turn)
+            # The claim and the turn trade places in one transaction: the
+            # moment a duplicate can no longer be refused by the claim, it is
+            # answered by the replay.
+            self._release_turn_claim_in(session, session_id, client_turn_id, claim_token)
             session.flush()
             return DirectorReply(
                 session_id=session_id,
@@ -2060,14 +2227,17 @@ class CreativeDirectorService:
         for key, anchor in current.items():
             if key not in wanted_keys:
                 anchor.status = CreativeAnchorStatus.SUPERSEDED.value
-        self._settle_inherited_style_anchor(session, row, result)
+        self._settle_inherited_style_anchor(session, row, result, dict(brief.fields_json))
         session.flush()
         result.sort(key=lambda anchor: (not anchor.required, anchor.kind, anchor.anchor_key))
         return result, derivation
 
     @staticmethod
     def _settle_inherited_style_anchor(
-        session: Any, row: CreativeSession, anchors: list[CreativeVisualAnchor]
+        session: Any,
+        row: CreativeSession,
+        anchors: list[CreativeVisualAnchor],
+        fields: dict[str, Any],
     ) -> None:
         """Don't charge for a style plate the lock is going to discard.
 
@@ -2086,10 +2256,8 @@ class CreativeDirectorService:
         readiness gate treats it as the settled decision it is.
         """
 
-        lock = session.scalar(
-            select(ProjectStyleLock).where(ProjectStyleLock.project_id == row.project_id)
-        )
-        if lock is None:
+        inheritance = _style_inheritance(session, row.project_id, fields)
+        if inheritance is None:
             return
         for anchor in anchors:
             if anchor.kind != "STYLE":
@@ -2102,7 +2270,14 @@ class CreativeDirectorService:
                 continue
             anchor.status = CreativeAnchorStatus.SKIPPED.value
             anchor.required = False
-            anchor.skip_reason = "PROJECT_STYLE_ALREADY_LOCKED"
+            # Which of the two situations this is stays on the record from
+            # here on: the lock is the look this brief asks for, or it is
+            # another look that the user will have to choose to inherit.
+            anchor.skip_reason = (
+                "PROJECT_STYLE_ALREADY_LOCKED"
+                if inheritance["matches_brief"]
+                else "PROJECT_STYLE_LOCK_DIFFERS"
+            )
 
     def _emit_visual_actions(
         self,
@@ -2605,6 +2780,12 @@ class CreativeDirectorService:
                     "medium": get_path(fields, "visual_style.medium") or "",
                     "never": ["change character identity", "switch rendering medium mid-story"],
                 },
+                # The style this bible will actually be locked to. A project
+                # keeps one style lock, so a later session inherits it; when
+                # that lock's look is not this brief's, the draft says so
+                # before anyone approves it, and the lock refuses until the
+                # user accepts the inheritance on record.
+                "style_inheritance": _style_inheritance(session, row.project_id, fields),
             }
             draft = session.scalar(
                 select(VisualBibleVersion).where(
@@ -2638,6 +2819,7 @@ class CreativeDirectorService:
         version: int,
         actor: str,
         actor_user_id: str | None = None,
+        accept_inherited_style: bool = False,
     ) -> dict[str, Any]:
         """Lock one bible version and bind it through the platform's own locks.
 
@@ -2647,6 +2829,13 @@ class CreativeDirectorService:
         ``ProjectStyleService.lock``. A failure leaves the bible DRAFT with the
         failure recorded in its lineage and blocks compilation; nothing here
         writes those tables directly.
+
+        A project keeps one style lock. When it already has one and that
+        lock's look is not the one this brief asks for, the lock is refused
+        with ``STYLE_LOCK_CONFLICT`` until the caller passes
+        ``accept_inherited_style``: the new characters and scenes will render
+        in the older style, and that is the user's decision to make, on
+        record, never the lock's to make for them.
         """
 
         with self.database.session() as session:
@@ -2734,6 +2923,22 @@ class CreativeDirectorService:
             fields = dict(approved_brief.fields_json)
             brief_id = approved_brief.id
             screenplay_id = self._approved_screenplay(session, row).id
+            inheritance = _style_inheritance(session, project_id, fields)
+
+        if inheritance is not None and not inheritance["matches_brief"] and not accept_inherited_style:
+            raise CreativeSessionConflict(
+                "this project already holds a style lock whose look is not the one this brief "
+                "asks for; approve with accept_inherited_style to render this bible's characters "
+                "and scenes in the locked style, or start a new project for the new look",
+                reason_code=ReasonCode.STYLE_LOCK_CONFLICT.value,
+                details={"style_inheritance": inheritance},
+            )
+        if inheritance is not None:
+            lineage["style_inheritance"] = {
+                **inheritance,
+                "accepted": bool(accept_inherited_style) or inheritance["matches_brief"],
+                "accepted_by": actor if accept_inherited_style else None,
+            }
 
         if self.styles is None or self.characters is None or self.asset_registry is None:
             raise CreativeSessionConflict(
@@ -2976,16 +3181,21 @@ class CreativeDirectorService:
                 }
             # Someone else's lock. One style per project is the platform rule,
             # so this bible inherits it - but only ever on record, and never
-            # while pretending the plate is this bible's own.
+            # while pretending the plate is this bible's own. Whether the
+            # locked look is the one this brief asked for was decided (and,
+            # when it is not, explicitly accepted) before any step ran.
             inherited_from = metadata.get("creative_session_id")
             codes.append(ReasonCode.STYLE_LOCK_INHERITED.value)
+            inheritance = dict(lineage.get("style_inheritance") or {})
             return {
                 "style_lock_id": lock.id,
                 "style_version_id": lock.style_version_id,
                 "style_asset_id": version_row.asset_id if version_row is not None else None,
                 "style_inherited": True,
                 "style_inherited_from_session_id": inherited_from,
-                "style_matches_this_bible": False,
+                "style_matches_this_bible": bool(inheritance.get("matches_brief")),
+                "style_conflict_accepted": bool(inheritance.get("accepted"))
+                and not inheritance.get("matches_brief"),
             }
 
         def execute() -> dict[str, Any]:
@@ -3630,7 +3840,14 @@ class CreativeDirectorService:
         product = get_path(fields, "product.name")
         for beat in beats:
             for shot in beat["shots"]:
-                shot["anchors"] = anchor_keys_for_shot(shot, beat, str(product) if product else None)
+                # The screenplay's own bindings first (a second character in
+                # frame, a key visual bound by hand), then what the rendered
+                # line implies. Overwriting with the derived list is how an
+                # approved binding used to vanish before compilation.
+                shot["anchors"] = merge_shot_anchors(
+                    shot.get("anchors") or [],
+                    anchor_keys_for_shot(shot, beat, str(product) if product else None),
+                )
         return beats
 
     def approve_beats(
@@ -3769,19 +3986,40 @@ class CreativeDirectorService:
             assert approved_script is not None
             script = approved_script.script_text
             obligations = [item.model_dump() for item in screenplay.obligations]
+            # The user's own prohibitions, as instructions the shots can be
+            # held to. Collected from every user turn, filtered to the
+            # sentences that actually forbid something, so a villa (别墅) or
+            # a fact about an umbrella never becomes a rule in every prompt.
+            prohibitions = [
+                sentence
+                for sentence in dict.fromkeys(
+                    self._session_prohibitions(self._turn_views(session, session_id))
+                )
+                if enforceable_prohibition(sentence)
+            ]
+            prohibition_terms = list(
+                dict.fromkeys(term for sentence in prohibitions for term in prohibited_terms(sentence))
+            )
+            selling_points = [
+                str(item).strip()
+                for item in (get_path(fields, "product.selling_points") or [])
+                if str(item).strip()
+            ]
             # What holds for the whole piece becomes a narrative fact: it then
             # travels through series context into every shot's prompt, and the
             # ledger's own idempotency makes it unrewritable - a second
             # establishment with different words is a conflict, not an update.
-            # That is what "the claim stays verbatim" is enforced by.
+            # That is what "the claim stays verbatim" is enforced by. The
+            # brief's selling points are preserved on the user's authority,
+            # whatever `must_preserve` the director put on its own restatement.
             world_facts = [
                 {"key": f"invariant:{index}", "summary": text, "category": "INVARIANT"}
                 for index, text in enumerate(global_invariants(screenplay), 1)
             ] + [
-                {"key": f"product_claim:{index}", "summary": claim.claim, "category": "PRODUCT_CLAIM"}
-                for index, claim in enumerate(screenplay.product_claims, 1)
-                if claim.must_preserve
+                {"key": f"product_claim:{index}", "summary": claim, "category": "PRODUCT_CLAIM"}
+                for index, claim in enumerate(preserved_product_claims(screenplay, selling_points), 1)
             ]
+            approved_aspect_ratio = _aspect(fields)
             current_anchors = self._current_anchors(session, session_id)
             anchor_ids_by_key = {anchor.anchor_key: anchor.id for anchor in current_anchors}
             #: The key visual behind each anchor, so a shot's declared anchors
@@ -3802,10 +4040,20 @@ class CreativeDirectorService:
         product_name = get_path(fields, "product.name")
         for intent, constraint in zip(
             ordered_intents,
-            shot_constraints(screenplay, product=str(product_name) if product_name else None),
+            shot_constraints(
+                screenplay,
+                product=str(product_name) if product_name else None,
+                selling_points=selling_points,
+                prohibitions=prohibitions,
+                prohibited_terms=prohibition_terms,
+            ),
             strict=False,
         ):
             intent.update(constraint.as_json())
+            # The frame the user approved, on every shot: the prompt compiler
+            # and the generation request read it from the intent rather than
+            # from the project default, which is not what was approved.
+            intent["aspect_ratio"] = approved_aspect_ratio
         if _script_check != script:
             raise CreativeSessionConflict(
                 "the approved screenplay's script and its beat plan disagree; re-propose the beats",
@@ -3992,12 +4240,18 @@ class CreativeDirectorService:
         from production_domain.models import Location, Scene
 
         with self.database.session() as session:
-            location_ids = {
-                str(name).casefold(): location_id
-                for location_id, name in session.execute(
-                    select(Location.id, Location.name).where(Location.project_id == project_id)
-                ).tuples()
-            }
+            # Keyed the way the compiler names a Location: the scene heading
+            # carries the beat renderer's *cleaned* location (punctuation and
+            # connectives stripped, 60 characters), while the anchor's subject
+            # is the screenplay's raw one. Both sides are folded through the
+            # same cleaning so "Tokyo, Shibuya crossing" finds the Location
+            # "Tokyo Shibuya crossing" instead of leaving the plate unbound.
+            location_ids: dict[str, str] = {}
+            for location_id, name in session.execute(
+                select(Location.id, Location.name).where(Location.project_id == project_id)
+            ).tuples():
+                for key in _location_keys(str(name)):
+                    location_ids.setdefault(key, location_id)
             scene_location_ids = set(
                 session.scalars(
                     select(Scene.location_id).where(
@@ -4006,7 +4260,14 @@ class CreativeDirectorService:
                 )
             )
         for key, item in scenes.items():
-            location_id = location_ids.get(str(item.get("subject") or "").casefold())
+            location_id = next(
+                (
+                    found
+                    for candidate in _location_keys(str(item.get("subject") or ""))
+                    if (found := location_ids.get(candidate)) is not None
+                ),
+                None,
+            )
             if location_id is None or location_id not in scene_location_ids:
                 # The compiler named the location differently than the anchor
                 # did; recorded as unbound rather than guessed at.
@@ -4790,6 +5051,104 @@ def _content_without_audit(content: dict[str, Any]) -> dict[str, Any]:
 
 def _aspect(fields: dict[str, Any]) -> str:
     return str(fields.get("aspect_ratio") or "9:16")
+
+
+def _location_keys(name: str) -> list[str]:
+    """The forms under which a scene location may be named, most exact first.
+
+    The anchor names the screenplay's raw location; the compiler names the
+    Location row after the beat renderer's cleaned heading. Both are folded
+    the same way, so either spelling finds the other.
+    """
+
+    keys = [normalize_name(name), normalize_name(compiler_location(name))]
+    return [key for index, key in enumerate(keys) if key and key not in keys[:index]]
+
+
+def _style_descriptor(fields: dict[str, Any]) -> dict[str, Any]:
+    """The look a brief asks for, in the terms the style plate is derived from."""
+
+    tone = fields.get("tone") or []
+    return {
+        "medium": str(get_path(fields, "visual_style.medium") or "cinematic live-action"),
+        "palette": str(get_path(fields, "visual_style.palette") or ""),
+        "tone": [str(item) for item in tone] if isinstance(tone, list) else [str(tone)],
+    }
+
+
+def _styles_match(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
+    """Whether two style descriptors describe the same look.
+
+    Medium and palette are compared as normalized text, tone as a set: the
+    same words in a different order are the same look. An unknown descriptor
+    (a lock made outside the director, whose look nobody recorded) never
+    matches - inheriting it is a decision, not an inference.
+    """
+
+    if not left or not right or left.get("unknown") or right.get("unknown"):
+        return False
+
+    def fold(value: Any) -> str:
+        return normalize_name(str(value or ""))
+
+    return (
+        fold(left.get("medium")) == fold(right.get("medium"))
+        and fold(left.get("palette")) == fold(right.get("palette"))
+        and {fold(item) for item in (left.get("tone") or []) if fold(item)}
+        == {fold(item) for item in (right.get("tone") or []) if fold(item)}
+    )
+
+
+def _locked_style_descriptor(session: Any, project_id: str) -> dict[str, Any] | None:
+    """The look the project's existing style lock was made for, if any.
+
+    Read from the key plate's own anchor when the lock came from a director
+    session (the anchor's prompt records medium, palette and tone); a lock
+    made another way has no recorded look and is reported as unknown.
+    """
+
+    from production_domain.models import AssetVersion
+
+    lock = session.scalar(select(ProjectStyleLock).where(ProjectStyleLock.project_id == project_id))
+    if lock is None:
+        return None
+    version = session.get(AssetVersion, lock.style_version_id) if lock.style_version_id else None
+    metadata = dict(version.metadata_json or {}) if version is not None else {}
+    anchor = (
+        session.get(CreativeVisualAnchor, metadata.get("anchor_id"))
+        if metadata.get("anchor_id")
+        else None
+    )
+    descriptor: dict[str, Any] = {
+        "lock_id": lock.id,
+        "style_version_id": lock.style_version_id,
+        "locked_from_session_id": metadata.get("creative_session_id"),
+    }
+    style = dict((anchor.prompt_json or {}).get("style") or {}) if anchor is not None else {}
+    if not style:
+        return {**descriptor, "unknown": True}
+    tone = style.get("tone") or []
+    return {
+        **descriptor,
+        "medium": str(style.get("medium") or ""),
+        "palette": str(style.get("palette") or ""),
+        "tone": [str(item) for item in tone] if isinstance(tone, list) else [str(tone)],
+    }
+
+
+def _style_inheritance(session: Any, project_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """What locking this bible would inherit, and whether that is the brief's look."""
+
+    locked = _locked_style_descriptor(session, project_id)
+    if locked is None:
+        return None
+    wanted = _style_descriptor(fields)
+    return {
+        "inherited": True,
+        "matches_brief": _styles_match(locked, wanted),
+        "locked_style": locked,
+        "brief_style": wanted,
+    }
 
 
 def _compose_anchor_prompt(kind: str, prompt_json: dict[str, Any]) -> str:

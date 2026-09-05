@@ -16,10 +16,18 @@ from platform_contracts import (
     PromptCompilerInput,
     PromptCompilerOutput,
     PromptContinuityContext,
+    approved_aspect_ratio,
 )
 from platform_database import Database
 from production_domain.models import PromptCompilation, Shot, TimelineState
 from pydantic import ValidationError
+
+#: Constraint prefixes the compiler writes and reads back: a prohibition in
+#: the client's own words, and one thing that must not be shown or done.
+#: Prefixed so `compile_input` can lift them out of a spec's constraints into
+#: the QC checklist and the negative prompt without a second channel.
+PROHIBITION_PREFIX = "the client forbade, in their words: "
+FORBIDDEN_PREFIX = "must not show or do: "
 
 
 class ResolvedSkill(Protocol):
@@ -418,7 +426,11 @@ class PromptCompilerService:
             director = dict(shot.director_intent_json or {})
             raw_action = shot.user_prompt or shot.prompt
             duration = shot.duration
-            aspect_ratio = project.default_aspect_ratio
+            # The frame the approved brief fixed, when this shot came out of
+            # a director session; the project default is only for shots made
+            # outside one. Compiling (and billing) 9:16 for a 16:9 approval
+            # is exactly the mismatch reading the default here produced.
+            aspect_ratio = approved_aspect_ratio(director) or project.default_aspect_ratio
             generation_policy = shot.generation_policy
             continuity_policy = shot.continuity_policy
 
@@ -489,6 +501,14 @@ class PromptCompilerService:
         ]
         director_copy = [
             str(item).strip() for item in (director.get("required_copy") or []) if str(item).strip()
+        ]
+        director_prohibitions = [
+            str(item).strip() for item in (director.get("prohibitions") or []) if str(item).strip()
+        ]
+        director_prohibited_terms = [
+            str(item).strip()
+            for item in (director.get("prohibited_terms") or [])
+            if str(item).strip()
         ]
         state_characters = start_state.get("characters", {})
         binding_by_character = {
@@ -691,6 +711,13 @@ class PromptCompilerService:
         constraints.extend(
             f'required on-screen copy, exactly these words: "{item}"' for item in director_copy
         )
+        # What the client forbade, whole (so a model reads the instruction as
+        # the client gave it) and as the things it forbids (so they reach the
+        # negative prompt and the QC checklist by name). The screenplay gate
+        # can only match words; this is where a prohibition is enforced on
+        # what is actually rendered.
+        constraints.extend(f"{PROHIBITION_PREFIX}{item}" for item in director_prohibitions)
+        constraints.extend(f"{FORBIDDEN_PREFIX}{item}" for item in director_prohibited_terms)
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -874,6 +901,16 @@ class PromptCompilerService:
             else json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             for item in value.continuity_context.facts
         ]
+        forbidden = [
+            item.removeprefix(FORBIDDEN_PREFIX)
+            for item in spec.constraints
+            if item.startswith(FORBIDDEN_PREFIX)
+        ]
+        prohibitions = [
+            item.removeprefix(PROHIBITION_PREFIX)
+            for item in spec.constraints
+            if item.startswith(PROHIBITION_PREFIX)
+        ]
         qc_checklist = [
             f"dominant_action={spec.dominant_action}",
             f"camera_movement={spec.camera.dominant_movement}",
@@ -889,13 +926,19 @@ class PromptCompilerService:
                 f"subject_identity={subject.name}:{subject.asset_version_id or subject.asset_id or 'unbound'}"
                 for subject in spec.subjects
             ),
+            # Reviewed as the client said it, not as the compiler paraphrased
+            # it: the checklist line is the whole prohibition.
+            *(f"prohibition={item}" for item in prohibitions),
         ]
         return PromptCompilerOutput(
             status="COMPILED",
             positive_prompt=self.to_neutral_prompt(spec),
-            negative_prompt=(
-                "identity drift, visual style drift, changed wardrobe, changed props, extra subjects, "
-                "duplicate limbs, unintended cuts, text artifacts, unapproved direct gaze into the lens"
+            negative_prompt=", ".join(
+                [
+                    "identity drift, visual style drift, changed wardrobe, changed props, extra subjects, "
+                    "duplicate limbs, unintended cuts, text artifacts, unapproved direct gaze into the lens",
+                    *forbidden,
+                ]
             ),
             asset_bindings=list(dict.fromkeys(value.asset_bindings)),
             continuity_assertions=facts,

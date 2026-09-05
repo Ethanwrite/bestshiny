@@ -387,10 +387,32 @@ class CharacterEvidenceTracker:
                 )
             )
             for submission in rows:
+                # Every character still waiting is settled with the parent:
+                # a REQUESTED row past the deadline was never going to report,
+                # and leaving it REQUESTED said "still analysing" for ever.
+                missing: list[str] = []
+                for row in session.scalars(
+                    select(CharacterEvidenceCoverage)
+                    .where(
+                        CharacterEvidenceCoverage.submission_id == submission.id,
+                        CharacterEvidenceCoverage.status == "REQUESTED",
+                    )
+                    .order_by(CharacterEvidenceCoverage.character_id)
+                ):
+                    missing.append(row.character_id)
+                    row.status = "FAILED"
+                    row.failure_reason = "NO_REPORT_BEFORE_DEADLINE"
+                reported = list(submission.metadata_json.get("reported_character_ids") or [])
                 submission.status = "RECONCILIATION_REQUIRED"
                 submission.reconciliation_note = (
-                    f"accepted at {submission.accepted_at.isoformat()} and no signed "
-                    f"callback arrived within {self.callback_timeout_seconds}s"
+                    f"accepted at {submission.accepted_at.isoformat()} and "
+                    + (
+                        "no signed callback arrived"
+                        if not reported
+                        else f"only {len(reported)} of the requested characters reported"
+                    )
+                    + f" within {self.callback_timeout_seconds}s"
+                    + (f"; never reported: {', '.join(missing)}" if missing else "")
                 )
                 timed_out += 1
             session.flush()
@@ -535,10 +557,15 @@ class CharacterEvidenceTracker:
 
         Tolerates an absent row (a submission made before this table existed);
         never creates one, because a callback for a job this table never
-        dispatched is already rejected upstream by the lineage checks. A
-        character missing from the envelope never blocks the REPORTED
-        transition - that would turn a shadow observation into a gate - but it
-        is recorded, so partial coverage is visible.
+        dispatched is already rejected upstream by the lineage checks.
+
+        REPORTED means every character the job was asked about has reported.
+        A callback that covers only some of them leaves the row ACCEPTED with
+        the gap recorded (``missing_character_ids``): the remaining reports
+        can still arrive and complete it, and if they never do the accepted
+        deadline turns the job over to reconciliation instead of a parent
+        marked REPORTED sitting on characters that stay REQUESTED for ever.
+        None of this reads or changes the candidate's QA gate.
         """
 
         with self.database.session() as session:
@@ -551,17 +578,37 @@ class CharacterEvidenceTracker:
                 return
             now = utcnow()
             submission.last_callback_at = now
+            metadata = dict(submission.metadata_json)
             if character_ids is not None:
-                submission.metadata_json = {
-                    **submission.metadata_json,
-                    "reported_character_ids": list(character_ids),
-                }
+                already = list(metadata.get("reported_character_ids") or [])
+                metadata["reported_character_ids"] = list(
+                    dict.fromkeys([*already, *(str(item) for item in character_ids)])
+                )
             if status == "SUCCEEDED":
-                submission.status = "REPORTED"
-                submission.reported_at = now
+                missing = [
+                    row.character_id
+                    for row in session.scalars(
+                        select(CharacterEvidenceCoverage)
+                        .where(
+                            CharacterEvidenceCoverage.submission_id == submission.id,
+                            CharacterEvidenceCoverage.status == "REQUESTED",
+                        )
+                        .order_by(CharacterEvidenceCoverage.character_id)
+                    )
+                ]
+                metadata["missing_character_ids"] = missing
                 submission.error_code = None
                 submission.error_message = None
+                if missing:
+                    metadata["partial_callbacks"] = int(metadata.get("partial_callbacks") or 0) + 1
+                    # Deliberately still ACCEPTED: the deadline keeps running
+                    # for the characters that have not reported.
+                else:
+                    submission.status = "REPORTED"
+                    submission.reported_at = now
+                submission.metadata_json = metadata
             else:
+                submission.metadata_json = metadata
                 submission.status = "FAILED"
                 submission.error_code = (error_code or "REMOTE_FAILURE")[:120]
                 for row in session.scalars(

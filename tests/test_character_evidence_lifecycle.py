@@ -270,11 +270,30 @@ def test_callback_moves_the_submission_to_reported(container, project) -> None: 
     tracker = _tracker(container, _AcceptingProducer())
     tracker.enqueue_ready_candidates()
     tracker.dispatch_pending()
+    # A success envelope that reports none of the characters it was asked
+    # about is not a report: the job stays ACCEPTED, under its deadline, with
+    # the gap on record - REPORTED means every requested character reported.
     tracker.record_callback(candidate_id, status="SUCCEEDED")
+    with container.database.session() as session:
+        row = session.scalar(select(CharacterEvidenceSubmission))
+        assert row.status == "ACCEPTED"
+        assert row.reported_at is None
+        assert row.metadata_json["missing_character_ids"]
+        missing = list(row.metadata_json["missing_character_ids"])
+    for character_id in missing:
+        tracker.record_character_report(
+            candidate_id,
+            character_id=character_id,
+            producer_run_id="run-1",
+            decision="ABSTAIN",
+            qa_result_id=None,
+        )
+    tracker.record_callback(candidate_id, status="SUCCEEDED", character_ids=missing)
     with container.database.session() as session:
         row = session.scalar(select(CharacterEvidenceSubmission))
         assert row.status == "REPORTED"
         assert row.reported_at is not None
+        assert row.metadata_json["missing_character_ids"] == []
     # A failure callback for an unknown candidate is tolerated silently: the
     # webhook's lineage checks already rejected anything not ours.
     tracker.record_callback("nonexistent-candidate", status="FAILED")

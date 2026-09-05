@@ -635,7 +635,12 @@ Rules that shape it (2026-09-02 overhaul):
   asset version, as the manual route does) and promotes the style plate into a STYLE asset version
   locked through `ProjectStyleService.lock` - a signed-in user is required, the development bypass
   is refused with `STYLE_LOCK_REQUIRES_USER`. A project that already has a lock inherits it, on
-  record (`STYLE_LOCK_INHERITED`). Any failure leaves the bible DRAFT with the error in
+  record (`STYLE_LOCK_INHERITED`) - but only unasked when the locked look (medium, palette, tone,
+  read from the plate's own anchor) is the one this brief asks for. When it is not, the draft bible
+  says so (`content.style_inheritance`, the skipped plate reads `PROJECT_STYLE_LOCK_DIFFERS`) and
+  the lock is refused with `STYLE_LOCK_CONFLICT` until the approval carries
+  `accept_inherited_style`; the acceptance is recorded in `lineage_json.style_inheritance`. Any
+  failure leaves the bible DRAFT with the error in
   `lineage_json` and blocks compilation (`BIBLE_LOCK_INCOMPLETE`); a retry completes only what is
   missing. Nothing here writes identity or style tables directly.
 - **Only the approved screenplay is compiled, idempotently.** Beats are materialized from the
@@ -643,12 +648,25 @@ Rules that shape it (2026-09-02 overhaul):
   script is the episode's `script_source`. The compile reuses the same episode on retry, runs the
   same narrative compiler and frame anchor planner, applies the shot intents, and writes one
   `creative_shot_lineage` row per shot (brief, screenplay, bible, anchors, identity versions,
-  style lock) - `GET /v1/creative/shots/{id}/lineage` reads it back.
+  style lock) - `GET /v1/creative/shots/{id}/lineage` reads it back. The shot intent carries the
+  brief's approved `aspect_ratio` (the prompt compiler and the generation request read it before
+  the project default), the screenplay's own `shot.anchors` merged ahead of the derived ones, the
+  brief's selling points as preserved product claims whatever `must_preserve` the director wrote,
+  and the user's enforceable prohibitions (`prohibitions`, `prohibited_terms`) which the compiler
+  turns into constraints, negative-prompt terms and a `prohibition=` QC line.
 - **One dialogue round is one transaction.** The user turn, the director turn, the applied
   operations, the question states and the brief revision land together or not at all; a crash after
   the model answered leaves no orphan message and spends no FREE round (the FREE budget counts
   landed rounds). `client_turn_id` makes a retried POST replay the recorded reply
-  (`IDEMPOTENT_REPLAY`). Model failures degrade with a retryable reason code
+  (`IDEMPOTENT_REPLAY`); while the first request is still being answered, the key is held by a
+  `creative_turn_claims` row (migration `0080`) written before the model call, so a duplicate is
+  refused with `TURN_IN_PROGRESS` (retryable) instead of paying for a second director call - the
+  same words with another key, or the same key with other words, is `CLIENT_TURN_ID_CONTENT_MISMATCH`;
+  a claim past its five-minute lease belongs to a dead process and is taken over. A USER_STATED
+  operation is honoured only when its quote is the user's *and* names the value it writes (a fact
+  path literally, an enum-like path through the extractor's own cues, a number in digits or
+  Chinese numerals) - otherwise it is recorded as `VALUE_NOT_IN_EVIDENCE` and demoted to the
+  director's inference. Model failures degrade with a retryable reason code
   (`MODEL_UNAVAILABLE`, `MODEL_BUDGET_REFUSED`, `MODEL_OUTPUT_INVALID`, `MODEL_CALL_ERROR`).
 
 The **VisualBible is version-locked on approval**: a LOCKED version is immutable and cannot be

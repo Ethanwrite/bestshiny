@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +75,12 @@ def _clean_phrase(value: str) -> str:
     return " ".join(text.split())[:60]
 
 
+def compiler_location(location: str) -> str:
+    """The location exactly as the scene heading, and so the Location row, names it."""
+
+    return _clean_phrase(location) or "studio"
+
+
 def validate_screenplay(payload: Any) -> Screenplay:
     """Strict validation of a model or user screenplay; never a 500."""
 
@@ -96,6 +103,21 @@ def validate_screenplay(payload: Any) -> Screenplay:
             seen.add(shot.sequence)
             if shot.action is not None and not _clean_phrase(shot.action.actor):
                 problems.append(f"beat {beat.sequence} shot {shot.sequence}: empty actor")
+    # Two names the schema keeps apart can still be one token once rendered
+    # for the script: "Mary Jane" and "Mary-Jane" both become `Mary-Jane`, the
+    # compiler reads one actor, and the Character row (matched case-blind on
+    # that token) is shared - two identities, one Canon. Refused here, where
+    # the script token is minted, rather than discovered at the lock.
+    by_script_name: dict[str, str] = {}
+    for character in screenplay.characters:
+        token = script_name(character.name).casefold()
+        other = by_script_name.get(token)
+        if other is not None and other != character.name:
+            problems.append(
+                f"characters {other!r} and {character.name!r} collapse to the same script name "
+                f"{script_name(character.name)!r}; rename one of them"
+            )
+        by_script_name.setdefault(token, character.name)
     if problems:
         raise ScreenplayInvalid("screenplay failed the shot contract", problems[:20])
     return screenplay
@@ -124,7 +146,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
     beats: list[dict[str, Any]] = []
     for beat in screenplay.beats:
         scene = scenes[beat.scene_key]
-        location = _clean_phrase(scene.location) or "studio"
+        location = compiler_location(scene.location)
         shots: list[dict[str, Any]] = []
         for shot in beat.shots:
             if shot.dialogue is not None:
@@ -504,16 +526,93 @@ class ShotConstraints:
     invariants: tuple[str, ...] = ()
     product_claims: tuple[str, ...] = ()
     required_copy: tuple[str, ...] = ()
+    #: What the user forbade, in their own sentences, and the things those
+    #: sentences forbid. Global by nature - a prohibition holds in every shot -
+    #: so every shot carries them into its prompt and its QC checklist.
+    prohibitions: tuple[str, ...] = ()
+    prohibited_terms: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return {
             "invariants": list(self.invariants),
             "product_claims": list(self.product_claims),
             "required_copy": list(self.required_copy),
+            "prohibitions": list(self.prohibitions),
+            "prohibited_terms": list(self.prohibited_terms),
         }
 
     def __bool__(self) -> bool:
-        return bool(self.invariants or self.product_claims or self.required_copy)
+        return bool(
+            self.invariants or self.product_claims or self.required_copy or self.prohibitions
+        )
+
+
+def preserved_product_claims(
+    screenplay: Screenplay, selling_points: Sequence[str] = ()
+) -> list[str]:
+    """Every product claim that must survive verbatim, the user's own first.
+
+    The director may echo a selling point the user stated as a claim with
+    ``must_preserve=false``, or leave it out of ``product_claims`` altogether;
+    either way it then reached no shot. A selling point the brief establishes
+    is preserved on the user's authority, not the director's flag: it is
+    listed as written, and any claim that restates it is preserved too.
+    """
+
+    wanted = [str(item).strip() for item in selling_points if str(item).strip()]
+    wanted_keys = [normalize_name(item) for item in wanted]
+    result: list[str] = []
+    seen: set[str] = set()
+
+    def add(text: str) -> None:
+        key = normalize_name(text)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(text)
+
+    for item in wanted:
+        add(item)
+    for claim in screenplay.product_claims:
+        restates_user = any(
+            key and (key in normalize_name(claim.claim) or normalize_name(claim.claim) in key)
+            for key in wanted_keys
+        )
+        if claim.must_preserve or restates_user:
+            add(claim.claim)
+    return result
+
+
+def normalize_anchor_key(value: str) -> str:
+    """A declared anchor key in the form the derived keys use.
+
+    The derived keys are ``kind:normalized subject``; a user writing
+    ``character:Ren`` by hand means the same anchor as ``character:ren``.
+    """
+
+    text = " ".join(str(value or "").split())
+    kind, separator, subject = text.partition(":")
+    if not separator:
+        return text
+    return f"{kind.strip().casefold()}:{normalize_name(subject)}"
+
+
+def merge_shot_anchors(declared: Sequence[str], derived: Sequence[str]) -> list[str]:
+    """The shot's anchors: what was declared on it, then what its line implies.
+
+    ``beats_from_screenplay`` carries the screenplay's own ``shot.anchors``
+    (a second character in frame, a key visual the user bound by hand) and
+    ``anchor_keys_for_shot`` derives the actor, the location, the prop and the
+    style from the rendered line. The plan used to keep only the derived
+    list, so the explicit bindings the user approved were gone before the
+    compiler ever saw them. Declared first, so a deliberate binding is never
+    demoted behind an inferred one; duplicates fold.
+    """
+
+    merged: list[str] = []
+    for item in [*(normalize_anchor_key(key) for key in declared), *derived]:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
 
 
 #: Characters that can carry a word: everything else is a boundary. Explicit
@@ -590,8 +689,15 @@ def global_invariants(screenplay: Screenplay) -> list[str]:
     ]
 
 
-def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> list[ShotConstraints]:
-    """Per-shot invariants, product claims and required copy, in shot order.
+def shot_constraints(  # noqa: PLR0913 - one call carries everything a shot must honour
+    screenplay: Screenplay,
+    *,
+    product: str | None = None,
+    selling_points: Sequence[str] = (),
+    prohibitions: Sequence[str] = (),
+    prohibited_terms: Sequence[str] = (),
+) -> list[ShotConstraints]:
+    """Per-shot invariants, product claims, required copy and prohibitions, in shot order.
 
     The order matches ``render_script``'s: one entry per shot that renders an
     action line, so the list zips with the compiled shots.
@@ -599,9 +705,9 @@ def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> l
 
     names = {normalize_name(character.name): character.name for character in screenplay.characters}
     scoped = [(item, *_invariant_scope(item, screenplay)) for item in screenplay.invariants]
-    preserved = tuple(
-        claim.claim for claim in screenplay.product_claims if claim.must_preserve
-    )
+    preserved = tuple(preserved_product_claims(screenplay, selling_points))
+    forbidden = tuple(str(item).strip() for item in prohibitions if str(item).strip())
+    forbidden_terms = tuple(str(item).strip() for item in prohibited_terms if str(item).strip())
     product_key = normalize_name(product) if product else ""
     copy_by_position: dict[tuple[int, int], list[str]] = {}
     for item in screenplay.required_copy:
@@ -639,6 +745,8 @@ def shot_constraints(screenplay: Screenplay, *, product: str | None = None) -> l
                     invariants=applicable,
                     product_claims=claims,
                     required_copy=tuple(placed_here),
+                    prohibitions=forbidden,
+                    prohibited_terms=forbidden_terms,
                 )
             )
             _ = names

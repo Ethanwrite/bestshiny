@@ -220,7 +220,37 @@ something else happens to reload it — the renewal succeeds and the site still 
   database. The pre-extraction `bestshiny-backup` dump and the `*.bak-20260905-044537` copies of
   `.env` and the compose file are the safer path.
 
-- **Current release.** `75ea271` (`main`, [#48](https://github.com/Ethanwrite/bestshiny/pull/48)
+- **Data correction, 2026-09-05 ≈05:03Z — one recovery message rewritten in place.**
+  Not a release: no deploy, no migration, no restart. One `UPDATE` against
+  `creative_turns`, at the operator's request.
+
+  Migration `0075` wrote a DIRECTOR turn on the single session it recovered
+  (`743d34cd-8ab2-4b07-bda8-79bf3cee44f0`, turn `8f4668c5-50c7-4b86-8681-f42f274cc0aa`,
+  sequence 9) telling the user *"key visuals whose look has not changed are re-used rather
+  than generated again"*. That is not what happens: the way back out of the recovered stage
+  runs a live DIRECTOR call that writes a **new** screenplay, anchor prompts derive from it,
+  and the hash matches only when the model reproduces the old phrasing. The sentence was a
+  promise about money the platform could not keep.
+  [#51](https://github.com/Ethanwrite/bestshiny/pull/51) corrected the constant — but a
+  constant only governs future runs, and alembic will not re-run an applied migration, so the
+  row `0075` had already written on this host still carried the original text.
+
+  The replacement was parsed out of `RECOVERY_MESSAGE` in the migration's own AST rather than
+  retyped, so the row now says exactly what today's code would write. **The original is kept**
+  in `context_json` beside `message_corrected_at` and `message_corrected_reason`: this is
+  machine-authored dialogue, and correcting it must not look like it never said anything else.
+
+  Procedure worth repeating for any hand-written production `UPDATE`: `bestshiny-backup` first
+  (`video_platform-20260905T050255Z.dump`), then a statement triple-guarded on the row id, on
+  `reasoner = 'MIGRATION'` and on `context_json->>'migration'`, inside `BEGIN`/`COMMIT` with
+  `ON_ERROR_STOP`. `UPDATE 1`. The first attempt failed on `operator does not exist: json ||
+  jsonb` — **`context_json` is a `json` column, not `jsonb`**, so a merge needs a
+  `::jsonb … ::json` round trip; the error aborted the transaction and wrote nothing, which is
+  what the explicit `BEGIN` is for. Verified after: content matches the constant, the original
+  is preserved, still exactly one `MIGRATION` turn, the session still `BRIEF_APPROVED`,
+  `/health` 200.
+
+- **Previous release.** `75ea271` (`main`, [#48](https://github.com/Ethanwrite/bestshiny/pull/48)
   the four defects a pre-deploy audit found in the shipped tree, and
   [#49](https://github.com/Ethanwrite/bestshiny/pull/49) the voyage video-pixel price), deployed
   2026-09-04 ≈23:05Z. `DEPLOYED_SHA.prev = d491870`. One migration ran,
@@ -254,7 +284,7 @@ something else happens to reload it — the renewal succeeds and the site still 
   platform sends video: as extracted stills. `settle_from_usage` no longer returns UNCERTAIN for a
   usage block reporting video pixels.
 
-- **Current release.** `d491870` (`main`, [#46](https://github.com/Ethanwrite/bestshiny/pull/46)
+- **Previous release.** `d491870` (`main`, [#46](https://github.com/Ethanwrite/bestshiny/pull/46)
   the creative-director production chain: director intent reaches generation, Scene/Product/Prop
   become real Canon, brief↔screenplay conformance, server-verified USER_STATED, optimistic
   concurrency on dialogue and screenplay, a resumable visual-bible lock, legacy-session recovery,

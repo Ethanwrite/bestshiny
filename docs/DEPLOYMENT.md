@@ -176,7 +176,45 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `4ab15cb` (`main`, [#52](https://github.com/Ethanwrite/bestshiny/pull/52)
+- **Current release.** `fe91a8f` (`main`, [#55](https://github.com/Ethanwrite/bestshiny/pull/55)
+  — reference images reach Seedream, one dominant action per shot, execution duration is the
+  router's, identity references narrow to identity-critical characters, both multimodal
+  embeddings on as advice; ledger entry `docs/OPEN_ISSUES.md` §2.48), deployed 2026-09-06 ≈05:30Z.
+  `DEPLOYED_SHA.prev = 4ab15cb`. One migration ran, `0080` → **`0081_veo_discrete_durations`**:
+  data only, no DDL — `supported_durations = [4, 6, 8]` written onto the three OpenRouter Veo
+  capability profiles (verified on all three rows afterwards) and the old "gap" note on the
+  `veo-3.1-openrouter` definition swapped for the current note. No `.env` change was made: the two
+  flags this release adds or flips carry code defaults.
+
+  Same ordering as the `4ab15cb` deploy (`deploy_remote.sh`, log `deploy-fe91a8f.log`,
+  `DEPLOY_EXIT=0`, ~4 min including a full pip layer rebuild): backups → extract
+  (`COMPOSE_UNCHANGED`) → build → `stop worker` → explicit `alembic upgrade head` on the new image →
+  `up -d api web` → `up -d --force-recreate --no-deps web` → `/health` (answered on the first
+  check) → `up -d worker`.
+
+  Verified after: both markers written, `alembic current` = `0081`, all three running image IDs
+  equal the freshly built ones, `RestartCount=0` on all three, local 8080/3000 200, public
+  `api.bestshiny.com/health` and `bestshiny.com/app` 200 from the host, the new bundle
+  `/assets/index-Bc-S0XTz.js` carries the reference-preview and upload-refusal strings, the api's
+  startup sync inserted the `MULTIMODAL_EMBEDDING` FALLBACK binding (`gemini-embedding-2-openrouter`,
+  priority 10) beside the Voyage PRIMARY, zero tracebacks in api or worker, and data untouched
+  (14 sessions, 28 jobs, 6 anchors, 0 style locks, `memory_index_outbox` empty).
+
+  **What the host `.env` still overrides.** It carries `FEATURE_VOYAGE_MEMORY=false` and
+  `FEATURE_SEMANTIC_STYLE_LOCK=true`, both of which beat the new code defaults: production memory
+  indexing stays off, and the semantic style layer stays *enforced* (the new advisory mode only
+  engages when the enforced flag is off). Flipping them is the operator's decision; enabling memory
+  bills no backlog because the outbox was empty at this deploy, and no style lock exists yet, so
+  switching the layer to advisory affects no existing gate.
+
+  **Rollback caveat.** A code rollback to `4ab15cb` requires a downgrade to `0080` (that image pins
+  `REQUIRED_SCHEMA_REVISION = 0080_creative_turn_claims`); `0081`'s `downgrade()` removes the
+  `supported_durations` key and restores the gap note, and is exercised by
+  `tests/test_execution_duration.py`, never on this populated database. The pre-extraction
+  `bestshiny-backup` dump and the `*.bak-<stamp>` copies of `.env` and the compose file remain the
+  safer path.
+
+- **Previous release.** `4ab15cb` (`main`, [#52](https://github.com/Ethanwrite/bestshiny/pull/52)
   the creative-director audit's P1/P2 findings, on top of
   [#51](https://github.com/Ethanwrite/bestshiny/pull/51) the audit's medium/low findings and
   [#50](https://github.com/Ethanwrite/bestshiny/pull/50) the `75ea271` release record), deployed

@@ -63,6 +63,7 @@ from production_domain.models import (
     GenerationEvent,
     GenerationIdempotency,
     GenerationJob,
+    GenerationSpendAuthorization,
     JobStatus,
     LiveCanaryUsage,
     MediaAsset,
@@ -371,6 +372,7 @@ class GenerationGateway:
         provider: str,
         model: str,
         media_type: str,
+        pre_boundary_proven: bool = False,
     ) -> LiveGenerationFence | None:
         """Take every hold this live generation needs, then mark them UNCERTAIN.
 
@@ -383,14 +385,28 @@ class GenerationGateway:
         call exactly as before. Every hold is taken before any of them is
         marked UNCERTAIN, so a refused permit or a tripped breaker leaves
         nothing held.
+
+        ``pre_boundary_proven`` is the caller's durable evidence that the
+        previous attempt never reached a transport: the job is still NOT_SENT
+        with no provider job, which every paid step (asset upload, submission)
+        moves it off before it runs. A hold that attempt left UNCERTAIN - the
+        process died between preparing the boundary and selecting an account
+        - is then handed back and taken again, instead of failing the job for
+        good as a forbidden resubmission (2026-09-06 audit F08). Anything the
+        job cannot prove stays UNCERTAIN for an operator.
         """
 
         if self.provider_mode is not ProviderMode.LIVE:
             return None
         key = self._live_canary_operation_key(job_id)
+        recovered_evidence = f"generation-boundary-recovered-before-transport:{job_id}"
         authorization: SpendAuthorizationView | None = None
         if self.production_budget is not None:
             authorization = self.production_budget.find_operation(key)
+            if authorization is not None and authorization.status == "UNCERTAIN" and pre_boundary_proven:
+                authorization = self.production_budget.release_pre_boundary(
+                    authorization.id, evidence_reference=recovered_evidence
+                )
         if authorization is not None and authorization.status in {"UNCERTAIN", "SETTLED"}:
             raise LiveCanaryResubmissionForbidden(
                 "live generation spend authorization is already uncertain or settled; "
@@ -421,6 +437,18 @@ class GenerationGateway:
                 estimated_cost_usd=None,
                 idempotency_key=key,
             )
+            if reservation.replayed and reservation.status == "UNCERTAIN" and pre_boundary_proven:
+                # Same evidence, same answer for the permit: the usage is
+                # released and re-opened against the permit's current budget.
+                self.live_canary.release_pre_boundary(
+                    reservation.usage_id, evidence_reference=recovered_evidence
+                )
+                reservation = self.live_canary.reserve_matching(
+                    provider=provider,
+                    model=model,
+                    estimated_cost_usd=None,
+                    idempotency_key=key,
+                )
             if reservation.replayed and reservation.status in {"UNCERTAIN", "SETTLED"}:
                 raise LiveCanaryResubmissionForbidden(
                     "live generation canary outcome is already uncertain or settled; "
@@ -2803,6 +2831,7 @@ class GenerationGateway:
                 model = job.model
                 project_id = job.project_id
                 priority = job.priority
+                pre_boundary_proven = job.submission_state == "NOT_SENT" and not job.provider_job_id
                 project = session.get(Project, job.project_id)
                 workspace_scoped = bool(project and project.workspace_id)
         if attempts_exhausted:
@@ -2838,6 +2867,9 @@ class GenerationGateway:
                 provider=provider_name,
                 model=model,
                 media_type=capability,
+                # Flow is excluded: acquiring its affinity may provision a
+                # remote project, and nothing on the job records that it did.
+                pre_boundary_proven=pre_boundary_proven and provider_name != FLOW_PROVIDER,
             )
         except LiveCanaryResubmissionForbidden as exc:
             # This operation's usage is already UNCERTAIN or SETTLED: a paid
@@ -3782,7 +3814,14 @@ class GenerationGateway:
                 self._discard_synchronous_result(session, job_id)
             if target_status == JobStatus.WORKER_NEEDS_USER_ACTION.value:
                 worker = session.get(BrowserWorker, job.worker_id) if job.worker_id else None
-                if worker:
+                # A browser worker needs a human at its keyboard before it can
+                # serve again, and its heartbeat restores READY afterwards. A
+                # direct API resource has neither: flipping it parked every
+                # other job of that provider behind one job's reconciliation,
+                # with spare capacity and nothing to restore it (2026-09-06
+                # audit F09). The job itself is still quarantined and keeps its
+                # slot; the resource keeps serving the rest.
+                if worker and (worker.metadata_json or {}).get("resource_kind") != "DIRECT_API":
                     worker.status = WorkerStatus.NEEDS_USER_ACTION.value
             if self.workspace_credits is not None:
                 if submitted and job.status in {
@@ -4016,7 +4055,69 @@ class GenerationGateway:
                 self._event(session, job.id, "JOB_RESUMED", status=job.status)
                 recovered += 1
         self.reconcile_credit_lifecycle()
+        self.settle_completed_spend_authorizations()
         return recovered
+
+    def settle_completed_spend_authorizations(self) -> int:
+        """Settle the platform budget for generations that completed without settling it.
+
+        The completion transaction commits the output, the billing evidence,
+        the user's credits and COMPLETED; the spend authorization is settled
+        after it. A process that dies in between leaves the authorization
+        UNCERTAIN with its reservation counted against the daily breaker, and
+        completed jobs are never polled again, so nothing came back to settle
+        it (2026-09-06 audit F07). The billing evidence the transaction did
+        commit is the settlement's input: the provider's actual cost when it
+        reported one, the quote otherwise - the same rule the poll applies.
+        """
+
+        if self.provider_mode is not ProviderMode.LIVE or self.production_budget is None:
+            return 0
+        with self.database.session() as session:
+            rows = session.execute(
+                select(GenerationJob)
+                .join(
+                    GenerationSpendAuthorization,
+                    GenerationSpendAuthorization.generation_job_id == GenerationJob.id,
+                )
+                .where(
+                    GenerationSpendAuthorization.status == "UNCERTAIN",
+                    GenerationJob.status == JobStatus.COMPLETED.value,
+                    GenerationJob.output_asset_id.is_not(None),
+                    GenerationJob.provider_job_id.is_not(None),
+                )
+            ).all()
+            targets = [
+                (job.id, job.provider, job.model, job.provider_job_id, job.actual_cost) for (job,) in rows
+            ]
+        settled = 0
+        for job_id, provider, model, provider_job_id, actual_cost in targets:
+            # `_provider_billing_facts` reads the figure the completion
+            # transaction recorded on the job from the provider's response;
+            # a job without one settles at its quote, as the poll would.
+            raw: dict[str, Any] = {"usage": {"actual_cost_usd": actual_cost}} if actual_cost else {}
+            try:
+                self._settle_live_generation_fence(
+                    job_id=job_id,
+                    provider=provider,
+                    model=model,
+                    provider_job_id=provider_job_id,
+                    raw=raw,
+                )
+            except (LiveSpendDenied, LiveCanaryConflict, SpendAuthorizationConflict, ValueError) as exc:
+                with self.database.session() as session:
+                    self._event(
+                        session,
+                        job_id,
+                        "LIVE_CANARY_SETTLEMENT_REVIEW_REQUIRED",
+                        error=str(exc),
+                        recovery=True,
+                    )
+                continue
+            with self.database.session() as session:
+                self._event(session, job_id, "SPEND_AUTHORIZATION_SETTLED_ON_RECOVERY")
+            settled += 1
+        return settled
 
     def reconcile_credit_lifecycle(self) -> int:
         """Repair deterministic crash gaps; ambiguous provider outcomes stay held."""

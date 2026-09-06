@@ -784,8 +784,10 @@ class LiveCanaryPermitService:
 
         GenerationGateway marks a usage UNCERTAIN before any possible live
         transport. A synchronous, conclusively local failure may then release
-        that hold through this explicit method. Crashes and ambiguous failures
-        remain UNCERTAIN and therefore fail closed.
+        that hold through this explicit method, and so may a later attempt
+        whose job row proves the earlier one died before any transport
+        (still NOT_SENT, no provider job). Ambiguous failures remain
+        UNCERTAIN and therefore fail closed.
         """
 
         evidence = evidence_reference.strip()

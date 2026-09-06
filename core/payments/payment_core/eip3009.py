@@ -347,6 +347,7 @@ class EIP3009RelayerService:
                 self._require_chain()
                 if self._authorization_used(authorization):
                     raise EIP3009Conflict("This USDC authorization nonce has already been used")
+                self._require_earlier_transactions_delivered(session, current_id=authorization.id)
                 raw_transaction, tx_hash, relayer_nonce = self._prepare_transaction(authorization, signature)
                 # Persist the exact signed transaction before touching the
                 # network. If the process dies after broadcasting, a retry can
@@ -730,6 +731,58 @@ class EIP3009RelayerService:
             order.paid_at = authorization.confirmed_at
             return result
 
+    def _require_earlier_transactions_delivered(self, session: Session, *, current_id: str) -> None:
+        """Every earlier prepared transaction must be in the network before a nonce is read.
+
+        ``_prepare_transaction`` takes the nonce from the node's pending count.
+        A transaction that was persisted but whose broadcast then failed is not
+        in that count, so the next order was handed the same nonce and the two
+        could never both be mined as their own transactions - the first was
+        dead on arrival, or replaced the second (2026-09-06 audit F02). Sending
+        the earlier bytes first is what moves the count; when they still will
+        not go, this order waits rather than colliding. Expired rows are left
+        alone: nothing of theirs can reach the chain, so their nonce is free.
+        """
+
+        now_epoch = int(utcnow().timestamp())
+        stalled = list(
+            session.scalars(
+                select(EIP3009Authorization)
+                .where(
+                    EIP3009Authorization.relayer_address == self.relayer_address,
+                    EIP3009Authorization.chain_id == self.chain_id,
+                    EIP3009Authorization.status == "SUBMITTING",
+                    EIP3009Authorization.id != current_id,
+                    EIP3009Authorization.valid_before > now_epoch,
+                )
+                .order_by(EIP3009Authorization.relayer_nonce)
+                .with_for_update()
+            )
+        )
+        for row in stalled:
+            if not row.raw_transaction or not row.transaction_hash:
+                continue
+            if not self._delivered(row.raw_transaction, row.transaction_hash):
+                raise EIP3009RPCError(
+                    "RELAYER_TRANSACTION_PENDING",
+                    "An earlier sponsored payment has not reached Base yet; retry in a moment",
+                )
+            row.status = "SUBMITTED"
+            row.last_error_code = None
+
+    def _delivered(self, raw_transaction: str, tx_hash: str) -> bool:
+        """True once the node holds the transaction, whether this send or an earlier one carried it."""
+
+        try:
+            if str(self._rpc("eth_sendRawTransaction", [raw_transaction])).lower() == tx_hash:
+                return True
+        except EIP3009RPCError:
+            pass
+        try:
+            return isinstance(self._rpc("eth_getTransactionByHash", [tx_hash]), dict)
+        except EIP3009RPCError:
+            return False
+
     def _prepare_transaction(
         self, authorization: EIP3009Authorization, signature: str
     ) -> tuple[str, str, int]:
@@ -804,12 +857,25 @@ class EIP3009RelayerService:
             raw_transaction = authorization.raw_transaction
             expired = authorization.valid_before <= int(utcnow().timestamp())
         if expired:
+            # Only the node's own answer may end the order. A query that failed
+            # is not "not found": it used to fold a receipt the first call had
+            # already returned into EXPIRED, a state the sweep never revisits,
+            # so a paid order stayed unpaid for good (2026-09-06 audit F03).
+            # The error is recorded and raised instead; the order stays
+            # SUBMITTING and is asked about again.
             try:
                 receipt = self._rpc("eth_getTransactionReceipt", [tx_hash])
-                known = self._rpc("eth_getTransactionByHash", [tx_hash])
-            except EIP3009RPCError:
-                receipt = known = None
-            if not isinstance(receipt, dict) and not isinstance(known, dict):
+                known = receipt
+                if not isinstance(receipt, dict):
+                    known = self._rpc("eth_getTransactionByHash", [tx_hash])
+            except EIP3009RPCError as exc:
+                with self.database.session() as session:
+                    authorization, _order = self._load_owned(
+                        session, workspace_id, user_id, authorization_id, lock=True
+                    )
+                    authorization.last_error_code = exc.code
+                raise
+            if not isinstance(known, dict):
                 with self.database.session() as session:
                     authorization, order = self._load_owned(
                         session, workspace_id, user_id, authorization_id, lock=True

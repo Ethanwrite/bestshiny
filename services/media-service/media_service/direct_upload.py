@@ -78,7 +78,9 @@ class DirectUploadNotFinished(RuntimeError):
 @dataclass(frozen=True)
 class AuthorizedUpload:
     upload_id: str
-    presigned: PresignedUpload
+    # None when there is nothing for the client to write: the content is already
+    # held (`existing_asset_id` says where) and completion adopts it from there.
+    presigned: PresignedUpload | None
     expires_at: datetime
     # Set when this exact content already exists for the project: the client can
     # skip the transfer entirely rather than re-uploading bytes we already hold.
@@ -134,16 +136,25 @@ class DirectUploadService:
         self.ttl_seconds = max(60, ttl_seconds)
         self.verify_sha256_on_complete = verify_sha256_on_complete
 
-    @staticmethod
-    def _storage_key(sha256: str, filename: str) -> str:
-        """Content-addressed, exactly as the streaming path keys its objects.
+    def _storage_key(self, sha256: str, filename: str, upload_id: str) -> str:
+        """The key this authorization's PUT may write.
 
-        Safe here only because the store enforces the digest on write; a
-        client-chosen key or an unenforced digest would let one upload name
-        itself after another's content.
+        Content-addressed, exactly as the streaming path keys its objects, when
+        the store enforces the digest on write: a PUT can then only ever land
+        the bytes the key already names. Where it does not
+        (``verify_sha256_on_complete``), a client that declared another
+        upload's digest was handed a PUT to *that* object and could overwrite
+        it before completion ever read the hash back - across projects, with
+        the victim's row left READY (2026-09-06 audit F01). So the key then
+        carries a segment only this authorization knows: no adopted object is
+        reachable from a digest alone, and the PUT can only fill a slot that is
+        this upload's own. Dedupe is unaffected either way; it keys on the
+        recorded digest, not on the object name.
         """
 
         suffix = Path(Path(filename).name).suffix.lower()
+        if self.verify_sha256_on_complete:
+            return f"{sha256[:2]}/{sha256}-{upload_id}{suffix}"
         return f"{sha256[:2]}/{sha256}{suffix}"
 
     def authorize(
@@ -174,7 +185,8 @@ class DirectUploadService:
             raise StorageLimitExceeded(self.max_upload_bytes)
         normalized_type = asset_type.strip().upper()
         safe_name = Path(filename).name or "asset.bin"
-        storage_key = self._storage_key(digest, safe_name)
+        upload_id = new_id()
+        storage_key = self._storage_key(digest, safe_name, upload_id)
 
         with self.database.session() as session:
             existing_upload = self._existing_authorization(session, project_id, idempotency_key)
@@ -187,20 +199,32 @@ class DirectUploadService:
                 )
             )
             duplicate_id = duplicate.id if duplicate else None
+            duplicate_key = duplicate.storage_key if duplicate else None
 
         if existing_upload is not None:
             return self._replay(
                 existing_upload,
                 digest=digest,
                 asset_type=normalized_type,
-                storage_key=storage_key,
+                filename=safe_name,
+                lineage_key=lineage_key,
                 mime_type=mime_type,
                 duplicate_id=duplicate_id,
             )
 
-        upload_id = new_id()
         expires_at = utcnow() + timedelta(seconds=self.ttl_seconds)
-        presigned = self._presign(storage_key, digest, mime_type, self.ttl_seconds)
+        presigned: PresignedUpload | None
+        if duplicate_key is not None and self.verify_sha256_on_complete:
+            # The project already holds these bytes under an adopted asset's
+            # key, and that is the object completion will adopt again. Nothing
+            # is left for the client to write, so no write credential is
+            # issued: a PUT into this upload's own slot would leave completion
+            # looking at an empty key, and a PUT to the adopted key is exactly
+            # the overwrite the per-upload slot exists to rule out.
+            storage_key = duplicate_key
+            presigned = None
+        else:
+            presigned = self._presign(storage_key, digest, mime_type, self.ttl_seconds)
         try:
             with self.database.session() as session:
                 session.add(
@@ -241,7 +265,8 @@ class DirectUploadService:
                 winner,
                 digest=digest,
                 asset_type=normalized_type,
-                storage_key=storage_key,
+                filename=safe_name,
+                lineage_key=lineage_key,
                 mime_type=mime_type,
                 duplicate_id=duplicate_id,
             )
@@ -289,14 +314,28 @@ class DirectUploadService:
         *,
         digest: str,
         asset_type: str,
-        storage_key: str,
+        filename: str,
+        lineage_key: str,
         mime_type: str,
         duplicate_id: str | None,
     ) -> AuthorizedUpload:
         """Re-issue the credential for an upload this key already authorized."""
 
-        if upload.sha256 != digest or upload.asset_type != asset_type or upload.storage_key != storage_key:
+        if (
+            upload.sha256 != digest
+            or upload.asset_type != asset_type
+            # The same bytes bound to another shot or character are another
+            # upload; replaying the first one would bind them to the old scope.
+            or upload.lineage_key != lineage_key
+            or Path(upload.filename).suffix.lower() != Path(filename).suffix.lower()
+        ):
             raise DirectUploadConflict("Idempotency-Key was already used for a different upload")
+        if upload.status == DirectUploadStatus.COMPLETED.value and upload.media_asset_id:
+            # The completion answered and the answer was lost, or the same
+            # file is offered again under the same key. The upload is done:
+            # what it produced is the reply (2026-09-06 audit F10), and no
+            # write credential comes with it - there is nothing left to write.
+            return AuthorizedUpload(upload.id, None, _aware(upload.expires_at), upload.media_asset_id)
         if upload.status != DirectUploadStatus.PENDING.value:
             raise DirectUploadConflict(f"this upload is {upload.status.lower()} and cannot be re-authorized")
         expires_at = _aware(upload.expires_at)
@@ -309,7 +348,19 @@ class DirectUploadService:
             raise DirectUploadExpired(
                 "the authorized upload window has closed; authorize again with a new Idempotency-Key"
             )
-        presigned = self._presign(storage_key, digest, mime_type, expires_in)
+        if upload.storage_key != self._storage_key(digest, filename, upload.id):
+            # The row points at an adopted asset's object rather than at a slot
+            # of its own (or predates per-upload slots), and a PUT there is
+            # never issued: either those bytes are still held and the client
+            # completes without transferring, or they are gone and only a
+            # fresh authorization can start over.
+            if duplicate_id is None:
+                raise DirectUploadConflict(
+                    "this upload has no writable slot and its content is no longer held; "
+                    "authorize again with a new Idempotency-Key"
+                )
+            return AuthorizedUpload(upload.id, None, expires_at, duplicate_id)
+        presigned = self._presign(upload.storage_key, digest, mime_type, expires_in)
         return AuthorizedUpload(upload.id, presigned, expires_at, duplicate_id)
 
     def find_by_idempotency_key(self, *, project_id: str, idempotency_key: str) -> DirectUpload | None:

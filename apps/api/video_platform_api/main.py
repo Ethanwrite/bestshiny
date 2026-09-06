@@ -2233,12 +2233,15 @@ def create_app(container: Container | None = None) -> FastAPI:
                 container.direct_uploads.abandon(expired_upload.id)
                 if expired_upload.storage_reservation_id:
                     storage_quota.release(expired_upload.storage_reservation_id)
+        presigned = authorized.presigned
         return {
             "upload_id": authorized.upload_id,
-            "url": authorized.presigned.url,
-            "method": authorized.presigned.method,
-            "headers": authorized.presigned.headers,
-            "storage_key": authorized.presigned.storage_key,
+            # Null when there is nothing to transfer: the content is already
+            # held and `existing_asset_id` names it.
+            "url": presigned.url if presigned else None,
+            "method": presigned.method if presigned else None,
+            "headers": presigned.headers if presigned else {},
+            "storage_key": presigned.storage_key if presigned else None,
             "expires_at": authorized.expires_at.isoformat(),
             # When set, this content is already held for the project: complete
             # immediately and skip the transfer.

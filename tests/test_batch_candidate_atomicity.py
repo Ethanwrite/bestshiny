@@ -476,3 +476,76 @@ async def test_adopted_slots_survive_the_sweeper_and_recovery_overwrites_in_plac
     assert sweep.deleted == []
     assert sweep.kept_referenced == 3
     assert len(_staged_keys(container)) == 3
+
+
+# --- Every candidate the batch produced gets its QA, and an interrupted QA resumes (2026-09-06 audit F04/F05)
+
+
+def _candidate_ids(container, shot_id: str) -> list[str]:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        return list(
+            session.scalars(
+                select(GenerationCandidate.id)
+                .where(GenerationCandidate.shot_id == shot_id)
+                .order_by(GenerationCandidate.attempt_number)
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_worker_validates_every_batch_sibling_not_only_the_primary(container, project, monkeypatch):  # type: ignore[no-untyped-def]
+    from generation_gateway.worker import process_next_job
+
+    _add_batch_route(container, BatchImageProvider())
+    shot_id, primary_id = _make_shot_with_primary(container, project.id)
+    await _submitted_batch_job(container, project.id, shot_id, primary_id)
+    validated: list[str] = []
+    monkeypatch.setattr(container.candidates, "sync_candidate", validated.append)
+
+    assert await process_next_job(container)
+    expected = _candidate_ids(container, shot_id)
+    assert len(expected) == 3 and expected[0] == primary_id
+    assert validated == expected
+
+
+@pytest.mark.asyncio
+async def test_qa_interrupted_after_completion_resumes_on_the_next_worker_start(  # type: ignore[no-untyped-def]
+    container, project, monkeypatch
+):
+    from generation_gateway.worker import process_next_job, resume_interrupted_candidate_qa
+
+    _add_batch_route(container, BatchImageProvider())
+    shot_id, primary_id = _make_shot_with_primary(container, project.id)
+    job = await _submitted_batch_job(container, project.id, shot_id, primary_id)
+
+    def outage(_candidate_id: str) -> None:
+        raise RuntimeError("temporary QA dependency outage")
+
+    monkeypatch.setattr(container.candidates, "sync_candidate", outage)
+    assert await process_next_job(container)
+    stranded = _candidate_ids(container, shot_id)
+    with container.database.session() as session:
+        assert session.get(GenerationJob, job.id).status == JobStatus.COMPLETED.value
+        for candidate_id in stranded:
+            candidate = session.get(GenerationCandidate, candidate_id)
+            assert candidate.status == CandidateStatus.VALIDATING.value and candidate.qa_result_id is None
+    assert not await process_next_job(container), "a completed job is never claimed again"
+
+    resumed: list[str] = []
+
+    def qa(candidate_id: str) -> None:
+        resumed.append(candidate_id)
+        with container.database.session() as session:
+            session.get(GenerationCandidate, candidate_id).qa_result_id = f"qa-{candidate_id[:8]}"
+
+    monkeypatch.setattr(container.candidates, "sync_candidate", qa)
+    container.gateway.recover_after_restart()
+    # A creation the user deleted meanwhile is not worth a judge call.
+    with container.database.session() as session:
+        session.get(GenerationJob, job.id).deleted_at = utcnow()
+    assert resume_interrupted_candidate_qa(container) == 0
+    with container.database.session() as session:
+        session.get(GenerationJob, job.id).deleted_at = None
+    assert resume_interrupted_candidate_qa(container) == 3
+    assert sorted(resumed) == sorted(stranded)
+    assert resume_interrupted_candidate_qa(container) == 0, "nothing is left for the start after that"

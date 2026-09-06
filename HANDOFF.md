@@ -35,6 +35,15 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > "Image generation", "Creative director", "Model capability and role runtime" (requested versus
 > execution duration) and "Project style lock" in `CURRENT_ARCHITECTURE.md`.
 >
+> **2026-09-06 · branch `claude/code-audit-verification-64cacc` — the production-workflow audit,
+> verified and fixed.** The audit's thirteen findings were treated as hypotheses against `685f891`:
+> ten reproduced with its own fault-injection script, one (F11, the 1 MB proxy body limit) was already
+> closed by `5010ce5`, and two (F12 proxy timeout, F13 password-reset delivery) were confirmed by
+> inspection. Minimal fixes for F01-F10 and F12 are recorded in `docs/OPEN_ISSUES.md` §2.49 with their
+> residuals; F13 is a product decision, §1.19. No migration; the schema head stays `0081`. The
+> production-relevant one is F01: with OSS's verify-on-complete mode a direct upload's PUT could
+> overwrite another project's adopted object - the presigned key is now per-upload in that mode.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
 > `0070_creative_director_screenplay`); production state is in

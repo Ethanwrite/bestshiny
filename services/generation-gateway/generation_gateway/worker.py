@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from production_domain.models import GenerationJob, JobStatus, utcnow
+from production_domain.models import CandidateStatus, GenerationCandidate, GenerationJob, JobStatus, utcnow
 from sqlalchemy import and_, or_, select
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ async def process_next_job(container) -> bool:  # type: ignore[no-untyped-def]
                 estimated_cost=processed.cost_estimate,
                 actual_cost=processed.actual_cost,
             )
-            container.candidates.sync_candidate(processed.candidate_id)
+            _sync_completed_candidates(container, processed.id, processed.candidate_id)
     except Exception as exc:
         logger.exception("generation job %s failed outside the gateway", job_id)
         try:
@@ -66,6 +66,89 @@ async def process_next_job(container) -> bool:  # type: ignore[no-untyped-def]
         except Exception:
             logger.exception("generation job %s could not be quarantined", job_id)
     return True
+
+
+def _sync_completed_candidates(container, job_id: str, primary_id: str) -> int:  # type: ignore[no-untyped-def]
+    """QA every candidate the job produced, one failure never taking the rest.
+
+    A batch generation commits one candidate per output in the completion
+    transaction, but only the job's own ``candidate_id`` was ever synced, so
+    the siblings sat in VALIDATING with their media and no verdict until
+    someone pressed Validate on each (2026-09-06 audit F04). The primary goes
+    first, exactly as before; the siblings follow through the same call the
+    Validate button makes.
+    """
+
+    with container.database.session() as session:
+        siblings = list(
+            session.scalars(
+                select(GenerationCandidate.id)
+                .where(
+                    GenerationCandidate.generation_job_id == job_id,
+                    GenerationCandidate.id != primary_id,
+                    GenerationCandidate.status == CandidateStatus.VALIDATING.value,
+                    GenerationCandidate.qa_result_id.is_(None),
+                    GenerationCandidate.output_asset_id.is_not(None),
+                )
+                .order_by(GenerationCandidate.attempt_number)
+            )
+        )
+    synced = 0
+    for candidate_id in [primary_id, *siblings]:
+        try:
+            container.candidates.sync_candidate(candidate_id)
+            synced += 1
+        except Exception:
+            # Left VALIDATING without a verdict; `resume_interrupted_candidate_qa`
+            # brings it back on the next worker start.
+            logger.exception(
+                "candidate %s of generation job %s failed post-completion QA", candidate_id, job_id
+            )
+    return synced
+
+
+def resume_interrupted_candidate_qa(container, *, limit: int = 100) -> int:  # type: ignore[no-untyped-def]
+    """Run the QA a completed generation never received. Never fatal to the worker.
+
+    Completion commits the media, the credits and the COMPLETED status in one
+    transaction; the cost record and the candidate QA run after it. A process
+    that dies - or a QA dependency that is briefly down - between the two
+    leaves a candidate VALIDATING with an output and no result, and nothing
+    came back for it: the job is COMPLETED, so neither the job loop nor restart
+    recovery selects it, and `fail_processing` returns without acting
+    (2026-09-06 audit F05). This is the return trip, on the same path the
+    Validate button takes; a candidate that fails again stays where it is and
+    is tried on the next start.
+    """
+
+    with container.database.session() as session:
+        candidate_ids = list(
+            session.scalars(
+                select(GenerationCandidate.id)
+                .join(GenerationJob, GenerationJob.id == GenerationCandidate.generation_job_id)
+                .where(
+                    GenerationJob.status == JobStatus.COMPLETED.value,
+                    GenerationJob.output_asset_id.is_not(None),
+                    # A deleted creation must not spend on a judge model now.
+                    GenerationJob.deleted_at.is_(None),
+                    GenerationCandidate.status == CandidateStatus.VALIDATING.value,
+                    GenerationCandidate.qa_result_id.is_(None),
+                    GenerationCandidate.output_asset_id.is_not(None),
+                )
+                .order_by(GenerationCandidate.created_at)
+                .limit(max(1, limit))
+            )
+        )
+    resumed = 0
+    for candidate_id in candidate_ids:
+        try:
+            container.candidates.sync_candidate(candidate_id)
+            resumed += 1
+        except Exception:
+            logger.exception("candidate %s could not resume its interrupted QA", candidate_id)
+    if resumed or candidate_ids:
+        logger.info("resumed QA for %d of %d interrupted candidate(s)", resumed, len(candidate_ids))
+    return resumed
 
 
 def sweep_expired_uploads_once(container) -> int:  # type: ignore[no-untyped-def]
@@ -323,6 +406,11 @@ def sweep_eip3009_payments_once(container) -> int:  # type: ignore[no-untyped-de
 
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
+    try:
+        resume_interrupted_candidate_qa(container)
+    except Exception:
+        # Maintenance must never take the job loop down with it.
+        logger.exception("interrupted candidate QA could not be resumed")
     upload_interval = max(0, int(container.settings.expired_upload_sweep_interval_seconds))
     staging_interval = max(0, int(container.settings.generation_staging_sweep_interval_seconds))
     evidence_interval = max(0, int(container.settings.character_evidence_sweep_interval_seconds))

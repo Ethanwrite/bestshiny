@@ -545,3 +545,165 @@ def test_private_key_must_match_the_configured_relayer_address(tmp_path) -> None
             rpc_url="https://base-rpc.example.test",
             treasury_address=TREASURY,
         )
+
+
+# --- The relayer nonce is never shared, and a query failure never expires an order (2026-09-06 audit F02/F03)
+
+
+class NonceTrackingRPC(FakeBaseRPC):
+    """A node whose pending count moves with what it accepted, as a real one does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted: list[str] = []
+        self.lose_next_response = False
+
+    def __call__(self, method: str, params: list[Any]) -> Any:
+        if method == "eth_getTransactionCount":
+            return hex(7 + len(self.accepted))
+        if method == "eth_sendRawTransaction":
+            raw = str(params[0])
+            if self.lose_next_response:
+                # The node took the bytes; the answer never reached us.
+                self.lose_next_response = False
+                self.sent_raw.append(raw)
+                self.accepted.append(raw)
+                raise EIP3009RPCError("RPC_UNAVAILABLE")
+            result = super().__call__(method, params)
+            if raw not in self.accepted:
+                self.accepted.append(raw)
+            return result
+        if method == "eth_getTransactionByHash":
+            wanted = str(params[0]).lower()
+            for raw in self.accepted:
+                if "0x" + keccak(bytes.fromhex(raw[2:])).hex() == wanted:
+                    return {"hash": wanted}
+            return None
+        return super().__call__(method, params)
+
+
+def _two_orders(tmp_path):  # type: ignore[no-untyped-def]
+    container, _relayer, _fake = _container(tmp_path)
+    rpc = NonceTrackingRPC()
+    container.eip3009_relayer._rpc = rpc  # type: ignore[method-assign]
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    checkouts = [_checkout(client, workspace_id, payer), _checkout(client, workspace_id, payer)]
+
+    def submit(checkout: dict):  # type: ignore[no-untyped-def]
+        return client.post(
+            f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit",
+            json={"signature": _signature(payer, checkout["typed_data"])},
+            headers=_csrf(client),
+        )
+
+    return container, rpc, checkouts, submit
+
+
+def _nonces(container, checkouts) -> list[tuple[str, int | None]]:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        rows = [session.get(EIP3009Authorization, checkout["id"]) for checkout in checkouts]
+        return [(row.status, row.relayer_nonce) for row in rows]
+
+
+def test_an_order_after_a_failed_broadcast_delivers_it_first_and_takes_the_next_nonce(tmp_path) -> None:
+    container, rpc, (first, second), submit = _two_orders(tmp_path)
+    rpc.send_failures = 1
+    assert submit(first).status_code == 503
+    assert _nonces(container, [first]) == [("SUBMITTING", 7)]
+
+    assert submit(second).status_code == 200
+    assert _nonces(container, [first, second]) == [("SUBMITTED", 7), ("SUBMITTED", 8)]
+    assert len(rpc.accepted) == 2
+
+
+def test_an_order_after_a_lost_broadcast_reply_takes_the_next_nonce(tmp_path) -> None:
+    container, rpc, (first, second), submit = _two_orders(tmp_path)
+    rpc.lose_next_response = True
+    # The node took the bytes and the reply was lost; asking the node settles it.
+    delivered = submit(first)
+    assert delivered.status_code == 200 and delivered.json()["status"] == "SUBMITTED"
+    assert submit(second).status_code == 200
+    assert _nonces(container, [first, second]) == [("SUBMITTED", 7), ("SUBMITTED", 8)]
+    assert len(rpc.accepted) == 2
+
+
+def test_an_order_waits_while_an_earlier_transaction_still_cannot_be_delivered(tmp_path) -> None:
+    container, rpc, (first, second), submit = _two_orders(tmp_path)
+    rpc.send_failures = 2
+    assert submit(first).status_code == 503
+
+    blocked = submit(second)
+    assert blocked.status_code == 503
+    assert blocked.json()["detail"]["code"] == "RELAYER_TRANSACTION_PENDING"
+    # Nothing of the second order was prepared: no nonce, no transaction, still signable.
+    assert _nonces(container, [first, second]) == [("SUBMITTING", 7), ("PENDING", None)]
+    assert rpc.accepted == []
+
+    # The network comes back: the same retry delivers both, in order.
+    assert submit(second).status_code == 200
+    assert _nonces(container, [first, second]) == [("SUBMITTED", 7), ("SUBMITTED", 8)]
+
+
+def _expired_uncertain_order(tmp_path):  # type: ignore[no-untyped-def]
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    checkout = _checkout(client, workspace_id, payer)
+    signature = _signature(payer, checkout["typed_data"])
+    path = f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit"
+    fake.send_failures = 1
+    assert client.post(path, json={"signature": signature}, headers=_csrf(client)).status_code == 503
+    with container.database.session() as session:
+        authorization = session.scalar(select(EIP3009Authorization))
+        assert authorization is not None
+        authorization.valid_after = 0
+        authorization.valid_before = 1
+        tx_hash = authorization.transaction_hash
+    return container, fake, client, checkout, path, signature, tx_hash
+
+
+def test_a_receipt_is_kept_when_the_follow_up_query_fails_after_expiry(tmp_path) -> None:
+    container, fake, client, checkout, path, signature, tx_hash = _expired_uncertain_order(tmp_path)
+    fake.receipt = _receipt(checkout, tx_hash)
+
+    def flaky(method: str, params: list[Any]) -> Any:
+        if method == "eth_getTransactionByHash":
+            raise EIP3009RPCError("RPC_UNAVAILABLE")
+        return fake(method, params)
+
+    container.eip3009_relayer._rpc = flaky  # type: ignore[method-assign]
+    response = client.post(path, json={"signature": signature}, headers=_csrf(client))
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "SUBMITTED", "the receipt was kept: not EXPIRED"
+    # The follow-up query is still failing; the receipt alone lets the sweep finish the order.
+    assert container.eip3009_relayer.sweep().confirmed == 1
+    with container.database.session() as session:
+        assert session.scalar(select(EIP3009Authorization)).status == "CONFIRMED"
+        assert session.scalar(select(WorkspaceCreditLedgerEntry)) is not None
+
+
+def test_an_rpc_outage_after_expiry_is_an_error_not_an_expired_order(tmp_path) -> None:
+    container, fake, client, checkout, path, signature, tx_hash = _expired_uncertain_order(tmp_path)
+
+    def down(method: str, params: list[Any]) -> Any:
+        if method in {"eth_getTransactionReceipt", "eth_getTransactionByHash"}:
+            raise EIP3009RPCError("RPC_UNAVAILABLE")
+        return fake(method, params)
+
+    container.eip3009_relayer._rpc = down  # type: ignore[method-assign]
+    response = client.post(path, json={"signature": signature}, headers=_csrf(client))
+    assert response.status_code == 503
+    with container.database.session() as session:
+        authorization = session.scalar(select(EIP3009Authorization))
+        assert (authorization.status, authorization.last_error_code) == ("SUBMITTING", "RPC_UNAVAILABLE")
+    assert len(fake.sent_raw) == 1
+
+    # The node answers again, with the receipt: the unattended sweep finishes the order.
+    fake.receipt = _receipt(checkout, tx_hash)
+    container.eip3009_relayer._rpc = fake  # type: ignore[method-assign]
+    result = container.eip3009_relayer.sweep()
+    assert result.confirmed == 1
+    with container.database.session() as session:
+        assert session.scalar(select(EIP3009Authorization)).status == "CONFIRMED"
+        assert session.scalar(select(PaymentOrder)).status == "PAID"

@@ -303,3 +303,58 @@ def test_reclamation_never_deletes_an_object_another_asset_shares(container, pro
     assert result.objects_kept_shared == 1
     assert result.objects_deleted == 0
     assert container.storage.path_for(storage_key).is_file(), "shared bytes survive"
+
+
+def test_a_transient_read_failure_defers_the_verdict_and_the_lease_brings_it_back(  # type: ignore[no-untyped-def]
+    container, project, monkeypatch
+) -> None:
+    """A read that did not happen is not a file that does not decode (2026-09-06 audit F06)."""
+
+    asset_id = _adopt(container, project, _png_bytes(), mime_type="image/png")
+    original_open = container.storage.open
+
+    def timed_out(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise TimeoutError("storage read timed out")
+
+    monkeypatch.setattr(container.storage, "open", timed_out)
+    first = _verify(container)
+    assert (first.deferred, first.invalid) == (1, 0)
+    assert _status(container, asset_id) == ("VERIFYING", "OBJECT_READ_DEFERRED:TimeoutError")
+
+    monkeypatch.setattr(container.storage, "open", original_open)
+    assert _verify(container).examined == 0, "the claim holds for the lease"
+    with container.database.session() as session:
+        session.get(MediaAsset, asset_id).verification_claimed_at = utcnow() - timedelta(seconds=3600)
+    second = _verify(container)
+    assert second.verified_ready == 1
+    assert _status(container, asset_id) == ("READY", None)
+
+
+def test_a_missing_object_is_invalid_while_a_store_error_is_deferred(container, project, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    missing_id = _adopt(container, project, _png_bytes(48), mime_type="image/png")
+    throttled_id = _adopt(container, project, _png_bytes(96), mime_type="image/png")
+    with container.database.session() as session:
+        keys = {
+            asset_id: session.get(MediaAsset, asset_id).storage_key for asset_id in (missing_id, throttled_id)
+        }
+
+    class NoSuchKey(Exception):
+        response = {"Error": {"Code": "NoSuchKey"}}
+
+    class SlowDown(Exception):
+        response = {"Error": {"Code": "SlowDown"}}
+
+    original_open = container.storage.open
+
+    def failing_open(key, mode="rb"):  # type: ignore[no-untyped-def]
+        if key == keys[missing_id]:
+            raise NoSuchKey()
+        if key == keys[throttled_id]:
+            raise SlowDown()
+        return original_open(key, mode)
+
+    monkeypatch.setattr(container.storage, "open", failing_open)
+    result = _verify(container)
+    assert (result.invalid, result.deferred) == (1, 1)
+    assert _status(container, missing_id) == ("INVALID", "OBJECT_UNREADABLE:NoSuchKey")
+    assert _status(container, throttled_id) == ("VERIFYING", "OBJECT_READ_DEFERRED:SlowDown")

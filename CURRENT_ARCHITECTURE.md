@@ -1109,6 +1109,13 @@ uploading, so a deployment with valid credentials but unusable browser CORS fail
 The presigned PUT binds `x-amz-checksum-sha256`, so the object store rejects bytes that do not
 hash to the declared digest — that is what makes a client-declared SHA-256 safe to
 content-address a key with, and it is why this service never reads the body to learn the hash.
+Alibaba OSS accepts that header and ignores it, so under `S3_VERIFY_UPLOAD_SHA256_ON_COMPLETE`
+(the deployed mode) completion hashes the object itself — and, since 2026-09-06, the PUT targets
+a per-upload slot (`{sha[:2]}/{sha}-{upload_id}{suffix}`) rather than the content-addressed key:
+a declared digest could otherwise presign a PUT to another project's adopted object and overwrite
+it before the hash was ever checked (OPEN_ISSUES §2.49, F01). Bytes the project already holds are
+completed from the adopted object with no write credential (`url: null`, `existing_asset_id`
+set), and a completed upload re-authorized under its key replays as its asset.
 Size at completion comes from `HEAD`, never from the client. Validation reads a bounded 64 KB
 header: magic bytes, declared format, and dimensions for the decompression-bomb bound. The full
 decode the multipart path performs is deliberately given up; a truncated file fails at first use,

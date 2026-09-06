@@ -2979,9 +2979,12 @@ async function directUploadAsset() {
       ...(scope === "character" && $("operationsCharacterSelect").value ? { character_id: $("operationsCharacterSelect").value } : {}),
     };
     button.textContent = "Requesting authorization…";
+    // One key per attempt. A key fixed to the file's digest made a later
+    // upload of the same bytes - after a lost reply, into another project of
+    // the workspace, or bound to another shot - replay or refuse this one.
     const authorization = await request("/v1/assets/uploads", {
       method: "POST",
-      headers: { "Idempotency-Key": `web-upload-${digest}-${file.size}` },
+      headers: { "Idempotency-Key": `web-upload-${crypto.randomUUID()}` },
       body: JSON.stringify(payload),
     });
     if (!authorization.existing_asset_id) {

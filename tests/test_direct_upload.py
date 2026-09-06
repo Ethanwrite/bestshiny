@@ -1538,3 +1538,172 @@ def test_the_sweep_blocks_behind_a_completion_that_already_owns_the_row(  # type
         )
     # Settled, never released: no torn PENDING/RELEASED pair, no unaccounted bytes.
     assert _quota(container, workspace_id) == (0, len(payload), ["SETTLED"])
+
+
+# --- 9. Where the store does not enforce the digest, a PUT reaches only its own slot (2026-09-06 audit F01)
+
+
+def _verifying_service(container, store):  # type: ignore[no-untyped-def]
+    """The OSS shape: the checksum header is accepted and ignored, so completion hashes."""
+
+    return DirectUploadService(
+        container.database,
+        store,
+        max_upload_bytes=64 * 1024 * 1024,
+        max_image_pixels=50_000_000,
+        verify_sha256_on_complete=True,
+    )
+
+
+def _adopt_completed(container, service, project_id: str, authorized, payload: bytes) -> str:  # type: ignore[no-untyped-def]
+    digest = hashlib.sha256(payload).hexdigest()
+    size, mime = service.verify_object(service.pending(authorized.upload_id))
+    with container.database.session() as session:
+        asset, _reused = container.media.adopt_stored_object_in(
+            session,
+            project_id,
+            "CHARACTER_REFERENCE",
+            authorized.presigned.storage_key,
+            sha256=digest,
+            mime_type=mime,
+            size_bytes=size,
+            lineage_key="shared",
+        )
+        service.mark_completed(session, authorized.upload_id, media_asset_id=asset.id)
+        return asset.id
+
+
+def test_a_declared_digest_cannot_reach_another_projects_object_when_the_store_does_not_enforce_it(
+    container,  # type: ignore[no-untyped-def]
+    project,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    """Declaring a victim's digest used to presign a PUT to the victim's own key.
+
+    The forged bytes were refused at completion, but only after they had
+    replaced the adopted object, whose row stayed READY with the old digest.
+    """
+
+    from production_domain.models import Project
+
+    store.enforce_checksum = False
+    service = _verifying_service(container, store)
+    good = _png()
+    digest = hashlib.sha256(good).hexdigest()
+    victim = _authorize(service, project.id, good)
+    assert store.client_put(victim.presigned.storage_key, good, "image/png", declared_sha=digest)
+    _adopt_completed(container, service, project.id, victim, good)
+
+    with container.database.session() as session:
+        other = Project(title="another tenant's project")
+        session.add(other)
+        session.flush()
+        other_id = other.id
+    attacker = _authorize(service, other_id, good, idempotency_key="other-project-upload")
+    assert attacker.presigned is not None
+    assert attacker.presigned.storage_key != victim.presigned.storage_key
+    assert attacker.presigned.storage_key.startswith(f"{digest[:2]}/{digest}")
+
+    # The forged bytes can only land in the attacker's own slot, and are refused there.
+    assert store.client_put(attacker.presigned.storage_key, _png(64, 64), "image/png", declared_sha=digest)
+    with pytest.raises(DirectUploadNotFinished, match="SHA-256 does not match"):
+        service.verify_object(service.pending(attacker.upload_id))
+    assert store.objects[victim.presigned.storage_key][0] == good
+
+
+def test_held_content_is_reused_without_a_write_credential_when_the_store_does_not_enforce_the_digest(
+    container,  # type: ignore[no-untyped-def]
+    project,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    """A second upload of bytes the project holds completes from the adopted object, and no PUT is issued."""
+
+    store.enforce_checksum = False
+    service = _verifying_service(container, store)
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    first = _authorize(service, project.id, payload)
+    assert store.client_put(first.presigned.storage_key, payload, "image/png", declared_sha=digest)
+    asset_id = _adopt_completed(container, service, project.id, first, payload)
+
+    second = _authorize(service, project.id, payload, idempotency_key="upload-2")
+    assert second.presigned is None
+    assert second.existing_asset_id == asset_id
+    upload = service.pending(second.upload_id)
+    assert upload.storage_key == first.presigned.storage_key
+    assert service.verify_object(upload) == (len(payload), "image/png")
+
+    # Replaying the reuse row hands out no credential either.
+    replay = _authorize(service, project.id, payload, idempotency_key="upload-2")
+    assert replay.upload_id == second.upload_id
+    assert (replay.presigned, replay.existing_asset_id) == (None, asset_id)
+    assert store.presigned == [first.presigned.storage_key]
+
+
+# --- 10. A finished upload replays as its asset (2026-09-06 audit F10) ---------------
+
+
+def test_a_completed_upload_replays_as_its_asset_instead_of_a_conflict(
+    container,  # type: ignore[no-untyped-def]
+    project,  # type: ignore[no-untyped-def]
+    uploads,  # type: ignore[no-untyped-def]
+    store,  # type: ignore[no-untyped-def]
+) -> None:
+    payload = _png()
+    digest = hashlib.sha256(payload).hexdigest()
+    issued = _authorize(uploads, project.id, payload)
+    assert store.client_put(issued.presigned.storage_key, payload, "image/png", declared_sha=digest)
+    asset_id = _adopt_completed(container, uploads, project.id, issued, payload)
+
+    replay = _authorize(uploads, project.id, payload)
+    assert replay.upload_id == issued.upload_id
+    assert replay.presigned is None
+    assert replay.existing_asset_id == asset_id
+
+
+def test_the_same_bytes_bound_to_another_scope_are_another_upload(
+    container,  # type: ignore[no-untyped-def]
+    project,  # type: ignore[no-untyped-def]
+    uploads,  # type: ignore[no-untyped-def]
+) -> None:
+    payload = _png()
+    _authorize(uploads, project.id, payload, lineage_key="shot:one")
+    with pytest.raises(DirectUploadConflict, match="different upload"):
+        _authorize(uploads, project.id, payload, lineage_key="shot:two")
+
+
+def test_the_http_flow_recovers_a_lost_completion_reply(container, project, store) -> None:  # type: ignore[no-untyped-def]
+    import hashlib as _hashlib
+
+    from fastapi.testclient import TestClient
+    from video_platform_api.main import create_app
+
+    payload = _png(400, 300)
+    digest = _hashlib.sha256(payload).hexdigest()
+    container.storage = store
+    container.direct_uploads.storage = store
+    container.media.storage = store
+    body = {
+        "project_id": project.id,
+        "asset_type": "CHARACTER_REFERENCE",
+        "filename": "plate.png",
+        "mime_type": "image/png",
+        "sha256": digest,
+        "size_bytes": len(payload),
+    }
+    with TestClient(create_app(container)) as client:
+        issued = client.post("/v1/assets/uploads", headers={"Idempotency-Key": "http-lost-reply"}, json=body)
+        assert issued.status_code == 201, issued.text
+        assert store.client_put(issued.json()["storage_key"], payload, "image/png", declared_sha=digest)
+        completed = client.post(f"/v1/assets/uploads/{issued.json()['upload_id']}/complete")
+        assert completed.status_code == 200, completed.text
+
+        # The client never saw that answer and starts over with the same key.
+        again = client.post("/v1/assets/uploads", headers={"Idempotency-Key": "http-lost-reply"}, json=body)
+        assert again.status_code == 201, again.text
+        replay = again.json()
+        assert replay["upload_id"] == issued.json()["upload_id"]
+        assert replay["url"] is None and replay["existing_asset_id"] == completed.json()["id"]
+        finished = client.post(f"/v1/assets/uploads/{replay['upload_id']}/complete")
+        assert finished.status_code == 200, finished.text
+        assert finished.json()["id"] == completed.json()["id"] and finished.json()["reused"] is True

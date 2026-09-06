@@ -67,6 +67,9 @@ class MediaVerificationSweep:
     invalid: int = 0
     quarantined: int = 0
     contended: int = 0
+    # Claimed, but the bytes could not be read this pass; the claim lapses
+    # and the row is verified again, exactly as after a worker crash.
+    deferred: int = 0
     details: list[dict[str, Any]] = field(default_factory=list)
 
     def as_response(self) -> dict[str, Any]:
@@ -76,13 +79,14 @@ class MediaVerificationSweep:
             "invalid": self.invalid,
             "quarantined": self.quarantined,
             "contended": self.contended,
+            "deferred": self.deferred,
             "details": self.details,
         }
 
 
 @dataclass(frozen=True)
 class _Verdict:
-    status: str  # READY | INVALID | QUARANTINED
+    status: str  # READY | INVALID | QUARANTINED | DEFERRED (no verdict: the read failed)
     error: str | None = None
     width: int | None = None
     height: int | None = None
@@ -195,7 +199,7 @@ def verify_pending_assets(
             )
         )
     examined = len(candidate_ids)
-    ready = invalid = quarantined = contended = 0
+    ready = invalid = quarantined = contended = deferred = 0
     details: list[dict[str, Any]] = []
 
     for asset_id in candidate_ids:
@@ -232,6 +236,17 @@ def verify_pending_assets(
             if asset is None or asset.verification_status != "VERIFYING":
                 contended += 1
                 continue
+            if verdict.status == "DEFERRED":
+                # No bytes were examined, so no verdict is written: a read that
+                # timed out is not a file that does not decode. The claim is
+                # kept and lapses with the lease, after which the row is picked
+                # up again - the crash-recovery path, reused (2026-09-06 audit
+                # F06). The error is recorded so a persistent one is visible.
+                asset.verification_error = verdict.error
+                deferred += 1
+                session.flush()
+                details.append({"asset_id": asset_id, "status": verdict.status, "error": verdict.error})
+                continue
             asset.verification_status = verdict.status
             asset.verification_error = verdict.error
             if verdict.status == "READY":
@@ -261,6 +276,7 @@ def verify_pending_assets(
         invalid=invalid,
         quarantined=quarantined,
         contended=contended,
+        deferred=deferred,
         details=details,
     )
 
@@ -443,8 +459,28 @@ def _verify_stored_object(
                     "QUARANTINED", error=f"SHA256_MISMATCH:stored {digest.hexdigest()[:12]}…"
                 )
             return _Verdict("READY")
-    except (FileNotFoundError, OSError) as exc:
+    except FileNotFoundError as exc:
         return _Verdict("INVALID", error=f"OBJECT_UNREADABLE:{type(exc).__name__}")
+    except Exception as exc:
+        # Every other failure to *read* - a timeout, an exhausted descriptor
+        # table, an I/O error, an object-store client error - says nothing
+        # about the bytes. INVALID here was permanent and the sweep never
+        # returned, so one transient timeout retired a good asset for good; an
+        # error not derived from OSError, meanwhile, escaped and took the rest
+        # of the batch down with it. A store that answers "no such object" is
+        # the one final read failure and keeps the INVALID verdict.
+        if _object_store_reports_missing(exc):
+            return _Verdict("INVALID", error=f"OBJECT_UNREADABLE:{type(exc).__name__}")
+        return _Verdict("DEFERRED", error=f"OBJECT_READ_DEFERRED:{type(exc).__name__}")
+
+
+def _object_store_reports_missing(exc: BaseException) -> bool:
+    """An S3-style client error whose code says the key does not exist."""
+
+    response = getattr(exc, "response", None)
+    error = response.get("Error") if isinstance(response, dict) else None
+    code = str(error.get("Code") or "") if isinstance(error, dict) else ""
+    return code in {"404", "NoSuchKey", "NotFound"}
 
 
 __all__ = [

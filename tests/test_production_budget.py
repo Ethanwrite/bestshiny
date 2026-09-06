@@ -871,3 +871,121 @@ async def test_tripped_breaker_refuses_a_director_call_the_way_a_missing_permit_
     assert isinstance(refused.value, LiveSpendDenied)
     assert capability.call_count == 0
     assert _authorizations(container) == []
+
+
+# --- Recovery around the paid boundary (2026-09-06 audit F07/F08/F09) ------------------
+
+
+class _ProcessDeath(BaseException):
+    """Not an Exception: no handler in the gateway may see it."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reported_cost", "settled_cost", "source"),
+    [("0.04", "0.040000", SOURCE_VERIFIED_PROVIDER), (None, "0.080000", SOURCE_ESTIMATED_QUOTE)],
+)
+async def test_a_completion_crash_before_settlement_is_settled_on_restart(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch, stage_stub_output, reported_cost, settled_cost, source
+) -> None:
+    live, project_id, _workspace_id = _live_container(tmp_path, platform_usd="1")
+    _stub_happy_provider(live, monkeypatch, stage_stub_output, cost=reported_cost)
+    job = _create(live, project_id, "budget-settlement-crash")
+    await live.gateway.process(job.id)
+    _due(live, job.id)
+
+    settle = live.gateway._settle_live_generation_fence
+
+    def die(**_kwargs: Any) -> None:
+        raise _ProcessDeath()
+
+    monkeypatch.setattr(live.gateway, "_settle_live_generation_fence", die)
+    with pytest.raises(_ProcessDeath):
+        await live.gateway.process(job.id)
+    monkeypatch.setattr(live.gateway, "_settle_live_generation_fence", settle)
+    with live.database.session() as session:
+        assert session.get(GenerationJob, job.id).status == "COMPLETED"
+    held = _authorizations(live, generation_job_id=job.id)[0]
+    assert held.status == "UNCERTAIN" and held.reserved_cost_usd == Decimal("0.080000")
+
+    assert live.gateway.recover_after_restart() == 0
+    settled = _authorizations(live, generation_job_id=job.id)[0]
+    assert (settled.status, settled.actual_cost_usd, settled.settlement_source) == (
+        "SETTLED",
+        Decimal(settled_cost),
+        source,
+    )
+    ledger = _ledger(live, PLATFORM_SCOPE, PLATFORM_SCOPE_KEY)
+    assert (ledger.reserved_usd, ledger.actual_usd) == (Decimal("0.000000"), Decimal(settled_cost))
+    assert live.gateway.settle_completed_spend_authorizations() == 0, "settled once"
+
+
+@pytest.mark.asyncio
+async def test_a_crash_before_any_transport_is_retried_on_a_fresh_reservation(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch, stage_stub_output
+) -> None:
+    live, project_id, _workspace_id = _live_container(tmp_path, platform_usd="1")
+    calls = _stub_happy_provider(live, monkeypatch, stage_stub_output)
+    job = _create(live, project_id, "budget-pre-transport-crash")
+    select_account = live.gateway.scheduler.select_account
+
+    def die(*_args: Any, **_kwargs: Any) -> None:
+        raise _ProcessDeath()
+
+    monkeypatch.setattr(live.gateway.scheduler, "select_account", die)
+    with pytest.raises(_ProcessDeath):
+        await live.gateway.process(job.id)
+    monkeypatch.setattr(live.gateway.scheduler, "select_account", select_account)
+    assert _authorizations(live, generation_job_id=job.id)[0].status == "UNCERTAIN"
+    with live.database.session() as session:
+        stored = session.get(GenerationJob, job.id)
+        assert (stored.submission_state, stored.provider_job_id) == ("NOT_SENT", None)
+        stored.claim_expires_at = utcnow() - timedelta(seconds=1)
+
+    live.gateway.recover_after_restart()
+    submitted = await live.gateway.process(job.id)
+    assert submitted.status == "SUBMITTED", (submitted.error_code, submitted.error_message)
+    assert calls["submit"] == 1
+    reopened = _authorizations(live, generation_job_id=job.id)
+    assert len(reopened) == 1 and reopened[0].status == "UNCERTAIN"
+    assert reopened[0].reserved_cost_usd == Decimal("0.080000")
+    assert _ledger(live, PLATFORM_SCOPE, PLATFORM_SCOPE_KEY).reserved_usd == Decimal("0.080000")
+
+    _due(live, job.id)
+    completed = await live.gateway.process(job.id)
+    assert completed.status == "COMPLETED"
+    assert _authorizations(live, generation_job_id=job.id)[0].status == "SETTLED"
+
+
+@pytest.mark.asyncio
+async def test_one_uncertain_direct_api_submit_does_not_park_the_shared_resource(  # type: ignore[no-untyped-def]
+    tmp_path, monkeypatch, stage_stub_output
+) -> None:
+    from production_domain.models import BrowserWorker
+
+    live, project_id, _workspace_id = _live_container(tmp_path, platform_usd="1")
+    _stub_happy_provider(live, monkeypatch, stage_stub_output)
+    provider = live.providers.get(PROVIDER)
+
+    async def timed_out(*_args: Any, **_kwargs: Any) -> ProviderSubmission:
+        raise ProviderError(
+            "the response never arrived",
+            RetryCategory.TRANSIENT_NETWORK,
+            code="NETWORK_TIMEOUT",
+            submitted=True,
+        )
+
+    monkeypatch.setattr(provider, "generate_video", timed_out)
+    first = _create(live, project_id, "direct-api-first")
+    uncertain = await live.gateway.process(first.id)
+    assert uncertain.status == "WORKER_NEEDS_USER_ACTION"
+    with live.database.session() as session:
+        worker = session.get(BrowserWorker, uncertain.worker_id)
+        assert worker.metadata_json["resource_kind"] == "DIRECT_API"
+        # The job keeps its slot for reconciliation; the resource keeps serving.
+        assert worker.status == "READY" and worker.current_jobs == 1
+
+    _stub_happy_provider(live, monkeypatch, stage_stub_output)
+    second = _create(live, project_id, "direct-api-second")
+    submitted = await live.gateway.process(second.id)
+    assert submitted.status == "SUBMITTED", (submitted.error_code, submitted.error_message)

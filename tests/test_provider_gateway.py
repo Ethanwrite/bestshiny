@@ -1285,3 +1285,24 @@ async def test_worker_quarantines_one_exception_and_continues_to_next_job(
         assert failed.status == JobStatus.FAILED.value
         assert failed.error_code == "WORKER_PROCESSING_ERROR"
         assert "single poisoned job" in failed.error_message
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_submit_still_parks_a_browser_worker(container, project):
+    """A browser session needs a human before it serves again; that flip is kept (2026-09-06 audit F09)."""
+
+    add_fake_route(container, FakeProvider(fail_uncertain=True))
+    job, _ = container.gateway.create(
+        GenerationRequest(
+            project_id=project.id,
+            type="video",
+            provider="fake",
+            model="fake-model",
+            prompt="One action",
+            idempotency_key="uncertain-browser-worker-1",
+        )
+    )
+    uncertain = await container.gateway.process(job.id)
+    assert uncertain.status == "WORKER_NEEDS_USER_ACTION"
+    with container.database.session() as session:
+        assert session.get(BrowserWorker, "fake-worker").status == "NEEDS_USER_ACTION"

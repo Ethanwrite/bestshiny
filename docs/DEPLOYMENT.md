@@ -176,7 +176,35 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `cc60332` (`main`, [#60](https://github.com/Ethanwrite/bestshiny/pull/60)
+- **Current release.** `57117a2` (`main`, [#61](https://github.com/Ethanwrite/bestshiny/pull/61)
+  — the password-reset flow closed where no token can reach the user, the audit's F13 decision in
+  `docs/OPEN_ISSUES.md` §1.19), deployed 2026-09-06 ≈19:01Z. `DEPLOYED_SHA.prev = cc60332`. No
+  migration (`alembic current` stayed `0081`), no `.env` change, `COMPOSE_UNCHANGED`. Same
+  ordering as the `fe91a8f` deploy (`deploy_remote.sh`, log `deploy-57117a2.log`, `DEPLOY_EXIT=0`;
+  api healthy on the first check).
+
+  What changed for users: `AuthService.password_reset_available` is true only where the response
+  carries the token (development, test). In production both `/api/auth/password-reset/*` endpoints
+  answer `503 密码重置功能暂未开放，请联系支持` and create no token row, `GET /health` reports
+  `auth.password_reset_available: false`, and the web app keeps its *Forgot password?* entry hidden
+  unless `/health` offers it. A locked-out user needs an operator reset until a delivery channel
+  exists.
+
+  Verified after: both markers written, all three running image IDs equal the freshly built ones,
+  `RestartCount=0` on all three, local 8080/3000 200, `https://api.bestshiny.com/health` and
+  `https://bestshiny.com/api/health` both 200 with `auth.password_reset_available: false`, both
+  reset endpoints 503 through the browser's own proxy path (`bestshiny.com/api/api/auth/...`),
+  the served `/login` markup carries `id="forgotPasswordBtn" … hidden`, the new bundle
+  `/assets/index-CYVUkgMF.js` reads the flag, and a real browser view of `/login` shows only
+  *No account? Create one* under the sign-in button (the button's computed display is `none`, zero
+  size). Zero tracebacks in api or worker; data untouched (14 sessions, 28 jobs, 6 anchors, 0
+  password-reset tokens).
+
+  **Rollback.** No migration, so a code rollback to `cc60332` is a plain redeploy of that
+  revision; the pre-extraction `bestshiny-backup` dump and the `*.bak-20260906-185951` copies of
+  `.env` and the compose file remain available.
+
+- **Previous release.** `cc60332` (`main`, [#60](https://github.com/Ethanwrite/bestshiny/pull/60)
   — the 2026-09-06 production-workflow audit, verified and fixed: per-upload direct-upload slots
   under OSS's verify mode, relayer nonce and expiry recovery, batch-sibling QA with its restart
   recovery, deferred verification reads, budget settlement and pre-transport recovery, direct-API

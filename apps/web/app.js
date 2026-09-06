@@ -835,9 +835,14 @@ async function uploadPassengerReference({ projectId, file }) {
       // idempotency, 422 …); folding every answer into one sentence hid all of it.
       const body = await response.json().catch(() => null);
       const detail = body?.detail;
+      // A 413 with no JSON body came from a proxy in front of the api, which
+      // says nothing useful; name the one thing it can mean.
+      const proxyReason = response.status === 413 && !detail
+        ? "the file is larger than the server accepts"
+        : "";
       const reason = detail && typeof detail === "object"
         ? (detail.message || JSON.stringify(detail))
-        : (detail || response.statusText || "");
+        : (detail || proxyReason || response.statusText || "");
       const error = new Error(`Reference upload failed (HTTP ${response.status})${reason ? `: ${reason}` : ""}`);
       error.status = response.status;
       error.detail = detail;

@@ -695,7 +695,13 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"ok": True, "service": "ai-video-platform", "providers": container.providers.list()}
+        return {
+            "ok": True,
+            "service": "ai-video-platform",
+            "providers": container.providers.list(),
+            # What the sign-in screen may offer before anyone is signed in.
+            "auth": {"password_reset_available": auth.password_reset_available},
+        }
 
     @app.post("/v1/projects")
     def create_project(

@@ -237,7 +237,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/auth/register`、`/api/auth/login` | 创建账号/工作空间或登录；成功后设置 HttpOnly 会话 Cookie |
 | `GET/POST` | `/api/auth/me`、`/api/auth/logout` | 查看当前账号或撤销当前会话 |
-| `POST` | `/api/auth/password-reset/request`、`/api/auth/password-reset/confirm` | 申请/消费一次性密码重置 token，成功后撤销旧会话 |
+| `POST` | `/api/auth/password-reset/request`、`/api/auth/password-reset/confirm` | 申请/消费一次性密码重置 token，成功后撤销旧会话；token 只在 development/test 环境随响应返回，生产环境暂无投递渠道，两个端点返回 `503`，前端按 `/health` 的 `auth.password_reset_available` 隐藏入口 |
 | `POST` | `/api/prompt/correct` | 图片提示词整理与可撤销修订 |
 | `POST` | `/api/pricing/estimate` | 生成前成本与积分估算 |
 | `GET` | `/api/workspaces/{workspace_id}/credits` | 查询余额、冻结额、生命周期聚合与最近事件 |

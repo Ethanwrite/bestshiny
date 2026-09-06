@@ -90,7 +90,7 @@ def test_cookie_auth_is_httponly_and_cookie_unsafe_requests_require_double_submi
         assert client.cookies.get(CSRF_COOKIE_NAME) is None
 
 
-def test_production_auth_cookie_is_secure_and_reset_request_never_returns_token(
+def test_production_auth_cookie_is_secure_and_password_reset_is_closed(
     container,
 ) -> None:  # type: ignore[no-untyped-def]
     container.settings.auth_required = True
@@ -108,12 +108,34 @@ def test_production_auth_cookie_is_secure_and_reset_request_never_returns_token(
         )
         assert "Secure" in auth_cookie
         assert "HttpOnly" in auth_cookie
+        # No delivery channel exists in production, so the flow is closed there
+        # rather than claiming instructions were sent (OPEN_ISSUES 1.19).
+        assert client.get("/health").json()["auth"] == {"password_reset_available": False}
         requested = client.post(
             "/api/auth/password-reset/request",
             json={"email": "secure@example.com"},
         )
-        assert requested.status_code == 200
-        assert requested.json() == {"message": "如果该邮箱存在，重置说明已发送"}
+        assert requested.status_code == 503
+        assert "reset_token" not in requested.json()
+        confirmed = client.post(
+            "/api/auth/password-reset/confirm",
+            json={"token": "x" * 32, "new_password": NEW_PASSWORD},
+        )
+        assert confirmed.status_code == 503
+    with container.database.session() as session:
+        assert session.scalar(select(PasswordResetToken)) is None
+
+
+def test_the_web_app_hides_the_forgot_password_entry_until_the_server_offers_it() -> None:
+    import re
+    from pathlib import Path
+
+    web = Path(__file__).resolve().parents[1] / "apps" / "web"
+    html = (web / "index.html").read_text(encoding="utf-8")
+    button = re.search(r'<button id="forgotPasswordBtn"[^>]*>', html)
+    assert button and " hidden" in button.group(0), "the entry is hidden until /health offers it"
+    source = (web / "app.js").read_text(encoding="utf-8")
+    assert "forgotPasswordBtn" in source and "password_reset_available" in source
 
 
 def test_login_throttle_is_durable_across_app_instances(container) -> None:  # type: ignore[no-untyped-def]
@@ -150,6 +172,7 @@ def test_password_reset_is_generic_single_use_and_revokes_existing_sessions(
     container.settings.auth_required = True
     with TestClient(create_app(container)) as client:
         registered = _register(client, "reset-owner@example.com")
+        assert client.get("/health").json()["auth"] == {"password_reset_available": True}
         unknown = client.post(
             "/api/auth/password-reset/request",
             json={"email": "missing@example.com"},

@@ -526,7 +526,11 @@ async function bootstrapAuth() {
 async function health() {
   const pill = $("systemStatus");
   try {
-    await request("/health");
+    const payload = await request("/health");
+    // The entry stays hidden until the server says a reset token can reach
+    // the user; production has no delivery channel yet (OPEN_ISSUES 1.19).
+    const forgot = $("forgotPasswordBtn");
+    if (forgot) forgot.hidden = !payload?.auth?.password_reset_available;
     pill.className = "status-pill is-ok";
     pill.innerHTML = "<i></i>Online";
   } catch (_error) {

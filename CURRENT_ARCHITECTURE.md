@@ -302,7 +302,10 @@ sessions, workspace roles and project/asset/job tenant isolation. Phase III adds
 - double-submit CSRF for unsafe cookie-authenticated requests, while scoped Bearer/internal callers remain
   supported;
 - persistent login throttles;
-- expiring, hashed, one-use password-reset tokens; successful reset revokes active sessions;
+- expiring, hashed, one-use password-reset tokens; successful reset revokes active sessions — offered
+  only where the token can reach the user (development and test carry it in the response; production
+  has no delivery channel, answers `503` on both endpoints, and the web app hides the entry until
+  `GET /health` offers it — `docs/OPEN_ISSUES.md` §1.19);
 - Web `credentials: include` and CSRF headers, with no session token in `sessionStorage`.
 
 Workspace storage keeps `max_storage_bytes`, `used_storage_bytes` and `reserved_storage_bytes`. Upload admission

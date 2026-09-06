@@ -117,6 +117,10 @@ class PasswordResetRejected(RuntimeError):
     pass
 
 
+#: Answered by both reset endpoints where no reset token can reach the user.
+PASSWORD_RESET_CLOSED_MESSAGE = "密码重置功能暂未开放，请联系支持"
+
+
 class LegacyClaimConflict(RuntimeError):
     pass
 
@@ -388,6 +392,24 @@ class AuthService:
             raise InvalidCredentials("邮箱或密码错误")
         self._clear_login_throttle(throttle_id)
         return issued
+
+    @property
+    def password_reset_available(self) -> bool:
+        """Whether a reset token can actually reach the user in this deployment.
+
+        The request endpoint returns the token in its response body only in
+        development and test; production creates and hashes it and has no
+        delivery channel to send it through (OPEN_ISSUES §1.19). Until one
+        exists the flow is closed there - both endpoints refuse and the web
+        app hides its entry - rather than telling the user that instructions
+        were sent.
+        """
+
+        return self.deployment_environment in {"development", "test"}
+
+    def _require_password_reset_available(self) -> None:
+        if not self.password_reset_available:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, PASSWORD_RESET_CLOSED_MESSAGE)
 
     def request_password_reset(
         self,
@@ -929,6 +951,7 @@ class AuthService:
 
         @router.post("/password-reset/request")
         def request_password_reset(body: PasswordResetRequest, request: Request):
+            self._require_password_reset_available()
             issued = self.request_password_reset(
                 body,
                 client_ip=request.client.host if request.client else "",
@@ -936,13 +959,14 @@ class AuthService:
             response: dict[str, Any] = {
                 "message": "如果该邮箱存在，重置说明已发送",
             }
-            if self.deployment_environment in {"development", "test"} and issued.token:
+            if self.password_reset_available and issued.token:
                 response["reset_token"] = issued.token
                 response["expires_at"] = issued.expires_at.isoformat() if issued.expires_at else None
             return response
 
         @router.post("/password-reset/confirm")
         def confirm_password_reset(body: PasswordResetConfirmRequest, response: Response):
+            self._require_password_reset_available()
             try:
                 self.confirm_password_reset(body)
             except (PasswordResetRejected, ValueError) as exc:

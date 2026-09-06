@@ -274,6 +274,13 @@ are yours to supply; the send belongs behind a durable, retried outbox like the 
 hide the entry in production until one exists. Until then the honest answer to a locked-out user
 is a manual reset by an operator.
 
+**Decided 2026-09-06: hidden in production until a channel exists.**
+`AuthService.password_reset_available` is true only where the response can carry the token
+(development and test). Elsewhere both reset endpoints answer `503 密码重置功能暂未开放，请联系支持`,
+`GET /health` reports `auth.password_reset_available: false`, and the web app keeps its *Forgot
+password?* entry hidden unless `/health` offers it. Re-opening it is the mail-provider decision
+above, wired into that property.
+
 ### 1.15 The conservative LCB cannot be enabled yet, and that is a data question
 
 `FEATURE_ROUTER_LCB` is `false` and must stay false until a replay passes. A replay needs

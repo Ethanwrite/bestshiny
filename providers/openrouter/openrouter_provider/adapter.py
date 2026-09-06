@@ -279,10 +279,22 @@ class OpenRouterProvider(
         inputs: str | list[str] | list[dict[str, Any]],
         parameters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # The memory engine speaks Voyage's input shape (`image_url` as a bare
+        # string, `input_type` as a parameter). This surface is the
+        # OpenAI-compatible one: multimodal content carries `image_url` as
+        # `{"url": ...}` and knows no `input_type`. Translating here is what
+        # makes google/gemini-embedding-2 a real fallback for the
+        # MULTIMODAL_EMBEDDING role rather than a request the provider refuses.
+        wire = dict(wire_parameters(parameters))
+        wire.pop("input_type", None)
         return await self.client.request(
             "POST",
             "/embeddings",
-            json_body={"model": _required(model, "model"), "input": inputs, **wire_parameters(parameters)},
+            json_body={
+                "model": _required(model, "model"),
+                "input": _embedding_input(inputs),
+                **wire,
+            },
             submitted=True,
         )
 
@@ -439,6 +451,50 @@ class OpenRouterProvider(
         if not self.configured:
             return ProviderHealth(False, "NOT_CONFIGURED", {**metadata, "status": "NOT_CONFIGURED"})
         return ProviderHealth(ok, detail, metadata)
+
+
+def _embedding_input(inputs: Any) -> Any:
+    """Voyage-shaped multimodal pieces in this API's own content shape.
+
+    Strings and lists of strings pass through. A `{"content": [...]}` object
+    keeps text pieces, turns `{"type": "image_url", "image_url": "<url>"}` into
+    `{"type": "image_url", "image_url": {"url": "<url>"}}`, and carries an
+    `image_base64` data URI the same way; a piece already in this API's shape
+    is left alone. Video pieces are refused here as they are at Voyage:
+    memory sends extracted stills, never a video.
+    """
+
+    if isinstance(inputs, str):
+        return inputs
+    if not isinstance(inputs, list):
+        return inputs
+    translated: list[Any] = []
+    for item in inputs:
+        if isinstance(item, dict) and isinstance(item.get("content"), list):
+            translated.append({"content": [_embedding_piece(piece) for piece in item["content"]]})
+        else:
+            translated.append(item)
+    return translated
+
+
+def _embedding_piece(piece: Any) -> Any:
+    if not isinstance(piece, dict):
+        return piece
+    kind = str(piece.get("type") or "")
+    if kind in {"video_url", "video_base64"}:
+        raise ProviderError(
+            "OpenRouter embeddings take text and images; send video as extracted frames",
+            RetryCategory.INVALID_REQUEST,
+            code="EMBEDDING_INPUT_UNSUPPORTED",
+        )
+    if kind == "image_base64":
+        return {"type": "image_url", "image_url": {"url": str(piece.get("image_base64") or "")}}
+    if kind == "image_url":
+        url = piece.get("image_url")
+        if isinstance(url, dict):
+            return piece
+        return {"type": "image_url", "image_url": {"url": str(url or "")}}
+    return piece
 
 
 def _image_references(request: dict[str, Any], declared: Any) -> list[dict[str, Any]]:

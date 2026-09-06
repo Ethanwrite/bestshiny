@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from provider_sdk import provider_can_handle
 from router_evidence_core import TaskType, router_scenario, router_task_type
 
+from .duration import ExecutionDurationPlan, plan_execution_duration
 from .registry import ModelCapabilityRegistry
 from .scene_champions import SceneChampionTable
 from .schemas import (
@@ -214,10 +215,13 @@ class VideoModelRouter:
             failures.append(
                 ("TASK_TYPE_UNSUPPORTED", f"task type {task_type.value} requires {task_capability}")
             )
-        if profile.max_duration is not None and requirements.duration > profile.max_duration:
-            failures.append(("DURATION_UNSUPPORTED", f"duration exceeds {profile.max_duration:g}s"))
-        if profile.min_duration is not None and requirements.duration < profile.min_duration:
-            failures.append(("DURATION_UNSUPPORTED", f"duration is below {profile.min_duration:g}s"))
+        # Duration is planned, not merely bounded: a request the model can run
+        # at a legal length (snapped up to its minimum or to a declared step)
+        # is eligible with that execution length; a request over the ceiling
+        # is not, and the rejection carries the SPLIT_SHOT plan that would fit.
+        plan = self._execution_plan(profile, requirements, task_type)
+        if not plan.runnable:
+            failures.append(("DURATION_UNSUPPORTED", plan.detail))
         failures.extend(self._mode_failures(profile, requirements, task_type))
         if requirements.max_cost_per_second is not None:
             per_second = profile.cost.get("estimated_per_second")
@@ -298,13 +302,7 @@ class VideoModelRouter:
         so V2V falls back to the ``r2v`` declaration when no ``v2v`` exists.
         """
 
-        modes = profile.provider_metadata.get("modes")
-        if not isinstance(modes, dict):
-            return []
-        mode_keys = ("v2v", "r2v") if task_type is TaskType.V2V else (task_type.value.lower(),)
-        declaration = next(
-            (modes[key] for key in mode_keys if isinstance(modes.get(key), dict)), None
-        )
+        declaration = VideoModelRouter._mode_declaration(profile, task_type)
         if declaration is None:
             return []
         failures: list[tuple[str, str]] = []
@@ -336,26 +334,63 @@ class VideoModelRouter:
                         f"{{{', '.join(sorted(required_roles))}}}",
                     )
                 )
-        max_duration = declaration.get("max_duration")
-        with_reference_video = declaration.get("max_duration_with_reference_video")
-        if requirements.requires_reference_video and isinstance(with_reference_video, (int, float)):
-            max_duration = with_reference_video
-        if isinstance(max_duration, (int, float)) and requirements.duration > float(max_duration):
-            failures.append(
-                (
-                    "DURATION_UNSUPPORTED",
-                    f"{task_type.value} mode caps duration at {float(max_duration):g}s",
-                )
-            )
-        min_duration = declaration.get("min_duration")
-        if isinstance(min_duration, (int, float)) and requirements.duration < float(min_duration):
-            failures.append(
-                (
-                    "DURATION_UNSUPPORTED",
-                    f"{task_type.value} mode requires at least {float(min_duration):g}s",
-                )
-            )
+        # Duration bounds declared per mode are read by `_duration_bounds`,
+        # which folds them into the execution plan.
         return failures
+
+    @staticmethod
+    def _mode_declaration(profile: ModelCapabilityProfile, task_type: TaskType) -> dict | None:
+        modes = profile.provider_metadata.get("modes")
+        if not isinstance(modes, dict):
+            return None
+        mode_keys = ("v2v", "r2v") if task_type is TaskType.V2V else (task_type.value.lower(),)
+        return next((modes[key] for key in mode_keys if isinstance(modes.get(key), dict)), None)
+
+    @classmethod
+    def _duration_bounds(
+        cls,
+        profile: ModelCapabilityProfile,
+        requirements: ShotRequirements,
+        task_type: TaskType,
+    ) -> tuple[float | None, float | None, list[float] | None]:
+        """The envelope that applies to *this* request: range and declared steps.
+
+        The profile's ``min_duration`` / ``max_duration`` hold unless the mode
+        the request resolves to declares its own; a reference video narrows
+        the ceiling further (``max_duration_with_reference_video``). A discrete
+        set - Veo publishes ``[4, 6, 8]`` - is read from
+        ``provider_metadata.supported_durations`` on the profile or the mode.
+        """
+
+        minimum = profile.min_duration
+        maximum = profile.max_duration
+        supported = profile.provider_metadata.get("supported_durations")
+        declaration = cls._mode_declaration(profile, task_type)
+        if declaration is not None:
+            if isinstance(declaration.get("min_duration"), (int, float)):
+                minimum = float(declaration["min_duration"])
+            if isinstance(declaration.get("max_duration"), (int, float)):
+                maximum = float(declaration["max_duration"])
+            with_reference_video = declaration.get("max_duration_with_reference_video")
+            if requirements.requires_reference_video and isinstance(with_reference_video, (int, float)):
+                maximum = float(with_reference_video)
+            if isinstance(declaration.get("supported_durations"), list):
+                supported = declaration["supported_durations"]
+        return minimum, maximum, supported if isinstance(supported, list) else None
+
+    def _execution_plan(
+        self,
+        profile: ModelCapabilityProfile,
+        requirements: ShotRequirements,
+        task_type: TaskType,
+    ) -> ExecutionDurationPlan:
+        minimum, maximum, supported = self._duration_bounds(profile, requirements, task_type)
+        return plan_execution_duration(
+            requirements.duration,
+            min_duration=minimum,
+            max_duration=maximum,
+            supported_durations=supported,
+        )
 
     def rank(
         self,
@@ -384,6 +419,8 @@ class VideoModelRouter:
 
         candidates: list[ModelCandidate] = []
         key_by_logical: dict[str, str] = {}
+        split_hints: list[str] = []
+        task_type = router_task_type(requirements)
         profiles = (
             self.registry.routable(require_live=self.require_live_lifecycle)
             if hasattr(self.registry, "routable")
@@ -403,16 +440,22 @@ class VideoModelRouter:
                 continue
             failures = self._eligible(profile, requirements)
             if failures:
+                codes = list(dict.fromkeys(code for code, _ in failures))
+                if codes == ["DURATION_UNSUPPORTED"]:
+                    # Everything else fits: this model would serve the shot in
+                    # segments. Say so where a planner can read it.
+                    split_hints.append(f"{profile.key}: {failures[0][1]}")
                 rejected.append(
                     RejectedModel(
                         provider=profile.provider,
                         model=profile.model_id,
                         modality=profile.modality,
-                        reason_codes=list(dict.fromkeys(code for code, _ in failures)),
+                        reason_codes=codes,
                         details=[detail for _, detail in failures],
                     )
                 )
                 continue
+            plan = self._execution_plan(profile, requirements, task_type)
             components: dict[str, float] = {}
             reasons: list[str] = []
             penalties: list[str] = []
@@ -469,6 +512,9 @@ class VideoModelRouter:
                     penalties=penalties,
                     components=components,
                     confidence_level=profile.confidence_level,
+                    execution_duration=plan.execution_duration,
+                    execution_strategy=plan.strategy,
+                    execution_segments=list(plan.segments),
                 )
             )
         candidates.sort(key=lambda candidate: (-candidate.score, candidate.provider, candidate.model))
@@ -479,6 +525,7 @@ class VideoModelRouter:
                 + "; ".join(
                     f"{item.provider}:{item.model}={','.join(item.reason_codes)}" for item in rejected
                 )
+                + (f"; SPLIT_SHOT would fit: {split_hints[0]}" if split_hints else "")
             )
         scenario = router_scenario(requirements)
         selection_basis = "OPEN_SCORING"
@@ -518,6 +565,9 @@ class VideoModelRouter:
             scenario=scenario.value,
             selection_basis=selection_basis,
             champion_audit=champion_audit,
+            requested_duration=requirements.duration,
+            execution_duration=selected.execution_duration,
+            execution_strategy=selected.execution_strategy,
         )
 
     def _champion_ordered(

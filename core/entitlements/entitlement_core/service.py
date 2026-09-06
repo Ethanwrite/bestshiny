@@ -73,6 +73,31 @@ class WorkspaceModelResolver:
             require_live=require_live,
         )
 
+    def candidates(
+        self,
+        project_id: str,
+        role: ModelRole | str,
+        *,
+        asset_criticality: AssetCriticality | str = AssetCriticality.STANDARD,
+        require_live: bool = False,
+    ) -> list[ResolvedModel]:
+        """Every compatible binding for the role, in resolution order.
+
+        The same gate as `resolve`, which returns the first of these. The
+        runtime walks the list so a FALLBACK binding whose provider *is*
+        configured can serve when the PRIMARY's provider has no credential.
+        """
+
+        context = self.context_for_project(project_id)
+        requested_role = ModelRole(role)
+        self._assert_role_allowed(context.plan_tier, requested_role)
+        return self.models.candidates_for_role(
+            requested_role,
+            plan_tier=context.plan_tier.value,
+            asset_criticality=asset_criticality,
+            require_live=require_live,
+        )
+
     def default_video_role(self, project_id: str) -> ModelRole:
         # What "Auto" means, for every plan. Deliberately the priced,
         # live-verified route: the previous paid default (VIDEO_FLOW's

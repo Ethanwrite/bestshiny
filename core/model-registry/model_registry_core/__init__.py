@@ -1,3 +1,11 @@
+from .duration import (
+    EXACT,
+    SNAP_UP,
+    SPLIT_SHOT,
+    ExecutionDurationPlan,
+    legal_durations,
+    plan_execution_duration,
+)
 from .infrastructure import (
     ModelDefaultSyncResult,
     ModelInfrastructureService,
@@ -42,6 +50,12 @@ from .schemas import (
 
 __all__ = [
     "CONTRACT_INVALID",
+    "EXACT",
+    "SNAP_UP",
+    "SPLIT_SHOT",
+    "ExecutionDurationPlan",
+    "legal_durations",
+    "plan_execution_duration",
     "CanaryLoop",
     "CanaryRecord",
     "ChampionBinding",

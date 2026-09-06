@@ -149,7 +149,20 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
         location = compiler_location(scene.location)
         shots: list[dict[str, Any]] = []
         for shot in beat.shots:
-            if shot.dialogue is not None:
+            # The staging the prompt compiler reads, identical for both shapes:
+            # who is in frame, who must be recognisable, what may move.
+            staging = {
+                "micro_actions": list(shot.micro_actions),
+                "present_characters": [
+                    names.get(normalize_name(name), name) for name in shot.present_characters
+                ],
+                "identity_critical_characters": [
+                    names.get(normalize_name(name), name)
+                    for name in shot.identity_critical_characters
+                ],
+            }
+            if shot.action is None:
+                assert shot.dialogue is not None
                 speaker = names.get(normalize_name(shot.dialogue.speaker), shot.dialogue.speaker)
                 line = dialogue_line(script_name(speaker), shot.dialogue.text)
                 shots.append(
@@ -166,11 +179,11 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                         "gaze_target": shot.gaze_target,
                         "continuity_obligations": list(shot.continuity_obligations),
                         "description": "",
+                        **staging,
                     }
                 )
                 continue
             action = shot.action
-            assert action is not None
             actor = names.get(normalize_name(action.actor), action.actor)
             rendered = action_line(
                 script_name(actor),
@@ -179,11 +192,22 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                 target=_clean_phrase(action.target),
                 place=location,
             )
+            # The rendered line carries the dominant action for the narrative
+            # compiler; a line spoken during it rides beside, as `dialogue` and
+            # `speaker`, and reaches the prompt through the director intent.
+            spoken = (
+                {
+                    "dialogue": shot.dialogue.text,
+                    "speaker": names.get(normalize_name(shot.dialogue.speaker), shot.dialogue.speaker),
+                }
+                if shot.dialogue is not None
+                else {"dialogue": None}
+            )
             shots.append(
                 {
                     "sequence": shot.sequence,
                     "action": rendered,
-                    "dialogue": None,
+                    **spoken,
                     "actor": actor,
                     "verb": action.verb,
                     "object": _clean_phrase(action.object),
@@ -196,6 +220,7 @@ def beats_from_screenplay(screenplay: Screenplay) -> list[dict[str, Any]]:
                     "gaze_target": shot.gaze_target,
                     "continuity_obligations": list(shot.continuity_obligations),
                     "description": action.description,
+                    **staging,
                 }
             )
         beats.append(
@@ -247,7 +272,7 @@ def apply_beat_edits(screenplay: Screenplay, edited_beats: list[dict[str, Any]])
             for key in ("shot_type", "start_state", "end_state", "gaze_target"):
                 value = edited_shot.get(key)
                 if isinstance(value, str) and value and value != shot.get(key):
-                    if key == "shot_type" and shot.get("dialogue"):
+                    if key == "shot_type" and shot.get("dialogue") and not shot.get("action"):
                         continue
                     shot[key] = value
                     changed = True
@@ -334,10 +359,8 @@ def appearing_character_keys(screenplay: Screenplay) -> set[str]:
         for name in beat.characters:
             appearing.add(normalize_name(name))
         for shot in beat.shots:
-            if shot.dialogue is not None:
-                appearing.add(normalize_name(shot.dialogue.speaker))
-            if shot.action is not None:
-                appearing.add(normalize_name(shot.action.actor))
+            for name in (*shot.named_characters, *shot.present_characters):
+                appearing.add(normalize_name(name))
     return appearing
 
 
@@ -717,13 +740,14 @@ def shot_constraints(  # noqa: PLR0913 - one call carries everything a shot must
     for beat in screenplay.beats:
         beat_characters = {normalize_name(name) for name in beat.characters}
         for shot in beat.shots:
-            speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
             # `shot.sequence` is the shot's identity everywhere else, and it is
             # what the director names when placing copy. Nothing renumbers it
             # per beat, so matching on the list position would drop copy from a
             # screenplay that numbers shots continuously across beats.
             placed_here = copy_by_position.get((beat.sequence, shot.sequence), ())
-            present = beat_characters | {normalize_name(speaker)}
+            present = beat_characters | {
+                normalize_name(name) for name in (*shot.named_characters, *shot.present_characters)
+            }
             applicable = tuple(
                 item.text
                 for item, characters, scenes in scoped
@@ -754,10 +778,24 @@ def shot_constraints(  # noqa: PLR0913 - one call carries everything a shot must
 
 
 def anchor_keys_for_shot(shot: dict[str, Any], beat: dict[str, Any], product: str | None) -> list[str]:
+    """The key visuals a rendered shot implies.
+
+    Character anchors are the shot's identity-critical characters - the faces
+    the provider is given as references - never everyone present: a present
+    character is staged in the prompt, an identity-critical one is bound to a
+    reference plate. Without the declaration (older beat plans) the actor or
+    speaker is the one face.
+    """
+
     keys: list[str] = []
-    actor = shot.get("speaker") or shot.get("actor")
-    if actor:
-        keys.append(f"character:{normalize_name(str(actor))}")
+    critical = [str(name) for name in (shot.get("identity_critical_characters") or []) if str(name)]
+    if not critical:
+        actor = shot.get("speaker") or shot.get("actor")
+        critical = [str(actor)] if actor else []
+    for name in critical:
+        key = f"character:{normalize_name(name)}"
+        if key not in keys:
+            keys.append(key)
     location_key = str(beat.get("location_key") or "") or normalize_name(str(beat.get("location") or ""))
     if location_key:
         keys.append(f"scene:{location_key}")

@@ -69,6 +69,7 @@ const state = {
   savingJobId: null,          // job the save-to-project dialog is acting on
   authUser: null,
   authMode: "login", passengerPreviewObjectUrl: null,
+  passengerReferencePreviewUrl: null, // object URL of the reference the user picked, shown on the canvas
   styleLock: null,
   submissions: restoreSubmissions(),
   operations: { providers: [], skills: [], job: null },
@@ -426,6 +427,7 @@ function clearWorkspaceState() {
   $("lockProjectStyleBtn").disabled = true;
   $("projectStyleLockStatus").textContent = "Make a style version the main reference first, then a project member can lock it explicitly.";
   $("passengerReference").value = "";
+  clearReferencePreview();
   $("passengerPrompt").value = "";
   $("scriptInput").value = "";
   $("rawPrompt").value = "";
@@ -828,7 +830,19 @@ async function uploadPassengerReference({ projectId, file }) {
     const response = await fetch(`${API}/v1/assets`, {
       method: "POST", body: form, credentials: "include", headers: csrfHeaders("POST"),
     });
-    if (!response.ok) throw new Error("Reference upload failed");
+    if (!response.ok) {
+      // The server says exactly why (415 type refused, 413 too large, 409
+      // idempotency, 422 …); folding every answer into one sentence hid all of it.
+      const body = await response.json().catch(() => null);
+      const detail = body?.detail;
+      const reason = detail && typeof detail === "object"
+        ? (detail.message || JSON.stringify(detail))
+        : (detail || response.statusText || "");
+      const error = new Error(`Reference upload failed (HTTP ${response.status})${reason ? `: ${reason}` : ""}`);
+      error.status = response.status;
+      error.detail = detail;
+      throw error;
+    }
     const asset = await response.json();
     if (state.passengerReferenceUpload?.fingerprint === fingerprint
       && state.passengerReferenceUpload.file === file) {
@@ -1754,6 +1768,7 @@ async function selectProject(id) {
     stopPassengerPolling();
     $("passengerReference").value = "";
     $("referenceFileName").hidden = true;
+    clearReferencePreview();
     renderPassengerJob(null);
   }
   const projectChanged = state.project?.id !== id;
@@ -3627,9 +3642,18 @@ function renderScreenplay(view) {
     `<li><b>${escapeHTML(scene.key)}</b>: ${escapeHTML(scene.location)} — ${escapeHTML(scene.time)}${scene.description ? ` · ${escapeHTML(scene.description)}` : ""}</li>`).join("");
   const beats = (content.beats || []).map((beat) => {
     const shots = (beat.shots || []).map((shot) => {
-      const primary = shot.dialogue
+      // One dominant action, and at most one line beside it: a shot may carry
+      // both, a speaking shot carries the line alone.
+      const actionLine = shot.action
+        ? `<b>${escapeHTML(shot.action.actor)}</b> ${escapeHTML(shot.action.verb.replace("_", " "))}${shot.action.object ? ` ${escapeHTML(shot.action.object)}` : ""}${shot.action.target ? ` → ${escapeHTML(shot.action.target)}` : ""}${shot.action.description ? ` <small>${escapeHTML(shot.action.description)}</small>` : ""}`
+        : "";
+      const dialogueLine = shot.dialogue
         ? `<b>${escapeHTML(shot.dialogue.speaker)}:</b> ${escapeHTML(shot.dialogue.text)}`
-        : `<b>${escapeHTML(shot.action.actor)}</b> ${escapeHTML(shot.action.verb.replace("_", " "))}${shot.action.object ? ` ${escapeHTML(shot.action.object)}` : ""}${shot.action.target ? ` → ${escapeHTML(shot.action.target)}` : ""}${shot.action.description ? ` <small>${escapeHTML(shot.action.description)}</small>` : ""}`;
+        : "";
+      const microActions = (shot.micro_actions || []).length
+        ? ` <small>(${shot.micro_actions.map((item) => escapeHTML(String(item).replace(/_/g, " "))).join(", ")})</small>`
+        : "";
+      const primary = [actionLine, dialogueLine].filter(Boolean).join("<br>") + microActions;
       const states = [shot.start_state ? `start: ${shot.start_state}` : "", shot.end_state ? `end: ${shot.end_state}` : "", shot.gaze_target ? `gaze: ${shot.gaze_target}` : ""].filter(Boolean).join(" · ");
       const obligations = (shot.continuity_obligations || []).join("; ");
       return `<div class="creative-shot"><span class="mono">#${shot.sequence} ${escapeHTML(shot.shot_type)} ${shot.duration}s</span><div>${primary}${states ? `<small>${escapeHTML(states)}</small>` : ""}${obligations ? `<small>continuity: ${escapeHTML(obligations)}</small>` : ""}</div></div>`;
@@ -3742,14 +3766,18 @@ function renderBeats(view) {
   return beats.map((beat) => {
     const shots = (beat.shots || []).map((shot, index) => {
       const edit = edits[beat.sequence]?.[index] || {};
-      const primary = shot.dialogue !== null && shot.dialogue !== undefined
+      const hasLine = shot.dialogue !== null && shot.dialogue !== undefined;
+      // A speaking shot (line, no actor) renders its line; an action shot
+      // renders the action, and the line spoken during it beneath.
+      const speakingOnly = hasLine && !shot.actor;
+      const primary = speakingOnly
         ? `<b>${escapeHTML(shot.speaker || "")}:</b> ${escapeHTML(edit.dialogue ?? shot.dialogue)}`
-        : `${escapeHTML(shot.action)}${(edit.description ?? shot.description) ? ` <small>${escapeHTML(edit.description ?? shot.description)}</small>` : ""}`;
+        : `${escapeHTML(shot.action)}${(edit.description ?? shot.description) ? ` <small>${escapeHTML(edit.description ?? shot.description)}</small>` : ""}${hasLine ? `<br><b>${escapeHTML(shot.speaker || "")}:</b> ${escapeHTML(edit.dialogue ?? shot.dialogue)}` : ""}`;
       const editor = editable ? `<div class="creative-beat-edit">
-          ${shot.dialogue !== null && shot.dialogue !== undefined
+          ${hasLine
             ? `<input data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="dialogue" value="${escapeHTML(edit.dialogue ?? shot.dialogue)}" placeholder="Line" />`
             : `<input data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="description" value="${escapeHTML(edit.description ?? shot.description ?? "")}" placeholder="Staging note" />`}
-          ${shot.dialogue !== null && shot.dialogue !== undefined ? "<span></span>" : `<select data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="shot_type">${["WIDE", "MEDIUM", "CLOSE", "CLOSE_UP", "EXTREME_CLOSE_UP", "INSERT", "OVER_SHOULDER", "TWO_SHOT"].map((type) => `<option ${(edit.shot_type ?? shot.shot_type) === type ? "selected" : ""}>${type}</option>`).join("")}</select>`}
+          ${speakingOnly ? "<span></span>" : `<select data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="shot_type">${["WIDE", "MEDIUM", "CLOSE", "CLOSE_UP", "EXTREME_CLOSE_UP", "INSERT", "OVER_SHOULDER", "TWO_SHOT"].map((type) => `<option ${(edit.shot_type ?? shot.shot_type) === type ? "selected" : ""}>${type}</option>`).join("")}</select>`}
           <input type="number" min="1" max="15" step="0.5" data-beat="${beat.sequence}" data-shot="${index}" data-shot-field="duration" value="${escapeHTML(String(edit.duration ?? shot.duration))}" />
         </div>` : "";
       return `<div class="creative-shot"><span class="mono">#${index + 1} ${escapeHTML(edit.shot_type ?? shot.shot_type)} ${edit.duration ?? shot.duration}s</span><div>${primary}${shot.start_state ? `<small>${escapeHTML(`${shot.start_state} → ${shot.end_state || ""}`)}</small>` : ""}${editor}</div></div>`;
@@ -4553,11 +4581,81 @@ on("passengerImageTask", "change", updatePassengerCost);
 on("passengerAspect", "change", updatePassengerCost);
 on("passengerDuration", "input", updatePassengerCost);
 on("passengerResolution", "change", updatePassengerCost);
+/* The reference upload allowlist, the server's own
+   (packages/shared/platform_shared/media_validation.py `_IMAGE_TYPES`);
+   tests/test_reference_upload_contract.py pins the two together. Both the
+   extension and the MIME type are checked because the server refuses a pair
+   that disagrees, and the file picker's `accept` is a filter, not a gate. */
+const REFERENCE_IMAGE_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
+const REFERENCE_MAX_BYTES = 20 * 1024 * 1024;
+
+function referenceFileProblem(file) {
+  if (!file) return "Nothing landed — try dragging the file again.";
+  const extension = (file.name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
+  const expected = REFERENCE_IMAGE_TYPES[extension];
+  if (!expected) return "That's not a supported image. Use a PNG, JPG or WebP file.";
+  const declared = (file.type || "").split(";")[0].trim().toLowerCase();
+  if (declared !== expected) {
+    return `That file is named ${extension} but its type is ${declared || "unknown"}. Use a PNG, JPG or WebP file.`;
+  }
+  if (file.size > REFERENCE_MAX_BYTES) return "That image is over 20 MB. Use a smaller file.";
+  return null;
+}
+
+function clearReferencePreview() {
+  if (state.passengerReferencePreviewUrl) URL.revokeObjectURL(state.passengerReferencePreviewUrl);
+  state.passengerReferencePreviewUrl = null;
+}
+
+/** Show the picked reference on the canvas at once, before any upload. A
+ *  running generation keeps the canvas — its progress is repainted on every
+ *  poll tick — so then only the sidebar note names the file. */
+function renderReferencePreview(file) {
+  clearReferencePreview();
+  if (!file) {
+    renderPassengerJob(state.passengerJobs[state.passengerMedia] || null);
+    return;
+  }
+  if (passengerPoll) return;
+  const url = URL.createObjectURL(file);
+  state.passengerReferencePreviewUrl = url;
+  const stage = $("passengerResult");
+  stage.className = "canvas-stage has-result has-reference";
+  paintStage(stage, `
+    <img class="result-preview fade-in" src="${escapeHTML(url)}" alt="Reference image preview" />
+    <div class="result-bar">
+      <span class="status-chip is-queued">Reference</span>
+      <div class="result-meta">
+        <div><span>File</span><strong>${escapeHTML(file.name)}</strong></div>
+        <div><span>Size</span><strong>${(file.size / 1024).toFixed(0)} KB</strong></div>
+      </div>
+    </div>`);
+  $("saveToProjectBtn").disabled = true;
+  announceCanvas(`Reference image ${file.name} is on the canvas`);
+}
+
 on("passengerReference", "change", (event) => {
   state.passengerReferenceUpload = null;
   const file = event.target.files[0];
+  const problem = file ? referenceFileProblem(file) : null;
+  if (problem) {
+    // The picker's `accept` is advisory; a refused file must not sit in the
+    // input to be uploaded and refused by the server later.
+    event.target.value = "";
+    $("referenceFileName").hidden = true;
+    renderReferencePreview(null);
+    toast(problem);
+    updatePassengerCost();
+    return;
+  }
   $("referenceFileName").hidden = !file;
   if (file) $("referenceFileName").textContent = `${file.name} · ${(file.size / 1024).toFixed(0)} KB`;
+  renderReferencePreview(file || null);
   updatePassengerCost();
 });
 /* ---- Reference drag and drop ------------------------------------
@@ -4577,9 +4675,8 @@ function acceptReferenceFile(file, target) {
     window.setTimeout(() => target?.el.classList.remove(target.cls, "is-reject"), 620);
     toast(message);
   };
-  if (!file) return reject("Nothing landed — try dragging the file again.");
-  if (!file.type.startsWith("image/")) return reject("That's not an image. Drop a PNG, JPG or WebP.");
-  if (file.size > 20 * 1024 * 1024) return reject("That image is over 20 MB. Use a smaller file.");
+  const problem = referenceFileProblem(file);
+  if (problem) return reject(problem);
   // Accepted: the drag is over and the highlight has done its job.
   target?.el.classList.remove(target.cls, "is-reject");
   const transfer = new DataTransfer();

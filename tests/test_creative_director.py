@@ -1079,10 +1079,11 @@ def test_the_model_writes_an_original_treatment_beats_dialogue_and_screenplay(co
         assert script_lines[0] == "EXT. rooftop - NIGHT"
         assert "Mira picks up the phone" in script_lines
         assert "Ren: You did, Mira. Three days from now." in script_lines
-        # Every shot carries exactly one primary action plus start/end state.
+        # Every shot carries one dominant visual action (or is a speaking shot)
+        # plus start/end state; a line may ride beside an action.
         for beat in content["beats"]:
             for shot in beat["shots"]:
-                assert (shot["action"] is None) != (shot["dialogue"] is None)
+                assert shot["action"] is not None or shot["dialogue"] is not None
                 assert shot["start_state"] and shot["end_state"]
         # The screenplay call was made through the Skill, with the approved brief and the conversation.
         screenplay_call = director.calls[-1]

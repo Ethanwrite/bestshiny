@@ -191,12 +191,13 @@ def test_the_registry_profile_matches_what_openrouter_publishes(model: str) -> N
     assert bool(profile.get("supports_end_frame")) is ("last_frame" in published["frame_images"])
 
 
-def test_veo_records_the_discrete_durations_the_profile_cannot_hold() -> None:
-    """4/6/8 is a set, and the profile holds only min and max.
+def test_veo_declares_its_discrete_durations_where_the_router_reads_them() -> None:
+    """4/6/8 is a set, and every Veo profile now says so.
 
-    Recorded in `metadata_json`, which is persisted verbatim, so the gap is
-    visible to an operator rather than implied by a range that admits 5 and 7.
-    Closing it properly needs a schema change and is deliberately not done here.
+    The published set stays recorded on the definition; the capability
+    profile carries it as `provider_metadata.supported_durations`, which the
+    router reads to run a 5-second request at 6 seconds and to refuse a
+    9-second one before a reservation exists. The old "gap" note is gone.
     """
 
     import json as _json
@@ -208,8 +209,12 @@ def test_veo_records_the_discrete_durations_the_profile_cannot_hold() -> None:
         ).read_text()
     )
     veo = next(m for m in defaults["models"] if m["provider_model_id"] == "google/veo-3.1")
-    assert veo["metadata_json"]["supported_durations_seconds"] == [4, 6, 8]
-    assert "duration_admission_gap" in veo["metadata_json"]
+    assert veo["metadata_json"]["supported_durations_seconds"] == PUBLISHED["google/veo-3.1"]["durations"]
+    assert "duration_admission_gap" not in veo["metadata_json"]
+    for entry in defaults["models"]:
+        if entry["provider"] == "openrouter" and entry["provider_model_id"] == "google/veo-3.1":
+            declared = entry["capability_profile"]["provider_metadata"]["supported_durations"]
+            assert declared == PUBLISHED["google/veo-3.1"]["durations"], entry["logical_name"]
 
 
 def test_wan_3_0_ships_disabled_until_its_payload_contract_is_established() -> None:

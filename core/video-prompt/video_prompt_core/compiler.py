@@ -488,6 +488,17 @@ class PromptCompilerService:
         action = self._single_action(raw_action)
         director_gaze = str(director.get("gaze_target") or "").strip()
         director_staging = str(director.get("description") or "").strip()
+        # Who is in frame and what may move beside the dominant action. Present
+        # characters are staged in the prompt; identity references stay with the
+        # identity-critical subset (narrowed in the production pipeline).
+        present_characters = [
+            str(item).strip() for item in (director.get("present_characters") or []) if str(item).strip()
+        ]
+        micro_actions = [
+            str(item).strip().replace("_", " ")
+            for item in (director.get("micro_actions") or [])
+            if str(item).strip()
+        ]
         director_obligations = [
             str(item).strip()
             for item in (director.get("continuity_obligations") or [])
@@ -641,7 +652,13 @@ class PromptCompilerService:
             **(lighting or {}),
         }
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
-        dialogue = str(end_state.get("dialogue") or start_state.get("dialogue") or "")
+        # A speaking shot's line is in the compiled state; a line spoken during
+        # an action shot rides on the director intent, because the narrative
+        # compiler read the action line and the line beside it never entered
+        # the state.
+        dialogue = str(
+            end_state.get("dialogue") or start_state.get("dialogue") or director.get("dialogue") or ""
+        )
         props = self._canonical_props(start_state.get("props", []))
         # A canonical PRODUCT or PROP the DIRECTOR bound to *this* shot is a
         # thing the shot must render exactly, so it enters the spec's own prop
@@ -700,6 +717,12 @@ class PromptCompilerService:
         # away: they are the staging and the continuity the user signed off.
         if director_staging:
             constraints.append(f"stage the approved action as: {director_staging}")
+        if present_characters:
+            constraints.append("in frame: " + ", ".join(present_characters))
+        if micro_actions:
+            constraints.append(
+                "micro-actions allowed beside the dominant action: " + ", ".join(micro_actions)
+            )
         constraints.extend(f"continuity obligation: {item}" for item in director_obligations)
         # Scoped to this shot by the director, never every invariant on every
         # shot. Claims and copy are quoted, because their wording is the thing

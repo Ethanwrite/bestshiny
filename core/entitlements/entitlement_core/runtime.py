@@ -25,6 +25,7 @@ from production_domain.models import (
 )
 from provider_sdk import (
     AssetCriticality,
+    CapabilityProviderNotFound,
     ChatCapability,
     EdgeTask,
     EdgeTaskRole,
@@ -144,19 +145,62 @@ class ModelRoleRuntime:
         requested_role = ModelRole(role)
         criticality = AssetCriticality(asset_criticality)
         server_requires_live = self.provider_mode is ProviderMode.LIVE
-        selected = self.resolver.resolve(
+        selected, capability, implementation = self._select(
             project_id,
             requested_role,
-            asset_criticality=criticality,
+            criticality=criticality,
             require_live=server_requires_live or require_live,
         )
-        capability = capability_for_model_role(requested_role)
-        implementation = self.providers.resolve(selected.provider, capability)
         assert_provider_can_handle(
             getattr(implementation, "trust_level", selected.provider_trust_level),
             criticality,
         )
         return selected, capability, implementation
+
+    def _select(
+        self,
+        project_id: str,
+        role: ModelRole,
+        *,
+        criticality: AssetCriticality,
+        require_live: bool,
+    ) -> tuple[ResolvedModel, ProviderCapability, object]:
+        """The first binding, in resolution order, whose provider is configured.
+
+        Bindings are ordered PRIMARY then FALLBACK by the registry; the
+        credentials gate lives in the capability catalogue, which refuses a
+        provider without a key. Until now the PRIMARY was taken and the refusal
+        raised, so a FALLBACK binding could never serve - `MULTIMODAL_EMBEDDING`
+        on a deployment without a Voyage key failed outright instead of using
+        the Gemini embedding OpenRouter already reaches. A candidate whose
+        provider is not configured is skipped; if none is, the first refusal
+        is raised unchanged so callers keep degrading the way they always did.
+        """
+
+        capability = capability_for_model_role(role)
+        candidates = self.resolver.candidates(
+            project_id,
+            role,
+            asset_criticality=criticality,
+            require_live=require_live,
+        )
+        if not candidates:
+            # Same error, same wording, as a single resolution would raise.
+            self.resolver.resolve(
+                project_id, role, asset_criticality=criticality, require_live=require_live
+            )
+            raise LookupError(f"no compatible model binding for role={role.value}")
+        first_refusal: CapabilityProviderNotFound | None = None
+        for candidate in candidates:
+            try:
+                implementation = self.providers.resolve(candidate.provider, capability)
+            except CapabilityProviderNotFound as exc:
+                if first_refusal is None:
+                    first_refusal = exc
+                continue
+            return candidate, capability, implementation
+        assert first_refusal is not None
+        raise first_refusal
 
     def _revalidate_execution_boundary(
         self,
@@ -176,10 +220,10 @@ class ModelRoleRuntime:
         in-flight call and applies to subsequent calls.
         """
 
-        current = self.resolver.resolve(
+        current, _capability, _implementation = self._select(
             project_id,
             selected.role,
-            asset_criticality=criticality,
+            criticality=criticality,
             require_live=self.provider_mode is ProviderMode.LIVE or require_live,
         )
         if current != selected:

@@ -17,12 +17,13 @@ rejected or degraded on record, never turned into a 500.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from typing import Any, Literal
 
 from production_domain.models import CreativeFormat
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ANCHOR_PROMPT_VERSION = "creative-anchor-v2"
 
@@ -40,10 +41,55 @@ MAX_QUESTIONS_PER_TURN = 3
 #: with no canonical reference behind it.
 MAX_CAST = 12
 
+#: The screenplay's structural caps. One set of numbers, named here and pinned
+#: by tests, instead of literals on the fields that enforce them.
+MAX_SCENES = 12
+MAX_BEATS = 40
+MAX_SHOTS_PER_BEAT = 12
+
+#: The director's shot length: intent for the cut, in seconds. It is *not* a
+#: promise about any provider - which model renders the shot is decided later,
+#: and the router picks that model's legal execution length from its declared
+#: capability (see ``model_registry_core.duration``); the canonical narrative
+#: keeps the requested figure untouched.
+MIN_SHOT_DURATION_SECONDS = 1.0
+MAX_SHOT_DURATION_SECONDS = 15.0
+
+#: Faces one shot may hold by strong identity reference. Every present
+#: character is staged in the prompt, but only the identity-critical ones -
+#: the actor, the speaker, whoever the audience must recognise - are sent to
+#: the provider as identity references. A background figure handed to a
+#: provider as a fifth or sixth reference plate is a plate the model splits
+#: or ignores, and one less slot for the face that matters. Project-level
+#: cast stays bounded by ``MAX_CAST``.
+MAX_IDENTITY_CRITICAL_CHARACTERS = 4
+
+#: Micro-actions that may ride along with the dominant action without counting
+#: as a second action: the involuntary motion that keeps a subject alive in
+#: frame. A closed vocabulary, so a second *narrative* action cannot be
+#: smuggled in as one.
+MICRO_ACTIONS: tuple[str, ...] = (
+    "blink",
+    "breathe",
+    "mouth_movement",
+    "gaze_shift",
+    "slight_head_turn",
+)
+MAX_MICRO_ACTIONS = 4
+
+#: Speech pacing used to check a line against its shot. Natural Mandarin runs
+#: about four characters a second and natural English about two and a half
+#: words a second; half a second of air is kept at each end of the shot so a
+#: line does not start on the cut and end on the cut.
+SPEECH_CJK_CHARACTERS_PER_SECOND = 4.0
+SPEECH_WORDS_PER_SECOND = 2.5
+DIALOGUE_LEAD_SECONDS = 0.5
+DIALOGUE_TAIL_SECONDS = 0.5
+
 #: Locations that may each receive their own canonical SCENE key visual. Equal
 #: to the screenplay's own scene cap: every scene a beat actually plays in is
 #: anchored, so the frame-anchor planner can always resolve one.
-MAX_SCENE_ANCHORS = 12
+MAX_SCENE_ANCHORS = MAX_SCENES
 
 #: Distinct props that may receive their own key visual. Unlike the cast this
 #: is a budget, not a contract: a prop beyond it is recorded as uncovered with
@@ -558,6 +604,77 @@ def _clean_text(value: Any, limit: int) -> str:
     return text[:limit]
 
 
+_MICRO_ACTION_ALIASES: dict[str, str] = {
+    "blinks": "blink",
+    "blinking": "blink",
+    "眨眼": "blink",
+    "breath": "breathe",
+    "breathing": "breathe",
+    "呼吸": "breathe",
+    "lip_sync": "mouth_movement",
+    "lip_movement": "mouth_movement",
+    "mouth_shape": "mouth_movement",
+    "嘴型": "mouth_movement",
+    "口型": "mouth_movement",
+    "gaze": "gaze_shift",
+    "eye_movement": "gaze_shift",
+    "glance": "gaze_shift",
+    "眼神": "gaze_shift",
+    "head_turn": "slight_head_turn",
+    "small_head_turn": "slight_head_turn",
+    "转头": "slight_head_turn",
+    "轻微转头": "slight_head_turn",
+}
+
+#: Connectors that join one action to the next. A staging note that uses one
+#: is narrating a sequence, and the second action belongs in its own shot.
+_SEQUENCE_CONNECTORS = re.compile(
+    r"(然后|接着|紧接着|随后|而后|再接着|之后再|"
+    r"\b(?:and then|then|after that|afterwards|followed by|subsequently)\b)",
+    re.IGNORECASE,
+)
+_CJK_CHARACTER = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_LATIN_WORD = re.compile(r"[A-Za-z0-9\u00c0-\u024f']+")
+
+
+def normalize_micro_action(value: str) -> str:
+    """The canonical micro-action key, or a ValueError naming the vocabulary."""
+
+    key = " ".join(str(value or "").split()).lower().replace(" ", "_").replace("-", "_")
+    key = _MICRO_ACTION_ALIASES.get(key, key)
+    if key not in MICRO_ACTIONS:
+        raise ValueError(f"unknown micro-action {value!r}; use one of {', '.join(MICRO_ACTIONS)}")
+    return key
+
+
+def sequential_action_connector(description: str) -> str | None:
+    """The connector that turns a staging note into a sequence, if any."""
+
+    match = _SEQUENCE_CONNECTORS.search(str(description or ""))
+    return match.group(0) if match else None
+
+
+def estimated_speech_seconds(text: str) -> float:
+    """How long a line takes to say at a natural pace.
+
+    CJK text is paced per character, everything else per word; a mixed line
+    is the sum. Deterministic on purpose - it is a contract check, not a TTS
+    measurement, and the same line must always get the same answer.
+    """
+
+    cleaned = str(text or "")
+    cjk = len(_CJK_CHARACTER.findall(cleaned))
+    latin_words = len(_LATIN_WORD.findall(_CJK_CHARACTER.sub(" ", cleaned)))
+    seconds = cjk / SPEECH_CJK_CHARACTERS_PER_SECOND + latin_words / SPEECH_WORDS_PER_SECOND
+    return round(seconds, 2)
+
+
+def usable_dialogue_window(duration: float) -> float:
+    """The seconds of a shot a line may actually occupy."""
+
+    return round(max(0.0, float(duration) - DIALOGUE_LEAD_SECONDS - DIALOGUE_TAIL_SECONDS), 2)
+
+
 class ShotAction(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -605,20 +722,82 @@ class ShotDialogue(BaseModel):
 
 
 class ScreenplayShot(BaseModel):
-    """One planned shot: exactly one primary visible action or one line."""
+    """One planned shot: one dominant visible action, and at most one short line.
+
+    The dominant action is the ``action`` (one verb from the compiler's
+    vocabulary); a shot with a line and no action is a speaking shot, where
+    delivering the line *is* the visible action. Micro-actions - a blink, a
+    breath, mouth movement, a glance, a slight turn of the head - may ride
+    along and never count as a second action. A second *narrative* action does
+    not fit in one shot: it is refused, not compressed.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     sequence: int = Field(ge=1, le=200)
     shot_type: str = Field(default="MEDIUM", max_length=40)
-    duration: float = Field(default=5.0, ge=1.0, le=15.0)
+    #: Director intent, in seconds (``requested_duration``); accepted under
+    #: that name too. Never a claim about what a provider can render.
+    duration: float = Field(
+        default=5.0,
+        ge=MIN_SHOT_DURATION_SECONDS,
+        le=MAX_SHOT_DURATION_SECONDS,
+        validation_alias=AliasChoices("duration", "requested_duration"),
+    )
     action: ShotAction | None = None
     dialogue: ShotDialogue | None = None
+    micro_actions: list[str] = Field(default_factory=list, max_length=MAX_MICRO_ACTIONS)
+    #: Everyone visible in the frame, staged in the prompt. Defaults to the
+    #: actor and the speaker.
+    present_characters: list[str] = Field(default_factory=list, max_length=MAX_CAST)
+    #: The subset whose face the audience must recognise: the only characters
+    #: sent to the provider as identity references. Defaults to the actor and
+    #: the speaker; always a subset of ``present_characters``.
+    identity_critical_characters: list[str] = Field(
+        default_factory=list, max_length=MAX_IDENTITY_CRITICAL_CHARACTERS
+    )
     start_state: str = Field(default="", max_length=400)
     end_state: str = Field(default="", max_length=400)
     gaze_target: str = Field(default="", max_length=120)
     continuity_obligations: list[str] = Field(default_factory=list, max_length=8)
     anchors: list[str] = Field(default_factory=list, max_length=8)
+
+    @property
+    def requested_duration(self) -> float:
+        return self.duration
+
+    @property
+    def named_characters(self) -> list[str]:
+        """The actor and the speaker, in that order, without duplicates."""
+
+        names: list[str] = []
+        for value in (
+            self.action.actor if self.action is not None else "",
+            self.dialogue.speaker if self.dialogue is not None else "",
+        ):
+            if value and _normalize_name(value) not in {_normalize_name(item) for item in names}:
+                names.append(value)
+        return names
+
+    @field_validator("micro_actions")
+    @classmethod
+    def _micro_actions(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            key = normalize_micro_action(item)
+            if key not in normalized:
+                normalized.append(key)
+        return normalized
+
+    @field_validator("present_characters", "identity_critical_characters")
+    @classmethod
+    def _clean_character_lists(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in value:
+            name = _clean_text(item, 60)
+            if name and _normalize_name(name) not in {_normalize_name(known) for known in cleaned}:
+                cleaned.append(name)
+        return cleaned
 
     @field_validator("shot_type")
     @classmethod
@@ -641,15 +820,52 @@ class ScreenplayShot(BaseModel):
         return [_clean_text(item, 200) for item in value if _clean_text(item, 200)]
 
     @model_validator(mode="after")
-    def _exactly_one_primary(self) -> ScreenplayShot:
-        if (self.action is None) == (self.dialogue is None):
+    def _one_dominant_action(self) -> ScreenplayShot:
+        if self.action is None and self.dialogue is None:
             raise ValueError(
-                f"shot {self.sequence} must carry exactly one primary element: an action or a line"
+                f"shot {self.sequence} must carry a dominant visual action, a line, or both"
             )
-        if self.dialogue is not None:
+        if self.action is None:
+            # Speaking is the visible action of a shot that has no other.
             self.shot_type = "DIALOGUE"
         elif self.shot_type == "DIALOGUE":
             self.shot_type = "MEDIUM"
+        if self.action is not None:
+            connector = sequential_action_connector(self.action.description)
+            if connector is not None:
+                raise ValueError(
+                    f"shot {self.sequence} stages a sequence of actions ({connector!r} in "
+                    "action.description); one shot carries one dominant action - put the "
+                    "next action in its own shot"
+                )
+        if self.dialogue is not None:
+            needed = estimated_speech_seconds(self.dialogue.text)
+            window = usable_dialogue_window(self.duration)
+            if needed > window:
+                raise ValueError(
+                    f"shot {self.sequence} cannot carry its line: about {needed:g}s of speech in a "
+                    f"{self.duration:g}s shot that leaves {window:g}s for it; shorten the line or "
+                    "lengthen the shot"
+                )
+        named = self.named_characters
+        known = {_normalize_name(item) for item in self.present_characters}
+        for name in named:
+            if _normalize_name(name) not in known:
+                self.present_characters.append(name)
+                known.add(_normalize_name(name))
+        if not self.identity_critical_characters:
+            self.identity_critical_characters = list(named)
+        for name in self.identity_critical_characters:
+            if _normalize_name(name) not in known:
+                raise ValueError(
+                    f"shot {self.sequence} marks {name!r} as identity-critical but does not "
+                    "list them among present_characters"
+                )
+        if len(self.identity_critical_characters) > MAX_IDENTITY_CRITICAL_CHARACTERS:
+            raise ValueError(
+                f"shot {self.sequence} holds {len(self.identity_critical_characters)} faces by "
+                f"identity reference; at most {MAX_IDENTITY_CRITICAL_CHARACTERS} fit in one frame"
+            )
         return self
 
 
@@ -662,7 +878,7 @@ class ScreenplayBeat(BaseModel):
     scene_key: str = Field(min_length=1, max_length=60)
     characters: list[str] = Field(default_factory=list, max_length=8)
     emotional_beat: str = Field(default="", max_length=300)
-    shots: list[ScreenplayShot] = Field(min_length=1, max_length=12)
+    shots: list[ScreenplayShot] = Field(min_length=1, max_length=MAX_SHOTS_PER_BEAT)
 
     @field_validator("intent")
     @classmethod
@@ -862,7 +1078,7 @@ class Screenplay(BaseModel):
     variables: list[str] = Field(default_factory=list, max_length=40)
     characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=MAX_CAST)
     scenes: list[ScreenplayScene] = Field(min_length=1, max_length=MAX_SCENE_ANCHORS)
-    beats: list[ScreenplayBeat] = Field(min_length=1, max_length=40)
+    beats: list[ScreenplayBeat] = Field(min_length=1, max_length=MAX_BEATS)
     product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
     required_copy: list[RequiredCopy] = Field(default_factory=list, max_length=20)
     obligations: list[ScreenplayObligation] = Field(default_factory=list, max_length=20)
@@ -907,11 +1123,11 @@ class Screenplay(BaseModel):
             expected_sequence += 1
             shots_by_beat[beat.sequence] = {shot.sequence for shot in beat.shots}
             for shot in beat.shots:
-                speaker = shot.dialogue.speaker if shot.dialogue else shot.action.actor  # type: ignore[union-attr]
-                if _normalize_name(speaker) not in names:
-                    raise ValueError(
-                        f"beat {beat.sequence} shot {shot.sequence} uses unknown character {speaker!r}"
-                    )
+                for name in (*shot.named_characters, *shot.present_characters):
+                    if _normalize_name(name) not in names:
+                        raise ValueError(
+                            f"beat {beat.sequence} shot {shot.sequence} uses unknown character {name!r}"
+                        )
             for name in beat.characters:
                 if _normalize_name(name) not in names:
                     raise ValueError(f"beat {beat.sequence} lists unknown character {name!r}")

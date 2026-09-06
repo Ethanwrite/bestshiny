@@ -25,6 +25,16 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > asset or another live creation still references is kept and the holder recorded. Architecture:
 > `CURRENT_ARCHITECTURE.md` § "Removing a creation, without rewriting what it cost". Residual: OPEN_ISSUES 3.8.
 >
+> **2026-09-06 · branch `claude/reference-contract-embedding-fix-cb3881` — reference images reach
+> Seedream, the shot contract becomes one dominant action plus a line, execution duration is the
+> router's, identity references narrow to identity-critical characters, and both multimodal
+> embeddings are on as advice.** Alembic head moves to `0081_veo_discrete_durations` (data only:
+> Veo's `[4, 6, 8]` written onto the three OpenRouter Veo capability profiles; `REQUIRED_SCHEMA_REVISION`
+> moves with it, so the deployed api refuses to start until `alembic upgrade head` runs). The full
+> record, residuals included, is `docs/OPEN_ISSUES.md` §2.48; the architecture sections touched are
+> "Image generation", "Creative director", "Model capability and role runtime" (requested versus
+> execution duration) and "Project style lock" in `CURRENT_ARCHITECTURE.md`.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
 > `0070_creative_director_screenplay`); production state is in

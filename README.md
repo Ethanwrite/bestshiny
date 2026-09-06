@@ -14,6 +14,14 @@ Before taking over development, read [the documentation index](docs/README.md)ใ€
 > 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
 > callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 >
+> **2026-09-06:** migration head `0081_veo_discrete_durations`. Reference images now reach
+> Seedream (`image`), the web canvas previews a picked reference at once and names the server's
+> reason when an upload is refused; a screenplay shot is one dominant action plus at most one line
+> (micro-actions allowed, a line must fit its shot, present versus identity-critical characters); the
+> router decides each model's execution length while the shot keeps the director's requested one;
+> multimodal memory (Voyage, Gemini fallback) and the advisory semantic style layer are on. See
+> `docs/OPEN_ISSUES.md` ยง2.48.
+>
 > **2026-08-30:** migration head `0064_free_tier_defaults`. FREE-plan hard gates landed (chat on
 > `doubao-seed-2-0-lite-260428`, images on `doubao-seedream-5-0-260128`, 3 images / 10 director
 > rounds / 5 deep optimizations, public Shiny/Shinier/Shiniest image tiers mapped server-side);

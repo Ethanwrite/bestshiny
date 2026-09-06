@@ -411,6 +411,14 @@ class ModelCandidate(BaseModel):
     # Position in the scene-champion order when the ranking was decided by the
     # champion table; None for open-scored candidates.
     champion_rank: int | None = None
+    # What this model would actually run for the requested duration: the
+    # requested length itself (EXACT), the shortest legal length above it
+    # (SNAP_UP), or - only ever on a rejected model - a SPLIT_SHOT segment
+    # plan. The canonical shot keeps the request; the quote and the provider
+    # payload use this.
+    execution_duration: float | None = None
+    execution_strategy: str | None = None
+    execution_segments: list[float] = Field(default_factory=list)
 
 
 class RoutingEvidence(BaseModel):
@@ -465,3 +473,8 @@ class RouterDecision(BaseModel):
     scenario: str | None = None
     selection_basis: str = "OPEN_SCORING"
     champion_audit: list[str] = Field(default_factory=list)
+    # The director's requested length and the recommended model's execution
+    # length, so a caller can see at the decision whether the two differ.
+    requested_duration: float | None = None
+    execution_duration: float | None = None
+    execution_strategy: str | None = None

@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from production_domain.models import RetryCategory
 from provider_sdk import (
@@ -40,6 +40,17 @@ IMAGE_REQUEST_FIELDS = frozenset(
         "sequential_image_generation",
     }
 )
+
+# Gateway-resolved reference URLs, in the order the model should see them.
+# They become Seedream's `image` parameter; the start frame leads because an
+# edit is anchored on it. Same order as the OpenRouter image path.
+IMAGE_REFERENCE_SOURCES = ("start_frame_url", "end_frame_url", "reference_urls")
+
+#: Reference images one Seedream request may carry. This is the registry's
+#: declared `max_reference_images` for `seedream-5.0-ark` (a drift test pins
+#: the two together); the vendor's own per-model ceiling is not recorded in
+#: this repository, so the declared bound is the one enforced before billing.
+SEEDREAM_MAX_REFERENCE_IMAGES = 6
 
 
 class ArkProvider(GenerationProvider, ChatCapability):
@@ -109,6 +120,14 @@ class ArkProvider(GenerationProvider, ChatCapability):
             raise _invalid("image model is required")
         if not str(payload.get("prompt") or "").strip():
             raise _invalid("image prompt is required")
+        # The Gateway resolves `reference_asset_ids` into short-lived URLs and
+        # pays to do so; an allowlist that never mapped them onto `image` sent
+        # every reference-bearing Seedream request as plain text-to-image.
+        references = _image_references(request, payload.get("image"))
+        if references:
+            payload["image"] = references[0] if len(references) == 1 else references
+        else:
+            payload.pop("image", None)
         data = await self.client.request("POST", "/images/generations", json_body=payload, submitted=True)
         entries = data.get("data") if isinstance(data.get("data"), list) else []
         first = entries[0] if entries and isinstance(entries[0], dict) else {}
@@ -208,6 +227,53 @@ class ArkProvider(GenerationProvider, ChatCapability):
 
 class SeedanceProvider(ArkProvider):
     """Backward-compatible product-facing name for the Ark implementation."""
+
+
+def _image_references(request: dict[str, Any], declared: Any) -> list[str]:
+    """Build Seedream's `image` list from an Adapter payload or Gateway-resolved URLs.
+
+    A Passenger request carries no Adapter payload, so the URLs the Gateway
+    resolved must still reach the model; otherwise an edit silently becomes a
+    text-to-image generation against no reference at all. Order is kept
+    (frames first), duplicates are dropped, and a local asset id — which the
+    Gateway should already have resolved — is refused rather than sent as a URL.
+    """
+
+    references: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: Any) -> None:
+        candidate = str(value or "").strip()
+        if not candidate or candidate in seen:
+            return
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https", "data"}:
+            raise ProviderError(
+                "Seedream image references must be HTTP(S) or data URLs",
+                RetryCategory.INVALID_REQUEST,
+                code="PROVIDER_REFERENCE_URL_UNAVAILABLE",
+            )
+        seen.add(candidate)
+        references.append(candidate)
+
+    if isinstance(declared, str):
+        append(declared)
+    elif isinstance(declared, list):
+        for item in declared:
+            append(item)
+    for field_name in IMAGE_REFERENCE_SOURCES:
+        value = request.get(field_name)
+        if isinstance(value, str):
+            append(value)
+        elif isinstance(value, list):
+            for item in value:
+                append(item)
+    if len(references) > SEEDREAM_MAX_REFERENCE_IMAGES:
+        raise _invalid(
+            f"Seedream accepts at most {SEEDREAM_MAX_REFERENCE_IMAGES} reference images; "
+            f"{len(references)} were supplied"
+        )
+    return references
 
 
 def _seedance_payload(request: dict[str, Any], configured_model: str) -> dict[str, Any]:

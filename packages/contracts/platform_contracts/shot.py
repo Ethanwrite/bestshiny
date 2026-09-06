@@ -1,12 +1,47 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from provider_sdk import AssetCriticality
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 _ASPECT_RATIO = re.compile(r"^\d{1,2}:\d{1,2}$")
+
+
+def _identity_key(name: Any) -> str:
+    """Case-, space- and hyphen-blind key for matching a screenplay name to a Character row.
+
+    The screenplay says "Lin Jin"; the compiler minted the Character as
+    `Lin-Jin`; the planner reports whichever it found. All three are one face.
+    """
+
+    return "".join(ch for ch in str(name or "").casefold() if ch.isalnum())
+
+
+def identity_critical_subjects(
+    subjects: Sequence[Mapping[str, Any]], identity_critical_names: Sequence[str] | None
+) -> list[dict[str, Any]]:
+    """The planner subjects whose identity the provider must be given.
+
+    `subjects` are the frame-anchor planner's anchor subjects (dicts with a
+    `name`, usually a `character_id`, sometimes a `master_asset_id`);
+    `identity_critical_names` is what the director declared on the shot. With
+    no declaration every subject is identity-critical - the behaviour older
+    shots were planned under. With one, only the named faces keep their
+    identity references; the others are present, staged by the prompt, and
+    given no plate. A declaration that matches *no* subject is treated as
+    absent rather than dropping every identity reference: a naming mismatch
+    must not quietly render a shot with no face held at all.
+    """
+
+    rows = [dict(item) for item in subjects]
+    wanted = {_identity_key(name) for name in (identity_critical_names or []) if _identity_key(name)}
+    if not wanted:
+        return rows
+    kept = [row for row in rows if _identity_key(row.get("name")) in wanted]
+    return kept or rows
 
 
 def approved_aspect_ratio(director_intent: dict[str, Any] | None) -> str | None:

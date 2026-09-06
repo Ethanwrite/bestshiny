@@ -231,6 +231,8 @@ class ProjectStyleService:
         storage: StorageProvider,
         descriptor: LocalStyleDescriptor | None = None,
         semantic: SemanticStyleEmbedder | None = None,
+        *,
+        semantic_mode: str = "enforced",
     ):
         self.database = database
         self.storage = storage
@@ -238,7 +240,21 @@ class ProjectStyleService:
         # Layer 2. Absent means the deterministic gate runs alone, which is the
         # pre-existing behaviour, not a weaker version of a two-layer gate.
         self.semantic = semantic
+        # "enforced": the two-layer gate (a lock without its semantic reference
+        # is refused; a missing second opinion is REVIEW_REQUIRED). "advisory":
+        # the same embedding is computed and *recorded* - reference, similarity,
+        # verdict, reason codes - but never refuses a lock and never overrides
+        # the deterministic verdict; an unreachable model records why. The
+        # deterministic gate is not weakened either way: advisory adds evidence
+        # to a lock that would otherwise carry none.
+        if semantic_mode not in {"enforced", "advisory"}:
+            raise ValueError("semantic_mode must be 'enforced' or 'advisory'")
+        self.semantic_mode = semantic_mode
         self.frame_sampler = FFmpegFrameSampler()
+
+    @property
+    def semantic_enforced(self) -> bool:
+        return self.semantic is not None and self.semantic_mode == "enforced"
 
     @staticmethod
     def _vector_hash(vector: list[float]) -> str:
@@ -478,7 +494,7 @@ class ProjectStyleService:
         # Layer 2's reference is extracted at lock time, from the same version,
         # so the two layers can never describe different frames.
         semantic_attempt = self.semantic_reference(style_version_id)
-        if self.semantic is not None and semantic_attempt.embedding is None:
+        if self.semantic_enforced and semantic_attempt.embedding is None:
             # The feature is on, so this project is meant to have a two-layer
             # gate. The lock is append-only and cannot be revised, so a lock
             # made now would keep one layer for good. Refuse instead: nothing
@@ -527,11 +543,15 @@ class ProjectStyleService:
                     "explicit_confirmation": True,
                     "lock_version": "project-style-lock-v1",
                     "style_layers": 2 if semantic_embedding_id else 1,
-                    # With layer 2 switched on, a lock that reaches this point
+                    # With layer 2 enforced, a lock that reaches this point
                     # has one; the guard above refuses the rest. This therefore
-                    # records the deliberate case — the feature was off — and
-                    # keeps a single-layer lock from looking like an accident.
+                    # records the deliberate cases — the feature was off, or
+                    # advisory and the model unreachable — and keeps a
+                    # single-layer lock from looking like an accident.
                     "semantic_layer_absent_reason": semantic_attempt.reason,
+                    "semantic_layer_mode": (
+                        self.semantic_mode if self.semantic is not None else "off"
+                    ),
                 },
             )
             session.add(style_lock)
@@ -743,7 +763,18 @@ class ProjectStyleService:
 
         semantic_average_similarity = mean(semantic_scores) if semantic_scores else None
         semantic_minimum_similarity = min(semantic_scores) if semantic_scores else None
-        status = _worst_status(deterministic_status, semantic_status)
+        # Advisory: the semantic verdict is evidence on the row, never the
+        # verdict. A lock locked under the enforced two-layer gate keeps that
+        # gate whatever this process is configured with, because weakening a
+        # gate a project was locked under is the failure the mode exists to
+        # avoid; only a lock made in advisory mode is judged in advisory mode.
+        lock_mode = str((style_lock.metadata_json or {}).get("semantic_layer_mode") or "enforced")
+        advisory = lock_mode == "advisory" and self.semantic_mode == "advisory"
+        if advisory and semantic_status is not None:
+            reason_codes.append(f"STYLE_SEMANTIC_ADVISORY:{semantic_status}")
+        status = (
+            deterministic_status if advisory else _worst_status(deterministic_status, semantic_status)
+        )
         with self.database.session() as session:
             existing = session.scalar(
                 select(CandidateStyleEvaluation).where(CandidateStyleEvaluation.candidate_id == candidate_id)

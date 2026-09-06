@@ -1321,7 +1321,7 @@
           6,
           8
         ],
-        "duration_admission_gap": "Google publishes durationSeconds as the discrete set [4, 6, 8]; the capability profile holds only min/max, so intermediate values are quotable here and refused upstream. Expressing a discrete set needs a schema change and is not done here."
+        "duration_admission_note": "Google publishes durationSeconds as the discrete set [4, 6, 8]. The capability profile declares it as provider_metadata.supported_durations, so the router runs a request between the steps at the next step up and refuses one over the ceiling before a reservation exists (migration 0081 wrote it onto existing rows)."
       },
       "capability_profile": {
         "profile_version": "veo-3.1-openrouter-manual-v1",
@@ -1357,6 +1357,7 @@
         "dialogue_prior": 0.82,
         "text_render_prior": 0.7,
         "provider_metadata": {
+          "supported_durations": [4, 6, 8],
           "adapter": "veo",
           "cost": {
             "normalized": 0.95,
@@ -1439,6 +1440,7 @@
         "dialogue_prior": 0.78,
         "text_render_prior": 0.7,
         "provider_metadata": {
+          "supported_durations": [4, 6, 8],
           "adapter": "veo",
           "cost": {
             "normalized": 0.35,
@@ -1519,6 +1521,7 @@
         "dialogue_prior": 0.7,
         "text_render_prior": 0.7,
         "provider_metadata": {
+          "supported_durations": [4, 6, 8],
           "adapter": "veo",
           "cost": {
             "normalized": 0.15,
@@ -1759,6 +1762,12 @@
       "role": "MULTIMODAL_EMBEDDING",
       "model_logical_name": "voyage-multimodal-3.5-official",
       "priority": 0
+    },
+    {
+      "role": "MULTIMODAL_EMBEDDING",
+      "model_logical_name": "gemini-embedding-2-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
     },
     {
       "role": "VIDEO_KLING_STANDARD",

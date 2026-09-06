@@ -89,10 +89,11 @@ def test_context_priority_keeps_canonical_truth_ahead_of_episodic_memory(contain
 
 
 def test_feature_flag_project_override_does_not_change_global_default(container, project):
-    assert container.feature_flags.enabled("voyage_memory") is False
-    container.feature_flags.set("voyage_memory", True, project_id=project.id)
-    assert container.feature_flags.enabled("voyage_memory", project_id=project.id) is True
-    assert container.feature_flags.enabled("voyage_memory") is False
+    default = container.settings.feature_voyage_memory
+    assert container.feature_flags.enabled("voyage_memory") is default
+    container.feature_flags.set("voyage_memory", not default, project_id=project.id)
+    assert container.feature_flags.enabled("voyage_memory", project_id=project.id) is (not default)
+    assert container.feature_flags.enabled("voyage_memory") is default
 
 
 def test_context_budget_applies_to_mandatory_sections_too():

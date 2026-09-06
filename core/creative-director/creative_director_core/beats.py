@@ -415,6 +415,22 @@ def director_intent(
         # setting for shots made outside a session; a compiled shot renders
         # (and is billed) at the aspect the brief and the key visuals used.
         "aspect_ratio": str(intent.get("aspect_ratio") or ""),
+        # Who is in frame and who must be recognisable. The prompt stages every
+        # present character; only the identity-critical ones are bound to
+        # reference plates, and the production pipeline narrows its identity
+        # references to them. Micro-actions are the motion allowed beside the
+        # dominant action, never a second action.
+        "present_characters": [
+            str(item) for item in (intent.get("present_characters") or []) if str(item).strip()
+        ],
+        "identity_critical_characters": [
+            str(item)
+            for item in (intent.get("identity_critical_characters") or [])
+            if str(item).strip()
+        ],
+        "micro_actions": [
+            str(item) for item in (intent.get("micro_actions") or []) if str(item).strip()
+        ],
         "reference_asset_ids": list(dict.fromkeys(reference_asset_ids or [])),
         # Provenance: which approved screenplay revision, which beat, which
         # shot intent every field above came from.

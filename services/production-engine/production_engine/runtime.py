@@ -48,6 +48,7 @@ from platform_contracts import (
     GenerationRequest,
     PassengerGenerationCommand,
     authoritative_timeline_state_hash,
+    identity_critical_subjects,
 )
 from platform_database import Database
 from production_domain.models import (
@@ -441,6 +442,13 @@ class VisualProductionRuntime:
                 for media in [*asset.get("image_urls", []), *asset.get("video_urls", [])]
             )
         anchor_subject_rows = (frame_anchor_plan or {}).get("anchor_subjects") or []
+        # The director said whose face must be recognisable in this shot. A
+        # subject the planner carries because it is in the timeline state but
+        # the director did not mark identity-critical is staged in the prompt
+        # and *not* handed to the provider as an identity plate.
+        anchor_subject_rows = identity_critical_subjects(
+            anchor_subject_rows, director_intent.get("identity_critical_characters")
+        )
         if anchor_subject_rows:
             subject_ids = {
                 str(subject.get("character_id"))
@@ -507,6 +515,16 @@ class VisualProductionRuntime:
         }
         decision = self.router.rank(requirements, excluded_models=excluded, evidence=evidence)
         selected = decision.candidates[0]
+        # The router chose the model *and* the length that model legally runs
+        # for the director's request (a declared step, or its minimum). The
+        # canonical shot keeps the requested figure; the adapter payload, the
+        # quote and the provider call use the execution length.
+        execution_duration = float(selected.execution_duration or compiled.spec.duration)
+        execution_spec = (
+            compiled.spec.model_copy(update={"duration": execution_duration})
+            if execution_duration != float(compiled.spec.duration)
+            else compiled.spec
+        )
         adapter_context = generation_context.model_dump(mode="json")
         adapter_context.update(
             {
@@ -519,7 +537,7 @@ class VisualProductionRuntime:
         )
         model_request = self.adapters.get(selected.adapter).compile(
             selected.model,
-            AdapterInput(shot=compiled.spec, context=adapter_context),
+            AdapterInput(shot=execution_spec, context=adapter_context),
         )
         request = GenerationRequest(
             project_id=project_id,
@@ -530,7 +548,7 @@ class VisualProductionRuntime:
             model=selected.model,
             prompt=model_request.prompt,
             negative_prompt=model_request.negative_prompt,
-            duration=compiled.spec.duration,
+            duration=execution_duration,
             aspect_ratio=compiled.spec.aspect_ratio,
             start_frame_asset_id=start_frame_asset_id,
             end_frame_asset_id=end_frame_asset_id,
@@ -564,7 +582,10 @@ class VisualProductionRuntime:
                     "task_type": router_task_type(requirements).value,
                     "scenario": router_scenario(requirements).value,
                     "reference_mode": router_reference_mode(requirements).value,
-                    "duration_seconds": requirements.duration,
+                    # What ran, for the evidence cell; what was asked, beside it.
+                    "duration_seconds": execution_duration,
+                    "requested_duration_seconds": requirements.duration,
+                    "execution_strategy": selected.execution_strategy,
                     "resolution": requirements.resolution,
                     "aspect_ratio": requirements.aspect_ratio,
                     "asset_criticality": requirements.asset_criticality.value,
@@ -944,6 +965,15 @@ class VisualProductionRuntime:
         target_changed = next_model != request["model"] or next_provider != request["provider"]
         references_changed = reference_asset_ids != list(request.get("reference_asset_ids") or [])
         provider_payload = dict(request.get("provider_payload") or {})
+        # The alternative was ranked for the same request and carries the
+        # length *it* legally runs; the shot's own duration is unchanged.
+        retry_duration: float | None = None
+        if target_changed:
+            for item in (metadata.get("router") or {}).get("candidates", []):
+                if str(item.get("provider")) == next_provider and str(item.get("model")) == next_model:
+                    if isinstance(item.get("execution_duration"), (int, float)):
+                        retry_duration = float(item["execution_duration"])
+                    break
         if target_changed or references_changed:
             # The persisted Adapter payload describes the previous attempt: it was
             # shaped for the previous model and embeds the previous reference list.
@@ -987,7 +1017,14 @@ class VisualProductionRuntime:
                     context["canonical_asset_ids"] = list(reference_asset_ids)
                 adapted = self.adapters.get(profile.adapter).compile(
                     next_model,
-                    AdapterInput(shot=CanonicalShotSpec.model_validate(spec_data), context=context),
+                    AdapterInput(
+                        shot=CanonicalShotSpec.model_validate(
+                            {**spec_data, "duration": retry_duration}
+                            if retry_duration is not None
+                            else spec_data
+                        ),
+                        context=context,
+                    ),
                 )
                 provider_payload = dict(adapted.payload)
                 if target_changed:
@@ -1024,6 +1061,7 @@ class VisualProductionRuntime:
         retry_request = GenerationRequest.model_validate(
             {
                 **request,
+                **({"duration": retry_duration} if retry_duration is not None else {}),
                 "candidate_id": candidate_id,
                 "provider": next_provider,
                 "model": next_model,

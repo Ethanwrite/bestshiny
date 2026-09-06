@@ -797,10 +797,19 @@ def build_container(settings: Settings | None = None) -> Container:
     # Layer 2 is a deployment-wide switch rather than a per-project flag: it
     # changes what "committable" means, and a gate that is quietly stronger on
     # some projects than others is not a gate.
-    semantic_style = (
-        ModelRoleSemanticStyleEmbedder(model_roles) if settings.feature_semantic_style_lock else None
-    )
-    styles = ProjectStyleService(database, storage, semantic=semantic_style)
+    # Enforced wins; advisory otherwise, and only on a real transport - a mock
+    # transport has no embedding to advise with, so the pre-existing
+    # single-layer behaviour stands in development and in the offline suite.
+    if settings.feature_semantic_style_lock:
+        semantic_style: ModelRoleSemanticStyleEmbedder | None = ModelRoleSemanticStyleEmbedder(model_roles)
+        semantic_mode = "enforced"
+    elif settings.feature_semantic_style_advisory and settings.provider_mode != "mock":
+        semantic_style = ModelRoleSemanticStyleEmbedder(model_roles)
+        semantic_mode = "advisory"
+    else:
+        semantic_style = None
+        semantic_mode = "enforced"
+    styles = ProjectStyleService(database, storage, semantic=semantic_style, semantic_mode=semantic_mode)
     style_drift = StyleDriftMonitor(database)
     prompts = PromptCompilerService(
         database,

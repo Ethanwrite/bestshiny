@@ -22,3 +22,6 @@ from .shot import (
 from .shot import (
     approved_aspect_ratio as approved_aspect_ratio,
 )
+from .shot import (
+    identity_critical_subjects as identity_critical_subjects,
+)

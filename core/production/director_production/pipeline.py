@@ -38,6 +38,7 @@ from platform_contracts import (
     GenerationRequest,
     approved_aspect_ratio,
     authoritative_timeline_state_hash,
+    identity_critical_subjects,
 )
 from platform_database import Database
 from platform_shared import affected_rows
@@ -483,6 +484,11 @@ class CandidatePipeline:
                 approved_aspect_ratio(shot.director_intent_json)
                 or shot.scene.episode.project.default_aspect_ratio
             )
+            identity_critical_names = [
+                str(item)
+                for item in (shot.director_intent_json or {}).get("identity_critical_characters") or []
+                if str(item).strip()
+            ]
             start_frame_asset_id = shot.start_frame_asset_id
             end_frame_asset_id = shot.end_frame_asset_id
             continuity_mode = shot.continuity_mode
@@ -746,20 +752,32 @@ class CandidatePipeline:
             # not every character or scene the project happens to own. Without
             # a plan (planner unwired), the previous everything-canonical
             # behaviour stands.
-            anchor_subject_ids = (
-                {subject.character_id for subject in anchor_plan.anchor_subjects}
-                if anchor_plan is not None
-                else set()
-            )
-            anchor_master_asset_ids = (
-                [
-                    subject.master_asset_id
-                    for subject in anchor_plan.anchor_subjects
-                    if subject.master_asset_id
-                ]
+            # Only the faces the director marked identity-critical are bound
+            # as identity references; every other planner subject is staged
+            # in the prompt without a plate (see `identity_critical_subjects`).
+            identity_subjects = (
+                identity_critical_subjects(
+                    [
+                        {
+                            "character_id": subject.character_id,
+                            "name": subject.name,
+                            "master_asset_id": subject.master_asset_id,
+                        }
+                        for subject in anchor_plan.anchor_subjects
+                    ],
+                    identity_critical_names,
+                )
                 if anchor_plan is not None
                 else []
             )
+            anchor_subject_ids = {
+                str(subject["character_id"]) for subject in identity_subjects if subject.get("character_id")
+            }
+            anchor_master_asset_ids = [
+                str(subject["master_asset_id"])
+                for subject in identity_subjects
+                if subject.get("master_asset_id")
+            ]
             canonical_character_assets = tuple(
                 dict.fromkeys(
                     [

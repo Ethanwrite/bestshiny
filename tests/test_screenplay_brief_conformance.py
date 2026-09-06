@@ -239,7 +239,10 @@ def test_a_wildly_wrong_running_time_is_advisory_because_pacing_is_the_directors
     short = copy.deepcopy(SCREENPLAY)
     for beat in short["beats"]:
         for shot in beat["shots"]:
-            shot["duration"] = 1
+            # As short as the shot contract allows: a line still has to fit
+            # the shot it is spoken in, so speaking shots keep the length
+            # their words need and every other shot drops to one second.
+            shot["duration"] = 5 if shot.get("dialogue") else 1
     found = VALIDATOR.validate(
         validate_screenplay(short), BRIEF, format_value="SHORT_DRAMA", provenance=USER_FACTS
     )

@@ -11,6 +11,16 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-09-06 update — references reach Seedream, one dominant action per shot, execution
+> duration is the router's, embeddings are on as advice.** Migration head is now
+> `0081_veo_discrete_durations` (data only). The Ark image adapter maps the Gateway-resolved
+> reference URLs onto Seedream's `image`; a screenplay shot is one dominant action plus at most one
+> line, with micro-actions, a speech-duration check and present-versus-identity-critical characters;
+> the video router plans each candidate's execution length while the canonical shot keeps the
+> requested one; `MULTIMODAL_EMBEDDING` falls back to Gemini through the credentials gate and the
+> semantic style layer runs in advisory mode. Details in the sections named in `docs/OPEN_ISSUES.md`
+> §2.48.
+
 > **2026-09-02 update — the director writes.** Migration head is now
 > `0070_creative_director_screenplay`. The creative director's DIRECTOR model runs under the
 > Director Skill with the whole conversation, applies explicit brief operations with per-field
@@ -616,8 +626,19 @@ Rules that shape it (2026-09-02 overhaul):
   and become `ASSUMPTION_ACCEPTED` under the approver's name - never disguised as answers.
 - **The model writes the screenplay.** After approval the DIRECTOR role authors a validated
   `Screenplay` (`creative_screenplays`): treatment and hook, invariants and variables, characters
-  and relationships, scenes, beats with dialogue and one-action `ShotIntent`s (actor + one verb
-  from the narrative compiler's vocabulary, or one line), start/end state and gaze target,
+  and relationships, scenes, beats with dialogue and `ShotIntent`s that each carry **one dominant
+  visual action** (actor + one verb from the narrative compiler's vocabulary) and **at most one
+  short line** beside it - a line alone is a speaking shot, neither is refused; permitted
+  micro-actions (blink, breathe, mouth movement, gaze shift, slight head turn) ride along and never
+  count as a second action, a staging note that sequences two actions is refused, and a line must
+  fit its shot (`estimated_speech_seconds` against `usable_dialogue_window`: about four Chinese
+  characters or two and a half words a second with half a second of air at each end). Each shot
+  names its `present_characters` (everyone in frame, staged by the prompt) and its
+  `identity_critical_characters` (at most four, the only faces bound to reference plates and handed
+  to the provider as identity references; `platform_contracts.identity_critical_subjects` narrows the
+  frame-anchor planner's subjects to them at generation). The shot's `duration` is the director's
+  intent (1-15 s, `requested_duration`); which model renders it, and at what execution length, is
+  the router's decision - start/end state and gaze target,
   continuity obligations, product claims and required copy, unresolved choices. Revisions are
   append-only: the user can redraft with notes (`REVISE_SCREENPLAY`), edit the structure
   (`USER_EDIT`), and approve exactly one revision. The fixed scaffold (`BeatPlanner`) survives only
@@ -973,7 +994,13 @@ Director algorithm was converted into an LLM call. Runtime execution:
 
 Narrative Memory no longer calls a Voyage client directly. It requests `MULTIMODAL_EMBEDDING` through the runtime,
 writes `EmbeddingEvidence` containing input/vector hashes and dimension rather than the full vector, and degrades to
-structured SQL timeline with `MEMORY_VECTOR_DEGRADED` when vector execution is unavailable.
+structured SQL timeline with `MEMORY_VECTOR_DEGRADED` when vector execution is unavailable. Since 2026-09-06 the role
+is bound to `voyage-multimodal-3.5-official` (PRIMARY) with `gemini-embedding-2-openrouter` as FALLBACK, and
+`ModelRoleRuntime._select` walks the bindings in order, skipping a provider the capability catalogue refuses for
+want of a credential - the credentials gate chooses the binding instead of merely refusing the first. The OpenRouter
+adapter translates Voyage-shaped multimodal pieces into its own content shape and drops the Voyage-only
+`input_type`; usage settles through the same `TokenCostEngine` as Voyage's pixels. `FEATURE_VOYAGE_MEMORY` defaults
+on; the retired string-only OpenRouter Voyage row stays disabled and unbound.
 
 Embedding provenance is now typed by `EvidencePurpose` and `AuthorityLevel`. Voyage, including
 `voyage-multimodal-3.5`, is always `ADVISORY` and may be used only for retrieval hints, supporting similarity and
@@ -1007,6 +1034,25 @@ OpenRouter routes.
 `GET /api/v1/videos/models` and `/api/v1/models/alibaba~wan-3.0/endpoints`. It is enabled and
 declares 30s, which restores a long-form route: `wan-3.0-official` on DashScope stays a separate
 record and stays disabled, because this account has no Wan 3.0 access there.
+
+### Requested duration and execution duration
+
+A shot's `duration` is what the director asked for, and it stays on the canonical shot. A model
+declares what it can run - a range (`min_duration` / `max_duration`, per profile or per mode) and
+sometimes a discrete set (`capability_profile.provider_metadata.supported_durations`; Veo publishes
+`[4, 6, 8]`, written onto existing rows by migration `0081`). `model_registry_core.duration` maps
+intent onto capability for every candidate: **EXACT** when the request is legal, **SNAP_UP** to the
+shortest legal length above it (a declared step, or the minimum) - never down, because cutting a
+shot short truncates its narrative - and **SPLIT_SHOT** when the request exceeds the ceiling, which
+rejects the model with the segment plan in the rejection detail and in the router's error. The
+`ModelCandidate` and the `RouterDecision` carry `execution_duration`, `execution_strategy` and
+`execution_segments`; the production planner hands the adapter a spec at the execution length,
+submits and quotes that length, and records `routing_context.duration_seconds` (what ran) beside
+`requested_duration_seconds` and `execution_strategy`; a retry onto an alternative uses that
+alternative's own length; passenger admission applies the same plan to a named or Auto video model
+and refuses an over-ceiling request before any reservation exists. Running one shot as several
+provider calls is deliberately not built: a SPLIT_SHOT is reported and the shot is split at the
+screenplay, where per-shot MP4 delivery already has a place for it.
 
 ## Provider status and Flow affinity
 
@@ -1286,7 +1332,13 @@ quality and background enums, and a 400K context. A request outside the envelope
 the paid call; a model with no reviewed envelope is rejected outright. Reference images become
 `input_references` entries, and the Gateway-resolved `start_frame_url`, `end_frame_url` and `reference_urls`
 are read directly so a Passenger request without an Adapter payload still performs an edit rather than
-silently degrading to text-to-image.
+silently degrading to text-to-image. The Ark/Seedream image path (`POST /images/generations`) reads the
+same three fields and builds Seedream's `image` parameter from them (one URL as a string, several as a
+list; a local asset id is refused, and more than the registry's declared `max_reference_images` is refused
+before billing) - until 2026-09-06 its field allowlist named `image` but nothing ever populated it, so a
+reference-bearing Seedream request was billed as plain text-to-image. The web app previews the picked
+reference on the canvas before any upload, gates on the server's own PNG/JPEG/WebP table, and reports a
+refused upload with the HTTP status and the server's `detail`.
 
 For Google Flow, `FlowProjectAllocator` owns first-use affinity. Active-state partial unique indexes enforce:
 
@@ -1312,6 +1364,16 @@ when reusing a stored reference, and produces `REVIEW_REQUIRED` with
 when evaluating a candidate. Layer 2's space is read after the model answers, because which model answers is
 decided per call. What this cannot see is a provider swapping a model behind a stable id at unchanged
 dimensions, since no provider wired here publishes a revision.
+
+**Layer 2 as advice (2026-09-06).** `FEATURE_SEMANTIC_STYLE_ADVISORY` (default on) builds the same
+`STYLE_SEMANTIC_EMBEDDING` embedder on a recorded or live transport in **advisory** mode
+(`ProjectStyleService(semantic_mode="advisory")`): the semantic reference and every candidate's semantic
+similarity are computed and recorded - `semantic_layer_mode` and `semantic_layer_absent_reason` on the lock,
+`semantic_status` and `STYLE_SEMANTIC_ADVISORY:<verdict>` on the evaluation - but an unreachable model never
+refuses a lock and the semantic verdict never replaces the deterministic one. The enforced form below wins when
+both flags are set, and a lock made under the enforced gate keeps that gate whatever the evaluating process
+runs. The deterministic gate is not weakened either way; advisory adds evidence to a lock that would otherwise
+carry none.
 
 **Layer 2 fails closed.** With `FEATURE_SEMANTIC_STYLE_LOCK` on, a lock whose semantic reference cannot be
 produced is refused (`SemanticStyleLayerRequired`) and nothing is written — `503` when the model was

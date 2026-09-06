@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from cost_core import CreditEstimate, CreditPricingEngine, PricingUnverified
-from model_registry_core import ModelRole
+from model_registry_core import ModelRole, plan_execution_duration
 from platform_contracts import GenerationRequest
 from production_domain.models import (
     GenerationIdempotency,
@@ -173,6 +173,8 @@ class GenerationAdmissionService:
                 admitted, requested_role, asset_criticality=admitted.asset_criticality
             )
 
+        if admitted.type == "video":
+            self._apply_execution_duration(admitted)
         try:
             estimate = self.pricing.estimate(
                 provider=admitted.provider,
@@ -248,6 +250,47 @@ class GenerationAdmissionService:
         admitted.provider = selected.provider
         admitted.model = selected.provider_model_id
         return role.value
+
+    def _apply_execution_duration(self, admitted: GenerationRequest) -> None:
+        """Run - and quote - the resolved model at the length it legally runs.
+
+        The caller's duration is intent. The model's declared envelope (a
+        range, sometimes a discrete step set) decides what is submitted: the
+        request itself when legal, otherwise the shortest legal length above
+        it. A request over the model's ceiling is refused here, naming the
+        SPLIT_SHOT plan, rather than reserved and refused by the adapter. The
+        quote below reads the execution length, so the figure shown is the
+        figure billed.
+        """
+
+        if admitted.duration is None or not admitted.provider or not admitted.model:
+            return
+        try:
+            profile = self.pricing.registry.get(admitted.model, admitted.provider)
+        except LookupError:
+            return
+        if profile is None:
+            return
+        supported = profile.provider_metadata.get("supported_durations")
+        plan = plan_execution_duration(
+            float(admitted.duration),
+            min_duration=profile.min_duration,
+            max_duration=profile.max_duration,
+            supported_durations=supported if isinstance(supported, list) else None,
+        )
+        if not plan.runnable:
+            raise ValueError(
+                f"{admitted.provider} / {admitted.model} cannot run a "
+                f"{plan.requested_duration:g}s shot in one call ({plan.detail}); "
+                "shorten the shot or split it"
+            )
+        admitted.metadata = {
+            **dict(admitted.metadata or {}),
+            "requested_duration_seconds": plan.requested_duration,
+            "execution_duration_seconds": plan.execution_duration,
+            "execution_strategy": plan.strategy,
+        }
+        admitted.duration = plan.execution_duration
 
     def _assert_named_model_usable(self, provider: str, model: str, media_type: str) -> None:
         """Refuse a named model the platform cannot run, rather than swapping it."""

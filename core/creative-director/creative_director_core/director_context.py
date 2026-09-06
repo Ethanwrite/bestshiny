@@ -19,7 +19,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .brief import BriefEngine
-from .schemas import ACTION_VERBS, MAX_CAST, MAX_QUESTIONS_PER_TURN, SHOT_TYPES, SPECS_BY_CODE
+from .schemas import (
+    ACTION_VERBS,
+    DIALOGUE_LEAD_SECONDS,
+    MAX_CAST,
+    MAX_IDENTITY_CRITICAL_CHARACTERS,
+    MAX_QUESTIONS_PER_TURN,
+    MAX_SHOT_DURATION_SECONDS,
+    MICRO_ACTIONS,
+    MIN_SHOT_DURATION_SECONDS,
+    SHOT_TYPES,
+    SPECS_BY_CODE,
+    SPEECH_CJK_CHARACTERS_PER_SECOND,
+    SPEECH_WORDS_PER_SECOND,
+    usable_dialogue_window,
+)
 
 #: Conversation budget, in characters of turn content, before compression.
 HISTORY_CHAR_BUDGET = 14000
@@ -102,6 +116,8 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                         "action": {{"actor": str, "verb": str, "object": str, "target": str,
                                    "description": str}} | null,
                         "dialogue": {{"speaker": str, "text": str}} | null,
+                        "micro_actions": [str],
+                        "present_characters": [str], "identity_critical_characters": [str],
                         "start_state": str, "end_state": str, "gaze_target": str,
                         "continuity_obligations": [str]}}]}}],
   "product_claims": [{{"claim": str, "must_preserve": bool}}],
@@ -110,15 +126,31 @@ Answer with ONE JSON object and nothing else, exactly this shape:
   "unresolved": [str]
 }}
 
-Shot contract (generation shots are single-action):
-- Every shot has EXACTLY ONE primary element: an "action" OR a "dialogue", never both, never none.
-- action.verb must be one of: {", ".join(ACTION_VERBS)}. One visible action per shot; describe
-  the staging in action.description.
+Shot contract (one generation shot = one dominant visual action):
+- Every shot carries ONE dominant visual action ("action", one verb) and may carry 0..1 short
+  "dialogue" line at the same time. A shot with a line and no action is a speaking shot: delivering
+  the line is its visible action. Never both null.
+- action.verb must be one of: {", ".join(ACTION_VERBS)}. Describe the staging in action.description.
+  Micro-actions ({", ".join(MICRO_ACTIONS)}) may ride along in "micro_actions" and do not count as
+  a second action. Never stage two consecutive narrative actions in one shot ("she opens the door,
+  then walks in" is two shots) - a description that sequences actions is rejected.
+- A line must fit its shot: about {SPEECH_CJK_CHARACTERS_PER_SECOND:g} Chinese characters or
+  {SPEECH_WORDS_PER_SECOND:g} English words per second, with {DIALOGUE_LEAD_SECONDS:g}s of air at
+  each end of the shot. A 3-second shot carries roughly
+  {int(usable_dialogue_window(3) * SPEECH_CJK_CHARACTERS_PER_SECOND)} characters or
+  {int(usable_dialogue_window(3) * SPEECH_WORDS_PER_SECOND)} words; a line that cannot be said in
+  its shot is rejected.
 - shot_type is one of: {", ".join(SHOT_TYPES)}. It is a suggestion the shot planner may
   refine (framing, lens, movement and light are not decided here); use MEDIUM when unsure.
-  Duration is 2-10 seconds per shot; the total should approximate the brief's duration.
-- Every actor and speaker must be a character in "characters"; beat.scene_key must be a scene key;
-  beats are numbered 1..n consecutively.
+  Duration is the director's intent, {MIN_SHOT_DURATION_SECONDS:g}-{MAX_SHOT_DURATION_SECONDS:g}
+  seconds per shot; the total should approximate the brief's duration. Which model renders a shot,
+  and at what execution length, is decided later from the model's capability - never assume one.
+- "present_characters" lists everyone visible in the frame (staged in the prompt).
+  "identity_critical_characters" is the subset whose face the audience must recognise (at most
+  {MAX_IDENTITY_CRITICAL_CHARACTERS}); only they are sent to the model as identity references, so a
+  background figure is present, not identity-critical. Both default to the actor and the speaker.
+- Every actor, speaker and present character must be a character in "characters"; beat.scene_key
+  must be a scene key; beats are numbered 1..n consecutively.
 - Write at most {MAX_CAST} characters. Every character who appears in a beat or a shot gets a
   generated key visual and a locked identity, so one extra name is one more unanchored face; a
   cast over the limit is rejected, not trimmed. Name in "characters" only who is actually on

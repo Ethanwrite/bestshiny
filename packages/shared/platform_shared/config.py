@@ -328,6 +328,17 @@ class Settings(BaseSettings):
     # locked style and per evaluated candidate, and it changes what "committable"
     # means, so switching it on is a deliberate act.
     feature_semantic_style_lock: bool = False
+    # Layer 2 as advice. On by default: the semantic embedding
+    # (`STYLE_SEMANTIC_EMBEDDING`, google/gemini-embedding-2) is computed for
+    # a lock and for every evaluated candidate and *recorded* - similarity,
+    # verdict, reason codes - but it never refuses a lock and never turns a
+    # candidate's deterministic verdict into FAIL or REVIEW_REQUIRED; an
+    # unreachable model records why and the deterministic gate stands alone.
+    # `feature_semantic_style_lock` above is the enforced form and wins when
+    # both are set. The advisory embedder is only built when the provider
+    # transport is real (recorded or live): a mock transport has no
+    # embedding to advise with.
+    feature_semantic_style_advisory: bool = True
     # Whether the External Evidence Registry may influence routing scores.
     # Off by default: the registry ships as a read-only data asset first, so
     # that publishing it changes nothing about which model gets picked. Turning
@@ -342,7 +353,13 @@ class Settings(BaseSettings):
     # changes no decision. Turning it on additionally requires a replay on
     # file that passed — see `docs/ROUTER_EVIDENCE.md`.
     feature_router_lcb: bool = False
-    feature_voyage_memory: bool = False
+    # Multimodal memory (`MULTIMODAL_EMBEDDING`: voyage-multimodal-3.5 on the
+    # official Voyage API, google/gemini-embedding-2 through OpenRouter as the
+    # fallback). On by default since 2026-09-06. Advisory only: indexing runs
+    # off the request path through `memory_index_outbox`, retrieval hints are
+    # never identity, state or commit authority, and an unavailable provider
+    # degrades to the structured timeline - it cannot fail a generation.
+    feature_voyage_memory: bool = True
     feature_auto_evaluation: bool = False
     feature_adaptive_router: bool = False
     feature_auto_retry: bool = False

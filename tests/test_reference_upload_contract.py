@@ -34,6 +34,24 @@ def test_the_web_app_carries_the_servers_reference_allowlist() -> None:
     assert _frontend_types() == expected
 
 
+def test_the_web_proxy_lets_an_upload_the_api_accepts_through() -> None:
+    """The api's request fence is the upload limit; nginx must not answer first.
+
+    `apps/web/nginx.conf` proxies `/api/` for the browser. nginx's default
+    `client_max_body_size` is 1 MB, so without an explicit value every reference
+    image over a megabyte died there with an HTML 413 the api never saw
+    (production, 2026-09-06). The proxy's limit has to be at least the api's.
+    """
+
+    from platform_shared import Settings
+
+    conf = (WEB / "nginx.conf").read_text(encoding="utf-8")
+    declared = re.search(r"^\s*client_max_body_size\s+(\d+)([kmgKMG]?);", conf, re.M)
+    assert declared, "apps/web/nginx.conf must declare client_max_body_size"
+    scale = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}[declared.group(2).lower()]
+    assert int(declared.group(1)) * scale >= Settings(_env_file=None).max_upload_bytes
+
+
 def test_the_file_picker_filter_names_exactly_the_accepted_types() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     picker = re.search(r'<input id="passengerReference" type="file" accept="([^"]+)"', html)

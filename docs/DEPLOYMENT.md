@@ -200,12 +200,16 @@ something else happens to reload it — the renewal succeeds and the site still 
   priority 10) beside the Voyage PRIMARY, zero tracebacks in api or worker, and data untouched
   (14 sessions, 28 jobs, 6 anchors, 0 style locks, `memory_index_outbox` empty).
 
-  **What the host `.env` still overrides.** It carries `FEATURE_VOYAGE_MEMORY=false` and
-  `FEATURE_SEMANTIC_STYLE_LOCK=true`, both of which beat the new code defaults: production memory
-  indexing stays off, and the semantic style layer stays *enforced* (the new advisory mode only
-  engages when the enforced flag is off). Flipping them is the operator's decision; enabling memory
-  bills no backlog because the outbox was empty at this deploy, and no style lock exists yet, so
-  switching the layer to advisory affects no existing gate.
+  **The two host `.env` overrides were flipped on the operator's confirmation, ≈05:50Z the same
+  day.** The host carried `FEATURE_VOYAGE_MEMORY=false` and `FEATURE_SEMANTIC_STYLE_LOCK=true`, both
+  of which beat the new code defaults. They now read `FEATURE_VOYAGE_MEMORY=true` and
+  `FEATURE_SEMANTIC_STYLE_LOCK=false` (`.env.bak-<stamp>` holds the previous file; the diff is
+  exactly those two lines). `api` and `worker` were force-recreated one after the other (api healthy
+  after 5 checks, ~15 s of 502; worker after it), on the same image IDs, restarts 0, zero
+  tracebacks; both containers report `FEATURE_VOYAGE_MEMORY=true`, `FEATURE_SEMANTIC_STYLE_LOCK=false`
+  and `PROVIDER_MODE=live`, so the semantic style layer now runs in **advisory** mode and the memory
+  outbox drains. Enabling memory billed no backlog (the outbox was empty), and no style lock existed,
+  so switching the layer to advisory affected no existing gate.
 
   **Rollback caveat.** A code rollback to `4ab15cb` requires a downgrade to `0080` (that image pins
   `REQUIRED_SCHEMA_REVISION = 0080_creative_turn_claims`); `0081`'s `downgrade()` removes the

@@ -176,7 +176,42 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `5010ce5` (`main`, [#58](https://github.com/Ethanwrite/bestshiny/pull/58)
+- **Current release.** `cc60332` (`main`, [#60](https://github.com/Ethanwrite/bestshiny/pull/60)
+  — the 2026-09-06 production-workflow audit, verified and fixed: per-upload direct-upload slots
+  under OSS's verify mode, relayer nonce and expiry recovery, batch-sibling QA with its restart
+  recovery, deferred verification reads, budget settlement and pre-transport recovery, direct-API
+  worker isolation, completed-upload replay, the web proxy's read timeout; ledger entry
+  `docs/OPEN_ISSUES.md` §2.49), deployed 2026-09-06 ≈18:47Z. `DEPLOYED_SHA.prev = 5010ce5`.
+  No migration (`alembic current` stayed `0081`; the explicit upgrade on the new image was a
+  no-op), no `.env` change, `COMPOSE_UNCHANGED`. Same ordering as the `fe91a8f` deploy
+  (`deploy_remote.sh`, log `deploy-cc60332.log`, `DEPLOY_EXIT=0`; api healthy on the first check).
+
+  Verified after: both markers written, all three running image IDs equal the freshly built ones,
+  `RestartCount=0` on all three, local 8080/3000 200, public `api.bestshiny.com/health` and
+  `bestshiny.com/app` 200 from the host, `nginx -T` inside the web container shows
+  `client_max_body_size 100m` and `proxy_read_timeout 300s`, the new bundle
+  `/assets/index-B4W3uWQh.js` keys each upload attempt (`web-upload-${crypto.randomUUID()}`),
+  zero tracebacks in api or worker, and data untouched (14 sessions, 28 jobs, 6 anchors, 14 READY
+  media assets, `memory_index_outbox` empty). The worker's new start-up recoveries found nothing
+  to do: no candidate was stranded in VALIDATING without a verdict, and the four UNCERTAIN spend
+  authorizations on this host all belong to jobs that did not complete, so they stay for the
+  operator (`docs/OPEN_ISSUES.md` §1.18). All three `direct-api:*` workers READY.
+
+  **Host nginx changed with it, ≈18:47Z.** The `bestshiny.com` server block — the one the
+  browser's `/api/` calls traverse — had no `proxy_read_timeout`, so nginx's 60 s default would
+  have cut a slow director turn before the container's new 300 s could matter; the
+  `api.bestshiny.com` block already carried 300 s. `/etc/nginx/sites-available/bestshiny` now sets
+  `proxy_read_timeout 300s` in that location too (`.bak-20260906-184713` holds the previous file;
+  `nginx -t` clean, graceful reload, site 200). The chain is host 300 s → web container 300 s →
+  api 120 s model timeout.
+
+  **Rollback.** No migration, so a code rollback to `5010ce5` is a plain redeploy of that
+  revision; the pre-extraction `bestshiny-backup` dump and the `*.bak-20260906-184534` copies of
+  `.env` and the compose file remain available. Direct uploads authorized under the old
+  content-addressed keys inside their one-hour window replay without a write credential
+  (§2.49 residuals).
+
+- **Previous release.** `5010ce5` (`main`, [#58](https://github.com/Ethanwrite/bestshiny/pull/58)
   — web-only: `apps/web/nginx.conf` gains `client_max_body_size 100m`), deployed 2026-09-06 ≈13:24Z.
   `DEPLOYED_SHA.prev = fe91a8f`. No migration, no `.env` change; api and worker were not touched
   (same image IDs as the `fe91a8f` release), only `web` was rebuilt and force-recreated

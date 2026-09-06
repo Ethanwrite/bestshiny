@@ -176,7 +176,32 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `fe91a8f` (`main`, [#55](https://github.com/Ethanwrite/bestshiny/pull/55)
+- **Current release.** `5010ce5` (`main`, [#58](https://github.com/Ethanwrite/bestshiny/pull/58)
+  — web-only: `apps/web/nginx.conf` gains `client_max_body_size 100m`), deployed 2026-09-06 ≈13:24Z.
+  `DEPLOYED_SHA.prev = fe91a8f`. No migration, no `.env` change; api and worker were not touched
+  (same image IDs as the `fe91a8f` release), only `web` was rebuilt and force-recreated
+  (`deploy_web_remote.sh <sha>`, log `deploy-web-5010ce5.log`, `DEPLOY_EXIT=0`).
+
+  **The defect.** Every reference image over 1 MB failed on the site with HTTP 413. The 413 came
+  from the **web container's nginx**: `apps/web/nginx.conf` never set `client_max_body_size`, so
+  nginx's 1 MB default answered `POST /api/v1/assets` with its own 585-byte HTML 413 — visible in
+  the web container's access log and absent from the api's. Neither of the two layers that were
+  meant to decide the limit was reached: the host nginx allows `128m`, and the api's request fence
+  answers a JSON 413 at `MAX_UPLOAD_BYTES` (100 MB). The proxy now declares the api's limit;
+  `tests/test_reference_upload_contract.py` pins it to `Settings.max_upload_bytes`. The old UI had
+  hidden this behind a generic "Reference upload failed", which is why it surfaced only after the
+  `fe91a8f` release started reporting the real status.
+
+  Verified after: markers, `web` running image equals the built one, restarts 0, public
+  `api.bestshiny.com/health` and `bestshiny.com/app` 200, the new bundle `/assets/index-QiN20SXU.js`
+  names a bodiless 413, `nginx -T` inside the container shows `client_max_body_size 100m`, and the
+  proof: a 5 MB multipart `POST /api/v1/assets` through the public web proxy without auth now
+  answers the api's `401 {"detail":"请先登录"}` with the whole body uploaded, where before the fix
+  nginx answered 413 without forwarding it. Zero tracebacks. **When a symptom is "413 on upload",
+  read the web container's access log first: three nginx layers can answer 413 and only the api's
+  is JSON.**
+
+- **Previous release.** `fe91a8f` (`main`, [#55](https://github.com/Ethanwrite/bestshiny/pull/55)
   — reference images reach Seedream, one dominant action per shot, execution duration is the
   router's, identity references narrow to identity-critical characters, both multimodal
   embeddings on as advice; ledger entry `docs/OPEN_ISSUES.md` §2.48), deployed 2026-09-06 ≈05:30Z.
@@ -218,7 +243,7 @@ something else happens to reload it — the renewal succeeds and the site still 
   `bestshiny-backup` dump and the `*.bak-<stamp>` copies of `.env` and the compose file remain the
   safer path.
 
-- **Previous release.** `4ab15cb` (`main`, [#52](https://github.com/Ethanwrite/bestshiny/pull/52)
+- **Earlier release.** `4ab15cb` (`main`, [#52](https://github.com/Ethanwrite/bestshiny/pull/52)
   the creative-director audit's P1/P2 findings, on top of
   [#51](https://github.com/Ethanwrite/bestshiny/pull/51) the audit's medium/low findings and
   [#50](https://github.com/Ethanwrite/bestshiny/pull/50) the `75ea271` release record), deployed

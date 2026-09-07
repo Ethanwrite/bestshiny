@@ -55,7 +55,7 @@ function restoreSubmissions() {
 }
 
 const state = {
-  projects: [], project: null, episode: null, shot: null, candidates: [], characters: [],
+  projects: [], project: null, workspaceId: null, episode: null, shot: null, candidates: [], characters: [],
   episodes: [],               // rich strip rows from /v1/projects/{id}/episodes
   creative: { sessions: [], session: null, beatEdits: {}, editingBrief: false, editingScreenplay: false, revealedTurn: null, revealedScreenplay: null, thinking: null },
   continuation: { mode: "CONTINUOUS", view: null },
@@ -80,6 +80,13 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+/* Every sign-out (and every "no projects" reset) starts a new epoch. A loader
+   that was awaiting the server when it happened compares the epoch it started
+   in with the current one and drops its answer, so the previous account's
+   projects, sessions or balance can never land in the next account's state. */
+let workspaceEpoch = 0;
+const staleEpoch = (epoch) => epoch !== workspaceEpoch;
 const escapeHTML = (value = "") => String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 
 /** Write only if the node exists. The admin console owns some of these
@@ -383,6 +390,10 @@ function lockAuth() {
   state.passengerPreviewObjectUrl = null;
   state.authUser = null;
   clearWorkspaceState();
+  $("accountName").textContent = "";
+  $("userMenuEmail").textContent = "";
+  $("userAvatar").textContent = "·";
+  $("userMenu").hidden = true;
   setAuthMode("login");
   $("authPassword").value = "";
   setAuth(null);
@@ -391,20 +402,25 @@ function lockAuth() {
 }
 
 function clearWorkspaceState() {
+  workspaceEpoch += 1;
   state.projects = [];
   state.project = null;
+  announceWorkspace(null);
   state.episode = null;
   state.shot = null;
   state.candidates = [];
   state.characters = [];
+  state.selectedCharacterId = null;
   state.logicalAssets = [];
   state.styleLock = null;
   state.passengerJobs = { image: null, video: null };
   state.passengerPrompts = { image: "", video: "" };
+  state.passengerOriginal = null;
   state.passengerReferenceUpload = null;
   state.submissions = { passenger: null, shot: null };
   state.jobs.clear();
   state.selectedJobId = null;
+  state.jobFilter = "all";
   state.credits = null;
   state.imageTiers = null;
   state.savingJobId = null;
@@ -417,6 +433,32 @@ function clearWorkspaceState() {
   // means a shared browser does not even keep the previous user's words.
   sessionStorage.removeItem(CREATIVE_TURN_STORAGE_KEY);
   state.confirmedAssets.clear();
+  // The director's conversations, the episode strip and a continuation
+  // draft are the most private things on the page, and none of them used to
+  // be cleared: a new account with no projects never overwrote them, so a
+  // shared browser showed the previous account's sessions (2026-09-06 audit).
+  stopCreativePolling();
+  state.creative = {
+    sessions: [], session: null, beatEdits: {}, editingBrief: false, editingScreenplay: false,
+    revealedTurn: null, revealedScreenplay: null, thinking: null, drafting: null,
+  };
+  state.episodes = [];
+  state.continuation = { mode: "CONTINUOUS", view: null };
+  state.operations = { providers: [], skills: [], job: null };
+  ["creativeIdeaInput", "creativeReplyInput", "creativeScreenplayJson", "continuationTimeGap",
+    "continuationLocation", "continuationGuidance", "operationsJobId"].forEach((id) => {
+    if ($(id)) $(id).value = "";
+  });
+  ["creativeTurns", "creativeBriefFields", "creativeBriefEditor", "creativeQuestions", "creativeAssumptions",
+    "creativeScreenplayBody", "creativeScreenplayEditor", "creativeAnchorGrid", "continuationPreview"].forEach((id) => {
+    if ($(id)) $(id).innerHTML = "";
+  });
+  if ($("continuationPreview")) $("continuationPreview").hidden = true;
+  renderCreativeSessionsEmpty();
+  renderEpisodeStrip();
+  renderCreative();
+  renderGenerationControl(null);
+  setText("creditsAmount", "—");
   $("projectSelect").innerHTML = '<option value="">No projects yet</option>';
   $("characterList").innerHTML = CHARACTERS_EMPTY;
   bindCharactersEmptyCta($("characterList"));
@@ -496,9 +538,32 @@ async function submitAuth(event) {
 }
 
 async function logout() {
-  await request("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => null);
+  const note = $("logoutError");
+  if (note) { note.hidden = true; note.textContent = ""; }
+  try {
+    await request("/api/auth/logout", { method: "POST", body: "{}" });
+  } catch (error) {
+    // 401: the server already holds no session for this cookie, so signing
+    // out locally is exact. Anything else means the session may still be
+    // live server-side and the HttpOnly cookie is still set: hiding the page
+    // would only look like a sign-out, and a refresh after the network came
+    // back would walk straight back into the account. Say so, and keep the
+    // button where it is so the same click retries.
+    if (error.status !== 401) {
+      const reason = error.message || "the server could not be reached";
+      if (note) {
+        note.textContent = `Sign-out did not complete (${reason}). You are still signed in on this device — try again.`;
+        note.hidden = false;
+      }
+      $("userMenu").hidden = false;
+      $("userMenuBtn")?.setAttribute("aria-expanded", "true");
+      toast("Sign-out did not complete. You are still signed in; try again.");
+      return false;
+    }
+  }
   lockAuth();
   navigate("/");
+  return true;
 }
 
 let workspaceLoad = null;
@@ -539,13 +604,31 @@ async function health() {
   }
 }
 
+// The workspace every credit on the page is charged against: the open
+// project's. Only with no project open does the first workspace stand in,
+// and the pill is then the same workspace the wallet falls back to.
+function currentWorkspaceId() {
+  return state.project?.workspace_id || (state.authUser?.workspaces || [])[0]?.id || null;
+}
+
 async function loadCredits() {
-  const workspace = (state.authUser?.workspaces || [])[0];
-  if (!workspace) return;
-  const billing = await request(`/v1/workspaces/${workspace.id}/billing`).catch(() => null);
-  if (!billing) return;
+  const workspaceId = currentWorkspaceId();
+  if (!workspaceId) return;
+  const epoch = workspaceEpoch;
+  const billing = await request(`/v1/workspaces/${workspaceId}/billing`).catch(() => null);
+  if (!billing || staleEpoch(epoch) || currentWorkspaceId() !== workspaceId) return;
   state.credits = billing.credit_balance;
   $("creditsAmount").textContent = `${Number(billing.credit_balance).toLocaleString()} credits`;
+}
+
+// Tell the wallet which workspace the open project belongs to, so a top-up,
+// its balance and its plans bind to the same account the generations do.
+function announceWorkspace(workspaceId) {
+  if (state.workspaceId === (workspaceId || null)) return;
+  state.workspaceId = workspaceId || null;
+  window.dispatchEvent(new CustomEvent("ai-director:workspace-changed", {
+    detail: { workspaceId: state.workspaceId, projectId: state.project?.id || null },
+  }));
 }
 
 /* ============================================================
@@ -574,6 +657,7 @@ function switchPage(page) {
     node.hidden = node.dataset.page !== page;
   });
   $("appBody").classList.toggle("no-inspector", page === "admin");
+  if ($("inspectorToggleBtn")) $("inspectorToggleBtn").hidden = page === "admin";
   $("appActionBar").hidden = page === "admin" || page === "ai-director";
   if ($("modeDescription")) $("modeDescription").textContent = PAGE_HINT[page] || "";
 
@@ -1486,7 +1570,10 @@ async function confirmPassengerAsset() {
    Projects and assets
    ============================================================ */
 async function loadProjects() {
-  state.projects = await request("/v1/projects");
+  const epoch = workspaceEpoch;
+  const projects = await request("/v1/projects");
+  if (staleEpoch(epoch)) return;
+  state.projects = projects;
   $("projectSelect").innerHTML = state.projects.length
     ? state.projects.map((project) => `<option value="${project.id}">${escapeHTML(project.name)}</option>`).join("")
     : '<option value="">No projects yet</option>';
@@ -1496,10 +1583,13 @@ async function loadProjects() {
 
 async function loadLogicalAssets() {
   if (!state.project) return;
-  [state.logicalAssets, state.styleLock] = await Promise.all([
+  const epoch = workspaceEpoch;
+  const [assets, styleLock] = await Promise.all([
     request(`/api/projects/${state.project.id}/assets`),
     request(`/api/projects/${state.project.id}/style-lock`),
   ]);
+  if (staleEpoch(epoch)) return;
+  [state.logicalAssets, state.styleLock] = [assets, styleLock];
   const options = (canonicalLabel) => '<option value="">Create a new asset</option>' + state.logicalAssets
     .map((asset) => `<option value="${asset.id}">${simpleLabel(asset.asset_type)} · ${escapeHTML(asset.name)}${asset.canonical_version_id ? canonicalLabel : ""}</option>`)
     .join("");
@@ -1781,8 +1871,12 @@ async function selectProject(id) {
     renderPassengerJob(null);
   }
   const projectChanged = state.project?.id !== id;
-  state.project = await request(`/v1/projects/${id}`);
+  const epoch = workspaceEpoch;
+  const project = await request(`/v1/projects/${id}`);
+  if (staleEpoch(epoch)) return;
+  state.project = project;
   $("projectSelect").value = id;
+  announceWorkspace(project.workspace_id);
   if (projectChanged) {
     state.creative.session = null;
     renderCreative();
@@ -1859,7 +1953,10 @@ function resetProductionView() {
 }
 
 async function loadEpisode(id) {
-  state.episode = await request(`/v1/episodes/${id}`);
+  const epoch = workspaceEpoch;
+  const episode = await request(`/v1/episodes/${id}`);
+  if (staleEpoch(epoch)) return;
+  state.episode = episode;
   $("scriptInput").value = state.episode.script_source || "";
   $("scriptOriginalView").textContent = state.episode.script_source || "No script recorded for this episode.";
   $("episodeStatus").textContent = simpleLabel(state.episode.status);
@@ -2101,7 +2198,10 @@ async function renderShotStage() {
 
 async function loadCandidates() {
   if (!state.shot) return;
-  state.candidates = await request(`/v1/shots/${state.shot.id}/candidates`);
+  const epoch = workspaceEpoch;
+  const candidates = await request(`/v1/shots/${state.shot.id}/candidates`);
+  if (staleEpoch(epoch) || !state.shot) return;
+  state.candidates = candidates;
   const candidateJobId = state.candidates.find((candidate) => candidate.generation_job_id)?.generation_job_id;
   if (candidateJobId && !$("operationsJobId").value.trim()) $("operationsJobId").value = candidateJobId;
   state.candidates.forEach((candidate) => {
@@ -2212,8 +2312,10 @@ async function generateShot() {
   if (!state.shot) { toast("Select a shot first"); return; }
   const projectId = state.project.id;
   const shotId = state.shot.id;
-  const estimatedCost = Number($("estimatedCost").value || 0);
-  const fingerprint = JSON.stringify({ projectId, shotId, estimatedCost });
+  // "Most I'll spend on this shot": a ceiling the server holds its own quote
+  // to before reserving anything, not an estimate it may ignore.
+  const spendCapUsd = Math.max(0, Number($("estimatedCost").value || 0)) || 0;
+  const fingerprint = JSON.stringify({ projectId, shotId, spendCapUsd });
   const idempotencyKey = beginSubmission("shot", fingerprint);
   if (!idempotencyKey) return;
   const button = $("generateBtn");
@@ -2223,7 +2325,7 @@ async function generateShot() {
   try {
     await request(`/v1/shots/${shotId}/generate`, {
       method: "POST",
-      body: JSON.stringify({ idempotency_key: idempotencyKey, estimated_cost: estimatedCost }),
+      body: JSON.stringify({ idempotency_key: idempotencyKey, spend_cap_usd: spendCapUsd }),
     });
     await loadCandidates();
     await renderShotStage();
@@ -2289,7 +2391,10 @@ async function createCharacter() {
 
 async function loadCharacters() {
   if (!state.project) return;
-  state.characters = await request(`/v1/projects/${state.project.id}/characters`);
+  const epoch = workspaceEpoch;
+  const characters = await request(`/v1/projects/${state.project.id}/characters`);
+  if (staleEpoch(epoch)) return;
+  state.characters = characters;
   if (!state.characters.some((character) => character.id === state.selectedCharacterId)) {
     state.selectedCharacterId = state.characters[0]?.id || null;
   }
@@ -2415,13 +2520,16 @@ async function refreshProductions() {
   // (older shot candidates, or anything past the 100 newest) are refreshed
   // by id so a remembered status never freezes; bounded so a long session
   // cannot fan out.
+  const epoch = workspaceEpoch;
   const listed = await loadProjectGenerations();
+  if (staleEpoch(epoch)) return;
   const stale = projectJobs()
     .filter((job) => !listed.has(job.id) && !TERMINAL_JOB_STATES.has(job.status))
     .slice(0, 20);
   const fresh = await Promise.all(
     stale.map((job) => request(`/v1/generations/${encodeURIComponent(job.id)}`).catch(() => null)),
   );
+  if (staleEpoch(epoch)) return;
   fresh.forEach((job) => { if (job) rememberJob(job); });
   renderProductions();
 }
@@ -2799,9 +2907,11 @@ function renderProviders() {
 
 async function loadOperations() {
   if (!$("providerHealthGrid")) return;
+  const epoch = workspaceEpoch;
   const [providers, skills] = await Promise.all([request("/v1/providers"), request("/v1/skills")]);
   const health = await Promise.all(providers.map((provider) => request(`/v1/providers/${encodeURIComponent(provider.name)}/health`)
     .catch((error) => ({ ok: false, detail: error.message }))));
+  if (staleEpoch(epoch)) return;
   state.operations.providers = providers.map((provider, index) => ({ ...provider, health: health[index] }));
   state.operations.skills = skills;
   renderProviders();
@@ -3160,25 +3270,37 @@ let creativeReplyInFlight = false;
 
 function creativeSessionId() { return state.creative.session?.session?.id || null; }
 
+/** The session rail with nothing in it - painted both when a project has no
+ *  sessions and when the account that had them signs out. */
+function renderCreativeSessionsEmpty() {
+  const list = $("creativeSessionList");
+  if (!list) return;
+  setText("creativeSessionCount", "0");
+  list.className = "shot-tree empty-state";
+  list.innerHTML = `
+    <div class="empty-block is-compact">
+      <strong>No director sessions yet</strong>
+      <p>Start one above and it stays here, so you can pick the conversation up later.</p>
+      <div class="btn-row btn-row-center">
+        <button class="btn btn-tertiary" type="button">Start a session</button>
+      </div>
+    </div>`;
+  // Bound by reference rather than through a data-* verb: the idea box is
+  // right above this rail, so the move is "put the cursor there", not a
+  // route change the dispatcher would have to learn.
+  list.querySelector("button")?.addEventListener("click", () => $("creativeIdeaInput").focus());
+}
+
 async function loadCreativeSessions() {
   if (!state.project) return;
-  state.creative.sessions = await request(`/v1/creative/sessions?project_id=${encodeURIComponent(state.project.id)}`);
+  const epoch = workspaceEpoch;
+  const sessions = await request(`/v1/creative/sessions?project_id=${encodeURIComponent(state.project.id)}`);
+  if (staleEpoch(epoch)) return;
+  state.creative.sessions = sessions;
   $("creativeSessionCount").textContent = state.creative.sessions.length;
   const list = $("creativeSessionList");
   if (!state.creative.sessions.length) {
-    list.className = "shot-tree empty-state";
-    list.innerHTML = `
-      <div class="empty-block is-compact">
-        <strong>No director sessions yet</strong>
-        <p>Start one above and it stays here, so you can pick the conversation up later.</p>
-        <div class="btn-row btn-row-center">
-          <button class="btn btn-tertiary" type="button">Start a session</button>
-        </div>
-      </div>`;
-    // Bound by reference rather than through a data-* verb: the idea box is
-    // right above this rail, so the move is "put the cursor there", not a
-    // route change the dispatcher would have to learn.
-    list.querySelector("button")?.addEventListener("click", () => $("creativeIdeaInput").focus());
+    renderCreativeSessionsEmpty();
     return;
   }
   list.className = "shot-tree";
@@ -3218,7 +3340,10 @@ async function openCreativeSession(id) {
     state.creative.revealedTurn = null;
     state.creative.revealedScreenplay = null;
   }
-  state.creative.session = await request(`/v1/creative/sessions/${id}`);
+  const epoch = workspaceEpoch;
+  const view = await request(`/v1/creative/sessions/${id}`);
+  if (staleEpoch(epoch)) return;
+  state.creative.session = view;
   releaseLandedCreativeTurns(state.creative.session);
   if (state.creative.revealedTurn === null) {
     // First paint of a session: everything before now is history.
@@ -4345,7 +4470,10 @@ const CONTINUATION_NOTES = {
 
 async function loadEpisodeStrip() {
   if (!state.project) return;
-  state.episodes = await request(`/v1/projects/${state.project.id}/episodes`);
+  const epoch = workspaceEpoch;
+  const episodes = await request(`/v1/projects/${state.project.id}/episodes`);
+  if (staleEpoch(epoch)) return;
+  state.episodes = episodes;
   renderEpisodeStrip();
 }
 
@@ -4566,6 +4694,16 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest(".user-menu")) $("userMenu").hidden = true;
 });
 on("adminNavBtn", "click", () => { $("userMenu").hidden = true; navigate("/admin"); });
+/* Narrow desktops fold the Inspector under a toggle (styles.css ≤1280px). */
+function setInspectorVisible(open) {
+  $("appBody").classList.toggle("show-inspector", open);
+  const toggle = $("inspectorToggleBtn");
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.textContent = open ? "Hide settings" : "Settings";
+  }
+}
+on("inspectorToggleBtn", "click", () => setInspectorVisible(!$("appBody").classList.contains("show-inspector")));
 on("assetsNavBtn", "click", () => { $("userMenu").hidden = true; guard(openAssetDetails)(null); });
 on("logoutBtn", "click", guard(logout));
 

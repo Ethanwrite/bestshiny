@@ -55,6 +55,54 @@ class ImageTierStatus:
     unavailable_reason: str | None
 
 
+class ShotSpendCapExceeded(PermissionError):
+    """The server's quote for a shot exceeds the cap its author set on it.
+
+    The Direct inspector's "Most I'll spend on this shot (USD)" used to travel
+    as ``estimated_cost`` and be dropped on the floor: the pipeline priced the
+    request from the catalogue and reserved credits for that quote without
+    ever comparing the two, so a cap below the quote prevented nothing
+    (2026-09-06 audit). It is now compared before any reservation, and a
+    retry onto a dearer alternative is refused the same way.
+    """
+
+    def __init__(self, *, quoted_usd: float, cap_usd: float, provider: str, model: str) -> None:
+        self.quoted_usd = float(quoted_usd)
+        self.cap_usd = float(cap_usd)
+        self.provider = provider
+        self.model = model
+        super().__init__(
+            f"This shot is quoted at ${self.quoted_usd:.4f} on {provider}/{model}, above the "
+            f"${self.cap_usd:.2f} cap you set for it; nothing was charged. Raise the cap or "
+            "shorten the shot."
+        )
+
+
+def enforce_shot_spend_cap(
+    admitted: AdmittedGeneration,
+    spend_cap_usd: float | None,
+) -> None:
+    """Refuse an admitted shot whose quote is above its author's cap.
+
+    ``None`` or ``0`` means no cap - the field's own default - so a caller that
+    never set one is unaffected; anything positive is a ceiling the quote must
+    fit under. The comparison is on the quote's USD total, the same figure the
+    credit reservation is derived from, so what is refused here is exactly
+    what would otherwise have been reserved.
+    """
+
+    if spend_cap_usd is None or spend_cap_usd <= 0:
+        return
+    quoted = float(admitted.estimate.estimated_total_usd)
+    if quoted > float(spend_cap_usd):
+        raise ShotSpendCapExceeded(
+            quoted_usd=quoted,
+            cap_usd=float(spend_cap_usd),
+            provider=admitted.request.provider,
+            model=admitted.request.model,
+        )
+
+
 class ExplicitModelUnavailable(ValueError):
     """A named model cannot run, and substituting a different one is not allowed.
 
@@ -554,4 +602,6 @@ __all__ = [
     "IMAGE_MODEL_TIERS",
     "IMAGE_TIER_DISPLAY",
     "ImageTierStatus",
+    "ShotSpendCapExceeded",
+    "enforce_shot_spend_cap",
 ]

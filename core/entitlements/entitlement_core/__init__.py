@@ -3,6 +3,8 @@ from .admission import (
     AdmittedGeneration,
     GenerationAdmissionService,
     ImageTierStatus,
+    ShotSpendCapExceeded,
+    enforce_shot_spend_cap,
 )
 from .canary import (
     CanaryReservation,
@@ -58,6 +60,7 @@ __all__ = [
     "ProductionBudgetService",
     "ProductionBudgetWindow",
     "ReconcileAction",
+    "ShotSpendCapExceeded",
     "SpendAuthorizationConflict",
     "SpendAuthorizationDenied",
     "SpendAuthorizationView",
@@ -71,5 +74,6 @@ __all__ = [
     "WorkspacePlanTier",
     "authorization_dict",
     "capability_for_model_role",
+    "enforce_shot_spend_cap",
     "window_dict",
 ]

@@ -822,6 +822,10 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
 }
 .user-menu-name { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-menu-caret { color: var(--fg-meta); font-size: 9px; }
+.user-menu-error {
+  margin: 6px 10px 4px; font-size: var(--t-meta); line-height: 1.5; color: var(--danger);
+  max-width: 260px; white-space: normal;
+}
 .user-menu-panel {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 60;
   min-width: 220px; padding: 6px;
@@ -2021,11 +2025,19 @@ body.public-route .sheet-actions { padding-top: 0; border-top: 0; }
 /* ============================================================
    Narrower desktops: fold the inspector under the canvas
    ============================================================ */
+/* The fold used to be one-way: the class that restores the inspector existed
+   here and nothing in the app ever set it, so under 1280px the model, ratio,
+   resolution, duration, character and recovery controls were simply gone
+   (2026-09-06 audit). #inspectorToggleBtn in the top bar sets it now, and the
+   button itself only exists at the widths where the fold applies. */
+.inspector-toggle { display: none; height: 30px; padding: 0 12px; }
 @media (max-width: 1280px) {
   .app-body { grid-template-columns: 236px minmax(0, 1fr); }
   .app-inspector { display: none; }
   .app-body.show-inspector { grid-template-columns: 236px minmax(0, 1fr) 300px; }
   .app-body.show-inspector .app-inspector { display: flex; }
+  .inspector-toggle { display: inline-flex; align-items: center; }
+  .inspector-toggle[aria-expanded="true"] { background: var(--bg-2); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line), inset 0 -2px 0 var(--brand-mark); }
 }
 
 /* ============================================================

@@ -224,6 +224,16 @@ tier — and it still receives server pricing and CostRecords. A plan sets the g
 models may be used; it does not decide whether a generation costs anything. Running out of credits answers
 `402`, distinct from the `403` of a plan entitlement denial: top up versus upgrade.
 
+**A shot's author can cap what it may cost.** The Direct inspector's "Most I'll spend on this shot
+(USD)" is `spend_cap_usd` on `POST /v1/shots/{id}/generate`: after admission has priced the request
+and before any credit is reserved, the quote's USD total is compared with it (`enforce_shot_spend_cap`)
+and a quote above the cap answers `422` naming both numbers, with nothing charged. The cap rides in
+the request metadata, so an automatic retry onto a dearer alternative is refused the same way: the
+retry plan turns terminal with `SPEND_CAP_EXCEEDED:<quote>><cap>` on it, no retry job is created, and
+the evaluation completes for the author. `None` or `0` is no cap. `estimated_cost` is still accepted
+as the caller's own estimate and was never a limit. Until 2026-09-06 the field was dropped on the
+floor - the pipeline passed `0.0` into the runtime and reserved for the quote unconditionally.
+
 The workspace wallet is authoritative only for user credits:
 
 ```text
@@ -307,6 +317,19 @@ sessions, workspace roles and project/asset/job tenant isolation. Phase III adds
   has no delivery channel, answers `503` on both endpoints, and the web app hides the entry until
   `GET /health` offers it — `docs/OPEN_ISSUES.md` §1.19);
 - Web `credentials: include` and CSRF headers, with no session token in `sessionStorage`.
+
+**A sign-out is what the server confirmed.** `POST /api/auth/logout` revokes the session row and
+deletes both cookies; the web app locks the page only after that answer, or after a `401`, which
+means the server holds no session for the cookie. Any other failure keeps the account on screen,
+says so next to the Sign out button, and the same button retries - hiding the page while the
+HttpOnly cookie and the server session both survive is not a sign-out. Locking the page clears
+everything the previous account saw: projects, the director sessions and their rail, the episode
+strip, a continuation draft, every prompt box, the identity strip and the credits pill, and the
+wallet's payer address, balance and receipt; each loader that writes private state carries a
+`workspaceEpoch` fence so an answer that arrives after the sign-out is dropped rather than painted
+into the next account's view. The wallet binds to the workspace the open project belongs to
+(`ai-director:workspace-changed` on every project switch) and names it as the recipient of a top-up,
+the same workspace the credits pill and every generation in that project are charged against.
 
 Workspace storage keeps `max_storage_bytes`, `used_storage_bytes` and `reserved_storage_bytes`. Upload admission
 reserves bytes atomically; successful registration settles the reservation, proven failure releases it and an
@@ -1096,6 +1119,11 @@ client ──presigned PUT──► object storage ◄──presigned GET── 
                                │ authorize, presign, orchestrate, bill
                             this API
 ```
+
+The one route that still carries bytes through the process, the multipart `POST /v1/assets`, is a
+plain `def`: FastAPI runs it on the threadpool. It validates, hashes and pushes the whole file
+synchronously, and as an `async def` with no await it did all of that on the event loop, stalling
+login, `/health` and every poll for the length of a slow upload (2026-09-06).
 
 Both directions are presigned. Writes go through `POST /v1/assets/uploads`, which authorizes the
 project and asset type, takes a quota hold on the declared size, chooses a content-addressed key

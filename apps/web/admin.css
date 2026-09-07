@@ -101,6 +101,11 @@
 .admin-table tbody tr:last-child td { border-bottom: 0; }
 
 .admin-mono  { font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* The page controls under a list: the server's own total/limit/offset. */
+.admin-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+               margin-top: 14px; color: var(--fg-meta); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.admin-pager-actions { display: flex; gap: 8px; }
 .admin-muted { color: var(--fg-meta); }
 
 .admin-status {

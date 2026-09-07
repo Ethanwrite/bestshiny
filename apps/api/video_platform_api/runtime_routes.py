@@ -26,7 +26,7 @@ from evaluation_core import (
     EvaluationResult,
 )
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
-from generation_gateway import IdempotencyConflict
+from generation_gateway import IdempotencyConflict, job_allowed_actions
 from memory_core import (
     MemoryEmbeddingUnavailable,
     MemoryLayer,
@@ -591,6 +591,8 @@ def register_runtime_routes(
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
         auth.require_project(principal, body.project_id, write=True)
+        # What was asked for, kept apart from what admission decides to run.
+        requested_duration = body.duration
         try:
             admitted = container.generation_admission.admit_passenger(
                 GenerationRequest(
@@ -654,6 +656,7 @@ def register_runtime_routes(
             raise HTTPException(409, str(exc)) from exc
         except (LookupError, ValueError) as exc:
             raise HTTPException(400, str(exc)) from exc
+        credit_status = container.gateway.credit_status(job.id)
         return {
             "id": job.id,
             "status": job.status,
@@ -661,10 +664,20 @@ def register_runtime_routes(
             "model": job.model,
             "output_asset_id": job.output_asset_id,
             "submission_state": getattr(job, "submission_state", None),
-            "credit_status": container.gateway.credit_status(job.id),
+            "credit_status": credit_status,
             "estimated_cost": job.cost_estimate,
             "estimated_credits": estimate.credits,
             "credit_pricing_version": container.credit_pricing.version,
+            # The length that runs (and is quoted) beside the length asked
+            # for: admission snaps onto the model's declared lengths, and the
+            # browser used to keep showing the typed number (2026-09-07 review).
+            "duration": admitted.request.duration,
+            "requested_duration": admitted.request.metadata.get(
+                "requested_duration_seconds", requested_duration
+            ),
+            "aspect_ratio": admitted.request.aspect_ratio,
+            "resolution": body.resolution,
+            "allowed_actions": job_allowed_actions(job, credit_status=credit_status),
             "replayed": replayed,
         }
 

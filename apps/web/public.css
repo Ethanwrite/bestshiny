@@ -206,6 +206,8 @@
 
 /* ---------- Pricing ---------- */
 .pub-price-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 40px; max-width: 760px; }
+/* The pricing page carries the free tier plus every pack the checkout sells. */
+.pub-price-grid-packs { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); max-width: 1080px; }
 .pub-price {
   position: relative; display: flex; flex-direction: column; gap: 14px;
   padding: 28px 26px; border-radius: var(--radius-l); background: var(--bg-2);

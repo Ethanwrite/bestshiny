@@ -4,9 +4,75 @@
  * state. The only thing it shares with the app is the token layer in
  * styles.css.
  */
-import { onRoute, navigate, currentUser, AUTH_ROUTES } from "./router.js";
+import { onRoute, navigate, currentUser, currentRoute, AUTH_ROUTES } from "./router.js";
 
 const mount = () => document.getElementById("publicPages");
+const API = window.AI_DIRECTOR_API
+  || (location.hostname === "127.0.0.1" && location.port === "18081"
+    ? "http://127.0.0.1:18080"
+    : "/api");
+
+/* ---- The credit packs: server truth, with the same rows as fallback -------
+   The packs on sale are the server's (core/payments/payment_core/catalog.py,
+   served at GET /v1/payments/catalog, no sign-in needed). This page used to
+   carry its own copy and advertised a thirty-dollar pack the checkout no
+   longer sold (2026-09-07 review). The fallback below is the catalogue's
+   rows verbatim - a test pins the two together - so the page paints the right
+   numbers before the request answers and keeps them if it never does. */
+const STATIC_PACKS = [
+  { sku: "starter_20", amount: "20.00", currency: "USDC", credits: 1800, recommended: false },
+  { sku: "creator_50", amount: "50.00", currency: "USDC", credits: 6000, recommended: true },
+  { sku: "pro_100", amount: "100.00", currency: "USDC", credits: 11000, recommended: false },
+];
+const STATIC_CNY_PACKS = [
+  { sku: "starter_20", amount: "140.00", currency: "CNY", credits: 1800, recommended: false },
+  { sku: "creator_50", amount: "450.00", currency: "CNY", credits: 6000, recommended: true },
+  { sku: "pro_100", amount: "700.00", currency: "CNY", credits: 11000, recommended: false },
+];
+const PACK_NAMES = { starter_20: "ESSENTIAL", creator_50: "MOST POPULAR", pro_100: "PROFESSIONAL" };
+let packs = STATIC_PACKS;
+let cnyPacks = STATIC_CNY_PACKS;
+
+const escapePublic = (value = "") => String(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+const formatUsd = (amount) => `$${Number(amount).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+const formatCny = (amount) => `¥${Number(amount).toLocaleString("zh-CN", { maximumFractionDigits: 0 })}`;
+const formatCredits = (credits) => Number(credits).toLocaleString("en-US");
+const packName = (pack) => PACK_NAMES[pack.sku] || String(pack.sku).replace(/_/g, " ").toUpperCase();
+const firstPack = () => packs[0];
+const cnyPriceFor = (pack) => cnyPacks.find((item) => item.sku === pack.sku) || null;
+
+function packCard(pack, { landing = false } = {}) {
+  const cny = cnyPriceFor(pack);
+  return `
+        <article class="pub-price ${pack.recommended ? "featured" : ""}">
+          <span class="pub-price-tag">${landing ? "PRO" : escapePublic(packName(pack))}</span>
+          <div class="pub-price-figure"><strong>${escapePublic(formatUsd(pack.amount))}</strong><span>one payment${cny ? ` · ${escapePublic(formatCny(cny.amount))} with WeChat Pay` : ""}</span></div>
+          <ul>
+            <li>Unlocks Pro and adds ${escapePublic(formatCredits(pack.credits))} credits</li>
+            <li>Every model the router can reach</li>
+            <li>${landing ? "Priority queue and full production history" : "Credits never expire, nothing recurs"}</li>
+          </ul>
+          <a class="btn ${pack.recommended || landing ? "btn-primary" : "btn-secondary"} btn-full" href="${landing ? "/pricing" : "/signup"}" data-link>${landing ? "See every pack" : "Start Creating"}</a>
+        </article>`;
+}
+
+async function loadPacks() {
+  try {
+    const response = await fetch(`${API}/v1/payments/catalog`, { credentials: "omit" });
+    if (!response.ok) return;
+    const body = await response.json();
+    const before = JSON.stringify([packs, cnyPacks]);
+    if (Array.isArray(body.packages) && body.packages.length) packs = body.packages;
+    if (Array.isArray(body.xunhupay_packages)) cnyPacks = body.xunhupay_packages;
+    // A page already painted from the fallback is repainted only when the
+    // server's rows differ from it; normally they are the same rows.
+    if (JSON.stringify([packs, cnyPacks]) === before) return;
+    const route = currentRoute();
+    if (["/", "/pricing"].includes(route)) render(route);
+  } catch (_error) {
+    // The fallback is the same catalogue; nothing to tell the visitor.
+  }
+}
 
 /* The workspace mock on the landing page is a real screenshot of the shell's
    structure, drawn in DOM so it stays honest when the shell changes. */
@@ -225,16 +291,7 @@ function landing() {
           </ul>
           <a class="btn btn-secondary btn-full" href="/signup" data-link>Create a workspace</a>
         </article>
-        <article class="pub-price featured">
-          <span class="pub-price-tag">PRO</span>
-          <div class="pub-price-figure"><strong>$30</strong><span>one payment</span></div>
-          <ul>
-            <li>Unlocks Pro and adds 3,000 credits</li>
-            <li>Every model the router can reach</li>
-            <li>Priority queue and full production history</li>
-          </ul>
-          <a class="btn btn-primary btn-full" href="/pricing" data-link>See what a shot costs</a>
-        </article>
+        ${packCard(firstPack(), { landing: true })}
       </div>
       <p class="pub-price-note">1 credit = $0.01. Credits are reserved when a job is submitted and settled against the real provider cost.</p>
     </div>
@@ -377,7 +434,7 @@ function pricingPage() {
       <span class="pub-eyebrow">Pricing</span>
       <h2 class="pub-h2">Credits, not seats.</h2>
       <p class="pub-lede">1 credit = $0.01. Credits are reserved when a job is submitted and settled against what the provider actually charged. Nothing recurs.</p>
-      <div class="pub-price-grid">
+      <div class="pub-price-grid pub-price-grid-packs">
         <article class="pub-price">
           <span class="pub-price-tag">FREE</span>
           <div class="pub-price-figure"><strong>$0</strong><span>to start</span></div>
@@ -389,17 +446,7 @@ function pricingPage() {
           </ul>
           <a class="btn btn-secondary btn-full" href="/signup" data-link>Create a workspace</a>
         </article>
-        <article class="pub-price featured">
-          <span class="pub-price-tag">PRO</span>
-          <div class="pub-price-figure"><strong>$30</strong><span>one payment</span></div>
-          <ul>
-            <li>Unlocks Pro permanently</li>
-            <li>Includes 3,000 credits</li>
-            <li>Every model the router can reach</li>
-            <li>Priority render queue</li>
-          </ul>
-          <a class="btn btn-primary btn-full" href="/signup" data-link>Start Creating</a>
-        </article>
+        ${packs.map((pack) => packCard(pack)).join("")}
       </div>
     </div>
   </section>
@@ -420,7 +467,7 @@ function pricingPage() {
           </tbody>
         </table>
       </div>
-      <p class="pub-price-note">Payment settles in native USDC on Base through DePay. Credits are added the moment the payment is confirmed.</p>
+      <p class="pub-price-note">Payment settles in native USDC on Base through DePay, or in CNY through WeChat Pay. Credits are added the moment the payment is confirmed.</p>
     </div>
   </section>
 
@@ -521,6 +568,7 @@ onRoute((route) => {
   if (route === "/app") { stopDemo(); return; }
   render(route);
 });
+loadPacks();
 
 document.getElementById("pubMenuBtn")?.addEventListener("click", (event) => {
   const header = event.currentTarget.closest(".pub-header");

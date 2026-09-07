@@ -210,6 +210,14 @@ authenticated request
 -> settle, refund or reconcile
 ```
 
+The Passenger request carries no asset criticality of its own: admission runs every plan-enforced
+Passenger request at `STANDARD`, the QA checks never read the field, and the Create page offers no
+picker for it (the one it had promised a strictness nothing honoured; removed 2026-09-07). Nor does
+"Auto" name a model role from the browser: the server resolves the role from the plan of the
+project's own workspace. Every job view carries `allowed_actions`, decided by
+`generation_gateway.job_allowed_actions` - the preconditions of the gateway's own `retry()` and
+`cancel()` - so the user page and the admin console offer only commands the gateway will accept.
+
 When Passenger video duration is omitted it defaults to 4 seconds. Under the current Seedance pricing snapshot this
 is about 44 credits, allowing one request against the 50-credit starter grant. An explicit 8-second request remains
 about 87 credits and fails before Job/Provider creation if the balance cannot be reserved. Fixed-offer purchases are
@@ -1076,9 +1084,13 @@ rejects the model with the segment plan in the rejection detail and in the route
 submits and quotes that length, and records `routing_context.duration_seconds` (what ran) beside
 `requested_duration_seconds` and `execution_strategy`; a retry onto an alternative uses that
 alternative's own length; passenger admission applies the same plan to a named or Auto video model
-and refuses an over-ceiling request before any reservation exists. Running one shot as several
-provider calls is deliberately not built: a SPLIT_SHOT is reported and the shot is split at the
-screenplay, where per-shot MP4 delivery already has a place for it.
+and refuses an over-ceiling request before any reservation exists. Both figures reach the caller:
+the job view (`GET /v1/generations…`) and the Passenger submit answer carry `duration` - what runs
+and is quoted - beside `requested_duration`, `aspect_ratio` and `resolution`, and the web canvas
+shows "6s (asked 5s)" (until 2026-09-07 neither figure left the server, so the page kept the
+number that was typed). Running one shot as several provider calls is deliberately not built: a
+SPLIT_SHOT is reported and the shot is split at the screenplay, where per-shot MP4 delivery
+already has a place for it.
 
 ## Provider status and Flow affinity
 

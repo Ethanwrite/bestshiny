@@ -137,6 +137,43 @@ class UnsafeRetry(RuntimeError):
     pass
 
 
+_TERMINAL_JOB_STATUSES = frozenset(
+    {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
+)
+
+
+def job_allowed_actions(job: Any, *, credit_status: str | None = None) -> dict[str, bool]:
+    """The commands ``retry()`` and ``cancel()`` would act on for this job now.
+
+    One rule for every surface. The web app enabled "Try again" on
+    ``safe_to_retry`` alone and the admin console on ``FAILED``/``RETRY_WAIT``
+    plus ``safe_to_retry``, while ``retry()`` refuses every terminal job
+    outright - a failure before submission keeps ``safe_to_retry`` true, so
+    both surfaces offered a button whose only answer was a 409 (2026-09-07
+    review). ``retry`` is exactly the precondition ``retry()`` checks before
+    its guarded update; ``cancel`` is what ``cancel()`` will change rather
+    than hand back unchanged (a terminal job, or one whose submission is
+    unconfirmed and needs reconciling first); ``resubmit`` names the honest
+    alternative for a finished failure: a new idempotent generation, never
+    this row.
+    """
+
+    status = getattr(job, "status", None)
+    terminal = status in _TERMINAL_JOB_STATUSES
+    submission_state = getattr(job, "submission_state", "NOT_SENT") or "NOT_SENT"
+    retry = (
+        not terminal
+        and bool(getattr(job, "safe_to_retry", False))
+        and submission_state == "NOT_SENT"
+        and not getattr(job, "provider_job_id", None)
+        and not getattr(job, "output_asset_id", None)
+        and credit_status in (None, "RESERVED")
+    )
+    cancel = not terminal and submission_state != "SENT_UNCONFIRMED"
+    resubmit = status in {JobStatus.FAILED.value, JobStatus.CANCELLED.value}
+    return {"retry": retry, "cancel": cancel, "resubmit": resubmit}
+
+
 class TimelineGenerationPlanStale(IdempotencyConflict):
     """A 409 conflict: SQL timeline changed after Autopilot prepared a request."""
 

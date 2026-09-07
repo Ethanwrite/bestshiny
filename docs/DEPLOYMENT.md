@@ -176,7 +176,61 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `55b4da9` (branch `claude/payment-nonce-rpc-response-bugs-35c85c`, the head
+- **Current release.** `60d7764` (`main`, the squash of
+  [#63](https://github.com/Ethanwrite/bestshiny/pull/63) — the third 2026-09-07 production review
+  verified and fixed: the Director stage bound to the variant under review, a sequenced project
+  switch, deleted creations forgotten everywhere, wallet polling that retries under backoff, parks
+  behind "Check payment status again" and ends when the sheet closes, the dead Director controls
+  and the criticality picker removed, the plan read from the open project's workspace, paged
+  Productions and admin lists, admin deep links and audit rows, refunded-vs-charged, "Try again" on
+  the gateway's own `allowed_actions`, the pricing page on the public catalogue, key visuals through
+  the thumbnail cache, an admin console that scrolls, IME Enter, a read address for direct uploads,
+  the worker busy flag, the web proxy's WebSocket upgrade, the length that runs beside the length
+  asked for, no Regenerate on an approved shot; ledger entry `docs/OPEN_ISSUES.md` §2.51), merged
+  2026-09-07 ≈11:05Z and deployed ≈11:16Z on the operator's "合并 PR #63，同步生产服务器".
+  `DEPLOYED_SHA.prev = 55b4da9`, so the marker is back on a commit of `main`. No migration
+  (`alembic current` stayed `0081_veo_discrete_durations (head)`; the explicit upgrade on the new
+  image was a no-op), no `.env` change (`PUBLIC_BASE_URL=https://api.bestshiny.com` is what the new
+  asset read address is minted from), `COMPOSE_UNCHANGED`. Same ordering as the `55b4da9` deploy
+  (`deploy_remote.sh` rewritten for this SHA, log `deploy-60d7764.log`, `DEPLOY_EXIT=0`, api healthy
+  on the first check, 97 seconds end to end). Delta against the running `55b4da9`:
+  `git diff --name-status 55b4da9 60d7764` = the review's 25 files plus the `0d4e71e` release record;
+  the archive's checksum was compared on both ends before extraction.
+
+  Verified after: both markers written (`DEPLOYED_SHA` = the full `60d77644…`, `.prev` = `55b4da94…`),
+  the compose file byte-equal to the `bak-20260907-111424` copy, all three running image IDs equal
+  the freshly built ones (api `a74aa6d7bdf6`, worker `0c9328dc9b48`, web `ebb3fdc108ee`),
+  `RestartCount=0` on all three, api healthy, local 8080/3000 200, public
+  `https://api.bestshiny.com/health`, `https://bestshiny.com/app` and the browser's own proxy path
+  `https://bestshiny.com/api/health` all 200 from the host. New contracts answer: `GET
+  /v1/payments/catalog` 200 without a session and carries the three packs (20/1,800, 50/6,000,
+  100/11,000 USDC) while `/v1/payments/config` stays 401; the OpenAPI carries the listing's `before`
+  query and the audit log's `id`; `GET /v1/generations?…&before=` is 401 unauthenticated (routed and
+  gated). `nginx -T` in the web container shows the `map $http_upgrade $connection_upgrade` block
+  and both `proxy_set_header Upgrade` / `Connection $connection_upgrade` lines inside `/api/`, with
+  `client_max_body_size 100m` and `proxy_read_timeout 300s` unchanged. The served bundle
+  `/assets/index-BmnQfRZz.js` carries `shotStageTake`, `walletRecheckBtn`, `productionsMore`, `Load
+  older creations`, `Check payment status again`, `On stage`, `is-staged`, `next_cursor`,
+  `allowed_actions`, `requested_duration`, `Approved · in the timeline`, `isComposing`,
+  `/v1/payments/catalog` and `data-page-step`, and no longer carries `Regenerate shot`,
+  `passengerCriticality` or `cameraScale`; the served `index.html` carries `id="shotStageTake"`,
+  `id="walletRecheckBtn"`, `id="productionsMoreBtn"` and "Camera, for the continuity check", and no
+  `passengerCriticality`, `cameraScale` or `lighting` control. Zero tracebacks in api or worker.
+  Data untouched (14 sessions, 28 jobs in the same four terminal states as before — 3 CANCELLED /
+  13 COMPLETED / 8 FAILED / 4 RETRY_WAIT — 0 deleted, 14 READY media assets, `memory_index_outbox`
+  empty). Disk 11% used.
+
+  **Not done by this deploy.** The host nginx in front of the web container (the `bestshiny.com`
+  block of `/etc/nginx/sites-available/bestshiny`) still forwards no `Upgrade`/`Connection`
+  headers, so the worker WebSocket does not upgrade through `https://bestshiny.com/api/` until that
+  block gains the same two lines; the extension's HTTP polling is unaffected and no client uses the
+  socket today.
+
+  **Rollback.** No migration, so a code rollback to `55b4da9` is a plain redeploy of that revision;
+  the pre-extraction `bestshiny-backup` dump and the `*.bak-20260907-111424` copies of `.env` and the
+  compose file remain available.
+
+- **Previous release.** `55b4da9` (branch `claude/payment-nonce-rpc-response-bugs-35c85c`, the head
   of [#62](https://github.com/Ethanwrite/bestshiny/pull/62), open and not merged at deploy time, on
   top of `main` `a1606ed` — the second 2026-09-06 production review verified and fixed: the relayer
   nonce floor, recovery of a lost `/submit` answer, the per-shot spending cap enforced, sign-out

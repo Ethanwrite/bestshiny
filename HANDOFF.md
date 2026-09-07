@@ -74,7 +74,10 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > runs beside the length asked for; the worker extension no longer parks on a failed heartbeat; the web
 > proxy forwards a WebSocket upgrade. Record with residuals: `docs/OPEN_ISSUES.md` §2.51. No migration; the
 > schema head stays `0081`. The host nginx in front of the web container needs the same `Upgrade`/`Connection`
-> headers before the worker WebSocket works through `/api/`.
+> headers before the worker WebSocket works through `/api/`. Committed as `341faf1`, opened as
+> [#63](https://github.com/Ethanwrite/bestshiny/pull/63), squash-merged as `60d7764` and deployed to
+> production from `main` on 2026-09-07 ≈11:16Z at the operator's request ("合并 PR #63，同步生产服务器";
+> record: `docs/DEPLOYMENT.md` §6, `DEPLOYED_SHA` back on a commit of `main`).
 >
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head

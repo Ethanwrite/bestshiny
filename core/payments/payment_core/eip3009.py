@@ -45,6 +45,16 @@ _ERC1271_MAGIC_VALUE = "0x1626ba7e"
 _TRANSFER_EVENT = "Transfer(address,address,uint256)"
 _AUTHORIZATION_USED_EVENT = "AuthorizationUsed(address,bytes32)"
 
+#: Statuses whose row may still hold its relayer nonce: prepared or in the
+#: network (``SUBMITTING``/``SUBMITTED``), or mined (the rest). ``EXPIRED`` is
+#: only ever stamped on a transaction the node did not hold, and ``CANCELLED``
+#: never had one.
+_NONCE_HOLDING_STATUSES = ("SUBMITTING", "SUBMITTED", "CONFIRMED", "FAILED", "RECONCILIATION_REQUIRED")
+#: A mined transaction consumed its nonce whatever its outcome: ``FAILED`` is
+#: stamped from a receipt with status 0, ``RECONCILIATION_REQUIRED`` from a
+#: receipt whose logs did not prove the order.
+_MINED_STATUSES = frozenset({"CONFIRMED", "FAILED", "RECONCILIATION_REQUIRED"})
+
 
 class EIP3009Error(RuntimeError):
     pass
@@ -309,70 +319,83 @@ class EIP3009RelayerService:
         if not signature_bytes:
             raise EIP3009Rejected("Invalid EIP-712 signature format")
         should_broadcast = False
-        with self._submission_lock, self.database.session() as session:
-            self._lock_relayer(session)
-            authorization, order = self._load_owned(
-                session, workspace_id, user_id, authorization_id, lock=True
-            )
-            if authorization.status in {"SUBMITTED", "CONFIRMED"}:
-                return self._result(authorization, order)
-            if authorization.status == "SUBMITTING":
-                should_broadcast = True
-            else:
-                now_epoch = int(utcnow().timestamp())
-                if authorization.valid_before <= now_epoch:
-                    authorization.status = "EXPIRED"
-                    order.status = "EXPIRED"
+        # The lock spans the broadcast, not just the preparation. Released
+        # between the two, the next order read the node's pending count while
+        # this one's transaction was persisted but not yet sent, and the two
+        # shared a nonce; the row floor below closes that on its own, but a
+        # process that never asks the node about nonce N+1 before it has
+        # handed over nonce N is simpler to reason about than one that relies
+        # on the floor for it.
+        with self._submission_lock:
+            with self.database.session() as session:
+                self._lock_relayer(session)
+                authorization, order = self._load_owned(
+                    session, workspace_id, user_id, authorization_id, lock=True
+                )
+                if authorization.status in {"SUBMITTED", "CONFIRMED"}:
                     return self._result(authorization, order)
-                if authorization.status != "PENDING" or order.status != "PENDING":
-                    raise EIP3009Conflict("Payment authorization cannot be submitted in its current state")
-                typed_data = self._typed_data_from_row(authorization)
-                signable = self._signable_message(typed_data)
-                digest = self._message_hash(signable).hex()
-                if digest != authorization.typed_data_hash:
-                    raise EIP3009Conflict("Payment authorization snapshot has changed")
-                self._require_payer_usdc_balance(
-                    authorization.from_address,
-                    authorization.value_microunits,
-                )
-                self._verify_payer_signature(
-                    authorization=authorization,
-                    signable=signable,
-                    digest=bytes.fromhex(digest),
-                    signature=signature,
-                    signature_bytes=signature_bytes,
-                )
-                authorization.signature_hash = hashlib.sha256(signature_bytes).hexdigest()
-                authorization.attempt_count += 1
-                self._require_chain()
-                if self._authorization_used(authorization):
-                    raise EIP3009Conflict("This USDC authorization nonce has already been used")
-                self._require_earlier_transactions_delivered(session, current_id=authorization.id)
-                raw_transaction, tx_hash, relayer_nonce = self._prepare_transaction(authorization, signature)
-                # Persist the exact signed transaction before touching the
-                # network. If the process dies after broadcasting, a retry can
-                # derive the same hash, locate it, or safely re-broadcast the
-                # same bytes without spending a second nonce.
-                authorization.raw_transaction = raw_transaction
-                authorization.transaction_hash = tx_hash
-                authorization.relayer_nonce = relayer_nonce
-                authorization.status = "SUBMITTING"
-                authorization.submitted_at = utcnow()
-                authorization.last_error_code = None
-                order.transaction_hash = tx_hash
-                order.status = "SUBMITTED"
-                order.submitted_at = authorization.submitted_at
-                state = session.get(RelayerAccountState, self.relayer_address)
-                if state is not None:
-                    state.last_submitted_nonce = relayer_nonce
-                should_broadcast = True
-        if not should_broadcast:
-            raise AssertionError("relayer submission produced no work")
-        return self._ensure_broadcast(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            authorization_id=authorization_id,
-        )
+                if authorization.status == "SUBMITTING":
+                    should_broadcast = True
+                else:
+                    now_epoch = int(utcnow().timestamp())
+                    if authorization.valid_before <= now_epoch:
+                        authorization.status = "EXPIRED"
+                        order.status = "EXPIRED"
+                        return self._result(authorization, order)
+                    if authorization.status != "PENDING" or order.status != "PENDING":
+                        raise EIP3009Conflict(
+                            "Payment authorization cannot be submitted in its current state"
+                        )
+                    typed_data = self._typed_data_from_row(authorization)
+                    signable = self._signable_message(typed_data)
+                    digest = self._message_hash(signable).hex()
+                    if digest != authorization.typed_data_hash:
+                        raise EIP3009Conflict("Payment authorization snapshot has changed")
+                    self._require_payer_usdc_balance(
+                        authorization.from_address,
+                        authorization.value_microunits,
+                    )
+                    self._verify_payer_signature(
+                        authorization=authorization,
+                        signable=signable,
+                        digest=bytes.fromhex(digest),
+                        signature=signature,
+                        signature_bytes=signature_bytes,
+                    )
+                    authorization.signature_hash = hashlib.sha256(signature_bytes).hexdigest()
+                    authorization.attempt_count += 1
+                    self._require_chain()
+                    if self._authorization_used(authorization):
+                        raise EIP3009Conflict("This USDC authorization nonce has already been used")
+                    self._require_earlier_transactions_delivered(session, current_id=authorization.id)
+                    relayer_nonce = self._allocate_relayer_nonce(session)
+                    raw_transaction, tx_hash = self._prepare_transaction(
+                        authorization, signature, nonce=relayer_nonce
+                    )
+                    # Persist the exact signed transaction before touching the
+                    # network. If the process dies after broadcasting, a retry can
+                    # derive the same hash, locate it, or safely re-broadcast the
+                    # same bytes without spending a second nonce.
+                    authorization.raw_transaction = raw_transaction
+                    authorization.transaction_hash = tx_hash
+                    authorization.relayer_nonce = relayer_nonce
+                    authorization.status = "SUBMITTING"
+                    authorization.submitted_at = utcnow()
+                    authorization.last_error_code = None
+                    order.transaction_hash = tx_hash
+                    order.status = "SUBMITTED"
+                    order.submitted_at = authorization.submitted_at
+                    state = session.get(RelayerAccountState, self.relayer_address)
+                    if state is not None:
+                        state.last_submitted_nonce = relayer_nonce
+                    should_broadcast = True
+            if not should_broadcast:
+                raise AssertionError("relayer submission produced no work")
+            return self._ensure_broadcast(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                authorization_id=authorization_id,
+            )
 
     def reconcile(
         self,
@@ -734,14 +757,16 @@ class EIP3009RelayerService:
     def _require_earlier_transactions_delivered(self, session: Session, *, current_id: str) -> None:
         """Every earlier prepared transaction must be in the network before a nonce is read.
 
-        ``_prepare_transaction`` takes the nonce from the node's pending count.
-        A transaction that was persisted but whose broadcast then failed is not
+        ``_allocate_relayer_nonce`` starts from the node's pending count. A
+        transaction that was persisted but whose broadcast then failed is not
         in that count, so the next order was handed the same nonce and the two
         could never both be mined as their own transactions - the first was
         dead on arrival, or replaced the second (2026-09-06 audit F02). Sending
         the earlier bytes first is what moves the count; when they still will
         not go, this order waits rather than colliding. Expired rows are left
-        alone: nothing of theirs can reach the chain, so their nonce is free.
+        alone: nothing of theirs can settle on the chain, so their nonce is
+        free. What this cannot fix - a node whose count has not caught up with
+        what it accepted - the row floor in ``_allocate_relayer_nonce`` does.
         """
 
         now_epoch = int(utcnow().timestamp())
@@ -783,11 +808,70 @@ class EIP3009RelayerService:
         except EIP3009RPCError:
             return False
 
+    def _allocate_relayer_nonce(self, session: Session) -> int:
+        """The next relayer nonce: the node's pending count, or one past the
+        highest nonce this relayer still has in the network when the node has
+        not caught up with it.
+
+        The pending count alone was the allocator. A node whose count lags
+        what it accepted a moment ago - a load-balanced RPC answers from more
+        than one node - handed the nonce of a transaction that was already
+        persisted and delivered to a second order, and the two could never
+        both be mined (2026-09-06 audit F02, the reproduction with a constant
+        count). The rows are the other half of the truth. Every earlier
+        transaction still in flight has been delivered by the time this runs
+        (``_require_earlier_transactions_delivered`` ran first), so the count
+        can never legitimately sit at or below their nonces: a mined
+        transaction consumed its nonce for good, and a delivered one holds it
+        until it is mined or dropped. A row whose transaction the node does
+        not hold - dropped, or never delivered and now expired - is not
+        counted, so no gap is ever built on it and its nonce stays free, which
+        is what keeps a stuck relayer impossible: with a gap the relayer would
+        queue behind a nonce nothing will ever fill. Only rows at or above the
+        count are asked about, so a node that is caught up costs no extra
+        call.
+        """
+
+        pending = self._parse_quantity(
+            self._rpc("eth_getTransactionCount", [self.relayer_address, "pending"])
+        )
+        now_epoch = int(utcnow().timestamp())
+        contenders = list(
+            session.scalars(
+                select(EIP3009Authorization)
+                .where(
+                    EIP3009Authorization.relayer_address == self.relayer_address,
+                    EIP3009Authorization.chain_id == self.chain_id,
+                    EIP3009Authorization.relayer_nonce.is_not(None),
+                    EIP3009Authorization.relayer_nonce >= pending,
+                    EIP3009Authorization.status.in_(_NONCE_HOLDING_STATUSES),
+                )
+                .order_by(EIP3009Authorization.relayer_nonce)
+            )
+        )
+        nonce = pending
+        for row in contenders:
+            if row.relayer_nonce is None:
+                continue
+            if row.status in _MINED_STATUSES:
+                held = True
+            elif row.valid_before <= now_epoch:
+                # Expired: whatever it sent cannot settle, and the sweep never
+                # re-sends it. Its nonce is free (the same rule as
+                # _require_earlier_transactions_delivered).
+                held = False
+            else:
+                held = bool(row.raw_transaction and row.transaction_hash) and self._delivered(
+                    str(row.raw_transaction), str(row.transaction_hash)
+                )
+            if held:
+                nonce = max(nonce, row.relayer_nonce + 1)
+        return nonce
+
     def _prepare_transaction(
-        self, authorization: EIP3009Authorization, signature: str
-    ) -> tuple[str, str, int]:
+        self, authorization: EIP3009Authorization, signature: str, *, nonce: int
+    ) -> tuple[str, str]:
         calldata = self._transfer_calldata(authorization, signature)
-        nonce = self._parse_quantity(self._rpc("eth_getTransactionCount", [self.relayer_address, "pending"]))
         estimate = self._parse_quantity(
             self._rpc(
                 "eth_estimateGas",
@@ -832,7 +916,7 @@ class EIP3009RelayerService:
         signed = Account.sign_transaction(transaction, self.relayer_private_key)
         expected = "0x" + signed.hash.hex()
         raw_transaction = "0x" + signed.raw_transaction.hex()
-        return raw_transaction, expected, nonce
+        return raw_transaction, expected
 
     def _ensure_broadcast(
         self,

@@ -111,3 +111,27 @@ def test_the_web_proxy_waits_at_least_as_long_as_the_api_waits_for_a_model() -> 
     assert declared, "apps/web/nginx.conf must declare proxy_read_timeout for /api/"
     scale = {None: 1, "ms": 0.001, "s": 1, "m": 60, "h": 3600}[declared.group(2)]
     assert int(declared.group(1)) * scale >= Settings(_env_file=None).provider_http_timeout_seconds
+
+
+def test_the_multipart_upload_route_runs_off_the_event_loop() -> None:
+    """``POST /v1/assets`` validates, hashes and pushes the whole file to
+    object storage synchronously. Declared ``async def`` with no await, it did
+    all of that on the event loop, so every other request in the process -
+    login, /health, the job polls - stalled for the length of a slow upload
+    (2026-09-06 audit). A plain ``def`` is what puts it on the threadpool."""
+
+    import inspect
+
+    from platform_shared import Settings
+    from video_platform_api.container import build_container
+
+    app = create_app(build_container(Settings(_env_file=None, deployment_environment="test")))
+    routes = {
+        (route.path, method): route.endpoint
+        for route in app.routes
+        for method in (getattr(route, "methods", None) or ())
+    }
+    assert ("/v1/assets", "POST") in routes
+    assert not inspect.iscoroutinefunction(routes[("/v1/assets", "POST")])
+    # The same rule for the other route that awaited nothing.
+    assert not inspect.iscoroutinefunction(routes[("/v1/providers", "GET")])

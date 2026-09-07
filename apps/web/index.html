@@ -115,6 +115,11 @@
         </nav>
 
         <div class="app-topbar-right">
+          <!-- Narrow desktops fold the Inspector away (styles.css, max-width 1280px);
+               this is the one control that brings it back. Hidden by CSS on wide
+               screens and by app.js on pages without an inspector. -->
+          <button id="inspectorToggleBtn" class="btn btn-tertiary inspector-toggle" type="button"
+                  aria-controls="appInspector" aria-expanded="false" title="Show or hide the settings panel">Settings</button>
           <button id="walletBtn" class="credits-pill" type="button" title="Credits and top up">
             <span class="credits-dot" aria-hidden="true"></span>
             <span id="creditsAmount" class="mono">—</span>
@@ -132,6 +137,9 @@
               <button id="adminNavBtn" class="user-menu-action" type="button" hidden>Admin · System health</button>
               <div class="user-menu-sep"></div>
               <button id="logoutBtn" class="user-menu-action is-danger" type="button">Sign out</button>
+              <!-- Written only when the server did not confirm the sign-out: the
+                   session is still live, so the page stays signed in and says so. -->
+              <p id="logoutError" class="user-menu-error" role="alert" hidden></p>
             </div>
           </div>
         </div>
@@ -768,6 +776,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <details class="disclosure">
                 <summary>Advanced</summary>
                 <label class="field"><span class="field-label">Most I'll spend on this shot (USD)</span><input id="estimatedCost" type="number" min="0" step="0.01" value="0.80" /></label>
+                <p class="field-note">A limit, checked against BestShiny's own quote before any credit is reserved: a shot quoted above it is refused and nothing is charged, and an automatic retry onto a dearer model is refused the same way. 0 means no limit.</p>
                 <label class="field"><span class="field-label">The full prompt BestShiny will send (read only)</span><textarea id="compiledPrompt" rows="7" readonly></textarea></label>
               </details>
             </div>
@@ -1115,6 +1124,7 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <b id="walletConfirmCredits">— Credits</b>
               </div>
               <div class="wallet-confirm-facts">
+                <span><small>Credits go to</small><b id="walletRecipient">—</b></span>
                 <span><small>Channel</small><b id="walletSettlement">Checking</b></span>
                 <span><small>Network</small><b id="walletNetwork">Base</b></span>
                 <span><small>Currency</small><b id="walletCurrency">Native USDC</b></span>

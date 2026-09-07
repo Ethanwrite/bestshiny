@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from asset_registry_core import AssetRegistry, CanonicalVersionNotSet
-from entitlement_core import GenerationAdmissionService
+from entitlement_core import (
+    GenerationAdmissionService,
+    ShotSpendCapExceeded,
+    enforce_shot_spend_cap,
+)
 from evaluation_core import (
     EvaluationDecision,
     EvaluationEvidence,
@@ -110,6 +114,19 @@ def _new_trace_id() -> str:
 #: one query rather than one each, short enough that an operator who has just
 #: saved a run sees it take effect without a restart.
 _LCB_SNAPSHOT_TTL_SECONDS = 60.0
+
+
+def _spend_cap(metadata: dict[str, Any]) -> float | None:
+    """The per-shot spend cap a request was submitted under, if any."""
+
+    raw = metadata.get("spend_cap_usd")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
 
 
 class VisualProductionRuntime:
@@ -748,15 +765,16 @@ class VisualProductionRuntime:
                 references_already_strengthened=bool(metadata.get("references_strengthened")),
             )
             if not plan.terminal:
-                retry_job = self._execute_retry(job_id, request, metadata, spec_data, plan)
-                self.metrics.record_once(
-                    provider=provider,
-                    model_id=model_id,
-                    metric="auto_retry",
-                    generation_job_id=job_id,
-                    project_id=project_id,
-                    shot_id=shot_id,
-                )
+                plan, retry_job = self._retry_under_cap(job_id, request, metadata, spec_data, plan)
+                if retry_job is not None:
+                    self.metrics.record_once(
+                        provider=provider,
+                        model_id=model_id,
+                        metric="auto_retry",
+                        generation_job_id=job_id,
+                        project_id=project_id,
+                        shot_id=shot_id,
+                    )
         with self.database.session() as session:
             trace = session.scalar(select(ProductionTrace).where(ProductionTrace.generation_job_id == job_id))
             if trace:
@@ -884,6 +902,40 @@ class VisualProductionRuntime:
             # the user's request, and a `ValueError` catch does not keep that
             # promise — `OperationalError` is not one.
             return
+
+    def _retry_under_cap(
+        self,
+        original_job_id: str,
+        request: dict[str, Any],
+        metadata: dict[str, Any],
+        spec_data: dict[str, Any],
+        plan: RetryPlan,
+    ) -> tuple[RetryPlan, GenerationJob | None]:
+        """Run the plan's retry, unless its quote is above the author's cap.
+
+        The alternative a plan chooses can cost more than the model that just
+        ran. Above the cap the shot was generated under, that ends the
+        automatic retries for this shot - the verdict stands for the author,
+        who can raise the cap and regenerate - and the refusal is recorded as
+        the plan's reason, never raised as an evaluation failure that would
+        hard-fail the candidate.
+        """
+
+        try:
+            return plan, self._execute_retry(original_job_id, request, metadata, spec_data, plan)
+        except ShotSpendCapExceeded as exc:
+            return (
+                plan.model_copy(
+                    update={
+                        "terminal": True,
+                        "reasons": [
+                            *plan.reasons,
+                            f"SPEND_CAP_EXCEEDED:{exc.quoted_usd:.4f}>{exc.cap_usd:.2f}",
+                        ],
+                    }
+                ),
+                None,
+            )
 
     def _execute_retry(
         self,
@@ -1079,6 +1131,10 @@ class VisualProductionRuntime:
             quoted_cost_usd: float | None = None
             if self.generation_admission is not None:
                 admitted_retry = self.generation_admission.admit_autopilot(retry_request)
+                # The author's cap travels in the request metadata from the
+                # first attempt; a retry onto a dearer model is held to it
+                # before its credits are reserved.
+                enforce_shot_spend_cap(admitted_retry, _spend_cap(metadata))
                 retry_request = admitted_retry.request
                 estimated_credits = admitted_retry.estimate.credits
                 pricing_version = self.generation_admission.pricing.version

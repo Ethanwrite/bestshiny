@@ -15,6 +15,7 @@ from character_core import (
 )
 from continuity_core import FrameAnchorPlan, FrameAnchorPlanner, FrameAnchorPlanUnresolved
 from cost_core import CostEngine
+from entitlement_core import enforce_shot_spend_cap
 from evaluation_core import EvaluationDecision, EvaluationEvidence
 from generation_gateway import GenerationGateway
 from generation_policy_core import (
@@ -438,6 +439,7 @@ class CandidatePipeline:
         character_bindings: list[dict] | None = None,
         reference_asset_ids: list[str] | None = None,
         estimated_cost: float = 0.0,
+        spend_cap_usd: float | None = None,
         enforce_entitlements: bool = True,
         state_deltas: list[dict[str, object]] | None = None,
         proposed_by_user_id: str | None = None,
@@ -878,7 +880,7 @@ class CandidatePipeline:
                     candidate_id=candidate_id,
                     character_bindings=character_bindings,
                     reference_asset_ids=effective_reference_asset_ids,
-                    estimated_cost=0.0,
+                    estimated_cost=estimated_cost,
                     allowed_providers=allowed_providers,
                     frame_anchor_plan=(anchor_plan.as_json() if anchor_plan is not None else None),
                 )
@@ -894,7 +896,23 @@ class CandidatePipeline:
                 else None
             )
             if admitted is not None:
+                # The author's cap against the server's quote, before any
+                # credit is reserved. It rides in the request metadata so an
+                # automatic retry onto a dearer alternative is held to it too.
+                enforce_shot_spend_cap(admitted, spend_cap_usd)
                 prepared = replace(prepared, request=admitted.request)
+            if spend_cap_usd is not None and spend_cap_usd > 0:
+                prepared = replace(
+                    prepared,
+                    request=prepared.request.model_copy(
+                        update={
+                            "metadata": {
+                                **prepared.request.metadata,
+                                "spend_cap_usd": float(spend_cap_usd),
+                            }
+                        }
+                    ),
+                )
             generation_plan = {
                 "policy": prepared.request.generation_policy,
                 "required_inputs": {
@@ -1045,6 +1063,11 @@ class CandidatePipeline:
             metadata={
                 "generation_plan": generation_plan,
                 **({"frame_anchor": anchor_plan.as_json()} if anchor_plan is not None else {}),
+                **(
+                    {"spend_cap_usd": float(spend_cap_usd)}
+                    if spend_cap_usd is not None and spend_cap_usd > 0
+                    else {}
+                ),
             },
         )
 

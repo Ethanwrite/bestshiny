@@ -29,6 +29,7 @@ from entitlement_core import (
     InsufficientWorkspaceCredits,
     PlanEntitlementDenied,
     ProductionBudgetExceeded,
+    ShotSpendCapExceeded,
     SpendAuthorizationDenied,
     WorkspaceCreditConflict,
     WorkspacePlanTier,
@@ -281,7 +282,15 @@ class CandidateGenerate(BaseModel):
     )
     character_ids: list[str] = Field(default_factory=list, max_length=20)
     reference_asset_ids: list[str] = Field(default_factory=list, max_length=100)
+    # The caller's own guess at the cost. Recorded on the job where nothing
+    # prices it; where admission runs, the server's quote replaces it. It is
+    # not a limit - that is `spend_cap_usd`.
     estimated_cost: float = Field(default=0.0, ge=0)
+    # The most the author will spend on this shot, in USD. The server's quote
+    # is compared to it before any credit is reserved and the generation is
+    # refused (422, nothing charged) when the quote is above it; an automatic
+    # retry onto a dearer model is refused the same way. None or 0 is no cap.
+    spend_cap_usd: float | None = Field(default=None, ge=0, le=100_000)
     state_deltas: list[CandidateCharacterStateDelta] = Field(default_factory=list, max_length=20)
 
 
@@ -1057,6 +1066,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                 character_bindings=bindings,
                 reference_asset_ids=body.reference_asset_ids,
                 estimated_cost=body.estimated_cost,
+                spend_cap_usd=body.spend_cap_usd,
                 enforce_entitlements=not principal.development_bypass,
                 state_deltas=[item.as_service_delta() for item in body.state_deltas],
                 proposed_by_user_id=(None if principal.development_bypass else principal.user_id),
@@ -1073,6 +1083,11 @@ def create_app(container: Container | None = None) -> FastAPI:
             # answers with different fixes — upgrade versus top up — and only
             # the caller can act on the difference.
             raise HTTPException(402, str(exc)) from exc
+        except ShotSpendCapExceeded as exc:
+            # The author's own ceiling, not the plan's and not the balance's:
+            # the request as written cannot be honoured, so it is 422, and
+            # the message carries both numbers so the fix is obvious.
+            raise HTTPException(422, str(exc)) from exc
         except PlanEntitlementDenied as exc:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
@@ -2928,8 +2943,13 @@ def create_app(container: Container | None = None) -> FastAPI:
             "reconciled_by": resolved.reconciled_by,
         }
 
+    # A plain `def`, deliberately: FastAPI runs it on the threadpool. It reads
+    # and hashes the whole file and pushes it to object storage synchronously,
+    # and as an `async def` with no await it did all of that on the event
+    # loop, stalling every other request in the process - login, /health,
+    # the polls - for the length of a slow upload (2026-09-06 audit).
     @app.post("/v1/assets")
-    async def upload_asset(
+    def upload_asset(
         request: Request,
         principal: AuthPrincipal = Depends(auth.current_user),
         project_id: str = Form(...),
@@ -3698,7 +3718,7 @@ def create_app(container: Container | None = None) -> FastAPI:
         return result
 
     @app.get("/v1/providers")
-    async def list_providers(_principal: AuthPrincipal = Depends(auth.current_user)):
+    def list_providers(_principal: AuthPrincipal = Depends(auth.current_user)):
         result = []
         for name in container.providers.list():
             if not container.providers.is_configured(name) or not container.model_registry.provider_enabled(

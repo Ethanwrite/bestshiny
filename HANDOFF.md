@@ -45,6 +45,17 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > production-relevant one is F01: with OSS's verify-on-complete mode a direct upload's PUT could
 > overwrite another project's adopted object - the presigned key is now per-upload in that mode.
 >
+> **2026-09-06 · branch `claude/payment-nonce-rpc-response-bugs-35c85c` — the second production review,
+> verified and fixed.** Eleven findings against `a1606ed`: three (RPC failure expiring a paid order, the
+> proxy read timeout, password-reset delivery) quote the tree before #60/#61 and were already closed;
+> the relayer-nonce item named the real residual of #60 (the node's pending count was still the only
+> allocator) and is closed by a row floor plus a lock held across the broadcast; the other seven
+> reproduced - a lost `/submit` answer told the user nothing was paid, the per-shot spending cap limited
+> nothing, sign-out kept the previous account's director sessions and treated a failed `/logout` as a
+> sign-out, the multipart upload ran on the event loop, the wallet topped up a workspace the open project
+> is not charged against, and the Inspector was unreachable under 1280px. Record with residuals:
+> `docs/OPEN_ISSUES.md` §2.50. No migration; the schema head stays `0081`. Not deployed by that session.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
 > `0070_creative_director_screenplay`); production state is in

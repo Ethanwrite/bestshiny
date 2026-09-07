@@ -206,6 +206,7 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
             )
             return {
                 "workspace_id": workspace.id,
+                "workspace_name": workspace.name,
                 "role": role,
                 "plan_tier": workspace.plan_tier,
                 "credit_balance": workspace.credit_balance,

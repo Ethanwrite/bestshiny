@@ -881,6 +881,13 @@ class AuthService:
                 {
                     "id": workspace_id,
                     "role": role,
+                    # Named so a client can say which workspace a top-up or a
+                    # balance belongs to, instead of showing a bare id.
+                    "name": (
+                        workspace_details[workspace_id].name
+                        if workspace_id in workspace_details
+                        else ""
+                    ),
                     "plan_tier": (
                         workspace_details[workspace_id].plan_tier
                         if workspace_id in workspace_details

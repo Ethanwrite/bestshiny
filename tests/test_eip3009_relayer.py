@@ -707,3 +707,145 @@ def test_an_rpc_outage_after_expiry_is_an_error_not_an_expired_order(tmp_path) -
     with container.database.session() as session:
         assert session.scalar(select(EIP3009Authorization)).status == "CONFIRMED"
         assert session.scalar(select(PaymentOrder)).status == "PAID"
+
+
+# --- The nonce is allocated from the rows as well as the node (2026-09-06 audit, second pass)
+
+
+def test_a_node_whose_pending_count_lags_still_hands_out_distinct_nonces(tmp_path) -> None:
+    """The base fake answers ``eth_getTransactionCount`` with a constant 7 - the
+    reproduction in the audit: a load-balanced node that has not caught up with
+    the transaction it accepted a moment ago. The first order's delivered
+    transaction holds 7, so the second takes 8 from the rows, not 7 from the node."""
+
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    checkouts = [_checkout(client, workspace_id, payer), _checkout(client, workspace_id, payer)]
+    for checkout in checkouts:
+        response = client.post(
+            f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/submit",
+            json={"signature": _signature(payer, checkout["typed_data"])},
+            headers=_csrf(client),
+        )
+        assert response.status_code == 200, response.text
+    assert _nonces(container, checkouts) == [("SUBMITTED", 7), ("SUBMITTED", 8)]
+    assert fake.sent_raw[0] != fake.sent_raw[-1]
+    with container.database.session() as session:
+        rows = list(session.scalars(select(EIP3009Authorization)))
+        assert len({row.relayer_nonce for row in rows}) == 2
+
+
+def test_a_delivered_transaction_the_node_dropped_frees_its_nonce(tmp_path) -> None:
+    """A row can only raise the floor while the node holds its transaction. Once
+    the node has dropped it, counting it would leave a nonce gap nothing fills
+    and the relayer would be stuck behind it for good."""
+
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    first, second = _checkout(client, workspace_id, payer), _checkout(client, workspace_id, payer)
+    delivered = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{first['id']}/submit",
+        json={"signature": _signature(payer, first["typed_data"])},
+        headers=_csrf(client),
+    )
+    assert delivered.status_code == 200 and delivered.json()["status"] == "SUBMITTED"
+    first_raw = fake.sent_raw[0]
+
+    def dropped(method: str, params: list[Any]) -> Any:
+        # The node no longer holds the first transaction and refuses the bytes.
+        if method == "eth_sendRawTransaction" and str(params[0]) == first_raw:
+            raise EIP3009RPCError("RPC_REJECTED")
+        return fake(method, params)
+
+    container.eip3009_relayer._rpc = dropped  # type: ignore[method-assign]
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{second['id']}/submit",
+        json={"signature": _signature(payer, second["typed_data"])},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200, response.text
+    assert _nonces(container, [first, second]) == [("SUBMITTED", 7), ("SUBMITTED", 7)]
+
+
+def test_an_expired_undelivered_transaction_frees_its_nonce(tmp_path) -> None:
+    container, _fake, client, _checkout_row, path, signature, _tx_hash = _expired_uncertain_order(tmp_path)
+    expired = client.post(path, json={"signature": signature}, headers=_csrf(client))
+    assert expired.json()["status"] == "EXPIRED"
+    payer = Account.create("second-payer")
+    workspace_id = path.split("/")[3]
+    second = _checkout(client, workspace_id, payer)
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{second['id']}/submit",
+        json={"signature": _signature(payer, second["typed_data"])},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200, response.text
+    assert _nonces(container, [second]) == [("SUBMITTED", 7)]
+
+
+def test_a_mined_transaction_raises_the_floor_even_when_the_node_is_behind(tmp_path) -> None:
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    first, second = _checkout(client, workspace_id, payer), _checkout(client, workspace_id, payer)
+    submitted = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{first['id']}/submit",
+        json={"signature": _signature(payer, first["typed_data"])},
+        headers=_csrf(client),
+    )
+    fake.receipt = _receipt(first, submitted.json()["transaction_hash"])
+    assert container.eip3009_relayer.sweep().confirmed == 1
+    fake.receipt = None
+
+    response = client.post(
+        f"/v1/workspaces/{workspace_id}/relayed-authorizations/{second['id']}/submit",
+        json={"signature": _signature(payer, second["typed_data"])},
+        headers=_csrf(client),
+    )
+    assert response.status_code == 200, response.text
+    assert _nonces(container, [first, second]) == [("CONFIRMED", 7), ("SUBMITTED", 8)]
+
+
+def test_two_orders_submitted_at_once_never_share_a_nonce(tmp_path) -> None:
+    """Both orders race through the service on two threads against the lagging
+    node; the lock is held across the broadcast and the floor reads the rows,
+    so the second allocation cannot see the count before the first delivery."""
+
+    import threading
+
+    container, _relayer, fake = _container(tmp_path)
+    client, workspace_id = _registered(container)
+    payer = Account.create("payer")
+    checkouts = [_checkout(client, workspace_id, payer), _checkout(client, workspace_id, payer)]
+    signatures = [_signature(payer, checkout["typed_data"]) for checkout in checkouts]
+    gate = threading.Barrier(2)
+    outcomes: list[str] = []
+    user_id = _owner_id(container)
+
+    def submit(index: int) -> None:
+        gate.wait()
+        try:
+            result = container.eip3009_relayer.submit_authorization(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                authorization_id=checkouts[index]["id"],
+                signature=signatures[index],
+            )
+            outcomes.append(result.status)
+        except Exception as exc:  # pragma: no cover - the assertion below names it
+            outcomes.append(f"error:{exc}")
+
+    threads = [threading.Thread(target=submit, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes == ["SUBMITTED", "SUBMITTED"], outcomes
+    assert sorted(nonce for _status, nonce in _nonces(container, checkouts)) == [7, 8]
+
+
+def _owner_id(container) -> str:  # type: ignore[no-untyped-def]
+    with container.database.session() as session:
+        return session.scalar(select(EIP3009Authorization.user_id))

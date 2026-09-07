@@ -69,9 +69,15 @@ const paymentFailureMessage = (status) => `${failureReason(status)} No credits w
 const paymentState = {
   user: null,
   workspace: null,
+  // The workspace of the project open in the app. app.js announces it on
+  // every project switch; a top-up, the balance and the plans all bind to it.
+  projectWorkspaceId: null,
   config: null,
   billing: null,
   checkout: null,
+  // A signed authorization whose /submit answer never arrived: kept so the
+  // next Confirm resends it instead of asking for a second payment.
+  pendingSubmission: null,
   walletAccount: "",
   selectedSku: DEFAULT_SKU,
   selectedProvider: "xunhupay",
@@ -146,17 +152,29 @@ async function api(path, options = {}) {
     const detail = typeof body.detail === "object"
       ? body.detail?.message || body.detail?.code
       : body.detail;
-    throw new Error(detail || `Request failed (${response.status})`);
+    const error = new Error(detail || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
 
-function chooseWorkspace(user) {
+// The workspace a top-up credits. It is the one the open project belongs to
+// whenever the user is a member of it: the credits pill, the plan gates and
+// every generation in that project are charged there, so paying anywhere else
+// tops up an account the user is not looking at. Only without a project does
+// the old order apply - a workspace they own or administer, else the first.
+function chooseWorkspace(user, projectWorkspaceId = null) {
   const workspaces = user?.workspaces || [];
-  return workspaces.find((workspace) => ["OWNER", "ADMIN"].includes(workspace.role))
+  return (projectWorkspaceId && workspaces.find((workspace) => workspace.id === projectWorkspaceId))
+    || workspaces.find((workspace) => ["OWNER", "ADMIN"].includes(workspace.role))
     || workspaces[0]
     || null;
 }
+
+const workspaceLabel = (workspace) => (workspace
+  ? (workspace.name || paymentState.billing?.workspace_name || `Workspace ${String(workspace.id).slice(0, 8)}`)
+  : "—");
 
 function setMessage(message = "", error = "") {
   element("walletStatus").textContent = message;
@@ -367,6 +385,10 @@ function render() {
   element("walletCreditBalance").textContent = paymentState.billing
     ? `${paymentState.billing.credit_balance.toLocaleString()} credits`
     : "—";
+  // Who receives the credits, said on the sheet: the workspace the open
+  // project is charged against, never a silently chosen other one.
+  element("walletRecipient").textContent = workspaceLabel(paymentState.workspace);
+  element("walletRecipient").title = paymentState.workspace?.id || "";
   element("walletNetwork").textContent = isXunhuPay
     ? "WeChat"
     : (paymentState.config?.network === "BASE_MAINNET" ? "Base Mainnet" : "Base");
@@ -415,9 +437,39 @@ function render() {
 
 async function refreshBilling() {
   if (!paymentState.workspace) return;
-  paymentState.billing = await api(`/v1/workspaces/${paymentState.workspace.id}/billing`);
-  paymentState.workspace.plan_tier = paymentState.billing.plan_tier;
+  const workspaceId = paymentState.workspace.id;
+  const billing = await api(`/v1/workspaces/${workspaceId}/billing`);
+  // The user may have switched projects while this was in flight; a balance
+  // for another workspace must not be painted as this one's.
+  if (paymentState.workspace?.id !== workspaceId) return;
+  paymentState.billing = billing;
+  paymentState.workspace.plan_tier = billing.plan_tier;
+  if (billing.workspace_name && !paymentState.workspace.name) paymentState.workspace.name = billing.workspace_name;
   render();
+}
+
+// Rebind to the workspace of the project now open. Called on every project
+// switch app.js announces; a top-up in flight for another workspace is left
+// alone until it settles or the sheet is closed.
+async function bindProjectWorkspace(workspaceId) {
+  paymentState.projectWorkspaceId = workspaceId || null;
+  // No project open (the last one deleted, or a sign-out under way): nothing
+  // to bind to, and the sign-out path resets the wallet itself.
+  if (!paymentState.user || !paymentState.projectWorkspaceId) return;
+  // A payment in flight - a poll running, a signed order waiting to be resent,
+  // a checkout being created - belongs to the workspace it was started for;
+  // rebinding under it would point its polls at the wrong workspace. The
+  // sheet rebinds the next time it is opened or closed instead.
+  if (paymentState.pollTimer || paymentState.pendingSubmission || paymentState.busy) return;
+  const next = chooseWorkspace(paymentState.user, paymentState.projectWorkspaceId);
+  if (next?.id === paymentState.workspace?.id) return;
+  paymentState.workspace = next;
+  paymentState.billing = null;
+  paymentState.checkout = null;
+  resetWalletView();
+  setMessage();
+  render();
+  if (next) await refreshBilling();
 }
 
 function resetWalletView() {
@@ -486,6 +538,7 @@ function showPaymentSuccess(payment, balanceBefore) {
   finishWidget();
   clearWalletConnectQr();
   clearXunhuPayQr();
+  paymentState.pendingSubmission = null;
   setMessage();
   const provider = payment.provider || paymentState.selectedProvider;
   const planId = payment.plan_id || payment.sku || paymentState.checkout?.plan_id
@@ -499,7 +552,7 @@ function showPaymentSuccess(payment, balanceBefore) {
 
   element("walletSuccessPlan").textContent = `${copy.name} pack`;
   element("walletSuccessAmount").textContent = `${providerLabel} · ${formatPrice({ amount, currency })}`;
-  element("walletSuccessCredits").textContent = `+${credits.toLocaleString()} Credits`;
+  element("walletSuccessCredits").textContent = `+${credits.toLocaleString()} Credits · ${workspaceLabel(paymentState.workspace)}`;
   element("walletPurchaseView").hidden = true;
   const success = element("walletSuccessView");
   success.hidden = false;
@@ -565,11 +618,25 @@ async function initializeForUser(user) {
   window.clearTimeout(paymentState.pollTimer);
   paymentState.pollTimer = null;
   paymentState.user = user;
-  paymentState.workspace = chooseWorkspace(user);
+  paymentState.workspace = chooseWorkspace(user, paymentState.projectWorkspaceId);
   paymentState.checkout = null;
+  paymentState.pendingSubmission = null;
+  // The previous account's wallet address, balance and receipt must not
+  // outlive its sign-out on a shared browser.
+  paymentState.walletAccount = "";
+  paymentState.billing = null;
+  discardWidget();
+  clearWalletConnectQr();
+  clearXunhuPayQr();
+  ["walletSuccessPlan", "walletSuccessAmount", "walletSuccessBalance"].forEach((id) => {
+    element(id).textContent = "—";
+  });
+  element("walletSuccessCredits").textContent = "— Credits";
+  setMessage();
   resetWalletView();
   if (!user || !paymentState.workspace) {
-    paymentState.billing = null;
+    const amount = element("creditsAmount");
+    if (amount) amount.textContent = "—";
     render();
     return;
   }
@@ -594,16 +661,21 @@ async function initializeForUser(user) {
 // state. Until then the widget owns it, and reopening a modal <dialog> would
 // bury the widget in the top layer.
 function finishWidget() {
-  if (paymentState.unmountWidget) {
-    try {
-      paymentState.unmountWidget();
-    } catch {
-      // The widget may already be gone; nothing here is worth surfacing.
-    }
-    paymentState.unmountWidget = null;
-  }
+  discardWidget();
   const dialog = element("walletDialog");
   if (!dialog.open) dialog.showModal();
+}
+
+// Take the widget down without bringing the sheet back: the sign-out path,
+// where the previous account's purchase must simply disappear.
+function discardWidget() {
+  if (!paymentState.unmountWidget) return;
+  try {
+    paymentState.unmountWidget();
+  } catch {
+    // The widget may already be gone; nothing here is worth surfacing.
+  }
+  paymentState.unmountWidget = null;
 }
 
 // Success is whatever BestShiny's own settlement says it is. The widget
@@ -927,7 +999,14 @@ async function pollRelayedAuthorization(authorizationId) {
       return;
     }
     if (["FAILED", "EXPIRED", "RECONCILIATION_REQUIRED"].includes(result.status)) {
+      paymentState.pendingSubmission = null;
       setMessage("", paymentFailureMessage(result.status));
+      return;
+    }
+    if (result.status === "PENDING" && paymentState.pendingSubmission?.checkoutId === authorizationId) {
+      // The server is back and never applied the submission: polling cannot
+      // finish this; the user can, with the signature already in hand.
+      setMessage(RESEND_MESSAGE);
       return;
     }
     paymentState.pollTimer = window.setTimeout(
@@ -943,13 +1022,102 @@ async function pollRelayedAuthorization(authorizationId) {
   }
 }
 
+const RESEND_MESSAGE = "The signed authorization was not submitted; nothing has left your wallet."
+  + " Press Confirm to send it again — no new signature is needed.";
+
+// Send a signed authorization to the relayer and follow it to settlement.
+// Once the signature has been sent, "nothing happened" is no longer something
+// this page can promise: the server may have relayed the transfer and only
+// the answer was lost. So a failure here is never reported as "no USDC was
+// transferred" - the order is asked about first (recoverRelayedSubmission).
+async function submitRelayedAuthorization(checkout, signature) {
+  const submitted = await api(
+    `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/submit`,
+    { method: "POST", body: JSON.stringify({ signature }) },
+  );
+  paymentState.pendingSubmission = null;
+  setMessage("Submitted on Base — waiting for confirmation…");
+  if (submitted.status === "CONFIRMED") {
+    await pollRelayedAuthorization(checkout.id);
+  } else {
+    pollRelayedAuthorization(checkout.id);
+  }
+}
+
+// The /submit answer did not arrive, or was an error. Ask the server what
+// became of the order before saying anything about the user's money.
+async function recoverRelayedSubmission(checkout, signature, error) {
+  const reason = error?.message || String(error);
+  setMessage(`Checking whether the payment went through — do not pay again. (${reason})`);
+  let current;
+  try {
+    current = await api(
+      `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}`,
+    );
+  } catch (lookupError) {
+    // The server cannot be reached at all: keep the order, keep asking, and
+    // say plainly that the result is pending - never that nothing was paid.
+    paymentState.pendingSubmission = { checkoutId: checkout.id, signature };
+    setMessage(
+      `Payment result pending confirmation for order ${checkout.id}. Keep this window open; it keeps checking. Do not pay again.`,
+      lookupError.message || String(lookupError),
+    );
+    pollRelayedAuthorization(checkout.id);
+    return "PENDING_CONFIRMATION";
+  }
+  if (["SUBMITTING", "SUBMITTED", "CONFIRMED"].includes(current.status)) {
+    // The server has it: the transfer is in flight or done. Follow it.
+    paymentState.pendingSubmission = null;
+    setMessage("Your authorization reached BestShiny — confirming the payment on Base…");
+    pollRelayedAuthorization(checkout.id);
+    return current.status;
+  }
+  if (current.status === "PENDING") {
+    if (Number(error?.status) === 409) {
+      // A conflict is the server refusing the order as it stands - for one
+      // thing because the USDC authorization was already used on chain, in
+      // which case money did move. Resending cannot help; say what it said.
+      paymentState.pendingSubmission = null;
+      setMessage("", `${reason} No credits were added. If money left your wallet, contact us and we will restore it.`);
+      return current.status;
+    }
+    // The server never applied the submission, so the signed authorization
+    // is still unused and still valid: the next Confirm resends it as is.
+    paymentState.pendingSubmission = { checkoutId: checkout.id, signature };
+    setMessage(RESEND_MESSAGE, reason);
+    return current.status;
+  }
+  paymentState.pendingSubmission = null;
+  setMessage("", paymentFailureMessage(current.status));
+  return current.status;
+}
+
 async function createRelayedCheckout(connectionMode = "qr") {
   const plan = selectedPackage();
   if (!plan) return;
   let checkout = null;
+  let signature = null;
   setBusy(true);
-  setMessage("Connect your wallet to authorize the Base USDC payment…");
   try {
+    const pending = paymentState.pendingSubmission;
+    if (pending && paymentState.checkout?.id === pending.checkoutId && paymentState.checkout?.sku === plan.sku) {
+      // A signed authorization whose answer was lost: resend the same
+      // signature to the same order rather than opening a second one.
+      checkout = paymentState.checkout;
+      signature = pending.signature;
+      setMessage("Resending the signed authorization…");
+      await submitRelayedAuthorization(checkout, signature);
+      return;
+    }
+    if (pending) {
+      // The user chose another pack: the unsent order is released, not paid.
+      paymentState.pendingSubmission = null;
+      await api(
+        `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${pending.checkoutId}/cancel`,
+        { method: "POST", body: "{}" },
+      ).catch(() => {});
+    }
+    setMessage("Connect your wallet to authorize the Base USDC payment…");
     const { account, signTypedData } = await connectBaseWallet(connectionMode);
     checkout = await api("/v1/payments/relayed-checkout", {
       method: "POST",
@@ -961,25 +1129,20 @@ async function createRelayedCheckout(connectionMode = "qr") {
     });
     paymentState.checkout = checkout;
     setMessage(
-      `The connected wallet will pay ${checkout.amount_usdc} USDC. Review and sign the authorization; no Base ETH is required.`,
+      `The connected wallet will pay ${checkout.amount_usdc} USDC to ${workspaceLabel(paymentState.workspace)}. Review and sign the authorization; no Base ETH is required.`,
     );
-    const signature = await signTypedData(checkout.typed_data);
+    signature = await signTypedData(checkout.typed_data);
     setMessage(
       "Authorization signed. Processing the USDC payment — no further wallet action is needed, and BestShiny covers the network fee.",
     );
-    const submitted = await api(
-      `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/submit`,
-      { method: "POST", body: JSON.stringify({ signature }) },
-    );
-    setMessage("Submitted on Base — waiting for confirmation…");
-    if (submitted.status === "CONFIRMED") {
-      await pollRelayedAuthorization(checkout.id);
-    } else {
-      pollRelayedAuthorization(checkout.id);
-    }
+    await submitRelayedAuthorization(checkout, signature);
   } catch (error) {
     clearWalletConnectQr();
-    if (Number(error?.code) === 4001 || String(error).includes("User rejected")) {
+    if (signature && checkout?.id) {
+      // The signature was sent (or the send itself failed): the outcome is
+      // the server's to state.
+      await recoverRelayedSubmission(checkout, signature, error);
+    } else if (Number(error?.code) === 4001 || String(error).includes("User rejected")) {
       if (checkout?.id) {
         await api(
           `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${checkout.id}/cancel`,
@@ -988,6 +1151,7 @@ async function createRelayedCheckout(connectionMode = "qr") {
       }
       setMessage("Authorization cancelled — nothing was transferred.");
     } else {
+      // Nothing was signed, so nothing could have been relayed.
       setMessage("Payment was not submitted — no USDC was transferred.", error.message || String(error));
     }
   } finally {
@@ -1003,6 +1167,9 @@ element("walletBtn").addEventListener("click", async () => {
       setMessage("", error.message);
     }
   }
+  // Opening the sheet is the moment to catch up with a project switch that
+  // happened while a payment was in flight.
+  await bindProjectWorkspace(paymentState.projectWorkspaceId).catch((error) => setMessage("", error.message));
   resetWalletView();
   if (!element("walletDialog").open) element("walletDialog").showModal();
 });
@@ -1013,6 +1180,7 @@ element("closeWalletBtn").addEventListener("click", () => {
   clearXunhuPayQr();
   resetWalletView();
   element("walletDialog").close();
+  bindProjectWorkspace(paymentState.projectWorkspaceId).catch((error) => setMessage("", error.message));
 });
 element("walletContinueBtn").addEventListener("click", () => {
   resetWalletView();
@@ -1026,5 +1194,8 @@ element("payUsdcBtn").addEventListener("click", createCheckout);
 element("payBrowserWalletBtn").addEventListener("click", () => createRelayedCheckout("browser"));
 window.addEventListener("ai-director:auth", (event) => {
   initializeForUser(event.detail).catch((error) => setMessage("", error.message));
+});
+window.addEventListener("ai-director:workspace-changed", (event) => {
+  bindProjectWorkspace(event.detail?.workspaceId || null).catch((error) => setMessage("", error.message));
 });
 render();

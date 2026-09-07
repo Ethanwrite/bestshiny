@@ -220,11 +220,24 @@ something else happens to reload it — the renewal succeeds and the site still 
   13 COMPLETED / 8 FAILED / 4 RETRY_WAIT — 0 deleted, 14 READY media assets, `memory_index_outbox`
   empty). Disk 11% used.
 
-  **Not done by this deploy.** The host nginx in front of the web container (the `bestshiny.com`
-  block of `/etc/nginx/sites-available/bestshiny`) still forwards no `Upgrade`/`Connection`
-  headers, so the worker WebSocket does not upgrade through `https://bestshiny.com/api/` until that
-  block gains the same two lines; the extension's HTTP polling is unaffected and no client uses the
-  socket today.
+  **Host nginx changed with it, ≈11:51Z, on the operator's "加上主机 nginx 的 WebSocket 头".** Neither
+  public server block forwarded `Upgrade`/`Connection`, so the worker WebSocket could not upgrade
+  through `https://bestshiny.com/api/` (host → web container → api) or `https://api.bestshiny.com`
+  (host → api) whatever the containers did. `/etc/nginx/conf.d/websocket-upgrade.conf` now carries
+  the `map $http_upgrade $connection_upgrade { default upgrade; '' close; }` block (http context),
+  and both `location /` blocks of `/etc/nginx/sites-available/bestshiny` gained
+  `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection $connection_upgrade;`
+  after their `proxy_read_timeout 300s` (`.bak-20260907-115129` holds the previous file; `nginx -t`
+  clean, graceful reload, site 200, keep-alive still reuses a connection). Proof: an HTTP/1.1
+  handshake probe (`Connection: Upgrade`, `Upgrade: websocket`, no credential) on either public path
+  now reaches the api as a WebSocket and gets its own refusal — the api logs
+  `"WebSocket /v1/workers/ws/probe" 403` from both the web container (`172.18.0.4`) and the host
+  (`172.18.0.1`) — where before the same probe arrived as a plain `GET … 404`. The chain is host →
+  web container → api, all three forwarding the upgrade. **Probe over HTTP/1.1 only:** the vhosts
+  speak HTTP/2, `curl` negotiates it by default, and HTTP/2 has no `Upgrade` header, so the same
+  request without `--http1.1` still reads 404 — that is the protocol, not a missing header;
+  browsers open `wss://` over HTTP/1.1. The extension's HTTP polling was never affected, and no
+  client uses the socket today.
 
   **Rollback.** No migration, so a code rollback to `55b4da9` is a plain redeploy of that revision;
   the pre-extraction `bestshiny-backup` dump and the `*.bak-20260907-111424` copies of `.env` and the

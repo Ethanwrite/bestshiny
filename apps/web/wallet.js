@@ -82,6 +82,14 @@ const paymentState = {
   selectedSku: DEFAULT_SKU,
   selectedProvider: "xunhupay",
   pollTimer: null,
+  // The poll being run, the generation it belongs to, and a poll that parked
+  // after repeated failures and waits for "Check payment status again".
+  pollGeneration: 0,
+  poll: null,
+  stalledPoll: null,
+  // Set while createCheckout closes the sheet to make room for the DePay
+  // window: that close must not end the poll following the order.
+  widgetHandoff: false,
   unmountWidget: null,
   balanceAnimation: null,
   busy: false,
@@ -460,7 +468,7 @@ async function bindProjectWorkspace(workspaceId) {
   // a checkout being created - belongs to the workspace it was started for;
   // rebinding under it would point its polls at the wrong workspace. The
   // sheet rebinds the next time it is opened or closed instead.
-  if (paymentState.pollTimer || paymentState.pendingSubmission || paymentState.busy) return;
+  if (paymentState.poll || paymentState.stalledPoll || paymentState.pendingSubmission || paymentState.busy) return;
   const next = chooseWorkspace(paymentState.user, paymentState.projectWorkspaceId);
   if (next?.id === paymentState.workspace?.id) return;
   paymentState.workspace = next;
@@ -615,8 +623,9 @@ async function showPaymentHistory() {
 }
 
 async function initializeForUser(user) {
-  window.clearTimeout(paymentState.pollTimer);
-  paymentState.pollTimer = null;
+  // Whatever order the previous account was following ends here; a request
+  // of its own still in flight drops its answer when it returns.
+  stopPolling();
   paymentState.user = user;
   paymentState.workspace = chooseWorkspace(user, paymentState.projectWorkspaceId);
   paymentState.checkout = null;
@@ -678,35 +687,115 @@ function discardWidget() {
   paymentState.unmountWidget = null;
 }
 
+/* ---- Following an order to settlement ------------------------------------
+   One poll at a time, and every poll belongs to the generation it started
+   in. Closing the sheet, signing out or starting another order bumps the
+   generation; a tick whose request was already in flight sees the change
+   when it returns and drops its answer instead of scheduling the next round
+   - which is what "closing the wallet" used to fail to stop. A tick that
+   throws is retried under a growing delay (the DePay check used to stop for
+   good on one dropped request, so a paid order never showed its credits),
+   and after POLL_MAX_FAILURES in a row it parks and offers "Check payment
+   status again", which resumes the same order (2026-09-07 review). */
+const POLL_INTERVAL_MS = 3000;
+const POLL_RETRY_STEPS_MS = [5000, 8000, 13000, 20000, 30000];
+const POLL_MAX_FAILURES = 6;
+const POLL_WAITING_COPY = {
+  depay: "Waiting for the payment to be confirmed…",
+  xunhupay: "Waiting for WeChat Pay to confirm…",
+  relayed: "Payment is still being confirmed on Base…",
+};
+
+function stopPolling() {
+  paymentState.pollGeneration = (paymentState.pollGeneration || 0) + 1;
+  window.clearTimeout(paymentState.pollTimer);
+  paymentState.pollTimer = null;
+  paymentState.poll = null;
+  paymentState.stalledPoll = null;
+  const recheck = element("walletRecheckBtn");
+  if (recheck) recheck.hidden = true;
+}
+
+// Run `tick(id, current)` for this order until it reports that nothing is
+// left to follow. `tick` returns true while the order still needs watching,
+// and consults `current()` after every await of its own so no side effect
+// lands once the poll has been superseded. Resolves after the first tick.
+async function followOrder(kind, id, tick) {
+  stopPolling();
+  const poll = { kind, id, generation: paymentState.pollGeneration, failures: 0 };
+  paymentState.poll = poll;
+  const current = () => paymentState.poll === poll && poll.generation === paymentState.pollGeneration;
+  const run = async () => {
+    if (!current()) return;
+    paymentState.pollTimer = null;
+    let again;
+    try {
+      again = await tick(id, current);
+    } catch (error) {
+      if (!current()) return;
+      poll.failures += 1;
+      if (poll.failures > POLL_MAX_FAILURES) {
+        // Parked, not abandoned: the order id stays on the page, and the
+        // button resumes exactly this poll.
+        paymentState.poll = null;
+        paymentState.stalledPoll = { kind, id, tick };
+        const recheck = element("walletRecheckBtn");
+        if (recheck) recheck.hidden = false;
+        setMessage(
+          `Still waiting to confirm order ${id}. Do not pay again - press "Check payment status again" to keep checking.`,
+          error.message,
+        );
+        return;
+      }
+      setMessage(POLL_WAITING_COPY[kind] || "Waiting for the payment to be confirmed…", error.message);
+      const delay = POLL_RETRY_STEPS_MS[Math.min(poll.failures - 1, POLL_RETRY_STEPS_MS.length - 1)];
+      paymentState.pollTimer = window.setTimeout(run, delay);
+      return;
+    }
+    if (!current()) return;
+    poll.failures = 0;
+    if (!again) {
+      paymentState.poll = null;
+      return;
+    }
+    paymentState.pollTimer = window.setTimeout(run, POLL_INTERVAL_MS);
+  };
+  await run();
+  return poll;
+}
+
+function resumeStalledPoll() {
+  const stalled = paymentState.stalledPoll;
+  if (!stalled) return;
+  followOrder(stalled.kind, stalled.id, stalled.tick);
+}
+
 // Success is whatever BestShiny's own settlement says it is. The widget
 // reporting a sent transaction means the user paid, not that we were paid.
-async function pollCheckout(checkoutId) {
-  window.clearTimeout(paymentState.pollTimer);
-  try {
-    const checkout = await api(
-      `/v1/workspaces/${paymentState.workspace.id}/depay-checkouts/${checkoutId}`,
-    );
-    if (checkout.status === "PAID") {
-      const balanceBefore = paymentState.billing?.credit_balance || 0;
-      await refreshBilling();
-      window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
-        detail: {
-          workspaceId: paymentState.workspace.id,
-          planTier: paymentState.billing.plan_tier,
-        },
-      }));
-      showPaymentSuccess({ ...checkout, provider: "depay" }, balanceBefore);
-      return;
-    }
-    if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
-      finishWidget();
-      setMessage("", paymentFailureMessage(checkout.status));
-      return;
-    }
-    paymentState.pollTimer = window.setTimeout(() => pollCheckout(checkoutId), 3000);
-  } catch (error) {
-    setMessage("", error.message);
+function pollCheckout(checkoutId) {
+  return followOrder("depay", checkoutId, pollCheckoutOnce);
+}
+
+async function pollCheckoutOnce(checkoutId, current) {
+  const workspaceId = paymentState.workspace.id;
+  const checkout = await api(`/v1/workspaces/${workspaceId}/depay-checkouts/${checkoutId}`);
+  if (!current()) return false;
+  if (checkout.status === "PAID") {
+    const balanceBefore = paymentState.billing?.credit_balance || 0;
+    await refreshBilling();
+    if (!current()) return false;
+    window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
+      detail: { workspaceId, planTier: paymentState.billing.plan_tier },
+    }));
+    showPaymentSuccess({ ...checkout, provider: "depay" }, balanceBefore);
+    return false;
   }
+  if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
+    finishWidget();
+    setMessage("", paymentFailureMessage(checkout.status));
+    return false;
+  }
+  return true;
 }
 
 async function createCheckout() {
@@ -742,7 +831,10 @@ async function createCheckout() {
     // via showModal() lives in the browser's top layer — so anything appended
     // to the body paints *behind* it and its backdrop. Our sheet has to step
     // aside, or the widget is present, initialized and completely invisible.
-    if (dialog.open) dialog.close();
+    if (dialog.open) {
+      paymentState.widgetHandoff = true;
+      dialog.close();
+    }
     // Payment() resolves with { unmount } the moment the widget *mounts* — the
     // user has not connected a wallet, let alone paid. So the progress story
     // comes from the widget's own callbacks, not from this promise, and our
@@ -798,41 +890,31 @@ function showXunhuPayCheckout(checkout) {
   host.hidden = host.childElementCount === 0;
 }
 
-async function pollXunhuPayCheckout(checkoutId) {
-  window.clearTimeout(paymentState.pollTimer);
-  try {
-    const checkout = await api(
-      `/v1/workspaces/${paymentState.workspace.id}/xunhupay-checkouts/${checkoutId}`,
-    );
-    if (checkout.status === "PAID") {
-      clearXunhuPayQr();
-      const balanceBefore = paymentState.billing?.credit_balance || 0;
-      await refreshBilling();
-      window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
-        detail: {
-          workspaceId: paymentState.workspace.id,
-          planTier: paymentState.billing.plan_tier,
-        },
-      }));
-      showPaymentSuccess({ ...checkout, provider: "xunhupay" }, balanceBefore);
-      return;
-    }
-    if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
-      clearXunhuPayQr();
-      setMessage("", paymentFailureMessage(checkout.status));
-      return;
-    }
-    paymentState.pollTimer = window.setTimeout(
-      () => pollXunhuPayCheckout(checkoutId),
-      3000,
-    );
-  } catch (error) {
-    setMessage("Waiting for WeChat Pay to confirm…", error.message);
-    paymentState.pollTimer = window.setTimeout(
-      () => pollXunhuPayCheckout(checkoutId),
-      5000,
-    );
+function pollXunhuPayCheckout(checkoutId) {
+  return followOrder("xunhupay", checkoutId, pollXunhuPayCheckoutOnce);
+}
+
+async function pollXunhuPayCheckoutOnce(checkoutId, current) {
+  const workspaceId = paymentState.workspace.id;
+  const checkout = await api(`/v1/workspaces/${workspaceId}/xunhupay-checkouts/${checkoutId}`);
+  if (!current()) return false;
+  if (checkout.status === "PAID") {
+    clearXunhuPayQr();
+    const balanceBefore = paymentState.billing?.credit_balance || 0;
+    await refreshBilling();
+    if (!current()) return false;
+    window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
+      detail: { workspaceId, planTier: paymentState.billing.plan_tier },
+    }));
+    showPaymentSuccess({ ...checkout, provider: "xunhupay" }, balanceBefore);
+    return false;
   }
+  if (["EXPIRED", "CANCELLED", "RECONCILIATION_REQUIRED"].includes(checkout.status)) {
+    clearXunhuPayQr();
+    setMessage("", paymentFailureMessage(checkout.status));
+    return false;
+  }
+  return true;
 }
 
 async function createXunhuPayCheckout() {
@@ -970,56 +1052,48 @@ async function connectBaseWallet(mode = "qr") {
   return connectInjectedBaseWallet();
 }
 
-async function pollRelayedAuthorization(authorizationId) {
-  window.clearTimeout(paymentState.pollTimer);
-  try {
-    const result = await api(
-      `/v1/workspaces/${paymentState.workspace.id}/relayed-authorizations/${authorizationId}/reconcile`,
-      { method: "POST", body: "{}" },
+function pollRelayedAuthorization(authorizationId) {
+  return followOrder("relayed", authorizationId, pollRelayedAuthorizationOnce);
+}
+
+async function pollRelayedAuthorizationOnce(authorizationId, current) {
+  const workspaceId = paymentState.workspace.id;
+  const result = await api(
+    `/v1/workspaces/${workspaceId}/relayed-authorizations/${authorizationId}/reconcile`,
+    { method: "POST", body: "{}" },
+  );
+  if (!current()) return false;
+  if (result.status === "CONFIRMED") {
+    const balanceBefore = paymentState.billing?.credit_balance || 0;
+    await refreshBilling();
+    if (!current()) return false;
+    window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
+      detail: { workspaceId, planTier: paymentState.billing.plan_tier },
+    }));
+    showPaymentSuccess(
+      {
+        ...paymentState.checkout,
+        ...result,
+        provider: "depay",
+        amount: paymentState.checkout?.amount_usdc,
+        currency: "USDC",
+      },
+      balanceBefore,
     );
-    if (result.status === "CONFIRMED") {
-      const balanceBefore = paymentState.billing?.credit_balance || 0;
-      await refreshBilling();
-      window.dispatchEvent(new CustomEvent("ai-director:plan-changed", {
-        detail: {
-          workspaceId: paymentState.workspace.id,
-          planTier: paymentState.billing.plan_tier,
-        },
-      }));
-      showPaymentSuccess(
-        {
-          ...paymentState.checkout,
-          ...result,
-          provider: "depay",
-          amount: paymentState.checkout?.amount_usdc,
-          currency: "USDC",
-        },
-        balanceBefore,
-      );
-      return;
-    }
-    if (["FAILED", "EXPIRED", "RECONCILIATION_REQUIRED"].includes(result.status)) {
-      paymentState.pendingSubmission = null;
-      setMessage("", paymentFailureMessage(result.status));
-      return;
-    }
-    if (result.status === "PENDING" && paymentState.pendingSubmission?.checkoutId === authorizationId) {
-      // The server is back and never applied the submission: polling cannot
-      // finish this; the user can, with the signature already in hand.
-      setMessage(RESEND_MESSAGE);
-      return;
-    }
-    paymentState.pollTimer = window.setTimeout(
-      () => pollRelayedAuthorization(authorizationId),
-      3000,
-    );
-  } catch (error) {
-    setMessage("Payment is still being confirmed on Base…", error.message);
-    paymentState.pollTimer = window.setTimeout(
-      () => pollRelayedAuthorization(authorizationId),
-      5000,
-    );
+    return false;
   }
+  if (["FAILED", "EXPIRED", "RECONCILIATION_REQUIRED"].includes(result.status)) {
+    paymentState.pendingSubmission = null;
+    setMessage("", paymentFailureMessage(result.status));
+    return false;
+  }
+  if (result.status === "PENDING" && paymentState.pendingSubmission?.checkoutId === authorizationId) {
+    // The server is back and never applied the submission: polling cannot
+    // finish this; the user can, with the signature already in hand.
+    setMessage(RESEND_MESSAGE);
+    return false;
+  }
+  return true;
 }
 
 const RESEND_MESSAGE = "The signed authorization was not submitted; nothing has left your wallet."
@@ -1173,19 +1247,28 @@ element("walletBtn").addEventListener("click", async () => {
   resetWalletView();
   if (!element("walletDialog").open) element("walletDialog").showModal();
 });
-element("closeWalletBtn").addEventListener("click", () => {
-  window.clearTimeout(paymentState.pollTimer);
-  paymentState.pollTimer = null;
+// Close, "Start creating" and Escape all end at the dialog's close event, so
+// there is exactly one place where a closed sheet stops following its order.
+// The handoff flag marks the close createCheckout performs to make room for
+// the DePay window: the order is being paid then, and its poll must survive.
+function closeWalletSheet() {
+  const dialog = element("walletDialog");
+  if (dialog.open) dialog.close();
+}
+element("closeWalletBtn").addEventListener("click", closeWalletSheet);
+element("walletContinueBtn").addEventListener("click", closeWalletSheet);
+element("walletDialog").addEventListener("close", () => {
+  if (paymentState.widgetHandoff) {
+    paymentState.widgetHandoff = false;
+    return;
+  }
+  stopPolling();
   clearWalletConnectQr();
   clearXunhuPayQr();
   resetWalletView();
-  element("walletDialog").close();
   bindProjectWorkspace(paymentState.projectWorkspaceId).catch((error) => setMessage("", error.message));
 });
-element("walletContinueBtn").addEventListener("click", () => {
-  resetWalletView();
-  element("walletDialog").close();
-});
+element("walletRecheckBtn").addEventListener("click", resumeStalledPoll);
 element("walletHistoryBtn").addEventListener("click", showPaymentHistory);
 element("walletHistoryCloseBtn").addEventListener("click", () => {
   element("walletHistoryPanel").hidden = true;

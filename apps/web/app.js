@@ -76,6 +76,9 @@ const state = {
   jobs: new Map(),            // job id -> last known job view, for Productions
   jobFilter: "all",
   selectedJobId: null,
+  forgottenJobs: new Set(),   // creations deleted this session; no surface may remember them again
+  productionsPaging: null,    // { projectId, cursor, hasMore } for the listing's older pages
+  previewCandidateId: null,   // the variant the director put on the stage, if any
   credits: null,
 };
 
@@ -212,8 +215,16 @@ const IMAGE_TIERS = [
   { value: "shiniest", stars: "\u2728\u2728\u2728", name: "Shiniest", plan: "Pro", tagline: "Highest quality and finest visual detail" },
 ];
 
-const isFreeWorkspace = () =>
-  Boolean(state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE"));
+/** The plan of the workspace the OPEN PROJECT is charged against. Never "any
+ *  workspace this account belongs to": a member of one FREE workspace working
+ *  in a PRO project was pinned to the FREE video route and shown FREE locks
+ *  by that test (2026-09-07 review). With no project open there is no plan. */
+function projectPlanTier() {
+  const workspaceId = state.project?.workspace_id;
+  if (!workspaceId) return null;
+  return (state.authUser?.workspaces || []).find((workspace) => workspace.id === workspaceId)?.plan_tier || null;
+}
+const projectOnFreePlan = () => projectPlanTier() === "FREE";
 
 const humanizeCode = (code = "") => String(code).replaceAll("_", " ").toLowerCase();
 
@@ -424,6 +435,9 @@ function clearWorkspaceState() {
   state.credits = null;
   state.imageTiers = null;
   state.savingJobId = null;
+  state.forgottenJobs?.clear();
+  state.productionsPaging = null;
+  state.previewCandidateId = null;
   state.assetMediaIds.clear();
   state.thumbCache.forEach((url) => { if (url) URL.revokeObjectURL(url); });
   state.thumbCache.clear();
@@ -814,7 +828,7 @@ function imageTierViews() {
       unavailable: !remote.available,
     }));
   }
-  const free = isFreeWorkspace();
+  const free = projectOnFreePlan();
   return IMAGE_TIERS.map((tier) => ({
     ...tier,
     locked: free && tier.plan === "Pro",
@@ -1366,24 +1380,14 @@ async function renderPassengerJob(job) {
 
   let preview = "";
   if (job.output_asset_id) {
-    const asset = await request(`/v1/assets/${job.output_asset_id}`).catch(() => null);
-    let mediaUrl = asset?.public_url || "";
-    const isProtectedLocalMedia = asset?.storage_key && (() => {
-      try { return new URL(asset.public_url, location.href).pathname.includes("/v1/storage/"); }
-      catch (_error) { return false; }
-    })();
-    if (isProtectedLocalMedia) {
-      const storagePath = asset.storage_key.split("/").map(encodeURIComponent).join("/");
-      const response = await fetch(`${API}/v1/storage/${storagePath}`, { credentials: "include" });
-      if (response.ok) {
-        state.passengerPreviewObjectUrl = URL.createObjectURL(await response.blob());
-        mediaUrl = state.passengerPreviewObjectUrl;
-      }
-    }
-    if (mediaUrl && asset.mime_type?.startsWith("image/")) {
-      preview = `<img class="result-preview fade-in" src="${escapeHTML(mediaUrl)}" alt="Generated result" />`;
-    } else if (mediaUrl && asset.mime_type?.startsWith("video/")) {
-      preview = `<video class="result-preview fade-in" src="${escapeHTML(mediaUrl)}" controls playsinline></video>`;
+    // One resolver for every surface: it reads the original through the
+    // authenticated storage route whenever the asset carries no other address.
+    const media = await resolveAssetMedia(job.output_asset_id).catch(() => null);
+    if (media?.revocable) state.passengerPreviewObjectUrl = media.url;
+    if (media && media.mime.startsWith("image/")) {
+      preview = `<img class="result-preview fade-in" src="${escapeHTML(media.url)}" alt="Generated result" />`;
+    } else if (media && media.mime.startsWith("video/")) {
+      preview = `<video class="result-preview fade-in" src="${escapeHTML(media.url)}" controls playsinline></video>`;
     }
   }
 
@@ -1394,6 +1398,12 @@ async function renderPassengerJob(job) {
   const frame = [job.aspect_ratio || asked.aspect_ratio, job.resolution || asked.resolution]
     .filter(Boolean).join(" · ") || "—";
   const length = job.duration ?? asked.duration ?? null;
+  // What runs beside what was asked: a model with fixed lengths shoots the
+  // shortest legal length above the request and is quoted for it, and the
+  // page used to keep showing the number that was typed (2026-09-07 review).
+  const askedLength = job.requested_duration ?? asked.duration ?? null;
+  const snapped = length !== null && askedLength !== null && Number(askedLength) !== Number(length);
+  const lengthLabel = length === null ? "" : `${length}s${snapped ? ` (asked ${askedLength}s)` : ""}`;
   const credits = jobCredits(job);
   const resultBar = `
     <div class="result-bar">
@@ -1403,7 +1413,7 @@ async function renderPassengerJob(job) {
       <div class="result-meta">
         <div><span>Look</span><strong>${escapeHTML(friendlyModel(job.model))}</strong></div>
         <div><span>Frame</span><strong>${escapeHTML(frame)}</strong></div>
-        ${isVideo && length ? `<div><span>Length</span><strong>${escapeHTML(String(length))}s</strong></div>` : ""}
+        ${isVideo && lengthLabel ? `<div><span>Length</span><strong>${escapeHTML(lengthLabel)}</strong></div>` : ""}
         <div class="is-cost"><span>Cost</span><strong>${credits ? `${credits} credits` : "—"}</strong></div>
       </div>
     </div>`;
@@ -1449,20 +1459,21 @@ async function generatePassenger() {
   const resolution = $("passengerResolution").value;
   const duration = mediaType === "video" ? Number($("passengerDuration").value || 4) : null;
   const negativePrompt = $("passengerNegativePrompt").value.trim();
-  const criticality = $("passengerCriticality").value;
   const imageTier = isImage ? $("passengerImageTier").value : null;
   const estimatedCost = passengerEstimatedCost();
-  const freeVideo = mediaType === "video"
-    && state.authUser?.workspaces?.some((workspace) => workspace.plan_tier === "FREE");
   const file = $("passengerReference").files[0];
+  // Auto names no role: the server resolves it from the plan of the project's
+  // own workspace. The browser used to send VIDEO_SEEDANCE whenever ANY of the
+  // account's workspaces was FREE, pinning a PRO project to the FREE route.
+  // No criticality travels either: admission runs every Create request at
+  // STANDARD, so a control for it promised something nothing honoured.
   const fingerprint = JSON.stringify({
     projectId, mediaType,
     provider: auto ? "" : selection.provider,
     model: auto ? "" : selection.model_id,
     imageTask: isImage ? imageTask : null,
     imageTier,
-    modelRole: !isImage && auto && freeVideo ? "VIDEO_SEEDANCE" : null,
-    prompt, negativePrompt, criticality, aspectRatio, resolution, duration, estimatedCost,
+    prompt, negativePrompt, aspectRatio, resolution, duration, estimatedCost,
     file: file ? [file.name, file.size, file.lastModified] : null,
   });
   const idempotencyKey = beginSubmission("passenger", fingerprint);
@@ -1485,10 +1496,8 @@ async function generatePassenger() {
       provider: auto ? "" : selection.provider,
       model: auto ? "" : selection.model_id,
       ...(isImage ? { image_task: imageTask, image_tier: imageTier } : {}),
-      ...(!isImage && auto && freeVideo ? { model_role: "VIDEO_SEEDANCE" } : {}),
       prompt,
       ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
-      asset_criticality: criticality,
       aspect_ratio: aspectRatio,
       // Resolution travels only with video; an image job carries none.
       ...(isImage ? {} : { resolution }),
@@ -1506,9 +1515,15 @@ async function generatePassenger() {
     startPassengerPolling(job.id, mediaType);
     await loadCredits();
     succeeded = true;
-    toast(auto
+    // The server may run a different length than was asked: say so at once,
+    // in the same breath as the reservation it was quoted on.
+    const runs = Number(job.duration);
+    const snapped = duration !== null && Number.isFinite(runs) && runs !== duration
+      ? ` Runs ${runs}s: this model shoots fixed lengths, and the quote is for ${runs}s.`
+      : "";
+    toast((auto
       ? `Submitted on ${friendlyModel(job.model)} — ${job.estimated_credits} credits reserved.`
-      : "Submitted. The model you chose is the one that runs and the one you are billed for.");
+      : "Submitted. The model you chose is the one that runs and the one you are billed for.") + snapped);
   } finally {
     finishSubmission("passenger", idempotencyKey, succeeded);
     button.disabled = false;
@@ -1584,11 +1599,12 @@ async function loadProjects() {
 async function loadLogicalAssets() {
   if (!state.project) return;
   const epoch = workspaceEpoch;
+  const projectId = state.project.id;
   const [assets, styleLock] = await Promise.all([
-    request(`/api/projects/${state.project.id}/assets`),
-    request(`/api/projects/${state.project.id}/style-lock`),
+    request(`/api/projects/${projectId}/assets`),
+    request(`/api/projects/${projectId}/style-lock`),
   ]);
-  if (staleEpoch(epoch)) return;
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   [state.logicalAssets, state.styleLock] = [assets, styleLock];
   const options = (canonicalLabel) => '<option value="">Create a new asset</option>' + state.logicalAssets
     .map((asset) => `<option value="${asset.id}">${simpleLabel(asset.asset_type)} · ${escapeHTML(asset.name)}${asset.canonical_version_id ? canonicalLabel : ""}</option>`)
@@ -1858,8 +1874,21 @@ async function uploadManualAssetVersion() {
   }
 }
 
+/* A project switch is the largest state change short of a sign-out, and it
+   races with itself: pick A, then B while A's answers are still in flight,
+   and A's late answers used to land on top of B's, leaving the page on a
+   project the user had left (2026-09-07 review). Every selectProject() takes
+   a sequence number and re-checks it after each await; every loader that
+   writes project state checks that the project it was started for is still
+   the open one, so a late answer is dropped wherever it arrives. */
+let projectLoadSequence = 0;
+const projectChanged = (projectId) => state.project?.id !== projectId;
+
 async function selectProject(id) {
   if (!id) return;
+  const sequence = ++projectLoadSequence;
+  const epoch = workspaceEpoch;
+  const stale = () => staleEpoch(epoch) || sequence !== projectLoadSequence;
   if (state.project && state.project.id !== id) {
     state.passengerReferenceUpload = null;
     state.passengerJobs = { image: null, video: null };
@@ -1870,27 +1899,32 @@ async function selectProject(id) {
     clearReferencePreview();
     renderPassengerJob(null);
   }
-  const projectChanged = state.project?.id !== id;
-  const epoch = workspaceEpoch;
+  const projectChanging = state.project?.id !== id;
   const project = await request(`/v1/projects/${id}`);
-  if (staleEpoch(epoch)) return;
+  if (stale()) return;
   state.project = project;
   $("projectSelect").value = id;
   announceWorkspace(project.workspace_id);
-  if (projectChanged) {
+  if (projectChanging) {
     state.creative.session = null;
+    state.previewCandidateId = null;
+    state.productionsPaging = null;
     renderCreative();
     // The catalogues' plan locks belong to this project's workspace.
     Promise.all([loadPassengerModels(), loadImageTiers()]).catch(() => null);
   }
   await loadLogicalAssets();
+  if (stale()) return;
   await loadCharacters();
+  if (stale()) return;
   await loadEpisodeStrip();
-  const keepEpisode = !projectChanged && state.episode
+  if (stale()) return;
+  const keepEpisode = !projectChanging && state.episode
     && state.project.episodes.some((episode) => episode.id === state.episode.id);
   if (keepEpisode) await loadEpisode(state.episode.id);
   else if (state.project.episodes.length) await loadEpisode(state.project.episodes[0].id);
   else resetProductionView();
+  if (stale()) return;
   if (!state.passengerJobs[state.passengerMedia]) await renderPassengerJob(null);
   if (state.page === "ai-director") await loadCreativeSessions();
   if (state.page === "productions") refreshProductions().catch(() => null);
@@ -1907,17 +1941,20 @@ async function resolveAssetMedia(assetId) {
   if (!assetId) return null;
   const asset = await request(`/v1/assets/${assetId}`).catch(() => null);
   if (!asset) return null;
-  let url = asset.public_url || "";
-  const isProtectedLocalMedia = asset.storage_key && (() => {
-    try { return new URL(asset.public_url, location.href).pathname.includes("/v1/storage/"); }
+  const url = asset.public_url || "";
+  // Read through the authenticated storage route when the address is that
+  // route - or when there is no address at all: a direct upload adopts an
+  // object the browser PUT itself, so its row carried no public_url and the
+  // preview came up empty for a readable asset (2026-09-07 review).
+  const viaStorage = Boolean(asset.storage_key) && (!url || (() => {
+    try { return new URL(url, location.href).pathname.includes("/v1/storage/"); }
     catch (_error) { return false; }
-  })();
-  if (isProtectedLocalMedia) {
+  })());
+  if (viaStorage) {
     const storagePath = asset.storage_key.split("/").map(encodeURIComponent).join("/");
-    const response = await fetch(`${API}/v1/storage/${storagePath}`, { credentials: "include" });
-    if (!response.ok) return null;
-    url = URL.createObjectURL(await response.blob());
-    return { url, mime: asset.mime_type || "", revocable: true };
+    const response = await fetch(`${API}/v1/storage/${storagePath}`, { credentials: "include" }).catch(() => null);
+    if (!response?.ok) return null;
+    return { url: URL.createObjectURL(await response.blob()), mime: asset.mime_type || "", revocable: true };
   }
   return url ? { url, mime: asset.mime_type || "", revocable: false } : null;
 }
@@ -1937,7 +1974,7 @@ async function resolveAssetThumbnail(assetId) {
 }
 
 function resetProductionView() {
-  state.episode = null; state.shot = null; state.candidates = [];
+  state.episode = null; state.shot = null; state.candidates = []; state.previewCandidateId = null;
   $("scriptPanel").hidden = false;
   $("shotTreePanel").hidden = true;
   $("viewScriptBtn").hidden = true;
@@ -1954,8 +1991,9 @@ function resetProductionView() {
 
 async function loadEpisode(id) {
   const epoch = workspaceEpoch;
+  const projectId = state.project?.id;
   const episode = await request(`/v1/episodes/${id}`);
-  if (staleEpoch(epoch)) return;
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   state.episode = episode;
   $("scriptInput").value = state.episode.script_source || "";
   $("scriptOriginalView").textContent = state.episode.script_source || "No script recorded for this episode.";
@@ -2061,6 +2099,7 @@ function renderNoShotSelected() {
   // The scope attribute on #shotPreviewStage survives this className rewrite;
   // the state class is what the redesign's canvas rules key off.
   $("shotPreviewStage").className = "shot-stage is-empty";
+  if ($("shotStageTake")) $("shotStageTake").hidden = true;
   $("shotStageMedia").innerHTML = `
     <div class="empty-block">
       <span class="empty-icon" aria-hidden="true">${empty.icon}</span>
@@ -2085,7 +2124,13 @@ function renderNoShotSelected() {
 }
 
 async function selectShot(id) {
-  state.shot = await request(`/v1/shots/${id}`);
+  const epoch = workspaceEpoch;
+  const projectId = state.project?.id;
+  const loaded = await request(`/v1/shots/${id}`);
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
+  // A different shot: whatever variant was on the stage belonged to the last one.
+  if (state.shot?.id !== id) state.previewCandidateId = null;
+  state.shot = loaded;
   renderScenes();
   renderShots();
   const scenes = state.episode?.scenes || [];
@@ -2121,8 +2166,14 @@ async function selectShot(id) {
   $("compiledPrompt").value = shot.compiled_prompt || "";
   $("barShotDuration").textContent = `${shot.duration}s`;
   $("barShotModel").textContent = routeName(shot.provider);
-  $("generateBtn").disabled = false;
-  $("generateBtn").textContent = shot.status === "COMMITTED" ? "Regenerate shot" : "Generate shot";
+  // An approved shot is in the timeline, and the server refuses to enqueue it
+  // again (the timeline fence admits DRAFT, PLANNED and READY only), so the
+  // button says so instead of offering a "Regenerate" that could only answer
+  // 409 (2026-09-07 review). The variants stay below for comparison.
+  const approved = shot.status === "COMMITTED";
+  $("generateBtn").disabled = approved;
+  $("generateBtn").textContent = approved ? "Approved · in the timeline" : "Generate shot";
+  $("generateBtn").title = approved ? "This shot is approved and locked. Its variants stay below for comparison." : "";
   // Only a shot with no paid history can be deleted; the server refuses the rest.
   $("shotDeleteBtn").hidden = Boolean(shot.committed_candidate_id) || ["QUEUED", "GENERATING", "VALIDATING", "COMMITTED"].includes(shot.status);
 
@@ -2142,14 +2193,64 @@ async function deleteSelectedShot() {
   toast("Shot deleted");
 }
 
-/** The current shot carries the page: show the approved take when there is one. */
+/** Which take the stage shows: the variant the director opened, else the
+ *  approved take, else the first variant with output. One rule, so the
+ *  caption, the card highlight and the human review all name the same take.
+ *  The stage used to show the approved take or the first variant only, so
+ *  with two variants awaiting review the second could be confirmed without
+ *  ever having been seen (2026-09-07 review). */
+function stagedCandidate() {
+  const withOutput = state.candidates.filter((candidate) => candidate.output_asset_id);
+  const opened = state.previewCandidateId
+    && withOutput.find((candidate) => candidate.id === state.previewCandidateId);
+  return opened
+    || withOutput.find((candidate) => candidate.status === "COMMITTED")
+    || withOutput[0]
+    || null;
+}
+
+/** "A", "B", "C" — the letter the variant grid gives this candidate. */
+function variantLetter(candidate) {
+  const index = state.candidates.findIndex((item) => item.id === candidate.id);
+  return index < 0 ? "?" : String.fromCharCode(65 + index);
+}
+
+/** Put one variant on the stage. The cards are updated in place, so a review
+ *  reason typed on another card survives. */
+async function stageCandidate(id) {
+  state.previewCandidateId = id;
+  markStagedVariant();
+  await renderShotStage();
+}
+
+function markStagedVariant() {
+  const staged = stagedCandidate();
+  document.querySelectorAll("#candidateGrid [data-variant]").forEach((card) => {
+    const onStage = Boolean(staged) && card.dataset.variant === staged.id;
+    card.classList.toggle("is-staged", onStage);
+    const button = card.querySelector("[data-preview]");
+    if (button) { button.disabled = onStage; button.textContent = onStage ? "On stage" : "View"; }
+    const note = card.querySelector("[data-stage-note]");
+    if (note) note.textContent = onStage ? "It is on the stage above." : "Put it on the stage first (View): the review is of what you saw.";
+    const flag = card.querySelector("[data-stage-flag]");
+    if (flag) flag.hidden = !onStage;
+  });
+}
+
+let shotStageSequence = 0;
+
+/** The current shot carries the page: show the take the director is looking at, and name it. */
 async function renderShotStage() {
   const stage = $("shotStageMedia");
+  // A render that finishes after a newer one began (another variant opened,
+  // another shot picked) must not paint over it.
+  const sequence = ++shotStageSequence;
   if (shotStageObjectUrl) { URL.revokeObjectURL(shotStageObjectUrl); shotStageObjectUrl = null; }
-  const committed = state.candidates.find((candidate) => candidate.status === "COMMITTED" && candidate.output_asset_id)
-    || state.candidates.find((candidate) => candidate.output_asset_id);
+  const shown = stagedCandidate();
   const shotFrame = $("shotPreviewStage");
-  if (!committed) {
+  const take = $("shotStageTake");
+  if (!shown) {
+    if (take) take.hidden = true;
     const generating = state.candidates.some((candidate) => ["QUEUED", "RUNNING", "GENERATING", "VALIDATING"].includes(candidate.status));
     shotFrame.className = `shot-stage ${generating ? "is-generating" : "is-empty"}`;
     // Shot candidates arrive as a SET with no per-candidate signal, so the
@@ -2178,29 +2279,42 @@ async function renderShotStage() {
       </div>`;
     return;
   }
-  const media = await resolveAssetMedia(committed.output_asset_id);
+  const media = await resolveAssetMedia(shown.output_asset_id);
+  if (sequence !== shotStageSequence) {
+    if (media?.revocable) URL.revokeObjectURL(media.url);
+    return;
+  }
+  const letter = variantLetter(shown);
+  const approved = shown.status === "COMMITTED";
+  if (take) {
+    take.hidden = false;
+    take.className = `status-chip ${statusTone(shown.status)}`;
+    take.textContent = approved ? `Approved take · Variant ${letter}` : `Variant ${letter} · ${simpleLabel(shown.status)}`;
+  }
   if (!media) {
     shotFrame.className = "shot-stage is-empty";
     stage.innerHTML = `
       <div class="empty-block">
         <span class="empty-icon" aria-hidden="true">${ICON_ALERT}</span>
-        <strong>This take will not display</strong>
+        <strong>Variant ${escapeHTML(letter)} will not display</strong>
         <p>The file exists but nothing could be loaded from it. Refreshing the variants usually recovers it.</p>
       </div>`;
     return;
   }
   if (media.revocable) shotStageObjectUrl = media.url;
   shotFrame.className = "shot-stage has-result";
+  const alt = approved ? "Approved take for this shot" : `Variant ${letter} of this shot`;
   stage.innerHTML = media.mime.startsWith("video/")
-    ? `<video src="${escapeHTML(media.url)}" controls playsinline></video>`
-    : `<img src="${escapeHTML(media.url)}" alt="Approved take for this shot" />`;
+    ? `<video src="${escapeHTML(media.url)}" controls playsinline aria-label="${escapeHTML(alt)}"></video>`
+    : `<img src="${escapeHTML(media.url)}" alt="${escapeHTML(alt)}" />`;
 }
 
 async function loadCandidates() {
   if (!state.shot) return;
   const epoch = workspaceEpoch;
-  const candidates = await request(`/v1/shots/${state.shot.id}/candidates`);
-  if (staleEpoch(epoch) || !state.shot) return;
+  const shotId = state.shot.id;
+  const candidates = await request(`/v1/shots/${shotId}/candidates`);
+  if (staleEpoch(epoch) || state.shot?.id !== shotId) return;
   state.candidates = candidates;
   const candidateJobId = state.candidates.find((candidate) => candidate.generation_job_id)?.generation_job_id;
   if (candidateJobId && !$("operationsJobId").value.trim()) $("operationsJobId").value = candidateJobId;
@@ -2238,11 +2352,19 @@ function renderCandidates(candidates) {
     return;
   }
   grid.className = "variant-grid";
+  const staged = stagedCandidate();
   grid.innerHTML = candidates.map((candidate, index) => {
     const qa = candidate.qa || {};
     const needsHumanReview = candidate.status === "USER_REVIEW_REQUIRED";
     const canCommit = candidate.status === "PASSED";
     const reviewBlocked = ["HARD_FAILED", "REJECTED", "COMMITTED"].includes(candidate.status);
+    const onStage = Boolean(staged) && staged.id === candidate.id;
+    // Every variant with output can be put on the stage; the one that is
+    // there says so. A review is of what was seen, so the review box names
+    // the move before the confirmation.
+    const previewAction = candidate.output_asset_id
+      ? `<button class="btn btn-tertiary btn-grow" data-preview="${escapeHTML(candidate.id)}"${onStage ? " disabled" : ""}>${onStage ? "On stage" : "View"}</button>`
+      : "";
     const scores = [
       ["Overall", Math.round((qa.overall_score || 0) * 100)],
       ["Character", Math.round((qa.character_score || 0) * 100)],
@@ -2252,16 +2374,16 @@ function renderCandidates(candidates) {
     const humanReview = needsHumanReview && !reviewBlocked ? `
       <section class="review-box" aria-label="Human review">
         <strong>This one needs your eyes</strong>
-        <p>Automated checks do not have enough to decide. Check identity, action and the join to the previous shot, then say why it passes.</p>
+        <p>Automated checks do not have enough to decide. <span data-stage-note>${onStage ? "It is on the stage above." : "Put it on the stage first (View): the review is of what you saw."}</span> Check identity, action and the join to the previous shot, then say why it passes.</p>
         <label class="field"><textarea data-review-reason="${escapeHTML(candidate.id)}" rows="3" placeholder="e.g. Verified identity, eyeline and the join to shot 03. Usable."></textarea></label>
         <label class="check-row"><input type="checkbox" data-review-confirm="${escapeHTML(candidate.id)}" /> I reviewed this result myself and confirm it can proceed</label>
         <button class="btn btn-secondary btn-full" data-human-review="${escapeHTML(candidate.id)}" disabled>Confirm review</button>
       </section>` : "";
     const validateAction = needsHumanReview || reviewBlocked ? "" : `<button class="btn btn-secondary btn-grow" data-validate="${escapeHTML(candidate.id)}">Run checks</button>`;
     const commitAction = canCommit ? `<button class="btn btn-secondary btn-grow" data-commit="${escapeHTML(candidate.id)}">Approve</button>` : "";
-    return `<article class="variant ${candidate.status === "COMMITTED" ? "is-committed" : ""}">
+    return `<article class="variant ${candidate.status === "COMMITTED" ? "is-committed" : ""} ${onStage ? "is-staged" : ""}" data-variant="${escapeHTML(candidate.id)}">
       <div class="variant-head">
-        <span>Variant ${String.fromCharCode(65 + index)}</span>
+        <span>Variant ${String.fromCharCode(65 + index)} <small class="variant-on-stage" data-stage-flag${onStage ? "" : " hidden"}>on stage</small></span>
         <span class="status-chip ${statusTone(candidate.status)}">${simpleLabel(candidate.status)}</span>
       </div>
       <div class="score-bars">${scores.map(([name, value]) => `
@@ -2270,10 +2392,11 @@ function renderCandidates(candidates) {
         ? (QA_SUMMARY[qa.summary] || sentenceCase(humanizeCode(qa.summary)))
         : "Waiting for generation or checks")}<br>${Math.max(1, Math.ceil(candidate.cost / .01))} credits</div>
       ${humanReview}
-      <div class="variant-actions">${validateAction}${commitAction}</div>
+      <div class="variant-actions">${previewAction}${validateAction}${commitAction}</div>
     </article>`;
   }).join("");
 
+  grid.querySelectorAll("[data-preview]").forEach((button) => button.addEventListener("click", guard(() => stageCandidate(button.dataset.preview))));
   grid.querySelectorAll("[data-validate]").forEach((button) => button.addEventListener("click", guard(() => validateCandidate(button.dataset.validate))));
   grid.querySelectorAll("[data-commit]").forEach((button) => button.addEventListener("click", guard(() => commitCandidate(button.dataset.commit))));
   grid.querySelectorAll("[data-human-review]").forEach((button) => button.addEventListener("click", guard(() => humanReviewCandidate(button.dataset.humanReview))));
@@ -2310,6 +2433,7 @@ async function compileScript() {
 
 async function generateShot() {
   if (!state.shot) { toast("Select a shot first"); return; }
+  if (state.shot.status === "COMMITTED") { toast("This shot is approved and in the timeline; it cannot be shot again."); return; }
   const projectId = state.project.id;
   const shotId = state.shot.id;
   // "Most I'll spend on this shot": a ceiling the server holds its own quote
@@ -2334,8 +2458,9 @@ async function generateShot() {
     toast("Variants queued. A network retry reuses the same submission instead of charging twice.");
   } finally {
     finishSubmission("shot", idempotencyKey, succeeded);
-    button.disabled = false;
-    button.textContent = state.shot?.status === "COMMITTED" ? "Regenerate shot" : "Generate shot";
+    const approved = state.shot?.status === "COMMITTED";
+    button.disabled = approved;
+    button.textContent = approved ? "Approved · in the timeline" : "Generate shot";
   }
 }
 
@@ -2350,6 +2475,12 @@ async function humanReviewCandidate(id) {
   if (!candidate || candidate.status !== "USER_REVIEW_REQUIRED") {
     await loadCandidates();
     return toast("That variant has moved on. Continue from its current state.");
+  }
+  if (candidate.output_asset_id && stagedCandidate()?.id !== id) {
+    // The review is of what was seen. Put this variant on the stage and ask
+    // again, rather than record a verdict on a take another card was showing.
+    await stageCandidate(id);
+    return toast(`Variant ${variantLetter(candidate)} is on the stage now. Look at it, then confirm.`);
   }
   const reason = document.querySelector(`[data-review-reason="${id}"]`)?.value.trim() || "";
   const explicitConfirmation = document.querySelector(`[data-review-confirm="${id}"]`)?.checked === true;
@@ -2372,6 +2503,8 @@ async function humanReviewCandidate(id) {
 
 async function commitCandidate(id) {
   await request(`/v1/shots/${state.shot.id}/candidates/${id}/commit`, { method: "POST", body: "{}" });
+  // The approved take is what the stage shows now, whichever variant was open.
+  state.previewCandidateId = null;
   await selectShot(state.shot.id);
   toast("Variant approved and written into the timeline.");
 }
@@ -2392,8 +2525,9 @@ async function createCharacter() {
 async function loadCharacters() {
   if (!state.project) return;
   const epoch = workspaceEpoch;
-  const characters = await request(`/v1/projects/${state.project.id}/characters`);
-  if (staleEpoch(epoch)) return;
+  const projectId = state.project.id;
+  const characters = await request(`/v1/projects/${projectId}/characters`);
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   state.characters = characters;
   if (!state.characters.some((character) => character.id === state.selectedCharacterId)) {
     state.selectedCharacterId = state.characters[0]?.id || null;
@@ -2473,6 +2607,9 @@ async function continuity() {
    ============================================================ */
 function rememberJob(job) {
   if (!job?.id) return;
+  // A creation deleted this session stays gone: the Create canvas repainting
+  // its last job, or a shot's candidate list, used to remember it back.
+  if (state.forgottenJobs?.has(job.id)) return;
   const previous = state.jobs.get(job.id) || {};
   // A job remembered from a surface that does not carry project_id (shot
   // candidates, the generate response) belongs to the project that surface
@@ -2504,15 +2641,52 @@ function jobProgress(job) {
 }
 
 /** Seed and refresh state.jobs from the server's per-project listing, so
- *  productions survive a reload instead of living only in session memory. */
-async function loadProjectGenerations() {
+ *  productions survive a reload instead of living only in session memory.
+ *  The listing is paged: the newest hundred first, and `older` fetches the
+ *  page before the deepest cursor reached, so nothing past the first page is
+ *  unreachable any more (2026-09-07 review). */
+function productionsPaging() {
+  const paging = state.productionsPaging;
+  return paging && paging.projectId === state.project?.id ? paging : null;
+}
+
+async function loadProjectGenerations({ older = false } = {}) {
   if (!state.project) return new Set();
+  const projectId = state.project.id;
+  const paging = productionsPaging() || { projectId, older: false, cursor: null, hasMore: false };
+  const before = older && paging.cursor ? `&before=${encodeURIComponent(paging.cursor)}` : "";
   const listing = await request(
-    `/v1/generations?project_id=${encodeURIComponent(state.project.id)}&limit=100`,
+    `/v1/generations?project_id=${encodeURIComponent(projectId)}&limit=100${before}`,
   ).catch(() => null);
+  if (projectChanged(projectId)) return new Set();
   const jobs = listing?.jobs || [];
   jobs.forEach((job) => rememberJob(job));
+  if (listing) {
+    // A refresh re-reads the newest page; the depth already reached through
+    // "Load older" is kept, so it continues from where it left off (or stays
+    // exhausted) instead of offering the second page again.
+    const keepDepth = !older && paging.older;
+    state.productionsPaging = {
+      projectId,
+      older: Boolean(paging.older || older),
+      cursor: keepDepth ? paging.cursor : (listing.next_cursor || null),
+      hasMore: keepDepth ? paging.hasMore : Boolean(listing.has_more),
+    };
+  }
   return new Set(jobs.map((job) => job.id));
+}
+
+async function loadOlderProductions() {
+  const epoch = workspaceEpoch;
+  const button = $("productionsMoreBtn");
+  if (button) { button.disabled = true; button.textContent = "Loading…"; }
+  try {
+    await loadProjectGenerations({ older: true });
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "Load older creations"; }
+  }
+  if (staleEpoch(epoch)) return;
+  renderProductions();
 }
 
 async function refreshProductions() {
@@ -2521,15 +2695,16 @@ async function refreshProductions() {
   // by id so a remembered status never freezes; bounded so a long session
   // cannot fan out.
   const epoch = workspaceEpoch;
+  const projectId = state.project?.id;
   const listed = await loadProjectGenerations();
-  if (staleEpoch(epoch)) return;
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   const stale = projectJobs()
     .filter((job) => !listed.has(job.id) && !TERMINAL_JOB_STATES.has(job.status))
     .slice(0, 20);
   const fresh = await Promise.all(
     stale.map((job) => request(`/v1/generations/${encodeURIComponent(job.id)}`).catch(() => null)),
   );
-  if (staleEpoch(epoch)) return;
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   fresh.forEach((job) => { if (job) rememberJob(job); });
   renderProductions();
 }
@@ -2557,7 +2732,12 @@ function renderProductions() {
   $("prodCountQueued").textContent = counts.queued;
   $("prodCountCompleted").textContent = counts.completed;
   $("prodCountFailed").textContent = counts.failed;
-  $("barJobCount").textContent = `${jobs.length} creation${jobs.length === 1 ? "" : "s"}`;
+  // The counts and the quote total are over the creations loaded so far; when
+  // older pages exist the label says so rather than posing as the project.
+  const paging = productionsPaging();
+  const more = $("productionsMore");
+  if (more) more.hidden = !paging?.hasMore;
+  $("barJobCount").textContent = `${jobs.length} creation${jobs.length === 1 ? "" : "s"}${paging?.hasMore ? " loaded" : ""}`;
   // The quoted credits of this project's jobs that ran or are running. Failed
   // and cancelled jobs are left out: a pre-submission failure is refunded
   // server-side and the job row keeps its quote, so counting it would show
@@ -2761,7 +2941,7 @@ function openDeleteCreationDialog(jobId) {
   $("deleteCreationSummary").innerHTML = `
     <strong>${escapeHTML(label)}</strong><br>
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
-    <span class="mono">${escapeHTML(job.id)}</span>${credits ? `<br>${credits} credits used` : ""}`;
+    <span class="mono">${escapeHTML(job.id)}</span>${credits ? `<br>${escapeHTML(creditLine(job))}` : ""}`;
   $("deleteCreationRunningNote").hidden = DIRECTLY_DELETABLE_JOB_STATES.has(job.status);
   $("deleteCreationError").textContent = "";
   $("confirmDeleteCreationBtn").disabled = false;
@@ -2800,9 +2980,20 @@ async function deleteCreation(jobId) {
 }
 
 /** Drop a creation from the session's memory so every count on this page
- *  falls immediately, without waiting for the next listing. */
+ *  falls immediately, without waiting for the next listing - and from every
+ *  other place that remembers it: the Create canvas's last job (whose repaint
+ *  used to remember the deleted creation straight back), its poll, and the
+ *  save dialog (2026-09-07 review). */
 function forgetJob(jobId) {
   state.jobs.delete(jobId);
+  state.forgottenJobs?.add(jobId);
+  Object.entries(state.passengerJobs || {}).forEach(([media, job]) => {
+    if (job?.id !== jobId) return;
+    state.passengerJobs[media] = null;
+    stopPassengerPolling();
+    if (media === state.passengerMedia) renderPassengerJob(null).catch(() => null);
+  });
+  if (state.savingJobId === jobId) state.savingJobId = null;
   if (state.selectedJobId === jobId) state.selectedJobId = null;
   if ($("operationsJobId") && $("operationsJobId").value.trim() === jobId) {
     $("operationsJobId").value = "";
@@ -2934,6 +3125,38 @@ const EVENT_LABELS = {
   JOB_COMPLETED: "Done",
 };
 
+/** The credits line for one creation, by what the ledger says about them.
+ *  Reserved, charged, refunded and held-for-a-check are four different
+ *  facts; the line used to know two, and a refunded creation read as
+ *  "charged" (2026-09-07 review). */
+const CREDIT_STATUS_COPY = {
+  RESERVED: "reserved",
+  SETTLED: "charged",
+  REFUNDED: "refunded",
+  RECONCILIATION_REQUIRED: "held while the charge is checked",
+};
+function creditLine(job) {
+  const credits = jobCredits(job);
+  if (!credits) return "No credits reserved";
+  const status = job.credit_status;
+  if (!status) return `${credits} credits quoted`;
+  return `${credits} credits ${CREDIT_STATUS_COPY[status] || humanizeCode(status)}`;
+}
+
+/** What the server would accept for this creation right now. The gateway's
+ *  own rule travels on the job view as `allowed_actions`; the local guesses
+ *  it replaces (safe_to_retry alone, a status list) offered a "Try again"
+ *  the server answered with 409 (2026-09-07 review). */
+function jobActions(job) {
+  if (job.allowed_actions) return job.allowed_actions;
+  const terminal = ["COMPLETED", "FAILED", "CANCELLED"].includes(job.status);
+  return {
+    retry: !terminal && job.safe_to_retry === true && (job.submission_state || "NOT_SENT") === "NOT_SENT",
+    cancel: !terminal && job.submission_state !== "SENT_UNCONFIRMED",
+    resubmit: ["FAILED", "CANCELLED"].includes(job.status),
+  };
+}
+
 function renderGenerationControl(job) {
   state.operations.job = job;
   if (!job) {
@@ -2951,20 +3174,18 @@ function renderGenerationControl(job) {
   rememberJob(job);
   setText("operationsJobMetric", simpleLabel(job.status));
   $("operationsJobId").value = job.id;
-  // Credits are RESERVED until the job settles; saying "charged" while they
-  // are still held is the one thing this line must never do.
-  const held = ["RESERVED", "RECONCILIATION_REQUIRED"].includes(job.credit_status);
   const attempts = Number(job.attempt_count || 0);
-  const credits = jobCredits(job);
+  const actions = jobActions(job);
   $("generationControlStatus").className = "output-box";
   $("generationControlStatus").innerHTML = `
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
     ${escapeHTML(friendlyModel(job.model))}<br>
-    ${credits} credits ${held ? "reserved" : "charged"}<br>
+    ${escapeHTML(creditLine(job))}<br>
     Tried ${attempts} time${attempts === 1 ? "" : "s"}
-    ${job.error_message ? `<br><span class="output-error">${escapeHTML(job.error_message)}</span>` : ""}`;
-  $("retryJobBtn").disabled = job.safe_to_retry !== true;
-  $("cancelJobBtn").disabled = !["QUEUED", "SUBMITTED", "RUNNING", "RETRY_WAIT"].includes(job.status);
+    ${job.error_message ? `<br><span class="output-error">${escapeHTML(job.error_message)}</span>` : ""}
+    ${actions.resubmit ? "<br>This creation is finished. To try again, start a new one from Create." : ""}`;
+  $("retryJobBtn").disabled = !actions.retry;
+  $("cancelJobBtn").disabled = !actions.cancel;
   $("reconcileJobBtn").disabled = !["SENT_UNCONFIRMED", "SUBMITTED"].includes(job.submission_state) && !["FAILED", "RUNNING"].includes(job.status);
   // Any creation can be deleted; one still being made is stopped first.
   if ($("deleteJobBtn")) $("deleteJobBtn").disabled = false;
@@ -3294,8 +3515,9 @@ function renderCreativeSessionsEmpty() {
 async function loadCreativeSessions() {
   if (!state.project) return;
   const epoch = workspaceEpoch;
-  const sessions = await request(`/v1/creative/sessions?project_id=${encodeURIComponent(state.project.id)}`);
-  if (staleEpoch(epoch)) return;
+  const projectId = state.project.id;
+  const sessions = await request(`/v1/creative/sessions?project_id=${encodeURIComponent(projectId)}`);
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   state.creative.sessions = sessions;
   $("creativeSessionCount").textContent = state.creative.sessions.length;
   const list = $("creativeSessionList");
@@ -3341,8 +3563,9 @@ async function openCreativeSession(id) {
     state.creative.revealedScreenplay = null;
   }
   const epoch = workspaceEpoch;
+  const projectId = state.project?.id;
   const view = await request(`/v1/creative/sessions/${id}`);
-  if (staleEpoch(epoch)) return;
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   state.creative.session = view;
   releaseLandedCreativeTurns(state.creative.session);
   if (state.creative.revealedTurn === null) {
@@ -4080,12 +4303,15 @@ function renderCreative() {
     const polling = Boolean(creativePoll && creativePoll.sessionId === view.session.id);
     $("creativeVisualsStatus").textContent = `${ready}/${anchors.length} ready${failed ? `, ${failed} failed` : ""}${skipped ? `, ${skipped} skipped` : ""}${polling ? " · auto-refreshing" : ""}`;
     $("creativeAnchorGrid").innerHTML = renderAnchors(view) + renderUncoveredElements(view);
+    // Through the per-session cache: every render used to fetch every key
+    // visual again and mint a new object URL it never revoked, so a session
+    // that polled visuals for a while kept growing (2026-09-07 review).
     anchors.filter((anchor) => anchor.media_asset_id).forEach(async (anchor) => {
-      const media = await resolveAssetThumbnail(anchor.media_asset_id).catch(() => null);
+      const url = await cachedAssetThumbnail(anchor.media_asset_id).catch(() => null);
       const cell = document.querySelector(`[data-anchor-thumb="${anchor.id}"]`);
-      if (media && cell) {
+      if (url && cell) {
         cell.classList.remove("empty-state");
-        cell.innerHTML = `<img src="${escapeHTML(media.url)}" alt="" loading="lazy" />`;
+        cell.innerHTML = `<img src="${escapeHTML(url)}" alt="" loading="lazy" />`;
       }
     });
     const requiredNotReady = anchors.filter((anchor) => anchor.required && anchor.status !== "READY");
@@ -4471,8 +4697,9 @@ const CONTINUATION_NOTES = {
 async function loadEpisodeStrip() {
   if (!state.project) return;
   const epoch = workspaceEpoch;
-  const episodes = await request(`/v1/projects/${state.project.id}/episodes`);
-  if (staleEpoch(epoch)) return;
+  const projectId = state.project.id;
+  const episodes = await request(`/v1/projects/${projectId}/episodes`);
+  if (staleEpoch(epoch) || projectChanged(projectId)) return;
   state.episodes = episodes;
   renderEpisodeStrip();
 }
@@ -4646,6 +4873,7 @@ document.addEventListener("click", (event) => {
     // stays disabled until one is. A disabled button dispatches no click event,
     // so without this branch the amber primary is silently dead on first paint.
     if (button.disabled) {
+      if (state.shot?.status === "COMMITTED") return toast("This shot is approved and in the timeline; it cannot be shot again.");
       const first = document.querySelector("[data-shot]");
       if (first) { first.click(); return toast("Opened the first shot — Generate shot is in the action bar."); }
       return toast("Break a script into shots first, then pick one to generate.");
@@ -4907,6 +5135,9 @@ on("lockProjectStyleBtn", "click", guard(lockSelectedProjectStyle));
 on("creativeStartBtn", "click", guard(startCreativeSession));
 on("creativeReplyBtn", "click", guard(sendCreativeReply));
 on("creativeReplyInput", "keydown", (event) => {
+  // Enter while an IME is composing confirms the candidate, not the message:
+  // sending on it posted half a sentence and spent a turn (2026-09-07 review).
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "Enter") { event.preventDefault(); guard(sendCreativeReply)(); }
 });
 on("creativeRefreshBtn", "click", guard(async () => {
@@ -5000,6 +5231,7 @@ on("closeScriptDrawerBtn", "click", () => $("scriptDrawer").close());
 
 /* Productions */
 on("productionsRefreshBtn", "click", guard(refreshProductions));
+on("productionsMoreBtn", "click", guard(loadOlderProductions));
 on("closeMediaViewerBtn", "click", () => {
   $("mediaViewerDialog").close();
 });

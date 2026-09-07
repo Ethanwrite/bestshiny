@@ -507,6 +507,9 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                 <span id="shotNumber" class="mono">SHOT —</span>
                 <strong id="shotAction">Select a shot</strong>
                 <small id="shotState">Opening state → one action → closing state</small>
+                <!-- Which take is on the stage: the approved one, or the variant the
+                     director opened. Hidden until a take is showing. -->
+                <span id="shotStageTake" class="status-chip is-neutral" hidden>—</span>
               </div>
             </div>
 
@@ -573,6 +576,11 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
                   <button class="btn btn-tertiary" type="button" data-empty-action="go-director">Open Director</button>
                 </div>
               </div>
+            </div>
+            <!-- Older pages of the listing (GET /v1/generations?before=…); shown
+                 by renderProductions only while the server says more exist. -->
+            <div id="productionsMore" class="load-more" hidden>
+              <button id="productionsMoreBtn" class="btn btn-tertiary" type="button">Load older creations</button>
             </div>
 
             <div class="canvas-toolbar creations-head">
@@ -647,16 +655,11 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <details class="disclosure">
                 <summary>Advanced</summary>
                 <label class="field"><span class="field-label">What must not appear</span><textarea id="passengerNegativePrompt" rows="3" placeholder="e.g. no text, no logos, no extra hands"></textarea></label>
-                <label class="field"><span class="field-label">How much this shot has to be right</span>
-                  <!-- Values are the asset_criticality contract; only the labels change. -->
-                  <select id="passengerCriticality">
-                    <option value="STANDARD">Normal</option>
-                    <option value="IMPORTANT">Important</option>
-                    <option value="HERO">Hero shot</option>
-                    <option value="CANONICAL">Sets the reference for others</option>
-                  </select>
-                </label>
-                <p class="field-note">The higher you set this, the more evidence BestShiny needs before it accepts a result instead of sending it to you to review. It does not guarantee a better image, and a stricter setting can cost more.</p>
+                <!-- No criticality picker. Admission runs every Create request at
+                     STANDARD (core/entitlements/entitlement_core/admission.py) and
+                     the checks never read it, so the picker that sat here promised
+                     a strictness nothing honoured (2026-09-07 review). Criticality
+                     is a pipeline fact, set where a shot is planned. -->
                 <div class="kv-list">
                   <div class="kv"><span>Model</span><b id="advModel">—</b></div>
                   <div class="kv"><span>Billing</span><b id="advPricing">Quoted before you generate</b></div>
@@ -733,17 +736,18 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               </details>
 
               <details class="group-disclosure" open>
-                <summary><h3 class="group-title">Camera</h3></summary>
+                <summary><h3 class="group-title">Camera, for the continuity check</h3></summary>
+                <!-- Angle and Movement describe the camera to "Check continuity"
+                     below and nothing else; they are not part of the generation
+                     request. The shot's framing is its compiled shot type (under
+                     Composition) and its prompt comes from the script. The Framing
+                     and Key light pickers that used to sit here were read by
+                     nothing at all (2026-09-07 review). -->
                 <div class="field-grid">
-                  <label class="field"><span class="field-label">Framing</span><select id="cameraScale"><option>Medium</option><option>Close-up</option><option>Wide</option><option>Extreme close-up</option></select></label>
                   <label class="field"><span class="field-label">Angle</span><select id="cameraAngle"><option>Eye level</option><option>Low angle</option><option>High angle</option><option>Profile</option></select></label>
+                  <label class="field"><span class="field-label">Movement</span><select id="cameraMove"><option>Locked off</option><option>Slow push in</option><option>Pan left</option><option>Follow</option><option>Orbit</option></select></label>
                 </div>
-                <label class="field"><span class="field-label">Movement</span><select id="cameraMove"><option>Locked off</option><option>Slow push in</option><option>Pan left</option><option>Follow</option><option>Orbit</option></select></label>
-              </details>
-
-              <details class="group-disclosure">
-                <summary><h3 class="group-title">Lighting</h3></summary>
-                <label class="field"><span class="field-label">Key light</span><select id="lighting"><option>Cold side light, rainy night</option><option>Soft frontal</option><option>Warm backlight</option><option>High-contrast rim</option></select></label>
+                <p class="field-note">Used only by Check continuity. Neither changes what is generated: the framing and the prompt come from the shot itself.</p>
               </details>
 
               <details class="group-disclosure">
@@ -1134,6 +1138,9 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
               <div id="xunhupayQr" class="wallet-connect-qr xunhupay-qr" aria-label="WeChat Pay QR code" hidden></div>
               <p id="walletStatus" class="sheet-status" role="status" aria-live="polite"></p>
               <p id="walletError" class="sheet-error" role="alert"></p>
+              <!-- The manual way back onto an order whose status checks kept failing:
+                   shown only once the poll has parked (wallet.js followOrder). -->
+              <button id="walletRecheckBtn" class="btn btn-secondary btn-full" type="button" hidden>Check payment status again</button>
               <button id="payUsdcBtn" class="btn btn-primary btn-full wallet-confirm-button" type="button" disabled>Confirm and pay</button>
               <button id="payBrowserWalletBtn" class="btn btn-tertiary btn-full wallet-browser-pay" type="button" hidden>Use browser wallet</button>
               <small class="wallet-safety-note">Each click creates a separate order. Credits are added only after BestShiny confirms payment.</small>

@@ -247,6 +247,7 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/v1/workspaces/{workspace_id}/relayed-authorizations/{id}/submit` | 验证用户签名并由 Relayer 提交 `transferWithAuthorization` |
 | `POST` | `/v1/workspaces/{workspace_id}/relayed-authorizations/{id}/reconcile` | 验证 Base 回执/确认数并原子入账 |
 | `GET` | `/v1/payments/config`、`/v1/workspaces/{workspace_id}/billing` | 读取 DePay/Base 配置和工作空间积分 |
+| `GET` | `/v1/payments/catalog` | 公开（无需登录）读取当前在售积分包（USDC 与微信支付两套价目，与结账冻结进订单的目录同源）；公开定价页以此为准 |
 | `POST` | `/v1/workspaces/{workspace_id}/depay-checkouts` | 为已登录工作空间创建 DePay 充值会话与带上下文的共享链接 |
 | `GET` | `/v1/workspaces/{workspace_id}/depay-checkouts/{checkout_id}` | 查询充值会话状态供 Web 轮询 |
 | `POST` | `/api/passenger/generate` | 乘客模式提交图片/视频任务 |
@@ -264,7 +265,8 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/v1/episodes/{episode_id}/continuations` | 计算 EpisodeContinuationContext 并提案下一集 |
 | `GET/POST` | `/v1/continuations/{id}`、`/v1/continuations/{id}/confirm` | 查看 / 确认续集并接续集间连续性 |
 | `POST` | `/v1/shots/{shot_id}/generate` | 自动导演生成镜头候选 |
-| `GET` | `/v1/generations/{job_id}` | 查询生成任务 |
+| `GET` | `/v1/generations?project_id=&limit=&before=` | 项目的创作列表，按创建时间倒序分页：`before` 为上一页 `next_cursor`（最后一条的 id，按 `(created_at, id)` 键集翻页，跨项目的游标返回 404）；每条带 `duration`（实际运行时长）、`requested_duration`、`aspect_ratio`、`resolution` 与网关裁定的 `allowed_actions` |
+| `GET` | `/v1/generations/{job_id}` | 查询生成任务（含 `allowed_actions`：`retry`/`cancel` 是网关 `retry()`/`cancel()` 的前置条件，`resubmit` 表示只能新建一次生成） |
 | `DELETE` | `/v1/generations/{job_id}` | 从 Productions 移除一次创作：软删除（`deleted_at`/`deleted_by`），不退款、不改动任何已产生的额度流水、结算、执行、成本与证据记录；仍在进行的会先安全取消，提交状态未确认的返回 409（先 Recheck credits）；重复调用返回成功。独占的媒体在事务提交后由异步清理回收 |
 | `POST` | `/api/generations/{job_id}/promote` | 把完成结果新增为资产版本，并可显式提升为 canonical |
 | `POST` | `/v1/shots/{shot_id}/candidates/{candidate_id}/human-review` | 对需要人工确认且没有硬失败的候选填写理由并显式确认；仍需另行采用 |

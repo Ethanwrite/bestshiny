@@ -35,6 +35,17 @@ let activePage = "overview";
 let activePath = "/admin";
 let pendingConfirm = null;
 let activeDetail = null;
+// The list pages answer { items, pagination: { total, limit, offset } }; the
+// console used to read the first page and offer no way to the rest.
+const PAGE_SIZE = 50;
+let activeOffset = 0;
+// Route names are plural (/admin/users/<id>); the detail endpoints and the
+// rows' data-detail are singular. Mapping them here is what makes a deep link
+// open the same drawer a click does - it used to fall into the audit branch.
+const DETAIL_KIND = { users: "user", models: "model", jobs: "job", projects: "project", audit: "audit" };
+// The audit rows already fetched, by log id: a click shows the record it has,
+// instead of asking the server for an entity whose id is the log's own.
+const auditRecords = new Map();
 
 function csrf() {
   const match = document.cookie.split("; ").find((item) => item.startsWith("ai_director_csrf="));
@@ -83,11 +94,37 @@ function queryFor(page) {
     if (from) params.set("created_from", new Date(from).toISOString());
     if (to) params.set("created_to", new Date(to).toISOString());
   }
+  if (PAGE[page]?.filters) {
+    params.set("limit", String(PAGE_SIZE));
+    params.set("offset", String(activeOffset));
+  }
   return params.toString() ? `?${params}` : "";
+}
+
+/** The page controls under a list, from the server's own pagination facts. */
+function pager(pagination) {
+  if (!pagination || !Number.isFinite(pagination.total)) return "";
+  const { total, limit, offset } = pagination;
+  if (total <= limit && offset === 0) return "";
+  const from = total ? offset + 1 : 0;
+  const to = Math.min(total, offset + limit);
+  return `<nav class="admin-pager" aria-label="Pages"><span>${fmt(from)}–${fmt(to)} of ${fmt(total)}</span><span class="admin-pager-actions"><button class="btn btn-secondary" type="button" data-page-step="-1"${offset === 0 ? " disabled" : ""}>Previous</button><button class="btn btn-secondary" type="button" data-page-step="1"${to >= total ? " disabled" : ""}>Next</button></span></nav>`;
+}
+
+/** Re-read the current list with the current filters and page. */
+async function reloadList(label = "Loading…") {
+  const config = PAGE[activePage];
+  $("adminContent").innerHTML = `<div class="admin-loading">${esc(label)}</div>`;
+  try {
+    render(activePage, await request(`${config.endpoint}${queryFor(activePage)}`));
+  } catch (error) {
+    $("adminContent").innerHTML = `<div class="admin-error">${esc(error.message)}</div>`;
+  }
 }
 
 async function load(route = activePath) {
   activePath = route;
+  activeOffset = 0;
   const parsed = parseRoute(route);
   activePage = PAGE[parsed.page] ? parsed.page : "overview";
   const config = PAGE[activePage];
@@ -109,7 +146,7 @@ async function load(route = activePath) {
     const payload = await request(`${config.endpoint}${queryFor(activePage)}`);
     $("adminAsOf").textContent = `AS OF ${date(payload.as_of || payload.checked_at || new Date())}`;
     render(activePage, payload);
-    if (parsed.id) await openDetail(activePage, parsed.id);
+    if (parsed.id) await openDetail(DETAIL_KIND[activePage] || activePage, parsed.id);
   } catch (error) {
     $("adminContent").innerHTML = `<div class="admin-error">${esc(error.message)}</div>`;
   }
@@ -117,7 +154,7 @@ async function load(route = activePath) {
 
 function render(page, data) {
   const renderers = { overview: renderOverview, users: renderUsers, credits: renderCredits, models: renderModels, providers: renderProviders, routing: renderRouting, jobs: renderJobs, projects: renderProjects, system: renderSystem, audit: renderAudit };
-  $("adminContent").innerHTML = renderers[page](data);
+  $("adminContent").innerHTML = renderers[page](data) + pager(data.pagination);
 }
 
 function metric(label, value, note = "") {
@@ -186,6 +223,8 @@ function renderSystem(data) {
 }
 
 function renderAudit(data) {
+  auditRecords.clear();
+  (data.items || []).forEach((item) => auditRecords.set(item.id, item));
   return table(["Action", "Actor", "Entity", "Reason", "Request", "Created"], (data.items || []).map((item) => `<tr data-detail="audit" data-id="${esc(item.id)}" tabindex="0"><td>${status(item.action)}</td><td>${esc(item.actor_role)}<br><span class="admin-mono admin-muted">${esc(item.actor_user_id)}</span></td><td>${esc(item.entity_type)} · <span class="admin-mono">${esc(item.entity_id)}</span></td><td>${esc(item.reason || "—")}</td><td class="admin-mono">${esc(item.request_id)}</td><td>${date(item.created_at)}</td></tr>`));
 }
 
@@ -204,8 +243,17 @@ async function openDetail(kind, id) {
   markCurrentRow(kind, id);
   const endpoint = { user: `/admin/users/${id}`, model: `/admin/models/${id}`, job: `/admin/jobs/${id}`, project: `/admin/projects/${id}` }[kind];
   if (!endpoint) {
-    const audit = (await request(`/admin/audit?entity_id=${encodeURIComponent(id)}`)).items?.[0];
-    if (audit) showDrawer(`${audit.action}`, audit);
+    // An audit row: the record is the one already on the page, or the one
+    // entry with this log id for a deep link. Never a search by entity_id
+    // with the log's own id, which found nothing or somebody else's entry.
+    try {
+      const audit = auditRecords.get(id)
+        || (await request(`/admin/audit?id=${encodeURIComponent(id)}`)).items?.[0];
+      if (audit) showDrawer(`${audit.action}`, audit);
+      else showDrawer("Unable to load", { error: `No audit entry ${id}` });
+    } catch (error) {
+      showDrawer("Unable to load", { error: error.message });
+    }
     return;
   }
   try {
@@ -339,6 +387,12 @@ async function executeConfirm() {
 document.addEventListener("click", async (event) => {
   const detail = event.target.closest("[data-detail]");
   if (detail) return openDetail(detail.dataset.detail, detail.dataset.id);
+  const step = event.target.closest("[data-page-step]");
+  if (step) {
+    activeOffset = Math.max(0, activeOffset + Number(step.dataset.pageStep) * PAGE_SIZE);
+    closeDrawer();
+    return reloadList();
+  }
   const probe = event.target.closest("[data-provider-probe]");
   if (probe) {
     probe.disabled = true;
@@ -405,10 +459,10 @@ document.addEventListener("keydown", (e) => {
 });
 
 $("adminRefreshBtn").addEventListener("click", () => load(activePath));
-$("adminApplyFilters").addEventListener("click", async () => {
-  const config = PAGE[activePage];
-  $("adminContent").innerHTML = '<div class="admin-loading">Applying filters…</div>';
-  try { render(activePage, await request(`${config.endpoint}${queryFor(activePage)}`)); } catch (error) { $("adminContent").innerHTML = `<div class="admin-error">${esc(error.message)}</div>`; }
+$("adminApplyFilters").addEventListener("click", () => {
+  activeOffset = 0;
+  closeDrawer();
+  reloadList("Applying filters…");
 });
 $("adminDrawerClose").addEventListener("click", closeDrawer);
 $("adminConfirmSubmit").addEventListener("click", (event) => { event.preventDefault(); executeConfirm().catch((error) => alert(error.message)); });

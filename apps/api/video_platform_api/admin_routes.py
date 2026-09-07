@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from generation_gateway import job_allowed_actions
 from model_registry_core import production_serviceable
 from production_domain.models import (
     AdminAuditLog,
@@ -1320,10 +1321,11 @@ def register_admin_routes(
                     for event in credit_events
                 ],
             },
-            "allowed_actions": {
-                "retry": job.status in {"FAILED", "RETRY_WAIT"} and job.safe_to_retry,
-                "cancel": job.status in {"NEW", "RESERVED", "QUEUED", "RETRY_WAIT"},
-            },
+            # The gateway's own rule, shared with the user view: the console
+            # used to offer Retry on FAILED rows the gateway refuses outright.
+            "allowed_actions": job_allowed_actions(
+                job, credit_status=credit.status if credit else None
+            ),
         }
 
     @router.post("/jobs/{job_id}/retry")
@@ -1561,6 +1563,9 @@ def register_admin_routes(
     @router.get("/audit")
     def audit_log(
         q: Annotated[str | None, Query(max_length=320)] = None,
+        # One entry by its own id: the console's row click and its deep link
+        # used to query `entity_id` with the log id, which matches nothing.
+        audit_id: Annotated[str | None, Query(alias="id", max_length=36)] = None,
         actor_user_id: str | None = None,
         action: str | None = None,
         entity_type: str | None = None,
@@ -1572,6 +1577,8 @@ def register_admin_routes(
         _principal: AuthPrincipal = Depends(admin_principal),
     ):
         statement = select(AdminAuditLog)
+        if audit_id:
+            statement = statement.where(AdminAuditLog.id == audit_id)
         if actor_user_id:
             statement = statement.where(AdminAuditLog.actor_user_id == actor_user_id)
         if action:

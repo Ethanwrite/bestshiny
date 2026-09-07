@@ -124,8 +124,12 @@ async function mediaUrl(command) {
 
 async function processCommand(command) {
   busy = true;
-  await heartbeat();
   try {
+    // The BUSY heartbeat is inside the guarded block on purpose: when it
+    // threw, `busy` stayed true for good and every later poll returned at
+    // once, so one dropped request parked the worker forever (2026-09-07
+    // review). A missed heartbeat is not a reason to drop the command either.
+    await heartbeat().catch(() => {});
     let response;
     if (command.type === 'provider.request') response = await providerRequest(command);
     else if (command.type === 'provider.media_url') response = await mediaUrl(command);

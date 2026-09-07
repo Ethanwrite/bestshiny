@@ -8,7 +8,12 @@ from .affinity import (
     OfflineFlowProjectProvisioner,
 )
 from .direct import DirectAPIResourceRegistry
-from .gateway import GenerationGateway, IdempotencyConflict, TimelineGenerationPlanStale
+from .gateway import (
+    GenerationGateway,
+    IdempotencyConflict,
+    TimelineGenerationPlanStale,
+    job_allowed_actions,
+)
 from .providers import GenerationTargetError, ProviderRouter
 
 __all__ = [
@@ -23,6 +28,7 @@ __all__ = [
     "GenerationGateway",
     "GenerationTargetError",
     "IdempotencyConflict",
+    "job_allowed_actions",
     "ProviderRouter",
     "TimelineGenerationPlanStale",
 ]

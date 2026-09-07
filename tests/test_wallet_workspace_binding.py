@@ -55,6 +55,38 @@ def _function_source(name: str, source: str = WALLET_JS) -> str:
     raise AssertionError(f"{name}() is not brace-balanced")
 
 
+def _const_source(name: str, source: str = WALLET_JS) -> str:
+    """One top-level ``const NAME = …;`` - an object, an array or one line."""
+
+    start = source.find(f"\nconst {name} = ")
+    assert start != -1, f"the module no longer defines {name}"
+    start += 1
+    value_at = start + len(f"const {name} = ")
+    if source[value_at] in "{[":
+        opener, closer = source[value_at], "}" if source[value_at] == "{" else "]"
+        depth = 0
+        for position in range(value_at, len(source)):
+            if source[position] == opener:
+                depth += 1
+            elif source[position] == closer:
+                depth -= 1
+                if depth == 0:
+                    return source[start : source.index(";", position) + 1]
+        raise AssertionError(f"{name} is not balanced")
+    return source[start : source.index(";\n", value_at) + 1]
+
+
+# Polling runs through one engine since the 2026-09-07 review; the functions
+# that follow an order are lifted together with it.
+POLL_ENGINE = "\n".join(
+    [
+        _const_source(name)
+        for name in ("POLL_INTERVAL_MS", "POLL_RETRY_STEPS_MS", "POLL_MAX_FAILURES", "POLL_WAITING_COPY")
+    ]
+    + [_function_source(name) for name in ("stopPolling", "followOrder")]
+)
+
+
 def _run(tmp_path: Path, script: str) -> dict:
     node = shutil.which("node")
     if node is None:  # pragma: no cover
@@ -332,6 +364,7 @@ function setMessage() {}
 function resetWalletView() {}
 function render() {}
 const window = { clearTimeout() {} };
+paymentState.pollGeneration = 0;
 await initializeForUser(null);
 console.log(JSON.stringify({
   state: {
@@ -344,7 +377,9 @@ console.log(JSON.stringify({
   pill: nodes.creditsAmount.textContent,
 }));
 """
-    result = _run(tmp_path, harness % {"functions": _function_source("initializeForUser")})
+    result = _run(tmp_path, harness % {
+        "functions": "\n".join(_function_source(name) for name in ("initializeForUser", "stopPolling")),
+    })
     assert result["state"] == {
         "user": None, "workspace": None, "billing": None, "checkout": None, "pending": None, "account": "",
     }
@@ -361,10 +396,11 @@ const RESEND_MESSAGE = "resend";
 %(functions)s
 const paymentState = {
   workspace: { id: "w1" }, pendingSubmission: { checkoutId: "auth-1", signature: "0xsig" },
-  pollTimer: null, billing: null,
+  pollTimer: null, billing: null, pollGeneration: 0, poll: null, stalledPoll: null,
 };
 const messages = [];
 const timers = [];
+const element = () => ({ hidden: true });
 const window = { clearTimeout() {}, setTimeout(fn, ms) { timers.push(ms); return 1; }, dispatchEvent() {} };
 function setMessage(message = "", error = "") { messages.push({ message, error }); }
 function paymentFailureMessage(status) { return `failed:${status}`; }
@@ -374,7 +410,11 @@ async function api() { return { status: "PENDING" }; }
 await pollRelayedAuthorization("auth-1");
 console.log(JSON.stringify({ messages, timers, pending: paymentState.pendingSubmission }));
 """
-    result = _run(tmp_path, harness % {"functions": _function_source("pollRelayedAuthorization")})
+    result = _run(tmp_path, harness % {
+        "functions": POLL_ENGINE + "\n" + "\n".join(
+            _function_source(name) for name in ("pollRelayedAuthorization", "pollRelayedAuthorizationOnce")
+        ),
+    })
     assert result["timers"] == [], "polling stops"
     assert result["messages"] == [{"message": "resend", "error": ""}]
     assert result["pending"] == {"checkoutId": "auth-1", "signature": "0xsig"}

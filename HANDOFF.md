@@ -58,6 +58,24 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > [#62](https://github.com/Ethanwrite/bestshiny/pull/62), and deployed to production from the branch tip on
 > 2026-09-07 ≈09:29Z at the operator's request (record: `docs/DEPLOYMENT.md` §6).
 >
+> **2026-09-07 · branch `claude/preview-binding-project-switching-d053fa` — the third production review,
+> verified and fixed.** Twenty-two P2 findings against `0d4e71e`, all reproduced (the FREE-workspace item only
+> in the browser: the server's default video role is already per-project). Most live in the served web files:
+> the Director stage now shows the variant the director opened and a human review is of the take on the stage;
+> a project switch is sequenced so a late answer for the project the user left is dropped; a deleted creation
+> is forgotten by the Create canvas, its poll and the save dialog; wallet polling runs through one engine that
+> retries a failed check under backoff, parks behind "Check payment status again", and ends when the sheet
+> closes; the controls nothing read (Framing, Key light, criticality) are gone; the plan the page acts on is
+> the open project's workspace's; Productions pages older creations (`GET /v1/generations?before=`); the admin
+> console maps deep links, opens audit rows from the record it has, pages its lists and scrolls; the credits
+> line knows refunded from charged; "Try again" follows the gateway's own `allowed_actions`
+> (`generation_gateway.job_allowed_actions`, on the job view and the admin detail); the pricing page reads
+> `GET /v1/payments/catalog`; a direct upload's asset gets a read address; the job view carries the length that
+> runs beside the length asked for; the worker extension no longer parks on a failed heartbeat; the web
+> proxy forwards a WebSocket upgrade. Record with residuals: `docs/OPEN_ISSUES.md` §2.51. No migration; the
+> schema head stays `0081`. The host nginx in front of the web container needs the same `Upgrade`/`Connection`
+> headers before the worker WebSocket works through `/api/`.
+>
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head
 > `0070_creative_director_screenplay`); production state is in

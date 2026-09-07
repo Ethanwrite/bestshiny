@@ -5,6 +5,8 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from payment_core import (
+    PAYMENT_PACKAGES,
+    XUNHUPAY_PACKAGES,
     DePayAuthenticationError,
     DePayConfigurationError,
     DePayPayloadError,
@@ -140,6 +142,26 @@ def register_payment_routes(app: FastAPI, container: Container, auth: AuthServic
     def require_legacy_wallet_payments() -> None:
         if not container.settings.legacy_wallet_payments_enabled:
             raise HTTPException(410, "Legacy wallet payments are disabled; use a fixed payment pack")
+
+    @app.get("/v1/payments/catalog")
+    def payment_catalog():
+        """The credit packs on sale, readable by anyone: the public pricing page's source.
+
+        Unauthenticated on purpose - a price is not a secret - and served
+        from the same catalogue the checkout freezes into an order, so the
+        marketing page can no longer advertise a pack the checkout does not
+        sell (it offered "$30 / 3,000 credits" from a copy of its own while
+        the catalogue sold 20/1,800, 50/6,000 and 100/11,000; 2026-09-07
+        review). Nothing here is accepted back from a client.
+        """
+
+        return {
+            "usd_per_credit": container.credit_pricing.usd_per_credit,
+            "packages": [package.as_public_dict() for package in PAYMENT_PACKAGES.values()],
+            "xunhupay_packages": [
+                package.as_public_dict() for package in XUNHUPAY_PACKAGES.values()
+            ],
+        }
 
     @app.get("/v1/payments/config")
     def payment_config(principal: AuthPrincipal = Depends(auth.current_user)):  # noqa: B008

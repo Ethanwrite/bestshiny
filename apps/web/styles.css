@@ -241,8 +241,11 @@ html, body {
 /* The app shell is a fixed-height grid; the public site is a scrolling page. */
 body { overflow: hidden; }
 body.public-route { height: auto; min-height: 100%; overflow: visible; }
-/* router.js toggles this alongside .public-route; the console is light (decision B). */
-body.admin-route { background: var(--bg-0); color: var(--fg); }
+/* router.js toggles this alongside .public-route; the console is light (decision B).
+   The console is a document that scrolls, not a fixed-height shell: its main
+   column grows with its tables, and under the app shell's overflow:hidden the
+   bottom of a long list could never be reached (2026-09-07 review). */
+body.admin-route { background: var(--bg-0); color: var(--fg); height: auto; min-height: 100%; overflow: visible; }
 
 h1, h2, h3, p { margin: 0; }
 a { color: inherit; text-decoration: none; }
@@ -1296,6 +1299,7 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
 .shot-stage-caption > .mono { font-size: 10px; letter-spacing: .12em; color: var(--fg-meta); }
 .shot-stage-caption strong { font-size: var(--t-card); font-weight: 600; color: var(--fg); }
 .shot-stage-caption small { font-size: var(--t-label); color: var(--fg-meta); margin-left: auto; }
+.shot-stage-caption .status-chip { flex: 0 0 auto; margin-left: 10px; }
 
 .shot-notes { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; align-items: start; }
 .shot-notes-main { min-width: 0; padding: 14px 16px 16px; }
@@ -1312,6 +1316,11 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
 /* Approved into the timeline. The old rgba(95,211,154,.28) inset measured
    1.05:1 and was invisible; approval is a green rail plus a green edge. */
 .variant.is-committed { border-color: var(--ok); box-shadow: inset 3px 0 0 var(--ok), var(--shadow-1); }
+/* The variant on the stage is the current selection - one of the sanctioned
+   amber meanings - so the same signal the tree and the strip use. */
+.variant.is-staged { border-color: var(--brand-line); box-shadow: inset 0 0 0 1px var(--brand-line), var(--shadow-1); }
+.variant.is-committed.is-staged { box-shadow: inset 3px 0 0 var(--ok), inset 0 0 0 1px var(--brand-line), var(--shadow-1); }
+.variant-on-stage { font: 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--brand-text); margin-left: 6px; }
 .variant-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .variant-head span { font-size: var(--t-card); font-weight: 600; }
 .score-bars { display: grid; gap: 6px; margin-bottom: 12px; }
@@ -1444,6 +1453,8 @@ input[type="file"]::file-selector-button:hover { background: var(--bg-3); }
 /* The small row bar keeps its own class and now has a real groove: the amber
    MARK on --bg-track is 3.53:1, where the bright fill on --bg-4 was 1.55:1. */
 .job-progress { width: 110px; height: 3px; border-radius: 2px; background: var(--bg-track); overflow: hidden; }
+/* Older pages of the listing, under the rows loaded so far. */
+.load-more { display: flex; justify-content: center; padding: 12px 0 4px; }
 .job-progress i { display: block; height: 100%; background: var(--brand-mark); transition: width .3s ease; }
 /* No signal from the provider yet: a sliding light instead of a fake number. */
 .job-progress.indeterminate i {

@@ -54,7 +54,7 @@ from generation_gateway import (
     GenerationTargetError,
     IdempotencyConflict,
 )
-from generation_gateway.gateway import UnsafeRetry
+from generation_gateway.gateway import UnsafeRetry, job_allowed_actions
 from image_prompt_core import ImagePromptCorrectRequest
 from media_service import (
     DEFAULT_SWEEP_LIMIT,
@@ -147,7 +147,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .admin_routes import register_admin_routes
@@ -357,8 +357,25 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def _job_view(job, *, credit_status: str | None = None) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    request = getattr(job, "request_json", None)
+    request = request if isinstance(request, dict) else {}
+    metadata = request.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    # The length the model runs and the length that was asked for. Admission
+    # snaps a request onto the model's declared lengths (5 s on a 4/6/8 model
+    # runs, and is quoted for, 6 s); until now neither figure reached a user
+    # surface, so the page kept the number that was typed (2026-09-07 review).
+    duration = request.get("duration")
+    requested_duration = metadata.get("requested_duration_seconds", duration)
     return {
         "id": job.id,
+        "duration": duration,
+        "requested_duration": requested_duration,
+        "aspect_ratio": request.get("aspect_ratio"),
+        "resolution": metadata.get("resolution"),
+        # What retry/cancel would actually do, decided by the gateway's own
+        # rule, so a surface never offers a command whose answer is 409.
+        "allowed_actions": job_allowed_actions(job, credit_status=credit_status),
         "project_id": getattr(job, "project_id", None),
         "status": job.status,
         "generation_type": getattr(job, "generation_type", None),
@@ -2113,13 +2130,32 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(422, str(exc)) from exc
         return ProviderMediaReconcileView(**asdict(result))
 
+    def _asset_public_url(asset: MediaAsset) -> str | None:
+        """The read address of a stored asset, minted from its key when the row holds none.
+
+        A direct upload adopts an object the browser PUT into storage itself,
+        so its row carries no ``public_url`` - nothing ever ``put`` it - and
+        the detail endpoint answered ``null``, which the web app showed as an
+        empty preview for a perfectly readable asset (2026-09-07 review). The
+        address is the same authenticated ``/v1/storage/{key}`` route every
+        other stored object is served through; it is only minted when the
+        deployment has a public base to mint it on, exactly as ``put`` does.
+        """
+
+        if asset.public_url:
+            return asset.public_url
+        base = str(getattr(container.storage, "public_base_url", "") or "").rstrip("/")
+        if not base or not asset.storage_key:
+            return None
+        return f"{base}/v1/storage/{asset.storage_key}"
+
     def _asset_view(asset: MediaAsset, *, reused: bool) -> dict[str, Any]:
         return {
             "id": asset.id,
             "sha256": asset.sha256,
             "asset_type": asset.asset_type,
             "storage_key": asset.storage_key,
-            "public_url": asset.public_url,
+            "public_url": _asset_public_url(asset),
             # PENDING_VERIFICATION for a fresh direct upload: registered, not
             # yet usable by providers until the full-content check passes.
             "verification_status": asset.verification_status,
@@ -3036,7 +3072,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                     "sha256": asset.sha256,
                     "asset_type": asset.asset_type,
                     "storage_key": asset.storage_key,
-                    "public_url": asset.public_url,
+                    "public_url": _asset_public_url(asset),
                     "reused": reused,
                 }
             if workspace_id:
@@ -3064,7 +3100,7 @@ def create_app(container: Container | None = None) -> FastAPI:
                         "sha256": asset.sha256,
                         "asset_type": asset.asset_type,
                         "storage_key": asset.storage_key,
-                        "public_url": asset.public_url,
+                        "public_url": _asset_public_url(asset),
                         "reused": reused,
                     }
             asset, reused = container.media.register(
@@ -3105,7 +3141,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             "sha256": asset.sha256,
             "asset_type": asset.asset_type,
             "storage_key": asset.storage_key,
-            "public_url": asset.public_url,
+            "public_url": _asset_public_url(asset),
             "reused": reused,
         }
 
@@ -3128,9 +3164,9 @@ def create_app(container: Container | None = None) -> FastAPI:
             "width": asset.width,
             "height": asset.height,
             "duration": asset.duration,
+            "public_url": _asset_public_url(asset),
             "provider": asset.provider,
             "provider_media_id": asset.provider_media_id,
-            "public_url": asset.public_url,
         }
 
     @app.get("/v1/assets/{asset_id}/thumbnail")
@@ -3304,38 +3340,62 @@ def create_app(container: Container | None = None) -> FastAPI:
     def list_generations(
         project_id: str,
         limit: int = 50,
+        before: str | None = None,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
-        """The project's generation jobs, newest first.
+        """The project's generation jobs, newest first, a page at a time.
 
         This is the durable Productions list: it answers from the jobs table,
         so a reload shows the same history the session built up. Events are
         deliberately not included — fifty jobs times a poll history is a
         payload, and the per-job endpoint already serves them. Creations the
         user deleted are not listed.
+
+        ``before`` is the id of the last creation of the previous page (the
+        ``next_cursor`` that page returned): the answer is everything older
+        than it, keyed on ``(created_at, id)`` rather than an offset, so a
+        creation that lands while the user reads page one shifts nothing.
+        Without it the page was capped at the newest hundred and everything
+        older was unreachable from the browser (2026-09-07 review).
         """
 
         auth.require_project(principal, project_id)
         capped = max(1, min(int(limit), 100))
         with container.database.session() as session:
+            statement = select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                # A creation the user removed is gone from every one
+                # of this page's numbers: the list, the four state
+                # counts, the session panel and the project total are
+                # all derived from this one answer.
+                GenerationJob.deleted_at.is_(None),
+            )
+            if before:
+                anchor = session.get(GenerationJob, before)
+                if anchor is None or anchor.project_id != project_id:
+                    raise HTTPException(404, "cursor creation not found")
+                statement = statement.where(
+                    or_(
+                        GenerationJob.created_at < anchor.created_at,
+                        and_(
+                            GenerationJob.created_at == anchor.created_at,
+                            GenerationJob.id < anchor.id,
+                        ),
+                    )
+                )
             rows = list(
                 session.scalars(
-                    select(GenerationJob)
-                    .where(
-                        GenerationJob.project_id == project_id,
-                        # A creation the user removed is gone from every one
-                        # of this page's numbers: the list, the four state
-                        # counts, the session panel and the project total are
-                        # all derived from this one answer.
-                        GenerationJob.deleted_at.is_(None),
-                    )
-                    .order_by(GenerationJob.created_at.desc(), GenerationJob.id.desc())
-                    .limit(capped + 1)
+                    statement.order_by(
+                        GenerationJob.created_at.desc(), GenerationJob.id.desc()
+                    ).limit(capped + 1)
                 )
             )
+        page = rows[:capped]
+        has_more = len(rows) > capped
         return {
-            "jobs": [_job_view(job) for job in rows[:capped]],
-            "has_more": len(rows) > capped,
+            "jobs": [_job_view(job) for job in page],
+            "has_more": has_more,
+            "next_cursor": page[-1].id if has_more and page else None,
         }
 
     def _live_generation(job_id: str):  # type: ignore[no-untyped-def]

@@ -54,7 +54,9 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > nothing, sign-out kept the previous account's director sessions and treated a failed `/logout` as a
 > sign-out, the multipart upload ran on the event loop, the wallet topped up a workspace the open project
 > is not charged against, and the Inspector was unreachable under 1280px. Record with residuals:
-> `docs/OPEN_ISSUES.md` §2.50. No migration; the schema head stays `0081`. Not deployed by that session.
+> `docs/OPEN_ISSUES.md` §2.50. No migration; the schema head stays `0081`. Committed as `55b4da9`, opened as
+> [#62](https://github.com/Ethanwrite/bestshiny/pull/62), and deployed to production from the branch tip on
+> 2026-09-07 ≈09:29Z at the operator's request (record: `docs/DEPLOYMENT.md` §6).
 >
 > **Next session: start with [`docs/SESSION_HANDOVER_2026-09-02-D.md`](docs/SESSION_HANDOVER_2026-09-02-D.md)**
 > (the creative director overhaul on branch `claude/bestshiny-director-workflow-1a6b59`, migration head

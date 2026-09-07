@@ -176,7 +176,43 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `57117a2` (`main`, [#61](https://github.com/Ethanwrite/bestshiny/pull/61)
+- **Current release.** `55b4da9` (branch `claude/payment-nonce-rpc-response-bugs-35c85c`, the head
+  of [#62](https://github.com/Ethanwrite/bestshiny/pull/62), open and not merged at deploy time, on
+  top of `main` `a1606ed` — the second 2026-09-06 production review verified and fixed: the relayer
+  nonce floor, recovery of a lost `/submit` answer, the per-shot spending cap enforced, sign-out
+  that reports failure and clears the previous account, the multipart upload off the event loop,
+  the wallet bound to the open project's workspace, the inspector toggle under 1280px; ledger entry
+  `docs/OPEN_ISSUES.md` §2.50), deployed 2026-09-07 ≈09:29Z. `DEPLOYED_SHA.prev = 57117a2`. No
+  migration (`alembic current` stayed `0081_veo_discrete_durations (head)`; the explicit upgrade on
+  the new image was a no-op), no `.env` change, `COMPOSE_UNCHANGED`. Same ordering as the `57117a2`
+  deploy (`deploy_remote.sh` rewritten for this SHA, log `deploy-55b4da9.log`, `DEPLOY_EXIT=0`, api
+  healthy on the first check, ~2 minutes end to end). Delta against the running `57117a2`:
+  `git diff --name-status 57117a2 55b4da9` = the review's 22 files plus the `a1606ed` release record.
+
+  Verified after: both markers written (`DEPLOYED_SHA` = the full `55b4da94…`, `.prev` = `57117a2…`),
+  all three running image IDs equal the freshly built ones (api `e7feb286ecca`, worker
+  `e59e000be6f8`, web `b4dd9f5ee9bf`), `RestartCount=0` on all three, local 8080/3000 200, public
+  `https://api.bestshiny.com/health`, `https://bestshiny.com/app` and the browser's own proxy path
+  `https://bestshiny.com/api/health` all 200 from the host, `/health` still `auth.password_reset_available:
+  false` and both reset endpoints still 503. The api's OpenAPI carries `spend_cap_usd`; an
+  unauthenticated multipart `POST /v1/assets` answers `401` against a `404` control (the route is
+  registered as a plain `def`), `GET /v1/providers` 401. The served bundle `/assets/index-AF60R-5h.js`
+  carries `inspectorToggleBtn`, `walletRecipient`, `spend_cap_usd`, `ai-director:workspace-changed`,
+  `Sign-out did not complete`, `do not pay again` and `no new signature is needed`; the served
+  `index.html` carries `id="inspectorToggleBtn"`, `id="logoutError"`, `id="walletRecipient"` and the
+  cap's "0 means no limit" note. `nginx -T` in the web container still shows `client_max_body_size
+  100m` and `proxy_read_timeout 300s`; the host `bestshiny.com` block still `128m` / `300s`. Zero
+  tracebacks in api or worker. Data untouched (14 sessions, 6 anchors, 28 jobs in the same four
+  terminal states as before the deploy — 3 CANCELLED / 13 COMPLETED / 8 FAILED / 4 RETRY_WAIT —
+  14 READY media assets, 8 relayer authorizations — 1 CONFIRMED at nonce 0, 7 EXPIRED without a
+  nonce — `memory_index_outbox` empty, 0 cleanup rows, 0 password-reset tokens).
+
+  **Rollback.** No migration, so a code rollback to `57117a2` is a plain redeploy of that revision;
+  the pre-extraction `bestshiny-backup` dump and the `*.bak-20260907-092757` copies of `.env` and the
+  compose file remain available. Merging #62 later changes nothing on the host: its squash's tree is
+  this tree, so `DEPLOYED_SHA` moves to a commit on `main` at the next redeploy, as with #44.
+
+- **Previous release.** `57117a2` (`main`, [#61](https://github.com/Ethanwrite/bestshiny/pull/61)
   — the password-reset flow closed where no token can reach the user, the audit's F13 decision in
   `docs/OPEN_ISSUES.md` §1.19), deployed 2026-09-06 ≈19:01Z. `DEPLOYED_SHA.prev = cc60332`. No
   migration (`alembic current` stayed `0081`), no `.env` change, `COMPOSE_UNCHANGED`. Same

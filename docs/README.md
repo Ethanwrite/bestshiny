@@ -1,6 +1,7 @@
 # AI Director Platform — Documentation Index
 
-> **2026-09-09:** production is `1494e72` (`main`, PR #64 — the Skill runtime), alembic `0082`;
+> **2026-09-09:** production is `74beba5` (`main`, PR #65 — the Skill contracts tolerate live replies,
+> on PR #64 — the Skill runtime), alembic `0082`;
 > [SKILL_RUNTIME.md](SKILL_RUNTIME.md) is the entry point for how a Skill reaches a model (five bound,
 > seven reference), [SESSION_HANDOVER_2026-09-08.md](SESSION_HANDOVER_2026-09-08.md) records the
 > session and its gates, and [DEPLOYMENT.md](DEPLOYMENT.md) §6 the release.

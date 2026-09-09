@@ -176,7 +176,45 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `1494e72` (`main`, the squash of
+- **Current release.** `74beba5` (`main`, the squash of
+  [#65](https://github.com/Ethanwrite/bestshiny/pull/65) — the Skill contracts tolerate live replies:
+  a Shot Planner micro-action outside the closed vocabulary, a malformed `micro_actions` field or a
+  fifth canonical key is dropped and recorded (`SHOT_PLANNER:MICRO_ACTION_DROPPED:<value>`) instead of
+  failing the whole plan; the cinematography string limits bound prompt size (focus / path / position /
+  lens intent 400, compositions 800); a script-compiled first shot takes its actor and the acted-upon
+  prop from its output state with provenance on the compilation record only; the story and shot-plan
+  calls get 12k / 16k output caps and the runtime records `MODEL_OUTPUT_TRUNCATED` when the provider
+  stops at the cap; entry point `docs/SKILL_RUNTIME.md` §8-§9, ledger `docs/OPEN_ISSUES.md` §2.52),
+  merged 2026-09-09 ≈12:07Z and deployed ≈12:12Z on the operator's "commit this, open a PR, merge and
+  deploy". `DEPLOYED_SHA.prev = 1494e72`. **No migration** (`alembic current` stayed
+  `0082_shot_cinematography_plan (head)`; the explicit upgrade on the new image was a no-op), no `.env`
+  change, `COMPOSE_UNCHANGED`. Same ordering as the `1494e72` deploy (`deploy_remote.sh` rewritten for
+  this SHA, log `deploy-74beba5.log`, `DEPLOY_EXIT=0`, api healthy on the first check, about 2 minutes).
+  Gated before the merge on both engines: SQLite 1822 passed, PostgreSQL 1835 passed, ruff and mypy
+  clean, plus a three-lens adversarial review of the diff. Delta against the running `1494e72`:
+  `git diff --name-status 1494e72 74beba5` = the PR's 11 code/test files plus the two release-record
+  commits' docs; the archive's SHA-256 (`717943df…`) was compared on both ends before extraction.
+
+  Verified after (`verify_remote_65.sh` on the host): both markers written (`DEPLOYED_SHA` = the full
+  `74beba5e…`, `.prev` = `1494e72a…`), the compose file byte-equal to the `bak-20260909-121048` copy,
+  all three running image IDs equal the freshly built ones (api `aa6156323207`, worker `df95b937a131`,
+  web `3e5cc2b9e2bd`), `RestartCount=0` on all three, api healthy, local 8080/3000 200, public
+  `https://api.bestshiny.com/health`, `https://bestshiny.com/app` and `https://bestshiny.com/api/health`
+  all 200 from the host. Inside the api image `STORY_MAX_OUTPUT_TOKENS = 12000`,
+  `SHOT_PLAN_MAX_OUTPUT_TOKENS = 16000`, `MODEL_OUTPUT_TRUNCATED` importable, `CinematographyCamera.focus`
+  capped at 400, `SkillRuntime.validate()` empty and five Skills integrated. The web service was rebuilt
+  but untouched by the release: the served bundle is byte-identical (`/assets/index-B0M_LxJ6.js`, the same
+  hash as `1494e72`). Zero tracebacks in api or worker. Data untouched (14 sessions, 6 anchors, 29 jobs —
+  11 COMPLETED / 7 FAILED / 1 RETRY_WAIT live, 10 deleted — 16 READY media assets, 0 screenplay rows,
+  23 prompt compilations, 194 decision records, `memory_index_outbox` empty). Disk 12% used.
+
+  **Known effect worth watching:** a prompt-compiler package recorded before this release for a
+  script-compiled first shot no longer matches that shot's envelope hash (the cast is now part of it), so
+  its first generation compiles deterministically on record (`NO_FRESH_SKILL_COMPILATION`) until the
+  compile stage reruns. Rolling back to `1494e72` needs no downgrade (same schema); prefer the
+  `bak-20260909-121048` backups.
+
+- **Previous release.** `1494e72` (`main`, the squash of
   [#64](https://github.com/Ethanwrite/bestshiny/pull/64) — the Skill runtime: one operation resolves to
   one Skill from machine-readable frontmatter, that body is injected alone under the Skill's model role,
   every row records `resolved / loaded / model_invoked / execution_mode / fallback_reason`; five Skills

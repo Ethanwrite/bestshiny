@@ -9,7 +9,8 @@ based on `main` `6078e55` (production at `60d7764`). Alembic head moves to
 
 **Merged and deployed 2026-09-09:** PR #64 squash-merged as `1494e72` ≈10:01Z and deployed to
 production ≈10:12Z (`DEPLOYED_SHA.prev = 60d7764`, alembic `0082`, `DEPLOY_EXIT=0`, verified; record in
-`docs/DEPLOYMENT.md` §6).
+`docs/DEPLOYMENT.md` §6). **The contract fixes from the live checks followed as PR #65, squash `74beba5`,
+deployed ≈12:12Z** (no migration, `DEPLOYED_SHA.prev = 1494e72`; `docs/SKILL_RUNTIME.md` §8-§9).
 
 ## 1. The audit, in one table
 

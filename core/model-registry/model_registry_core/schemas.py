@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ModelRole(StrEnum):
     DIRECTOR = "DIRECTOR"
     ASSISTANT_DIRECTOR = "ASSISTANT_DIRECTOR"
+    SHOT_PLANNER = "SHOT_PLANNER"
     CINEMATOGRAPHY_REASONING = "CINEMATOGRAPHY_REASONING"
     CAMERA_MOVEMENT = "CAMERA_MOVEMENT"
     CAMERA_OPERATOR = "CAMERA_OPERATOR"
@@ -42,6 +43,10 @@ class ModelBindingKind(StrEnum):
 ROLE_CAPABILITY: dict[ModelRole, str] = {
     ModelRole.DIRECTOR: "director_reasoning",
     ModelRole.ASSISTANT_DIRECTOR: "assistant_director",
+    # The shot planner (the short-drama Skill) runs on the assistant-director
+    # capability: the model competence is the same, the platform role - and
+    # the Skill body it executes under - is not.
+    ModelRole.SHOT_PLANNER: "assistant_director",
     ModelRole.CINEMATOGRAPHY_REASONING: "cinematography_reasoning",
     ModelRole.CAMERA_MOVEMENT: "camera_movement_reasoning",
     ModelRole.CAMERA_OPERATOR: "camera_operation_reasoning",

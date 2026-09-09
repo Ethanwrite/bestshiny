@@ -1,9 +1,13 @@
-"""What the DIRECTOR model is given each turn, and how it is audited.
+"""What the DIRECTOR and SHOT_PLANNER models are given, and how it is audited.
 
-Every call carries the Director Skill as its system prompt plus the
-application protocol (the JSON contract), the ordered conversation, the
-director's earlier questions, the structured brief with per-field provenance
-and question states, the user-established facts nobody may silently move, the
+Every call carries one Skill as its system prompt - injected by the Skill
+runtime, never assembled here - plus the application protocol (the JSON
+contract) this module defines: the dialogue turn, the story the Director
+writes (intent, facts, beats and lines; no shots), and the shot plan the Shot
+Planner decomposes it into (one dominant action per shot; no framing, lens,
+movement or light). The Director's context is the ordered conversation, its
+earlier questions, the structured brief with per-field provenance and
+question states, the user-established facts nobody may silently move, the
 workflow stage and the user's latest message. A long conversation is
 compressed on record - the audit says what was condensed - but user facts,
 corrections, prohibitions, open questions and approved content are always
@@ -28,7 +32,6 @@ from .schemas import (
     MAX_SHOT_DURATION_SECONDS,
     MICRO_ACTIONS,
     MIN_SHOT_DURATION_SECONDS,
-    SHOT_TYPES,
     SPECS_BY_CODE,
     SPEECH_CJK_CHARACTERS_PER_SECOND,
     SPEECH_WORDS_PER_SECOND,
@@ -92,11 +95,17 @@ Rules:
   When the brief is complete, say so and invite approval.
 """.strip()
 
-SCREENPLAY_PROTOCOL = f"""
-## Writing the screenplay (application protocol)
+STORY_PROTOCOL = f"""
+## Writing the story (application protocol)
 
-The brief below is approved and binding. Write an original treatment and screenplay for it, in
+The brief below is approved and binding. Write an original treatment and screenplay story for it, in
 the client's language for dialogue and prose. Lock the client's facts verbatim as invariants.
+
+You decide WHY: the intent, the hook, the audience promise, the locked invariants, the editable
+variables, the emotional and creative visual direction, the forbidden zones and the ending. You do
+NOT decide shots: shot count, start and end states, gaze, framing, composition, lens, camera
+movement, lighting, model or provider belong to later stages and any such field you write is
+discarded and recorded as a breach of your authority.
 
 Answer with ONE JSON object and nothing else, exactly this shape:
 {{
@@ -112,7 +121,53 @@ Answer with ONE JSON object and nothing else, exactly this shape:
               "interior": bool, "description": str}}],
   "beats": [{{"sequence": int, "intent": str, "summary": str, "scene_key": str,
              "characters": [str], "emotional_beat": str,
-             "shots": [{{"sequence": int, "shot_type": str, "duration": number,
+             "dialogue": [{{"speaker": str, "text": str}}]}}],   // the required lines, in order
+  "product_claims": [{{"claim": str, "must_preserve": bool}}],
+  "required_copy": [{{"text": str, "beat": int}}],  // which beat the words appear in
+  "obligations": [{{"key": str, "promise": str, "category": str}}],
+  "unresolved": [str]
+}}
+
+Story contract:
+- Every beat says what the audience now understands that they did not a moment ago, in "summary",
+  and carries its required dialogue in "dialogue", in the order it is spoken. Each line is one
+  short utterance a single shot can carry: about {SPEECH_CJK_CHARACTERS_PER_SECOND:g} Chinese
+  characters or {SPEECH_WORDS_PER_SECOND:g} English words per second, and no shot is longer than
+  {MAX_SHOT_DURATION_SECONDS:g} seconds - split a long speech into several lines.
+- Every speaker and every beat character must be a character in "characters"; beat.scene_key must
+  be a scene key; beats are numbered 1..n consecutively.
+- Write at most {MAX_CAST} characters. Every character who appears in a beat gets a generated key
+  visual and a locked identity, so one extra name is one more unanchored face; a cast over the
+  limit is rejected, not trimmed. Name in "characters" only who is actually on screen - describe
+  anyone who is merely referred to inside the prose instead.
+- Nobody looks into the lens unless the client asked; say so in "invariants" if the client did.
+- Product claims stay exact, word for word: they are recorded as narrative facts and cannot be
+  reworded later by you, by the shot planner, by the prompt compiler, or by an edit.
+- Every "required_copy" entry names the beat the words appear in; the shot planner places them in
+  a shot. Copy with no beat blocks approval.
+- Scope an invariant with "characters" and/or "scenes" when it is about them; leave both out only
+  when it holds for the whole piece. A scoped invariant constrains only the shots it applies to.
+- A change to identity, relationships, canonical assets, product facts, required dialogue, scene
+  geography, the ending, prohibitions or commercial claims is a new approved version that
+  supersedes the previous one; never present it as a silent edit.
+- Mark every open creative choice in "unresolved". Never invent an answer to an open question.
+- Write real, specific dialogue for this story. No placeholders.
+""".strip()
+
+SHOT_PLAN_PROTOCOL = f"""
+## Decomposing the story into shots (application protocol)
+
+The story below is the Director's and is binding: its characters, scenes, invariants, product
+claims, required copy, ending and every line of dialogue are locked. You decide WHAT HAPPENS in
+each generation shot: the one dominant visible action, the subject, which line is spoken, the
+start state, the end state, the gaze target, the spatial state and the continuity handoff. You do
+NOT decide how it is seen - shot size, framing, composition, lens, camera movement, lighting,
+model or provider - and any such field you write is discarded and recorded.
+
+Answer with ONE JSON object and nothing else, exactly this shape:
+{{
+  "beats": [{{"sequence": int,                 // one entry per story beat, same numbering
+             "shots": [{{"sequence": int, "duration": number,
                         "action": {{"actor": str, "verb": str, "object": str, "target": str,
                                    "description": str}} | null,
                         "dialogue": {{"speaker": str, "text": str}} | null,
@@ -120,9 +175,8 @@ Answer with ONE JSON object and nothing else, exactly this shape:
                         "present_characters": [str], "identity_critical_characters": [str],
                         "start_state": str, "end_state": str, "gaze_target": str,
                         "continuity_obligations": [str]}}]}}],
-  "product_claims": [{{"claim": str, "must_preserve": bool}}],
-  "required_copy": [{{"text": str, "beat": int, "shot": int}}],  // where the words are on screen
-  "obligations": [{{"key": str, "promise": str, "category": str}}],
+  "required_copy": [{{"text": str, "beat": int, "shot": int}}],  // where the story's copy lands
+  "mobile_hook_check": str,   // what the first seconds make a phone viewer notice, ask or feel
   "unresolved": [str]
 }}
 
@@ -134,38 +188,33 @@ Shot contract (one generation shot = one dominant visual action):
   Micro-actions ({", ".join(MICRO_ACTIONS)}) may ride along in "micro_actions" and do not count as
   a second action. Never stage two consecutive narrative actions in one shot ("she opens the door,
   then walks in" is two shots) - a description that sequences actions is rejected.
+- Place every line of every beat exactly once, verbatim, in the story's order, each in its own
+  shot or beside one action. Never write, drop, merge or reword a line: a plan whose lines differ
+  from the story is rejected whole.
 - A line must fit its shot: about {SPEECH_CJK_CHARACTERS_PER_SECOND:g} Chinese characters or
   {SPEECH_WORDS_PER_SECOND:g} English words per second, with {DIALOGUE_LEAD_SECONDS:g}s of air at
   each end of the shot. A 3-second shot carries roughly
   {int(usable_dialogue_window(3) * SPEECH_CJK_CHARACTERS_PER_SECOND)} characters or
   {int(usable_dialogue_window(3) * SPEECH_WORDS_PER_SECOND)} words; a line that cannot be said in
   its shot is rejected.
-- shot_type is one of: {", ".join(SHOT_TYPES)}. It is a suggestion the shot planner may
-  refine (framing, lens, movement and light are not decided here); use MEDIUM when unsure.
-  Duration is the director's intent, {MIN_SHOT_DURATION_SECONDS:g}-{MAX_SHOT_DURATION_SECONDS:g}
+- Duration is the planner's intent, {MIN_SHOT_DURATION_SECONDS:g}-{MAX_SHOT_DURATION_SECONDS:g}
   seconds per shot; the total should approximate the brief's duration. Which model renders a shot,
   and at what execution length, is decided later from the model's capability - never assume one.
+  Shot size is not yours either: do not write shot_type, framing or a lens.
 - "present_characters" lists everyone visible in the frame (staged in the prompt).
   "identity_critical_characters" is the subset whose face the audience must recognise (at most
   {MAX_IDENTITY_CRITICAL_CHARACTERS}); only they are sent to the model as identity references, so a
   background figure is present, not identity-critical. Both default to the actor and the speaker.
-- Every actor, speaker and present character must be a character in "characters"; beat.scene_key
-  must be a scene key; beats are numbered 1..n consecutively.
-- Write at most {MAX_CAST} characters. Every character who appears in a beat or a shot gets a
-  generated key visual and a locked identity, so one extra name is one more unanchored face; a
-  cast over the limit is rejected, not trimmed. Name in "characters" only who is actually on
-  screen - describe anyone who is merely referred to inside the prose instead.
-- State an explicit start_state, end_state and gaze_target for every shot. Nobody looks into the
-  lens unless the client asked.
-- Product claims stay exact, word for word: they are recorded as narrative facts and cannot be
-  reworded later by you, by the prompt compiler, or by an edit.
-- Every "required_copy" entry must name the beat and shot the words appear in. Copy with no
-  placement blocks approval - say where it is on screen rather than leaving it to the platform.
-- Scope an invariant with "characters" and/or "scenes" when it is about them; leave both out only
-  when it holds for the whole piece. A scoped invariant constrains only the shots it applies to.
-- Mark every open creative choice in "unresolved".
-- Write real, specific dialogue for this story. No placeholders.
+- Every actor, speaker and present character must be a character of the story; never add one.
+- State an explicit start_state, end_state and gaze_target for every shot, and chain them: each
+  end state is the next shot's start state. Name every gaze target; nobody looks into the lens
+  unless the story's invariants say the client asked.
+- Every "required_copy" entry of the story must name the beat and shot the words appear in.
+- Return an unresolved story or hook question in "unresolved" instead of answering it here.
 """.strip()
+
+#: The whole authoring contract, story then shots, for readers and tests.
+SCREENPLAY_PROTOCOL = f"{STORY_PROTOCOL}\n\n{SHOT_PLAN_PROTOCOL}"
 
 
 @dataclass
@@ -178,9 +227,12 @@ class ContextAudit:
     context_hash: str = ""
     skill_version: str | None = None
     skill_content_hash: str | None = None
+    #: The Skill runtime's record of the call that consumed this context
+    #: (resolved / loaded / model_invoked / execution_mode / fallback_reason).
+    skill_invocation: dict[str, Any] | None = None
 
     def as_json(self) -> dict[str, Any]:
-        return {
+        payload = {
             "turns_total": self.turns_total,
             "turns_verbatim": self.turns_verbatim,
             "turns_condensed": self.turns_condensed,
@@ -190,6 +242,17 @@ class ContextAudit:
             "skill_version": self.skill_version,
             "skill_content_hash": self.skill_content_hash,
         }
+        if self.skill_invocation is not None:
+            payload["skill_invocation"] = dict(self.skill_invocation)
+        return payload
+
+    def record(self, invocation: Any) -> None:
+        """Stamp the runtime's invocation onto this audit: the loaded Skill, the call hash."""
+
+        self.skill_invocation = invocation.as_json()
+        self.context_hash = invocation.context_hash or self.context_hash
+        self.skill_version = invocation.version if invocation.loaded else None
+        self.skill_content_hash = invocation.content_hash if invocation.loaded else None
 
 
 @dataclass(frozen=True)
@@ -320,7 +383,6 @@ def preserved_block(
 
 def build_turn_messages(
     *,
-    skill: SkillText,
     turns: list[dict[str, Any]],
     fields: dict[str, Any],
     provenance: dict[str, Any],
@@ -330,9 +392,16 @@ def build_turn_messages(
     latest_user_message: str,
     approved: dict[str, Any],
     analysis_questions: list[dict[str, Any]],
+    skill: Any = None,
 ) -> tuple[list[dict[str, Any]], ContextAudit]:
-    """The complete message list for one dialogue turn, plus its audit."""
+    """The conversation and state for one dialogue turn, plus its audit.
 
+    The system message - the Director Skill body and ``TURN_PROTOCOL`` - is
+    added by the Skill runtime, which is the only place a Skill body enters a
+    model call. ``skill`` is accepted for source compatibility and ignored.
+    """
+
+    del skill
     history, audit = compress_history(turns)
     preserved, counts = preserved_block(turns, fields, provenance, question_states, approved)
     state_block = {
@@ -354,47 +423,79 @@ def build_turn_messages(
         "latest_client_message": latest_user_message,
     }
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": f"{skill.system_prompt}\n\n{TURN_PROTOCOL}"},
         *history,
         {"role": "user", "content": json.dumps(state_block, ensure_ascii=False, default=str)},
     ]
     audit.preserved = counts
     audit.context_hash = _hash({"messages": messages})
-    audit.skill_version = skill.version
-    audit.skill_content_hash = skill.content_hash
     return messages, audit
 
 
-def build_screenplay_messages(
+def build_story_messages(
     *,
-    skill: SkillText,
     turns: list[dict[str, Any]],
     fields: dict[str, Any],
     provenance: dict[str, Any],
     format_value: str,
-    previous_screenplay: dict[str, Any] | None,
+    previous_story: dict[str, Any] | None,
     user_notes: str,
 ) -> tuple[list[dict[str, Any]], ContextAudit]:
-    """The message list for the screenplay-writing call, plus its audit."""
+    """The conversation and request for the Director's story call, plus its audit."""
 
     history, audit = compress_history(turns)
     preserved, counts = preserved_block(turns, fields, provenance, {}, {"brief": "APPROVED"})
     request = {
-        "task": "REVISE_SCREENPLAY" if previous_screenplay else "WRITE_SCREENPLAY",
+        "task": "REVISE_STORY" if previous_story else "WRITE_STORY",
         "approved_brief": fields,
         "format": format_value,
         "client_established_facts": preserved["client_established_facts"],
         "prohibitions": preserved["prohibitions"],
-        "previous_screenplay": previous_screenplay,
+        "previous_story": previous_story,
         "client_revision_notes": user_notes,
     }
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": f"{skill.system_prompt}\n\n{SCREENPLAY_PROTOCOL}"},
         *history,
         {"role": "user", "content": json.dumps(request, ensure_ascii=False, default=str)},
     ]
     audit.preserved = counts
     audit.context_hash = _hash({"messages": messages})
-    audit.skill_version = skill.version
-    audit.skill_content_hash = skill.content_hash
     return messages, audit
+
+
+def build_shot_plan_messages(
+    *,
+    story: dict[str, Any],
+    fields: dict[str, Any],
+    format_value: str,
+    prohibitions: list[str],
+    previous_plan: dict[str, Any] | None,
+    user_notes: str,
+) -> tuple[list[dict[str, Any]], ContextAudit]:
+    """The request for the Shot Planner's call: the locked story, nothing else creative.
+
+    No conversation history travels here - the story is the whole brief the
+    planner may read, so it cannot be argued into rewriting a line from
+    something the client said three turns ago.
+    """
+
+    request = {
+        "task": "REVISE_SHOTS" if previous_plan else "PLAN_SHOTS",
+        "format": format_value,
+        "duration_seconds": fields.get("duration_seconds"),
+        "aspect_ratio": fields.get("aspect_ratio"),
+        "platform": fields.get("platform"),
+        "story": story,
+        "prohibitions": prohibitions,
+        "previous_shot_plan": previous_plan,
+        "client_revision_notes": user_notes,
+    }
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": json.dumps(request, ensure_ascii=False, default=str)},
+    ]
+    audit = ContextAudit(0, 0, 0, False)
+    audit.context_hash = _hash({"messages": messages})
+    return messages, audit
+
+
+#: Source compatibility: the story call is what the screenplay call became.
+build_screenplay_messages = build_story_messages

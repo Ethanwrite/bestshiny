@@ -25,7 +25,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 for package in ("core/skills", "packages/contracts"):
     sys.path.insert(0, str(REPOSITORY_ROOT / package))
 
-from skill_core import SkillRegistry, SkillRegistryError  # noqa: E402
+from skill_core import REQUIRED_SECTIONS, SkillRegistry, SkillRegistryError  # noqa: E402
+from skill_core.runtime import EXPECTED_BINDINGS  # noqa: E402
 
 BLOCKING = "FAIL"
 ADVISORY = "WARN"
@@ -164,6 +165,60 @@ def _prompt_compiler_findings(body: str) -> list[Finding]:
     return findings
 
 
+def _industrial_findings(skill: object) -> list[Finding]:
+    """The industrialised contract: ten sections and a machine-readable binding."""
+
+    findings: list[Finding] = []
+    missing = tuple(getattr(skill, "missing_sections", ()))
+    if missing:
+        findings.append(
+            Finding(
+                BLOCKING,
+                "sections",
+                "required sections missing: " + ", ".join(missing)
+                + f" (every Skill carries {', '.join(REQUIRED_SECTIONS)})",
+            )
+        )
+    runtime_kind = getattr(skill, "runtime_kind", "reference")
+    operations = tuple(getattr(skill, "operations", ()))
+    if not getattr(skill, "authority", ()) or not getattr(skill, "forbidden_authority", ()):
+        findings.append(
+            Finding(
+                BLOCKING, "authority", "metadata must declare both authority and forbidden_authority"
+            )
+        )
+    if not getattr(skill, "stage", ""):
+        findings.append(Finding(BLOCKING, "stage", "metadata must declare the pipeline stage"))
+    if runtime_kind == "model":
+        expected_roles = {EXPECTED_BINDINGS[op] for op in EXPECTED_BINDINGS if op.value in operations}
+        if not operations:
+            findings.append(
+                Finding(BLOCKING, "operations", "a model Skill must declare its runtime operations")
+            )
+        elif len(expected_roles) != 1 or getattr(skill, "role", "") not in expected_roles:
+            findings.append(
+                Finding(
+                    BLOCKING,
+                    "binding",
+                    f"operations {', '.join(operations)} belong to role "
+                    f"{', '.join(sorted(expected_roles)) or 'none'}, not {getattr(skill, 'role', '')!r}",
+                )
+            )
+        if not getattr(skill, "output_contract", ""):
+            findings.append(
+                Finding(BLOCKING, "output-contract", "a model Skill must name its output contract")
+            )
+    elif not getattr(skill, "bound_to", None):
+        findings.append(
+            Finding(
+                ADVISORY,
+                "reference",
+                "a reference Skill with no bound_to is consulted by nothing at runtime; say so in the body",
+            )
+        )
+    return findings
+
+
 def review(path: Path) -> list[Finding]:
     findings, skill = _structural_findings(path)
     if skill is None:
@@ -173,13 +228,14 @@ def review(path: Path) -> list[Finding]:
     print(f"  name        {name}")
     print(f"  version     {getattr(skill, 'version', '')}")
     print(f"  sha256      {getattr(skill, 'content_hash', '')}")
+    operations = ", ".join(getattr(skill, "operations", ())) or "-"
+    print(
+        f"  binding     role={getattr(skill, 'role', '')} stage={getattr(skill, 'stage', '')} "
+        f"runtime={getattr(skill, 'runtime_kind', '')} operations={operations}"
+    )
+    findings.extend(_industrial_findings(skill))
     if name == "prompt-compiler":
         findings.extend(_prompt_compiler_findings(body))
-    else:
-        print(
-            "  note        no output contract is defined for this Skill yet; "
-            "structural review only"
-        )
     return findings
 
 

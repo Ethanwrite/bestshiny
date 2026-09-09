@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -47,6 +48,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from generation_gateway import (
@@ -157,6 +159,7 @@ from .creative_routes import register_creative_routes
 from .payment_routes import register_payment_routes
 from .request_limits import UploadSizeLimitMiddleware
 from .runtime_routes import register_runtime_routes
+from .skill_routes import register_skill_routes
 from .worker_auth import WorkerAuthenticationError, WorkerCredentialService, WorkerPrincipal
 
 
@@ -1035,7 +1038,7 @@ def create_app(container: Container | None = None) -> FastAPI:
             }
 
     @app.post("/v1/shots/{shot_id}/generate", status_code=202)
-    def generate_shot(
+    async def generate_shot(
         shot_id: str,
         body: CandidateGenerate,
         principal: AuthPrincipal = Depends(auth.current_user),
@@ -1076,7 +1079,25 @@ def create_app(container: Container | None = None) -> FastAPI:
                 )
                 for character_id in body.character_ids
             ]
-            candidate, replayed = container.candidates.create_candidate(
+            # The prompt-compiler Skill compiles this exact envelope - the
+            # same bindings, canonical assets and resolved dependencies the
+            # autopilot passes below - so the candidate's compile reuses the
+            # Skill's verified package instead of the deterministic one. A
+            # package that is still fresh is not paid for twice; a failure
+            # here is recorded by the compiler and never blocks the candidate
+            # (the compile below records its own fallback).
+            if container.settings.feature_skill_stages_at_approval:
+                try:
+                    inputs = await run_in_threadpool(
+                        container.visual_runtime.compiler_inputs, shot_id, character_bindings=bindings
+                    )
+                    await container.prompts.compile_shot_with_skill(shot_id, **inputs)
+                except Exception as exc:  # noqa: BLE001 - the candidate path reports its own refusals
+                    logging.getLogger(__name__).warning(
+                        "skill prompt compilation before generation failed: %s", exc
+                    )
+            candidate, replayed = await run_in_threadpool(
+                container.candidates.create_candidate,
                 shot_id,
                 idempotency_key=body.idempotency_key,
                 fallback_providers=(body.fallback_providers if principal.development_bypass else None),
@@ -1606,17 +1627,25 @@ def create_app(container: Container | None = None) -> FastAPI:
             fact_locks=fact_locks,
         )
         refined_prompt = role_result.optimized_candidate
+        corrector_skill = container.skill_runtime.snapshot_reference(
+            "image-prompt-corrector", reason="REFERENCE_SKILL_DETERMINISTIC_CORRECTOR"
+        )
         with container.database.session() as session:
             compilation = PromptCompilation(
                 project_id=body.project_id,
                 user_prompt=result.original_prompt,
                 compiled_prompt=refined_prompt,
                 compiler_version=(f"{result.corrector_version}+{container.model_roles.version}"),
+                # The corrector is deterministic and the refiner runs under
+                # its own model roles: the Skill is consulted as method, never
+                # injected, and the record says exactly that rather than
+                # claiming a version the registry does not hold.
                 skill_versions={
-                    "image-prompt-corrector": "v1",
+                    "image-prompt-corrector": str(corrector_skill.get("version") or "unresolved"),
                     "model-role-runtime": container.model_roles.version,
                 },
                 diff_json={
+                    "skill_invocation": corrector_skill,
                     "changes": [change.model_dump() for change in result.changes],
                     "preserved_facts": result.preserved_constraints,
                     "model_refinement": {
@@ -3835,12 +3864,26 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @app.get("/v1/skills")
     def list_skills(_principal: AuthPrincipal = Depends(auth.current_user)):
+        """Every installed Skill with its machine-readable binding: registered is not invoked."""
+
+        integrated = {row["skill"]: row for row in container.skill_runtime.integration_matrix()}
         return [
             {
                 "name": skill.name,
                 "category": skill.category,
                 "description": skill.description,
                 "version": skill.version,
+                "role": skill.role,
+                "stage": skill.stage,
+                "runtime": skill.runtime_kind,
+                "operations": list(skill.operations),
+                "model_role": skill.model_role,
+                "bound_to": skill.bound_to,
+                "authority": list(skill.authority),
+                "forbidden_authority": list(skill.forbidden_authority),
+                "output_contract": skill.output_contract,
+                "runtime_bound": bool(integrated.get(skill.name, {}).get("runtime_bound")),
+                "body_injected": bool(integrated.get(skill.name, {}).get("body_injected")),
             }
             for skill in container.skills.list_skills()
         ]
@@ -4250,6 +4293,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     auth.register_routes(app, verify_api_key)
     register_payment_routes(app, container, auth)
     register_runtime_routes(app, container, verify_api_key, auth)
+    register_skill_routes(app, container, auth)
     register_admin_routes(app, container, auth, verify_api_key)
     register_creative_routes(
         app,

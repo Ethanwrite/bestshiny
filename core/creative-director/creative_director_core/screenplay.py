@@ -28,11 +28,18 @@ from .brief import get_path
 from .schemas import (
     ANCHOR_PROMPT_VERSION,
     COMMERCE_FORMATS,
+    DIRECTOR_FORBIDDEN_KEYS,
     MAX_CAST,
     MAX_PROP_ANCHORS,
     MAX_SCENE_ANCHORS,
+    SHOT_PLANNER_FORBIDDEN_BEAT_KEYS,
+    SHOT_PLANNER_FORBIDDEN_SHOT_KEYS,
+    SHOT_PLANNER_FORBIDDEN_TOP_KEYS,
     Screenplay,
+    ShotPlan,
+    StoryDraft,
     normalize_name,
+    strip_forbidden_keys,
 )
 
 _LATIN_CLEAN = re.compile(r"[^A-Za-z0-9\-]+")
@@ -927,3 +934,417 @@ def _verb_from_rendered(line: str) -> str:
         if any(term in lowered for term in terms):
             return verb
     return "look"
+
+
+# ------------------------------------------------- two-stage authoring
+def story_from_screenplay(content: dict[str, Any]) -> dict[str, Any]:
+    """A screenplay's story half: everything the Director owns, no shots.
+
+    Beat dialogue is reconstructed from the shots in shot order, so a
+    revision request hands the Director exactly the lines it wrote.
+    """
+
+    story = {key: value for key, value in dict(content).items() if key not in {"beats", "_context"}}
+    beats: list[dict[str, Any]] = []
+    for beat in content.get("beats") or []:
+        if not isinstance(beat, dict):
+            continue
+        lines = [
+            dict(shot["dialogue"])
+            for shot in sorted(
+                (item for item in (beat.get("shots") or []) if isinstance(item, dict)),
+                key=lambda item: int(item.get("sequence") or 0),
+            )
+            if isinstance(shot.get("dialogue"), dict) and shot["dialogue"].get("text")
+        ]
+        beats.append(
+            {
+                "sequence": beat.get("sequence"),
+                "intent": beat.get("intent"),
+                "summary": beat.get("summary", ""),
+                "scene_key": beat.get("scene_key"),
+                "characters": list(beat.get("characters") or []),
+                "emotional_beat": beat.get("emotional_beat", ""),
+                "dialogue": lines,
+            }
+        )
+    story["beats"] = beats
+    # Copy placement is the Shot Planner's; the story keeps the beat only.
+    story["required_copy"] = [
+        {"text": item.get("text"), "beat": item.get("beat"), "shot": None}
+        if isinstance(item, dict)
+        else item
+        for item in (content.get("required_copy") or [])
+    ]
+    return story
+
+
+def shot_plan_from_screenplay(content: dict[str, Any]) -> dict[str, Any]:
+    """A screenplay's shot half, in the Shot Planner's own contract."""
+
+    return {
+        "beats": [
+            {"sequence": beat.get("sequence"), "shots": [dict(shot) for shot in beat.get("shots") or []]}
+            for beat in (content.get("beats") or [])
+            if isinstance(beat, dict)
+        ],
+        "required_copy": [
+            dict(item) for item in (content.get("required_copy") or []) if isinstance(item, dict)
+        ],
+        "mobile_hook_check": "",
+        "unresolved": [],
+    }
+
+
+def validate_story(payload: Any) -> tuple[StoryDraft, list[str]]:
+    """Validate the Director's story; out-of-authority keys are stripped and named."""
+
+    if not isinstance(payload, dict):
+        raise ScreenplayInvalid("story must be a JSON object", ["root is not an object"])
+    cleaned, stripped = strip_forbidden_keys(
+        payload, DIRECTOR_FORBIDDEN_KEYS, recurse_into=("beats",)
+    )
+    try:
+        story = StoryDraft.model_validate(cleaned)
+    except ValidationError as exc:
+        details = [
+            f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg')}"
+            for error in exc.errors()
+        ][:20]
+        raise ScreenplayInvalid("story failed validation", details) from exc
+    by_script_name: dict[str, str] = {}
+    problems: list[str] = []
+    for character in story.characters:
+        token = script_name(character.name).casefold()
+        other = by_script_name.get(token)
+        if other is not None and other != character.name:
+            problems.append(
+                f"characters {other!r} and {character.name!r} collapse to the same script name "
+                f"{script_name(character.name)!r}; rename one of them"
+            )
+        by_script_name.setdefault(token, character.name)
+    if problems:
+        raise ScreenplayInvalid("story failed the cast contract", problems[:20])
+    return story, stripped
+
+
+def validate_shot_plan(payload: Any) -> tuple[ShotPlan, list[str]]:
+    """Validate the Shot Planner's plan; photographic and story keys are stripped and named."""
+
+    if not isinstance(payload, dict):
+        raise ScreenplayInvalid("shot plan must be a JSON object", ["root is not an object"])
+    cleaned, stripped = strip_forbidden_keys(payload, SHOT_PLANNER_FORBIDDEN_TOP_KEYS)
+    beats: list[Any] = []
+    for index, beat in enumerate(cleaned.get("beats") or []):
+        if not isinstance(beat, dict):
+            beats.append(beat)
+            continue
+        beat_clean, beat_stripped = strip_forbidden_keys(
+            beat,
+            SHOT_PLANNER_FORBIDDEN_BEAT_KEYS,
+            path=f"beats[{index}]",
+        )
+        stripped.extend(beat_stripped)
+        shots: list[Any] = []
+        for shot_index, shot in enumerate(beat_clean.get("shots") or []):
+            if not isinstance(shot, dict):
+                shots.append(shot)
+                continue
+            shot_clean, shot_stripped = strip_forbidden_keys(
+                shot,
+                SHOT_PLANNER_FORBIDDEN_SHOT_KEYS,
+                path=f"beats[{index}].shots[{shot_index}]",
+            )
+            stripped.extend(shot_stripped)
+            shots.append(shot_clean)
+        beat_clean["shots"] = shots
+        beats.append(beat_clean)
+    cleaned["beats"] = beats
+    try:
+        plan = ShotPlan.model_validate(cleaned)
+    except ValidationError as exc:
+        details = [
+            f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg')}"
+            for error in exc.errors()
+        ][:20]
+        raise ScreenplayInvalid("shot plan failed validation", details) from exc
+    return plan, stripped
+
+
+def _line_key(speaker: str, text: str) -> tuple[str, str]:
+    return normalize_name(speaker), " ".join(str(text).split())
+
+
+def shot_plan_violations(story: StoryDraft, plan: ShotPlan) -> list[str]:
+    """Where the plan stepped on the Director's authority, or left the story unplanned.
+
+    The Shot Planner places dialogue; it may not write, drop or reword a
+    line. It stages the Director's characters; it may not invent one. Every
+    beat must be planned, and no beat may be planned that the story does not
+    have. Any finding here rejects the plan as a whole.
+    """
+
+    problems: list[str] = []
+    story_beats = {beat.sequence: beat for beat in story.beats}
+    names = {normalize_name(character.name) for character in story.characters}
+    planned = {beat.sequence: beat for beat in plan.beats}
+    for sequence in sorted(story_beats):
+        if sequence not in planned:
+            problems.append(f"beat_unplanned:{sequence}")
+    for sequence, beat in sorted(planned.items()):
+        story_beat = story_beats.get(sequence)
+        if story_beat is None:
+            problems.append(f"beat_invented:{sequence}")
+            continue
+        expected = [_line_key(line.speaker, line.text) for line in story_beat.dialogue]
+        placed = [
+            _line_key(shot.dialogue.speaker, shot.dialogue.text)
+            for shot in sorted(beat.shots, key=lambda item: item.sequence)
+            if shot.dialogue is not None
+        ]
+        if placed != expected:
+            missing = [item for item in expected if item not in placed]
+            extra = [item for item in placed if item not in expected]
+            if missing and extra and len(missing) == len(extra):
+                problems.append(f"dialogue_changed:beat {sequence}")
+            elif missing:
+                problems.append(f"dialogue_dropped:beat {sequence}")
+            elif extra:
+                problems.append(f"dialogue_invented:beat {sequence}")
+            else:
+                problems.append(f"dialogue_reordered:beat {sequence}")
+        for shot in beat.shots:
+            for name in (*shot.named_characters, *shot.present_characters):
+                if normalize_name(name) not in names:
+                    problems.append(f"unknown_character:{name}")
+    story_copy = {" ".join(item.text.split()) for item in story.required_copy}
+    for item in plan.required_copy:
+        if " ".join(item.text.split()) not in story_copy:
+            problems.append(f"required_copy_changed:{item.text[:40]}")
+    return list(dict.fromkeys(problems))
+
+
+def merge_story_and_shot_plan(story: StoryDraft, plan: ShotPlan) -> Screenplay:
+    """One screenplay from the two stages; the plan must already be clean."""
+
+    violations = shot_plan_violations(story, plan)
+    if violations:
+        raise ScreenplayInvalid("shot plan violates the story's authority", violations)
+    planned = {beat.sequence: beat for beat in plan.beats}
+    placements = {
+        " ".join(item.text.split()): item for item in plan.required_copy if item.beat is not None
+    }
+    content = story.model_dump(by_alias=True)
+    beats: list[dict[str, Any]] = []
+    for beat in story.beats:
+        shots: list[dict[str, Any]] = []
+        for shot in sorted(planned[beat.sequence].shots, key=lambda item: item.sequence):
+            shot_json = shot.model_dump(by_alias=True)
+            # Shot size is Cinematography's decision; the planner hands on a
+            # kind, not a framing. DIALOGUE is a kind (a speaking shot).
+            shot_json["shot_type"] = "DIALOGUE" if shot.action is None else "MEDIUM"
+            shots.append(shot_json)
+        beat_json = beat.model_dump(by_alias=True)
+        beat_json.pop("dialogue", None)
+        beat_json["shots"] = shots
+        beats.append(beat_json)
+    content["beats"] = beats
+    required_copy: list[dict[str, Any]] = []
+    for item in story.required_copy:
+        placement = placements.get(" ".join(item.text.split()))
+        required_copy.append(
+            {
+                "text": item.text,
+                "beat": placement.beat if placement is not None else item.beat,
+                "shot": placement.shot if placement is not None else item.shot,
+            }
+        )
+    content["required_copy"] = required_copy
+    content["unresolved"] = list(dict.fromkeys([*story.unresolved, *plan.unresolved]))
+    return validate_screenplay(content)
+
+
+def _placeholder_duration(text: str) -> float:
+    from .schemas import (
+        DIALOGUE_LEAD_SECONDS,
+        DIALOGUE_TAIL_SECONDS,
+        MAX_SHOT_DURATION_SECONDS,
+        MIN_SHOT_DURATION_SECONDS,
+        estimated_speech_seconds,
+    )
+
+    needed = estimated_speech_seconds(text) + DIALOGUE_LEAD_SECONDS + DIALOGUE_TAIL_SECONDS
+    return float(min(MAX_SHOT_DURATION_SECONDS, max(MIN_SHOT_DURATION_SECONDS, 3.0, needed + 0.5)))
+
+
+def deterministic_shot_plan(story: StoryDraft, *, reason: str) -> ShotPlan:
+    """The labelled degradation of the shot stage: the story's lines, one per shot.
+
+    Every required line becomes a speaking shot; a beat with no line gets one
+    placeholder look. Nothing here is the planner's staging, and the plan says
+    so in ``unresolved`` so the screenplay carries the label.
+    """
+
+    beats: list[dict[str, Any]] = []
+    for beat in story.beats:
+        shots: list[dict[str, Any]] = []
+        for line in beat.dialogue:
+            shots.append(
+                {
+                    "sequence": len(shots) + 1,
+                    "duration": _placeholder_duration(line.text),
+                    "dialogue": {"speaker": line.speaker, "text": line.text},
+                    "start_state": "",
+                    "end_state": "",
+                    "gaze_target": "",
+                }
+            )
+        if not shots:
+            actor = beat.characters[0] if beat.characters else story.characters[0].name
+            shots.append(
+                {
+                    "sequence": 1,
+                    "duration": 4.0,
+                    "action": {
+                        "actor": actor,
+                        "verb": "look",
+                        "target": "",
+                        "description": "placeholder staging; the shot planner model was unavailable",
+                    },
+                    "start_state": "",
+                    "end_state": "",
+                    "gaze_target": "",
+                }
+            )
+        beats.append({"sequence": beat.sequence, "shots": shots})
+    return ShotPlan.model_validate(
+        {
+            "beats": beats,
+            "required_copy": [],
+            "mobile_hook_check": "",
+            "unresolved": [
+                f"DETERMINISTIC SHOT PLAN: the shot planner model was unavailable ({reason}). "
+                "One line per shot with no staging; redraft before approving, or approve knowing this."
+            ],
+        }
+    )
+
+
+# ------------------------------------------------------ invariant versions
+#: The invariant classes the Director locks: a change to any of them is a new
+#: approved version that supersedes the previous one, never an overwrite.
+INVARIANT_CLASSES: tuple[str, ...] = (
+    "identity",
+    "relationships",
+    "scene_geography",
+    "required_dialogue",
+    "ending",
+    "invariants",
+    "product_claims",
+    "required_copy",
+    "obligations",
+)
+
+
+def invariant_classes(content: dict[str, Any]) -> dict[str, Any]:
+    """The invariant-class subset of a screenplay, in a canonical shape."""
+
+    characters = sorted(
+        (
+            {
+                "name": normalize_name(str(item.get("name") or "")),
+                "role": str(item.get("role") or ""),
+                "look": str(item.get("look") or ""),
+            }
+            for item in (content.get("characters") or [])
+            if isinstance(item, dict)
+        ),
+        key=lambda item: item["name"],
+    )
+    relationships = sorted(
+        f"{normalize_name(str(item.get('name') or ''))}|{normalize_name(str(rel.get('with') or ''))}|"
+        f"{str(rel.get('relation') or '')}"
+        for item in (content.get("characters") or [])
+        if isinstance(item, dict)
+        for rel in (item.get("relationships") or [])
+        if isinstance(rel, dict)
+    )
+    scenes = sorted(
+        f"{item.get('key')}|{normalize_name(str(item.get('location') or ''))}|{item.get('time')}|"
+        f"{item.get('interior')}"
+        for item in (content.get("scenes") or [])
+        if isinstance(item, dict)
+    )
+    dialogue = [
+        f"{beat.get('sequence')}|{normalize_name(str(shot['dialogue'].get('speaker') or ''))}|"
+        f"{' '.join(str(shot['dialogue'].get('text') or '').split())}"
+        for beat in (content.get("beats") or [])
+        if isinstance(beat, dict)
+        for shot in sorted(
+            (item for item in (beat.get("shots") or []) if isinstance(item, dict)),
+            key=lambda item: int(item.get("sequence") or 0),
+        )
+        if isinstance(shot.get("dialogue"), dict)
+    ]
+    treatment = content.get("treatment") if isinstance(content.get("treatment"), dict) else {}
+    return {
+        "identity": characters,
+        "relationships": relationships,
+        "scene_geography": scenes,
+        "required_dialogue": dialogue,
+        "ending": " ".join(str(treatment.get("ending") or "").split()),
+        "invariants": sorted(
+            json.dumps(item, sort_keys=True, ensure_ascii=False) if isinstance(item, dict) else str(item)
+            for item in (content.get("invariants") or [])
+        ),
+        "product_claims": sorted(
+            str(item.get("claim") if isinstance(item, dict) else item)
+            for item in (content.get("product_claims") or [])
+        ),
+        "required_copy": sorted(
+            " ".join(str(item.get("text") if isinstance(item, dict) else item).split())
+            for item in (content.get("required_copy") or [])
+        ),
+        "obligations": sorted(
+            f"{item.get('key')}|{item.get('promise')}"
+            for item in (content.get("obligations") or [])
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def invariant_version(content: dict[str, Any]) -> str:
+    """A content-addressed version of the invariant classes alone."""
+
+    encoded = json.dumps(
+        invariant_classes(_without_audit(content)), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return "inv:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def invariant_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> list[str]:
+    """Which invariant classes differ between two screenplay contents."""
+
+    if previous is None:
+        return []
+    before = invariant_classes(_without_audit(previous))
+    after = invariant_classes(_without_audit(current))
+    return [name for name in INVARIANT_CLASSES if before.get(name) != after.get(name)]
+
+
+def invariant_record(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
+    """What a revision records about its invariants: version, what it supersedes, what moved."""
+
+    version = invariant_version(current)
+    previous_version = invariant_version(previous) if previous is not None else None
+    changed = invariant_changes(previous, current)
+    return {
+        "version": version,
+        "supersedes_version": previous_version if changed else None,
+        "unchanged_from_version": previous_version if previous is not None and not changed else None,
+        "changed": changed,
+    }
+
+
+def _without_audit(content: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in dict(content or {}).items() if key != "_context"}

@@ -14,6 +14,13 @@ Before taking over development, read [the documentation index](docs/README.md)ã€
 > 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
 > callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 >
+> **2026-09-08:** migration head `0082_shot_cinematography_plan`. The Skill runtime
+> (`core/skills/skill_core/runtime.py`) is the only path by which a Skill body reaches a model: five
+> Skills are runtime-bound and injected alone under their own model role (director, short-drama as
+> `SHOT_PLANNER`, cinematography, continuity, prompt-compiler), the screenplay is a Director story
+> plus a Shot Planner decomposition, and every row records whether the outcome was Skill-driven or a
+> tracked fallback. Entry point: [docs/SKILL_RUNTIME.md](docs/SKILL_RUNTIME.md).
+>
 > **2026-09-06:** migration head `0081_veo_discrete_durations`. Reference images now reach
 > Seedream (`image`), the web canvas previews a picked reference at once and names the server's
 > reason when an upload is refused; a screenplay shot is one dominant action plus at most one line

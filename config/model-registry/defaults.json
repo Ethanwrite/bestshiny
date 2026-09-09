@@ -1,5 +1,5 @@
 {
-  "version": "phase2-model-infrastructure-v8",
+  "version": "phase2-model-infrastructure-v9",
   "models": [
     {
       "logical_name": "gpt-5.6-sol-openrouter",
@@ -1657,6 +1657,17 @@
       "priority": 10
     },
     {
+      "role": "SHOT_PLANNER",
+      "model_logical_name": "claude-sonnet-5-openrouter",
+      "priority": 0
+    },
+    {
+      "role": "SHOT_PLANNER",
+      "model_logical_name": "claude-opus-5-openrouter",
+      "binding_kind": "FALLBACK",
+      "priority": 10
+    },
+    {
       "role": "CINEMATOGRAPHY_REASONING",
       "model_logical_name": "gpt-5.6-sol-openrouter",
       "priority": 0
@@ -1840,6 +1851,12 @@
     },
     {
       "role": "ASSISTANT_DIRECTOR",
+      "model_logical_name": "doubao-free-reasoner",
+      "plan_tier": "FREE",
+      "priority": 0
+    },
+    {
+      "role": "SHOT_PLANNER",
       "model_logical_name": "doubao-free-reasoner",
       "plan_tier": "FREE",
       "priority": 0

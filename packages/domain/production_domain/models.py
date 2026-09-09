@@ -1110,6 +1110,15 @@ class Shot(Base, TimestampMixin):
     director_intent_json: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, server_default="{}", nullable=False
     )
+    #: The Cinematography Skill's plan for this shot - ``plan`` (framing,
+    #: angle, height, lens intent, one movement, motivated light, start and
+    #: end composition) and ``skill_invocation`` (which Skill version decided
+    #: it, or why the deterministic defaults stood in). Read by the prompt
+    #: compiler between the timeline state and a caller's explicit overrides;
+    #: empty for a shot the stage has not designed.
+    cinematography_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
     negative_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     provider: Mapped[str] = mapped_column(String(80), default="google_flow", nullable=False)
     model: Mapped[str] = mapped_column(String(120), default="veo", nullable=False)

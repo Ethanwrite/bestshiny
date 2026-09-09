@@ -1169,3 +1169,257 @@ def normalize_name(value: str) -> str:
     """Stable identity for list members (characters, props): case- and space-folded."""
 
     return _normalize_name(value)
+
+
+# ---------------------------------------------------------------------------
+# Two-stage authoring: the Director writes the story (WHY), the Shot Planner
+# decomposes it into generation-safe shots (WHAT HAPPENS). ``StoryDraft`` is
+# the Director's output contract - it has no shots and no photographic
+# fields - and ``ShotPlan`` is the Shot Planner's, which carries no story
+# facts of its own. ``merge_story_and_shot_plan`` (screenplay.py) folds the
+# two into the ``Screenplay`` every downstream stage already reads.
+# ---------------------------------------------------------------------------
+
+#: Keys the Director must never decide. A story carrying one is accepted with
+#: the key stripped and the breach recorded; the field itself never reaches
+#: the screenplay, so nothing downstream can mistake it for an approval.
+DIRECTOR_FORBIDDEN_KEYS: frozenset[str] = frozenset(
+    {
+        "shots",
+        "shot_count",
+        "shot_list",
+        "camera",
+        "lens",
+        "focal_length",
+        "camera_movement",
+        "movement",
+        "framing",
+        "composition",
+        "lighting",
+        "light",
+        "provider",
+        "model",
+        "model_id",
+        "start_state",
+        "end_state",
+        "gaze_target",
+        "gaze",
+    }
+)
+
+#: Keys the Shot Planner must never decide at the top level or on a beat: the
+#: story is the Director's, the photography is Cinematography's. Inside a shot
+#: only photographic keys are forbidden (a shot legitimately names its
+#: present and identity-critical characters).
+SHOT_PLANNER_FORBIDDEN_TOP_KEYS: frozenset[str] = frozenset(
+    {
+        "treatment",
+        "ending",
+        "premise",
+        "hook",
+        "characters",
+        "scenes",
+        "invariants",
+        "variables",
+        "product_claims",
+        "obligations",
+        "dialogue",
+        "camera",
+        "lens",
+        "lighting",
+        "framing",
+        "provider",
+        "model",
+    }
+)
+SHOT_PLANNER_FORBIDDEN_BEAT_KEYS: frozenset[str] = frozenset(
+    {"intent", "summary", "characters", "dialogue", "scene_key", "emotional_beat", "ending"}
+)
+SHOT_PLANNER_FORBIDDEN_SHOT_KEYS: frozenset[str] = frozenset(
+    {
+        "camera",
+        "lens",
+        "focal_length",
+        "camera_movement",
+        "movement",
+        "framing",
+        "composition",
+        "lighting",
+        "light",
+        "provider",
+        "model",
+        "model_id",
+        "shot_type",
+        "shot_size",
+    }
+)
+
+
+class StoryBeat(BaseModel):
+    """One story beat: what the audience learns, and the lines that carry it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    sequence: int = Field(ge=1, le=MAX_BEATS)
+    intent: str = Field(min_length=1, max_length=40)
+    summary: str = Field(default="", max_length=600)
+    scene_key: str = Field(min_length=1, max_length=60)
+    characters: list[str] = Field(default_factory=list, max_length=MAX_CAST)
+    emotional_beat: str = Field(default="", max_length=300)
+    #: The required dialogue of the beat, in the order it is spoken. The Shot
+    #: Planner places these lines into shots; it may not change a word.
+    dialogue: list[ShotDialogue] = Field(default_factory=list, max_length=MAX_SHOTS_PER_BEAT)
+
+    @field_validator("intent")
+    @classmethod
+    def _intent(cls, value: str) -> str:
+        cleaned = "_".join(_clean_text(value, 40).upper().replace("-", " ").split())
+        return cleaned or "BEAT"
+
+    @field_validator("summary", "emotional_beat")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 600)
+
+    @field_validator("characters")
+    @classmethod
+    def _clean_characters(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in value:
+            name = _clean_text(item, 60)
+            if name and _normalize_name(name) not in {_normalize_name(known) for known in cleaned}:
+                cleaned.append(name)
+        return cleaned
+
+
+class StoryDraft(BaseModel):
+    """The Director's screenplay without its shots: intent, facts, beats, lines."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    treatment: Treatment
+    invariants: list[ScreenplayInvariant] = Field(default_factory=list, max_length=40)
+    variables: list[str] = Field(default_factory=list, max_length=40)
+    characters: list[ScreenplayCharacter] = Field(min_length=1, max_length=MAX_CAST)
+    scenes: list[ScreenplayScene] = Field(min_length=1, max_length=MAX_SCENE_ANCHORS)
+    beats: list[StoryBeat] = Field(min_length=1, max_length=MAX_BEATS)
+    product_claims: list[ProductClaim] = Field(default_factory=list, max_length=20)
+    required_copy: list[RequiredCopy] = Field(default_factory=list, max_length=20)
+    obligations: list[ScreenplayObligation] = Field(default_factory=list, max_length=20)
+    unresolved: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("variables", "unresolved")
+    @classmethod
+    def _clean_lists(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
+
+    @model_validator(mode="after")
+    def _cross_references(self) -> StoryDraft:
+        scene_keys = {scene.key for scene in self.scenes}
+        if len(scene_keys) != len(self.scenes):
+            raise ValueError("scene keys must be unique")
+        names = {_normalize_name(character.name) for character in self.characters}
+        if len(names) != len(self.characters):
+            raise ValueError("character names must be unique")
+        expected_sequence = 1
+        for beat in self.beats:
+            if beat.scene_key not in scene_keys:
+                raise ValueError(f"beat {beat.sequence} references unknown scene {beat.scene_key!r}")
+            if beat.sequence != expected_sequence:
+                raise ValueError(f"beats must be numbered consecutively from 1; got {beat.sequence}")
+            expected_sequence += 1
+            for name in beat.characters:
+                if _normalize_name(name) not in names:
+                    raise ValueError(f"beat {beat.sequence} lists unknown character {name!r}")
+            for line in beat.dialogue:
+                if _normalize_name(line.speaker) not in names:
+                    raise ValueError(
+                        f"beat {beat.sequence} gives a line to unknown character {line.speaker!r}"
+                    )
+        for index, invariant in enumerate(self.invariants, 1):
+            for name in invariant.characters:
+                if _normalize_name(name) not in names:
+                    raise ValueError(f"invariant {index} is scoped to unknown character {name!r}")
+            for key in invariant.scenes:
+                if key not in scene_keys:
+                    raise ValueError(f"invariant {index} is scoped to unknown scene {key!r}")
+        return self
+
+
+class ShotPlanBeat(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    sequence: int = Field(ge=1, le=MAX_BEATS)
+    shots: list[ScreenplayShot] = Field(min_length=1, max_length=MAX_SHOTS_PER_BEAT)
+
+
+class ShotPlan(BaseModel):
+    """The Shot Planner's output: shots per beat, and where required copy lands."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    beats: list[ShotPlanBeat] = Field(min_length=1, max_length=MAX_BEATS)
+    required_copy: list[RequiredCopy] = Field(default_factory=list, max_length=20)
+    mobile_hook_check: str = Field(default="", max_length=600)
+    unresolved: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("mobile_hook_check")
+    @classmethod
+    def _clean(cls, value: str) -> str:
+        return _clean_text(value, 600)
+
+    @field_validator("unresolved")
+    @classmethod
+    def _clean_list(cls, value: list[str]) -> list[str]:
+        return [_clean_text(item, 400) for item in value if _clean_text(item, 400)]
+
+    @model_validator(mode="after")
+    def _unique_beats(self) -> ShotPlan:
+        seen: set[int] = set()
+        for beat in self.beats:
+            if beat.sequence in seen:
+                raise ValueError(f"beat {beat.sequence} is planned twice")
+            seen.add(beat.sequence)
+            shots: set[int] = set()
+            for shot in beat.shots:
+                if shot.sequence in shots:
+                    raise ValueError(f"beat {beat.sequence}: duplicate shot sequence {shot.sequence}")
+                shots.add(shot.sequence)
+        return self
+
+
+def strip_forbidden_keys(
+    payload: dict[str, Any],
+    forbidden: frozenset[str],
+    *,
+    path: str = "",
+    recurse_into: tuple[str, ...] = (),
+) -> tuple[dict[str, Any], list[str]]:
+    """Drop out-of-authority keys from one object level, reporting each as a path.
+
+    ``recurse_into`` names list-valued keys whose members are stripped with the
+    same forbidden set (a story's beats, a plan's shots).
+    """
+
+    cleaned: dict[str, Any] = {}
+    stripped: list[str] = []
+    for key, value in payload.items():
+        here = f"{path}.{key}" if path else str(key)
+        if str(key).lower() in forbidden:
+            stripped.append(here)
+            continue
+        if key in recurse_into and isinstance(value, list):
+            members: list[Any] = []
+            for index, member in enumerate(value):
+                if isinstance(member, dict):
+                    member_clean, member_stripped = strip_forbidden_keys(
+                        member, forbidden, path=f"{here}[{index}]"
+                    )
+                    members.append(member_clean)
+                    stripped.extend(member_stripped)
+                else:
+                    members.append(member)
+            cleaned[key] = members
+            continue
+        cleaned[key] = value
+    return cleaned, stripped

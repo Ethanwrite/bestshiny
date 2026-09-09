@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Literal, Protocol
 
 from platform_contracts import (
@@ -21,6 +23,15 @@ from platform_contracts import (
 from platform_database import Database
 from production_domain.models import PromptCompilation, Shot, TimelineState
 from pydantic import ValidationError
+from skill_core.runtime import (
+    EXECUTION_DETERMINISTIC,
+    EXECUTION_MODEL,
+    AuthorityViolation,
+    SkillInvocation,
+    SkillOperation,
+    SkillRuntime,
+)
+from sqlalchemy import select
 
 #: Constraint prefixes the compiler writes and reads back: a prohibition in
 #: the client's own words, and one thing that must not be shown or done.
@@ -28,6 +39,57 @@ from pydantic import ValidationError
 #: the QC checklist and the negative prompt without a second channel.
 PROHIBITION_PREFIX = "the client forbade, in their words: "
 FORBIDDEN_PREFIX = "must not show or do: "
+PRODUCT_CLAIM_PREFIX = "product claim, verbatim and unparaphrased: "
+REQUIRED_COPY_PREFIX = "required on-screen copy, exactly these words: "
+UNRESOLVED_PREFIX = "unresolved:"
+
+#: Connectors that sequence two actions in one line: the second action is a
+#: second shot, and the compiler refuses to render both in one.
+_SEQUENCE_CONNECTORS = re.compile(
+    r"(然后|接着|紧接着|随后|而后|再接着|之后再|"
+    r"\b(?:and then|then|after that|afterwards|followed by|subsequently)\b)",
+    re.IGNORECASE,
+)
+_MOVEMENT_CONNECTORS = re.compile(r"(\s(?:and|then|plus)\s|\s\+\s|,\s*then|然后|并且|再)", re.IGNORECASE)
+#: Values a stage may leave in a field to say it is not decided. The compiler
+#: never resolves them; it returns NOT_COMPILABLE naming the field.
+_UNRESOLVED_VALUES = frozenset({"unresolved", "tbd", "to be decided", "undecided", "?", "待定", "未定"})
+#: Names that belong to Model Router and the adapters, never to a prompt.
+_PROVIDER_MODEL_TERMS = re.compile(
+    r"\b(kling|veo|seedance|seedream|runway|grok|openrouter|doubao|qwen|gemini|sora|pika|luma|"
+    r"dashscope|midjourney|flux)\b|gpt[- ]image|google flow|stable diffusion|\bwan\s?[23]",
+    re.IGNORECASE,
+)
+_VENDOR_SYNTAX = re.compile(r"(--\w+|\([^()]{1,60}:\d(?:\.\d+)?\)|::\d)")
+_ENVELOPE_KEYS = (
+    "shot_spec",
+    "asset_bindings",
+    "continuity_context",
+    "PromptCompilerInput",
+    "CanonicalShotSpec",
+)
+
+COMPILER_PROTOCOL = """
+## Compiling one envelope (application protocol)
+
+The PromptCompilerInput envelope follows. Compile it into the provider-neutral package and answer with ONE
+JSON object carrying exactly these eight fields and nothing else:
+{
+  "status": "COMPILED" | "NOT_COMPILABLE",
+  "positive_prompt": str | null,
+  "negative_prompt": str | null,
+  "asset_bindings": [str],          // the envelope's identifiers, deduplicated, order preserved
+  "continuity_assertions": [str],   // one per entry of continuity_context.facts
+  "qc_checklist": [str],            // yes/no checks over what the package asserts
+  "missing_fields": [str],
+  "review_reason": str | null
+}
+
+The runtime re-verifies the package: the dominant action, every subject's name, the line, every product claim
+and required copy must appear verbatim in the positive prompt; the asset bindings must be echoed exactly and
+never appear in the prose; there must be one assertion per fact; no model, provider, vendor syntax or envelope
+key may appear anywhere. A package that fails any check is discarded and the deterministic package stands in.
+""".strip()
 
 
 class ResolvedSkill(Protocol):
@@ -137,10 +199,33 @@ class PromptCompilerResult:
     record_id: str
     skill_name: str
     skill_version: str
+    #: MODEL when the prompt-compiler Skill produced the package (fresh, verified),
+    #: DETERMINISTIC when the deterministic compiler did - with the invocation
+    #: record saying why.
+    execution_mode: str = EXECUTION_DETERMINISTIC
+    skill_invocation: dict[str, Any] = field(default_factory=dict)
 
     @property
     def neutral_prompt(self) -> str:
         return self.output.positive_prompt or ""
+
+    @property
+    def skill_driven(self) -> bool:
+        return self.execution_mode == EXECUTION_MODEL
+
+
+@dataclass(frozen=True)
+class _Envelope:
+    """One shot's compiler input, assembled once for every compile path."""
+
+    shot_id: str
+    project_id: str
+    spec: CanonicalShotSpec
+    compiler_input: PromptCompilerInput
+    raw_action: str
+    action: str
+    input_hash: str
+    cinematography: dict[str, Any]
 
 
 class PromptCompilerService:
@@ -155,12 +240,17 @@ class PromptCompilerService:
         styles: ProjectStyleSource | None = None,
         ledger: SeriesLedgerSource | None = None,
         dependencies: ShotDependencySource | None = None,
+        runtime: SkillRuntime | None = None,
     ):
         self.database = database
         self.skills = skills
         self.styles = styles
         self.ledger = ledger
         self.dependencies = dependencies
+        #: The Skill runtime that runs the prompt-compiler Skill on a model.
+        #: Without one, every compilation is the deterministic package and the
+        #: record says the stage was not configured.
+        self.runtime = runtime
 
     @staticmethod
     def _single_action(value: str) -> str:
@@ -391,7 +481,7 @@ class PromptCompilerService:
             {},
         )
 
-    def compile(
+    def _envelope(
         self,
         shot_id: str,
         *,
@@ -401,13 +491,20 @@ class PromptCompilerService:
         lighting: dict[str, Any] | None = None,
         resolution: str = "720p",
         dependency_contexts: Sequence[ResolvedDependency] | None = None,
-    ) -> PromptCompilerResult:
+    ) -> _Envelope:
+        """Assemble one shot's CanonicalShotSpec and envelope; every compile path starts here."""
+
         character_bindings = character_bindings or []
         canonical_assets = canonical_assets or []
         with self.database.session() as session:
             shot = session.get(Shot, shot_id)
             if not shot:
                 raise LookupError("shot not found")
+            # The Cinematography Skill's plan for this shot, when the stage
+            # designed one: read between the timeline state and a caller's
+            # explicit overrides, so the compiler renders the treatment the
+            # stage decided rather than the locked-off defaults.
+            cinematography = dict(shot.cinematography_json or {})
             input_state = session.get(TimelineState, shot.input_state_id) if shot.input_state_id else None
             output_state = session.get(TimelineState, shot.output_state_id) if shot.output_state_id else None
             start_state = dict(input_state.state_json) if input_state else {}
@@ -634,7 +731,10 @@ class PromptCompilerService:
                     subject.eyeline_target = "camera lens as the explicitly approved target"
 
         state_camera = start_state.get("camera", {}) if isinstance(start_state.get("camera"), dict) else {}
-        camera_values = {**state_camera, **(camera or {})}
+        plan = cinematography.get("plan") if isinstance(cinematography.get("plan"), dict) else {}
+        plan_camera = dict(plan.get("camera") or {}) if isinstance(plan.get("camera"), dict) else {}
+        plan_lighting = dict(plan.get("lighting") or {}) if isinstance(plan.get("lighting"), dict) else {}
+        camera_values = {**state_camera, **plan_camera, **(camera or {})}
         camera_spec = CanonicalCameraSpec(
             position=str(camera_values.get("position", "approved position")),
             angle=str(camera_values.get("angle", "eye level")),
@@ -649,6 +749,11 @@ class PromptCompilerService:
         )
         lighting_values = {
             **(start_state.get("lighting", {}) if isinstance(start_state.get("lighting"), dict) else {}),
+            **{
+                key: value
+                for key, value in plan_lighting.items()
+                if key in {"direction", "quality", "contrast", "color_temperature", "practicals"}
+            },
             **(lighting or {}),
         }
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
@@ -860,40 +965,314 @@ class PromptCompilerService:
                 facts=continuity_facts,
             ),
         )
-        output = self.compile_input(compiler_input)
+        return _Envelope(
+            shot_id=shot_id,
+            project_id=project_id,
+            spec=spec,
+            compiler_input=compiler_input,
+            raw_action=raw_action,
+            action=action,
+            input_hash=hashlib.sha256(
+                json.dumps(compiler_input.model_dump(mode="json"), sort_keys=True, ensure_ascii=False).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            cinematography=cinematography,
+        )
+
+    def compile(
+        self,
+        shot_id: str,
+        *,
+        character_bindings: list[dict[str, Any]] | None = None,
+        canonical_assets: list[dict[str, Any]] | None = None,
+        camera: dict[str, Any] | None = None,
+        lighting: dict[str, Any] | None = None,
+        resolution: str = "720p",
+        dependency_contexts: Sequence[ResolvedDependency] | None = None,
+    ) -> PromptCompilerResult:
+        """Compile one shot on the generation path, without calling a model.
+
+        A package the prompt-compiler Skill produced for exactly this envelope
+        (same input hash, verified, recorded by ``compile_shot_with_skill``)
+        is reused as the Skill's work; otherwise the deterministic compiler
+        produces the package and the record says the stage fell back and why.
+        A fresh Skill verdict of NOT_COMPILABLE is honoured, not overridden.
+        """
+
+        envelope = self._envelope(
+            shot_id,
+            character_bindings=character_bindings,
+            canonical_assets=canonical_assets,
+            camera=camera,
+            lighting=lighting,
+            resolution=resolution,
+            dependency_contexts=dependency_contexts,
+        )
+        fresh = self._fresh_skill_compilation(envelope)
+        if fresh is not None:
+            output = PromptCompilerOutput.model_validate(fresh.diff_json["prompt_compiler_output"])
+            if output.status != "COMPILED":
+                raise ValueError(
+                    "the prompt compiler Skill judged this shot not compilable: "
+                    + str(output.review_reason or "unspecified")
+                )
+            recorded = dict(fresh.diff_json.get("skill_invocation") or {})
+            return self._record(
+                envelope, output, recorded, EXECUTION_MODEL, reused_from=_original_record_id(fresh)
+            )
+        output = self.compile_input(envelope.compiler_input)
         if output.status != "COMPILED":
             raise ValueError(output.review_reason or "approved shot is not compilable")
+        fallback = self._deterministic_invocation("NO_FRESH_SKILL_COMPILATION")
+        return self._record(envelope, output, fallback.as_json(), EXECUTION_DETERMINISTIC)
+
+    async def compile_shot_with_skill(
+        self,
+        shot_id: str,
+        *,
+        model_roles: Any | None = None,
+        character_bindings: list[dict[str, Any]] | None = None,
+        canonical_assets: list[dict[str, Any]] | None = None,
+        camera: dict[str, Any] | None = None,
+        lighting: dict[str, Any] | None = None,
+        resolution: str = "720p",
+        dependency_contexts: Sequence[ResolvedDependency] | None = None,
+        reuse_fresh: bool = True,
+    ) -> PromptCompilerResult:
+        """Run the prompt-compiler Skill for one shot and record its package.
+
+        The record is what the generation path reuses while the envelope is
+        unchanged. A NOT_COMPILABLE verdict is recorded as such - it is the
+        Skill's decision, and it blocks generation until the shot changes or
+        the stage is run again. With ``reuse_fresh`` a package the Skill
+        already produced for exactly this envelope is returned instead of
+        paying for the same answer again.
+        """
+
+        envelope = self._envelope(
+            shot_id,
+            character_bindings=character_bindings,
+            canonical_assets=canonical_assets,
+            camera=camera,
+            lighting=lighting,
+            resolution=resolution,
+            dependency_contexts=dependency_contexts,
+        )
+        if reuse_fresh:
+            fresh = self._fresh_skill_compilation(envelope)
+            if fresh is not None:
+                output = PromptCompilerOutput.model_validate(fresh.diff_json["prompt_compiler_output"])
+                recorded = dict(fresh.diff_json.get("skill_invocation") or {})
+                return self._record(
+                    envelope, output, recorded, EXECUTION_MODEL, reused_from=_original_record_id(fresh)
+                )
+        output, invocation = await self.compile_input_with_skill(
+            envelope.compiler_input, project_id=envelope.project_id, model_roles=model_roles
+        )
+        return self._record(envelope, output, invocation.as_json(), invocation.execution_mode)
+
+    async def compile_input_with_skill(
+        self,
+        value: PromptCompilerInput,
+        *,
+        project_id: str,
+        model_roles: Any | None = None,
+    ) -> tuple[PromptCompilerOutput, SkillInvocation]:
+        """Compile one envelope through the prompt-compiler Skill, re-verified; degrade loudly.
+
+        The deterministic preflight runs first: an envelope it refuses is
+        never sent to a model, because the Skill's own first rule is the same
+        refusal. A model package that fails re-verification - a dropped
+        subject, a paraphrased claim, an invented asset, a provider name - is
+        discarded and the deterministic package returned, on record.
+        """
+
+        deterministic = self.compile_input(value)
+        operation = SkillOperation.PROMPT_COMPILATION
+        if deterministic.status != "COMPILED":
+            invocation = self._deterministic_invocation("PREFLIGHT_NOT_COMPILABLE")
+            return deterministic, invocation
+        if self.runtime is None:
+            return deterministic, self._deterministic_invocation("SKILL_RUNTIME_NOT_CONFIGURED")
+        spec = CanonicalShotSpec.model_validate(value.shot_spec)
+        invocation = await self.runtime.invoke(
+            operation,
+            project_id=project_id,
+            protocol=COMPILER_PROTOCOL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"task": "COMPILE", "envelope": value.model_dump(mode="json")},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                }
+            ],
+            validator=partial(_validate_compiler_output, spec, value),
+            model_roles=model_roles,
+            max_tokens=2500,
+        )
+        if invocation.output is None:
+            return deterministic, invocation
+        return invocation.output, invocation
+
+    def _deterministic_invocation(self, reason: str) -> SkillInvocation:
+        if self.runtime is not None:
+            return self.runtime.deterministic(SkillOperation.PROMPT_COMPILATION, reason=reason)
+        invocation = SkillInvocation(
+            operation=SkillOperation.PROMPT_COMPILATION.value,
+            fallback_reason=reason,
+            reason_codes=[reason],
+        )
+        try:
+            skill = self.skills.resolve("prompt-compiler")
+        except (LookupError, ValueError, OSError):
+            invocation.reason_codes.insert(0, "SKILL_UNAVAILABLE")
+        else:
+            invocation.name = skill.name
+            invocation.version = skill.version
+            invocation.content_hash = skill.content_hash
+            invocation.role = "prompt_compiler"
+            invocation.resolved = True
+        return invocation
+
+    def _fresh_skill_compilation(self, envelope: _Envelope) -> PromptCompilation | None:
+        """The latest Skill-produced package for exactly this envelope, if any."""
+
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(PromptCompilation)
+                    .where(PromptCompilation.shot_id == envelope.shot_id)
+                    .order_by(PromptCompilation.created_at.desc())
+                    .limit(12)
+                )
+            )
+            for row in rows:
+                diff = dict(row.diff_json or {})
+                if (
+                    diff.get("execution_mode") == EXECUTION_MODEL
+                    and diff.get("input_hash") == envelope.input_hash
+                    and isinstance(diff.get("prompt_compiler_output"), dict)
+                ):
+                    session.expunge(row)
+                    return row
+        return None
+
+    def _record(
+        self,
+        envelope: _Envelope,
+        output: PromptCompilerOutput,
+        invocation: dict[str, Any],
+        execution_mode: str,
+        *,
+        reused_from: str | None = None,
+    ) -> PromptCompilerResult:
         skill = self.skills.resolve("prompt-compiler")
         neutral_prompt = output.positive_prompt or ""
         with self.database.session() as session:
-            shot = session.get(Shot, shot_id)
+            shot = session.get(Shot, envelope.shot_id)
+            if shot is None:
+                raise LookupError("shot disappeared during compilation")
             record = PromptCompilation(
-                project_id=project_id,
-                shot_id=shot_id,
-                user_prompt=raw_action,
+                project_id=envelope.project_id,
+                shot_id=envelope.shot_id,
+                user_prompt=envelope.raw_action,
                 compiled_prompt=neutral_prompt,
                 compiler_version=self.version,
                 skill_versions={"prompt-compiler": skill.version},
                 diff_json={
-                    "canonical_shot_spec": spec.model_dump(mode="json"),
-                    "prompt_compiler_input": compiler_input.model_dump(mode="json"),
+                    "canonical_shot_spec": envelope.spec.model_dump(mode="json"),
+                    "prompt_compiler_input": envelope.compiler_input.model_dump(mode="json"),
                     "prompt_compiler_output": output.model_dump(mode="json"),
                     "skill_content_hash": skill.content_hash,
-                    "preserved_facts": [action],
+                    "skill_invocation": invocation,
+                    "execution_mode": execution_mode,
+                    "skill_driven": execution_mode == EXECUTION_MODEL,
+                    "input_hash": envelope.input_hash,
+                    "reused_from": reused_from,
+                    "cinematography": {
+                        "execution_mode": envelope.cinematography.get("execution_mode"),
+                        "skill_version": (envelope.cinematography.get("skill_invocation") or {}).get(
+                            "version"
+                        ),
+                        "input_hash": envelope.cinematography.get("input_hash"),
+                    }
+                    if envelope.cinematography
+                    else {"execution_mode": None, "fallback_reason": "NOT_DESIGNED"},
+                    "preserved_facts": [envelope.action],
                     "provider_specific": False,
                 },
             )
             session.add(record)
-            shot.compiled_prompt = neutral_prompt
+            if output.status == "COMPILED":
+                shot.compiled_prompt = neutral_prompt
             session.flush()
             return PromptCompilerResult(
-                spec=spec,
-                input=compiler_input,
+                spec=envelope.spec,
+                input=envelope.compiler_input,
                 output=output,
                 record_id=record.id,
                 skill_name=skill.name,
                 skill_version=skill.version,
+                execution_mode=execution_mode,
+                skill_invocation=dict(invocation),
             )
+
+    @staticmethod
+    def _preflight(spec: CanonicalShotSpec) -> tuple[list[str], list[str]]:
+        """The Skill's own preflight, deterministically: what makes a spec uncompilable.
+
+        Returns the offending field paths and the reasons. Two sequenced
+        actions, two camera movements, and any field a stage left unresolved
+        stop compilation here; the compiler never resolves them.
+        """
+
+        missing: list[str] = []
+        reasons: list[str] = []
+
+        def unresolved(value: Any) -> bool:
+            text = " ".join(str(value or "").split()).lower()
+            return text in _UNRESOLVED_VALUES or text.startswith(UNRESOLVED_PREFIX)
+
+        if not spec.intent.strip():
+            missing.append("intent")
+            reasons.append("intent is empty")
+        connector = _SEQUENCE_CONNECTORS.search(spec.dominant_action)
+        if connector is not None:
+            missing.append("dominant_action")
+            reasons.append(
+                f"dominant_action sequences two actions ({connector.group(0)!r}); one shot carries one action"
+            )
+        if _MOVEMENT_CONNECTORS.search(spec.camera.dominant_movement):
+            missing.append("camera.dominant_movement")
+            reasons.append("camera.dominant_movement names more than one movement")
+        for path, value in (
+            ("intent", spec.intent),
+            ("dominant_action", spec.dominant_action),
+            ("dialogue", spec.dialogue),
+            ("camera.dominant_movement", spec.camera.dominant_movement),
+            ("start_state.director_staging", spec.start_state.get("director_staging")),
+            ("end_state.director_staging", spec.end_state.get("director_staging")),
+        ):
+            if unresolved(value):
+                missing.append(path)
+                reasons.append(f"{path} is unresolved")
+        for index, subject in enumerate(spec.subjects):
+            for key in ("eyeline_target", "screen_position", "pose", "body_orientation"):
+                if unresolved(getattr(subject, key)):
+                    missing.append(f"subjects[{index}].{key}")
+                    reasons.append(f"subjects[{index}].{key} is unresolved")
+        for index, constraint in enumerate(spec.constraints):
+            if str(constraint).strip().lower().startswith(UNRESOLVED_PREFIX):
+                missing.append(f"constraints[{index}]")
+                reasons.append(f"a stage left a decision unresolved: {constraint}")
+        if not str(spec.aspect_ratio).strip():
+            missing.append("aspect_ratio")
+            reasons.append("aspect_ratio is empty")
+        return list(dict.fromkeys(missing)), reasons
 
     def compile_input(self, value: PromptCompilerInput) -> PromptCompilerOutput:
         """Compile one typed envelope without leaking Skill instructions into the prompt.
@@ -917,6 +1296,13 @@ class PromptCompilerService:
                 status="NOT_COMPILABLE",
                 missing_fields=missing_fields,
                 review_reason="CanonicalShotSpec failed validation: " + str(exc.errors(include_url=False)),
+            )
+        missing, reasons = self._preflight(spec)
+        if missing:
+            return PromptCompilerOutput(
+                status="NOT_COMPILABLE",
+                missing_fields=missing,
+                review_reason="; ".join(reasons),
             )
         facts = [
             item
@@ -1026,6 +1412,79 @@ class PromptCompilerService:
             "constraints": payload["constraints"],
         }
         return json.dumps(ordered, ensure_ascii=False, indent=2)
+
+
+def _original_record_id(record: PromptCompilation) -> str:
+    """The record the Skill actually produced: a reuse of a reuse still points at it."""
+
+    original = (record.diff_json or {}).get("reused_from")
+    return str(original) if original else record.id
+
+
+def verify_compiled_package(
+    spec: CanonicalShotSpec, value: PromptCompilerInput, output: PromptCompilerOutput
+) -> tuple[list[str], list[str]]:
+    """Re-verify a Skill-compiled package: (contract problems, authority problems).
+
+    Contract problems are dropped or altered facts and a broken echo; authority
+    problems are decisions the compiler may not make - naming a model or a
+    provider, vendor syntax, an asset described into the prose, an envelope
+    key leaked. Either list rejects the package.
+    """
+
+    contract: list[str] = []
+    authority: list[str] = []
+    positive = (output.positive_prompt or "").casefold()
+    combined = f"{output.positive_prompt or ''}\n{output.negative_prompt or ''}"
+    expected_assets = list(dict.fromkeys(value.asset_bindings))
+    if list(output.asset_bindings) != expected_assets:
+        contract.append("asset_bindings_not_echoed")
+    if len(output.continuity_assertions) != len(value.continuity_context.facts):
+        contract.append("continuity_assertions_count")
+    if spec.dominant_action.casefold() not in positive:
+        contract.append("dominant_action_missing")
+    for subject in spec.subjects:
+        if subject.name.strip() and subject.name.casefold() not in positive:
+            contract.append(f"subject_missing:{subject.name}")
+    if spec.dialogue.strip() and " ".join(spec.dialogue.split()).casefold() not in " ".join(positive.split()):
+        contract.append("dialogue_missing")
+    verbatim_prefixes = (
+        (PRODUCT_CLAIM_PREFIX, "product_claim_missing"),
+        (REQUIRED_COPY_PREFIX, "required_copy_missing"),
+    )
+    for constraint in spec.constraints:
+        for prefix, code in verbatim_prefixes:
+            if constraint.startswith(prefix):
+                quoted = constraint.removeprefix(prefix).strip().strip('"')
+                if quoted and quoted.casefold() not in positive:
+                    contract.append(code)
+    for identifier in expected_assets:
+        if identifier and identifier in combined:
+            authority.append("asset_id_in_prompt")
+            break
+    match = _PROVIDER_MODEL_TERMS.search(combined)
+    if match is not None:
+        authority.append(f"provider_or_model_named:{match.group(0).strip()}")
+    if _VENDOR_SYNTAX.search(combined):
+        authority.append("vendor_syntax")
+    for key in _ENVELOPE_KEYS:
+        if key in combined:
+            authority.append(f"envelope_key_leaked:{key}")
+    return list(dict.fromkeys(contract)), list(dict.fromkeys(authority))
+
+
+def _validate_compiler_output(
+    spec: CanonicalShotSpec, value: PromptCompilerInput, raw: dict[str, Any]
+) -> PromptCompilerOutput:
+    output = PromptCompilerOutput.model_validate(raw)
+    if output.status != "COMPILED":
+        return output
+    contract, authority = verify_compiled_package(spec, value, output)
+    if authority:
+        raise AuthorityViolation(authority)
+    if contract:
+        raise ValueError("compiled package failed re-verification: " + ", ".join(contract))
+    return output
 
 
 # Import compatibility only: both names resolve to the one implementation above.

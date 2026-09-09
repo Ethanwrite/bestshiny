@@ -11,6 +11,18 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-09-08 update — the Skill runtime: registered is not invoked.** Migration head is now
+> `0082_shot_cinematography_plan` (`shots.cinematography_json`). Every Skill call goes through
+> `skill_core.runtime.SkillRuntime`, which resolves one operation to one Skill from the frontmatter's
+> machine-readable binding (role, stage, operations, model role, authority, forbidden authority),
+> injects that body alone, validates the stage contract and records `resolved / loaded /
+> model_invoked / execution_mode / fallback_reason` on every row. Five Skills are runtime-bound
+> (director, short-drama as the shot planner under the new `SHOT_PLANNER` role, cinematography,
+> continuity, prompt-compiler); the screenplay is a Director story plus a Shot Planner decomposition;
+> cinematography, continuity review and Skill-compiled prompts run over every compiled episode; the
+> seven reference Skills are reported as bound to nothing. Entry point: `docs/SKILL_RUNTIME.md`; the
+> record is `docs/OPEN_ISSUES.md` §2.52 and `docs/SESSION_HANDOVER_2026-09-08.md`.
+
 > **2026-09-06 update — references reach Seedream, one dominant action per shot, execution
 > duration is the router's, embeddings are on as advice.** Migration head is now
 > `0081_veo_discrete_durations` (data only). The Ark image adapter maps the Gateway-resolved
@@ -162,7 +174,7 @@ provider execution and accounting. A second generation engine or wallet is not a
 | Upper-level creation | `core/creative-director/`, `core/episode-continuation/` | Stateful creative director (idea → brief → key visuals → visual bible → beats → existing chain) and series continuation (EpisodeContinuationContext → linked next episode); offline tests, structured-action boundary, no provider path of their own |
 | Generation/media | `services/generation-gateway/`, `services/media-service/`, `services/production-engine/` | Durable paid boundary, billing evidence, Flow affinity and storage quota |
 | Providers | `providers/` | Mixed adapter/stub state; none live-verified in Phase III |
-| Skills | `skills/`, `core/skills/` | Shared filesystem Registry and content-hash versions implemented; all twelve Skill bodies rewritten against the current contracts, none yet executed by a model |
+| Skills | `skills/`, `core/skills/` | Filesystem Registry with machine-readable bindings, content-hash versions, and the unified `SkillRuntime` (resolve → bind → load → snapshot → invoke → validate → fallback-track). Five Skills reach a model through their call sites (director, short-drama/shot_planner, cinematography, continuity, prompt-compiler); seven are reference-only and reported as such. See `docs/SKILL_RUNTIME.md` |
 
 ## Unified Prompt and Skill boundary
 
@@ -185,15 +197,33 @@ from the SHA-256 hash of the complete `SKILL.md`, and PromptCompilation records 
 output. The database `Skill`/`SkillVersion` models are not synchronized or consumed and must not be treated as a second
 active registry.
 
-Prompt compilation is still deterministic. `skill_contract()` exposes the installed Skill text and JSON Schemas
-but does not invoke `ModelRoleRuntime`, so no Skill body currently reaches a model. All twelve bodies were
-rewritten on 2026-08-22 against the contracts in force: the installed `prompt-compiler` Skill now describes the
-`PromptCompilerInput` envelope, the real `CanonicalShotSpec` field names, the eight `PromptCompilerOutput` fields
-and the `COMPILED`/`NOT_COMPILABLE` invariants, and it emits no Provider or model selection.
-`scripts/review_skill_contract.py` checks a candidate against those criteria without installing anything, and
-`tests/test_installed_skills.py` keeps the structural invariants green. Enabling model-backed compilation
-remains a separate, undecided step: it requires an explicit product decision on fallback behaviour, recorded in
-`HANDOFF.md` section 8.
+Since 2026-09-08 prompt compilation has a model path: `PromptCompilerService.compile_shot_with_skill` runs
+the `prompt-compiler` Skill through `SkillRuntime` under `PROMPT_COMPILER`, after the deterministic preflight
+(two sequenced actions, two camera movements, any unresolved value → `NOT_COMPILABLE` before a model is
+called) and before a re-verification of the package (asset echo, one assertion per fact, the action, subjects,
+line, claims and copy verbatim, no provider or model name, no vendor syntax, no envelope key). The synchronous
+generation path (`compile()`) reuses that package while the envelope hash is unchanged and compiles
+deterministically otherwise, with the invocation recorded either way; a fresh Skill verdict of
+`NOT_COMPILABLE` is honoured. The deterministic fallback is retained by the 2026-09-08 instruction and is
+never labelled Skill-driven (`prompt_compilations.diff_json.execution_mode`, `skill_driven`,
+`skill_invocation`). `scripts/review_skill_contract.py` checks every Skill's ten sections and its binding;
+`tests/test_installed_skills.py` and `tests/test_skill_runtime.py` keep the registry and the runtime green.
+
+## The Skill runtime
+
+`core/skills/skill_core/runtime.py` is the one path by which a Skill body reaches a model. Each
+`SkillOperation` (`creative_conversation`, `story_generation`, `story_revision`, `shot_decomposition`,
+`shot_revision`, `cinematography_design`, `continuity_review`, `prompt_compilation`) resolves to exactly one
+installed Skill whose frontmatter declares it (`role`, `stage`, `runtime`, `operations`, `model_role`,
+`authority`, `forbidden_authority`, `output_contract`); `EXPECTED_BINDINGS` is the platform's contract and
+`SkillRuntime.validate()` fails the container build when the registry does not satisfy it. An invocation
+loads that body alone (a message list carrying another installed body is refused), calls
+`ModelRoleRuntime.execute_chat` under the Skill's model role, validates the stage's pydantic contract plus its
+authority checks, and returns a `SkillInvocation` (`resolved`, `loaded`, `model_invoked`, `execution_mode`
+∈ {MODEL, MODEL_WITHOUT_SKILL, DETERMINISTIC}, `fallback_reason`, name/version/content_hash/role). Only
+`MODEL` with a loaded body is Skill-driven; a deterministic fallback is recorded as such and never as the
+Skill's work. The full contract, the enforced responsibility boundaries and the integration matrix are in
+`docs/SKILL_RUNTIME.md`.
 
 ## Product entry modes and accounting
 

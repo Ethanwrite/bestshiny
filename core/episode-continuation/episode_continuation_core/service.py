@@ -45,9 +45,60 @@ from production_domain.models import (
     TimelineState,
     TimelineTransitionType,
 )
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from skill_core.runtime import SkillOperation, SkillRuntime, Validated
 from sqlalchemy import func, select
 
 from .context import CONTINUITY_CLASSES, ContinuationContextBuilder, context_hash
+
+CONTINUATION_PROTOCOL = """
+## Planning the next episode (application protocol)
+
+You are the series director planning the next episode from the previous one's ending and the
+obligations the series still owes. Answer with ONE JSON object and nothing else:
+{"premise": str, "beats": [{"intent": str, "summary": str}]}
+
+Advance the open obligations; never contradict established facts. You decide the story intent of
+the episode - not its shots, framing, lens, camera movement, lighting, model or provider; any such
+field you write is discarded and recorded. The structural beat rows (locations, characters,
+parseable shot actions) stay deterministic: your summaries refine them, they do not replace them.
+""".strip()
+
+_CONTINUATION_FORBIDDEN_KEYS = frozenset(
+    {"shots", "shot_count", "camera", "lens", "lighting", "framing", "provider", "model", "model_id"}
+)
+
+
+class _ContinuationBeat(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    intent: str = Field(default="", max_length=40)
+    summary: str = Field(default="", max_length=400)
+
+
+class ContinuationProposal(BaseModel):
+    """The Director Skill's output for a continuation: a premise and beat summaries."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    premise: str = Field(default="", max_length=800)
+    beats: list[_ContinuationBeat] = Field(default_factory=list, max_length=40)
+
+
+def _validate_continuation(raw: dict[str, Any]) -> Validated:
+    stripped = sorted(key for key in raw if str(key).lower() in _CONTINUATION_FORBIDDEN_KEYS)
+    cleaned = {
+        key: value for key, value in raw.items() if str(key).lower() not in _CONTINUATION_FORBIDDEN_KEYS
+    }
+    try:
+        proposal = ContinuationProposal.model_validate(cleaned)
+    except ValidationError as exc:
+        raise ValueError(str(exc.errors(include_url=False))[:400]) from exc
+    return Validated(
+        proposal,
+        reason_codes=[f"AUTHORITY_STRIPPED:{key}" for key in stripped],
+        authority_violations=[f"stripped:{key}" for key in stripped],
+    )
 
 
 class EpisodeContinuationConflict(ValueError):
@@ -100,6 +151,7 @@ class EpisodeContinuationService:
         frame_anchors: FrameAnchorPlanning,
         ledger: SeriesLedger,
         model_roles: ModelReasoner | None = None,
+        skill_runtime: SkillRuntime | None = None,
     ):
         self.database = database
         self.context_builder = context_builder
@@ -107,6 +159,10 @@ class EpisodeContinuationService:
         self.frame_anchors = frame_anchors
         self.ledger = ledger
         self.model_roles = model_roles
+        #: The Director Skill, resolved by the runtime for ``story_generation``,
+        #: is the system prompt of the continuation proposal; without a
+        #: runtime the proposal is deterministic and says so.
+        self.skill_runtime = skill_runtime
         self.timeline = AuthoritativeTimelineStateEngine(database)
 
     # ------------------------------------------------------------- prepare
@@ -221,60 +277,72 @@ class EpisodeContinuationService:
         new_location: str | None,
         guidance: str,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
-        brief, beats = self._deterministic_proposal(context, mode, time_gap, new_location, guidance)
-        if self.model_roles is None:
-            return brief, beats, "DETERMINISTIC"
-        from model_registry_core import ModelRole
-        from provider_sdk import ProviderError, ProviderTrustViolation
+        """The Director Skill refines the deterministic proposal; every outcome is recorded.
 
-        try:
-            execution = await self.model_roles.execute_chat(
-                project_id,
-                ModelRole.DIRECTOR,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are the series director planning the next episode. Answer JSON "
-                            'only: {"premise": str, "beats": [{"intent": str, "summary": str}]}. '
-                            "Advance the open obligations; never contradict established facts."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "continuation_context": {
-                                    "ending": context["ending"]["output_state"],
-                                    "open_obligations": context["narrative"]["open_obligations"],
-                                    "mode": mode,
-                                    "time_gap": time_gap,
-                                    "new_location": new_location,
-                                    "guidance": guidance,
-                                }
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                parameters={"response_format": {"type": "json_object"}},
+        The proposal carries a ``provenance`` block: the reasoner and the
+        Skill runtime's invocation record (which Skill version was loaded,
+        whether a model was invoked, why the deterministic proposal stood).
+        """
+
+        brief, beats = self._deterministic_proposal(context, mode, time_gap, new_location, guidance)
+        if self.model_roles is None or self.skill_runtime is None:
+            reason = (
+                "MODEL_RUNTIME_NOT_CONFIGURED" if self.model_roles is None else "SKILL_RUNTIME_NOT_CONFIGURED"
             )
-            raw = _first_choice_json(execution.response)
-        except (LookupError, ProviderError, ProviderTrustViolation, TypeError, ValueError):
+            recorded: dict[str, Any] = (
+                self.skill_runtime.deterministic(SkillOperation.STORY_GENERATION, reason=reason).as_json()
+                if self.skill_runtime is not None
+                else {
+                    "operation": SkillOperation.STORY_GENERATION.value,
+                    "execution_mode": "DETERMINISTIC",
+                    "skill_driven": False,
+                    "fallback_reason": reason,
+                }
+            )
+            brief["provenance"] = {"reasoner": "DETERMINISTIC", "skill_invocation": recorded}
             return brief, beats, "DETERMINISTIC"
-        premise = raw.get("premise")
-        if isinstance(premise, str) and premise.strip():
-            brief["premise"] = premise.strip()[:800]
-        model_beats = raw.get("beats")
-        if isinstance(model_beats, list):
-            # The model refines summaries only; the structural beat rows -
-            # locations, characters, parseable shot actions - stay
-            # deterministic so the compile cannot be broken by prose.
-            for beat, refinement in zip(beats, model_beats, strict=False):
-                summary = refinement.get("summary") if isinstance(refinement, dict) else None
-                if isinstance(summary, str) and summary.strip():
-                    beat["summary"] = summary.strip()[:400]
-        return brief, beats, "MODEL:DIRECTOR"
+        invocation = await self.skill_runtime.invoke(
+            SkillOperation.STORY_GENERATION,
+            project_id=project_id,
+            protocol=CONTINUATION_PROTOCOL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": "PLAN_NEXT_EPISODE",
+                            "continuation_context": {
+                                "ending": context["ending"]["output_state"],
+                                "open_obligations": context["narrative"]["open_obligations"],
+                                "mode": mode,
+                                "time_gap": time_gap,
+                                "new_location": new_location,
+                                "guidance": guidance,
+                            },
+                            "deterministic_proposal": {"premise": brief.get("premise"), "beats": beats},
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            validator=_validate_continuation,
+            model_roles=self.model_roles,
+        )
+        if invocation.output is None:
+            brief["provenance"] = {"reasoner": "DETERMINISTIC", "skill_invocation": invocation.as_json()}
+            return brief, beats, "DETERMINISTIC"
+        proposal = invocation.output
+        if proposal.premise.strip():
+            brief["premise"] = proposal.premise.strip()[:800]
+        # The model refines summaries only; the structural beat rows -
+        # locations, characters, parseable shot actions - stay deterministic
+        # so the compile cannot be broken by prose.
+        for beat, refinement in zip(beats, proposal.beats, strict=False):
+            if refinement.summary.strip():
+                beat["summary"] = refinement.summary.strip()[:400]
+        reasoner = "MODEL:DIRECTOR" if invocation.skill_driven else "MODEL:DIRECTOR_WITHOUT_SKILL"
+        brief["provenance"] = {"reasoner": reasoner, "skill_invocation": invocation.as_json()}
+        return brief, beats, reasoner
 
     def _deterministic_proposal(
         self,

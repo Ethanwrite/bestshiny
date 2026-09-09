@@ -13,11 +13,16 @@ from character_core import (
 )
 from character_evidence.client import ModalCharacterEvidenceProducer
 from character_evidence.tracking import CharacterEvidenceTracker
-from continuity_core import ContinuityDecisionEngine, FrameAnchorPlanner
+from continuity_core import ContinuityDecisionEngine, ContinuityReviewer, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine, TokenCostEngine
 from creative_director_core import CreativeDirectorService
 from deepseek_provider import DeepSeekProvider
-from director_production import AgentOrchestrator, CandidatePipeline
+from director_production import (
+    AgentOrchestrator,
+    CandidatePipeline,
+    CinematographyDesigner,
+    VisualStageRunner,
+)
 from entitlement_core import (
     GenerationAdmissionService,
     LiveCanaryPermitService,
@@ -94,7 +99,7 @@ from runapi_provider import RunAPIEdgeProvider
 from runtime_control_core import FeatureFlagDefaults, FeatureFlagService
 from runway_provider import RunwayProvider
 from seedance_provider import SeedanceProvider
-from skill_core import PromptCompilerService, SkillRegistry
+from skill_core import PromptCompilerService, SkillRegistry, SkillRuntime
 from sqlalchemy.engine import make_url
 from style_core import ModelRoleSemanticStyleEmbedder, ProjectStyleService, StyleDriftMonitor
 from veo_provider import VeoOfficialProvider
@@ -150,6 +155,7 @@ class Container:
     credentials: CredentialVault
     production: ProductionEngine
     skills: SkillRegistry
+    skill_runtime: SkillRuntime
     agents: AgentRuntime
     narrative: NarrativeCompiler
     narrative_ledger: NarrativeLedgerService
@@ -158,6 +164,9 @@ class Container:
     timeline_branches: TimelineBranchService
     character_states: PersistentCharacterStateService
     continuity_decision: ContinuityDecisionEngine
+    continuity_reviewer: ContinuityReviewer
+    cinematography_designer: CinematographyDesigner
+    visual_stages: VisualStageRunner
     frame_anchors: FrameAnchorPlanner
     capabilities: ModelCapabilityRegistry
     capability_resolver: CapabilityResolver
@@ -758,6 +767,15 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     production = ProductionEngine(database)
     skills = SkillRegistry(settings.skills_root)
+    # The one path by which a Skill body reaches a model: resolves each
+    # runtime operation to its single bound Skill, injects that body alone,
+    # validates the output against the stage contract and records the
+    # invocation (resolved / loaded / model_invoked / execution_mode /
+    # fallback_reason). Binding problems fail the build, not a request.
+    skill_runtime = SkillRuntime(skills, model_roles)
+    binding_problems = skill_runtime.validate(strict_sections=False)
+    if binding_problems:
+        raise RuntimeError("skill runtime bindings are invalid: " + "; ".join(binding_problems))
     agents = AgentRuntime(production, gateway, media, skills)
     narrative = NarrativeCompiler(database)
     narrative_ledger = NarrativeLedgerService(database)
@@ -817,6 +835,26 @@ def build_container(settings: Settings | None = None) -> Container:
         styles,
         ledger=narrative_ledger,
         dependencies=shot_dependencies,
+        # The prompt-compiler Skill runs on a model through the runtime;
+        # the generation path reuses its verified package while the envelope
+        # is unchanged and compiles deterministically (on record) otherwise.
+        runtime=skill_runtime,
+    )
+    cinematography_designer = CinematographyDesigner(
+        database,
+        skill_runtime,
+        styles=styles,
+        enabled=settings.feature_skill_stages_at_approval,
+    )
+    continuity_reviewer = ContinuityReviewer(
+        database, skill_runtime, enabled=settings.feature_skill_stages_at_approval
+    )
+    visual_stages = VisualStageRunner(
+        database,
+        cinematography=cinematography_designer,
+        continuity=continuity_reviewer,
+        compiler=prompts,
+        enabled=settings.feature_skill_stages_at_approval,
     )
     credit_pricing = CreditPricingEngine(
         model_registry,
@@ -942,10 +980,13 @@ def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator,
         ledger=narrative_ledger,
         model_roles=model_roles,
-        # The Director Skill is the model's system prompt (content-addressed
-        # on every turn); the bible lock runs through the platform's own
-        # identity and style services rather than writing their tables.
+        # The Director Skill is the model's system prompt for turns and the
+        # story, the Shot Planner Skill for the shot decomposition - each
+        # resolved by the runtime per operation and content-addressed on the
+        # row; the bible lock runs through the platform's own identity and
+        # style services rather than writing their tables.
         skills=skills,
+        skill_runtime=skill_runtime,
         characters=characters,
         styles=styles,
         asset_registry=asset_registry,
@@ -959,6 +1000,7 @@ def build_container(settings: Settings | None = None) -> Container:
         frame_anchors=frame_anchors,
         ledger=narrative_ledger,
         model_roles=model_roles,
+        skill_runtime=skill_runtime,
     )
     return Container(
         settings=settings,
@@ -979,6 +1021,7 @@ def build_container(settings: Settings | None = None) -> Container:
         credentials=credentials,
         production=production,
         skills=skills,
+        skill_runtime=skill_runtime,
         agents=agents,
         narrative=narrative,
         narrative_ledger=narrative_ledger,
@@ -987,6 +1030,9 @@ def build_container(settings: Settings | None = None) -> Container:
         timeline_branches=timeline_branches,
         character_states=character_states,
         continuity_decision=continuity_decision,
+        continuity_reviewer=continuity_reviewer,
+        cinematography_designer=cinematography_designer,
+        visual_stages=visual_stages,
         frame_anchors=frame_anchors,
         capabilities=capabilities,
         capability_resolver=capability_resolver,

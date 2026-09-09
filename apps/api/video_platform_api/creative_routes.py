@@ -30,6 +30,7 @@ from entitlement_core import (
 )
 from episode_continuation_core import EpisodeContinuationConflict, EpisodeContinuationService
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from generation_gateway import GenerationTargetError, IdempotencyConflict
 from model_registry_core import ModelRole
 from platform_contracts import GenerationRequest
@@ -736,14 +737,15 @@ def register_creative_routes(
             raise _conflict(exc) from exc
 
     @app.post("/v1/creative/sessions/{session_id}/beats/approve")
-    def approve_creative_beats(
+    async def approve_creative_beats(
         session_id: str,
         body: BeatsApprove,
         principal: AuthPrincipal = Depends(auth.current_user),
     ):
         _require_session(principal, session_id, write=True)
         try:
-            return creative.approve_beats(
+            compiled = await run_in_threadpool(
+                creative.approve_beats,
                 session_id,
                 plan_revision=body.plan_revision,
                 actor=_actor(principal),
@@ -758,6 +760,17 @@ def register_creative_routes(
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+        # The Skill-bound visual stages run over the compiled shots:
+        # cinematography per shot, continuity per adjacent pair, prompt
+        # compilation through the prompt-compiler Skill. Each records its own
+        # invocation and fallback; none can undo the compile that just landed.
+        episode_id = compiled.get("episode_id")
+        if episode_id:
+            try:
+                compiled["skill_stages"] = await container.visual_stages.run_episode(episode_id)
+            except Exception as exc:  # noqa: BLE001 - the compile stands; the stages are recorded
+                compiled["skill_stages"] = {"episode_id": episode_id, "error": str(exc)[:300]}
+        return compiled
 
     @app.get("/v1/creative/shots/{shot_id}/lineage")
     def creative_shot_lineage(

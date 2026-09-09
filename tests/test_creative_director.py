@@ -242,25 +242,64 @@ SCREENPLAY = {
 }
 
 
-class ScriptedDirector:
-    """A DIRECTOR model that answers turns and writes screenplays under the new contract."""
+def _story_of(screenplay: dict[str, Any]) -> dict[str, Any]:
+    """The Director's half of a screenplay fixture: no shots, lines per beat."""
 
-    def __init__(self, turn_handler=None, screenplay=None, *, raise_with: Exception | None = None):  # type: ignore[no-untyped-def]
+    from creative_director_core.screenplay import story_from_screenplay
+
+    return story_from_screenplay(screenplay)
+
+
+def _shot_plan_of(screenplay: dict[str, Any]) -> dict[str, Any]:
+    """The Shot Planner's half of a screenplay fixture."""
+
+    from creative_director_core.screenplay import shot_plan_from_screenplay
+
+    return shot_plan_from_screenplay(screenplay)
+
+
+class ScriptedDirector:
+    """A model that answers turns as DIRECTOR, writes the story as DIRECTOR and cuts it as SHOT_PLANNER.
+
+    One scripted screenplay fixture stands for both halves: the story call
+    receives its story half and the shot-plan call its shot half, so the
+    merged screenplay the service records is the fixture itself.
+    """
+
+    def __init__(  # type: ignore[no-untyped-def]
+        self,
+        turn_handler=None,
+        screenplay=None,
+        *,
+        raise_with: Exception | None = None,
+        shot_plan=None,
+    ):
         self.turn_handler = turn_handler
         self.screenplay = screenplay if screenplay is not None else SCREENPLAY
+        self.shot_plan = shot_plan
         self.raise_with = raise_with
         self.calls: list[dict[str, Any]] = []
 
-    async def execute_chat(self, project_id, role, *, messages, parameters=None):  # type: ignore[no-untyped-def]
+    def _screenplay_for(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self.screenplay(request) if callable(self.screenplay) else self.screenplay
+
+    async def execute_chat(self, project_id, role, *, messages, parameters=None, **_extra):  # type: ignore[no-untyped-def]
         self.calls.append(
             {"project_id": project_id, "role": role, "messages": list(messages), "parameters": parameters}
         )
         if self.raise_with is not None:
             raise self.raise_with
         request = _latest_state_block(messages)
-        if request.get("task") in {"WRITE_SCREENPLAY", "REVISE_SCREENPLAY"}:
-            payload = self.screenplay(request) if callable(self.screenplay) else self.screenplay
+        task = request.get("task")
+        if task in {"WRITE_STORY", "REVISE_STORY"}:
+            payload = _story_of(self._screenplay_for(request))
             return _execution(payload, record_id=f"exec-screenplay-{len(self.calls)}")
+        if task in {"PLAN_SHOTS", "REVISE_SHOTS"}:
+            if self.shot_plan is not None:
+                payload = self.shot_plan(request) if callable(self.shot_plan) else self.shot_plan
+            else:
+                payload = _shot_plan_of(self._screenplay_for(request))
+            return _execution(payload, record_id=f"exec-shotplan-{len(self.calls)}")
         latest = request.get("latest_client_message", "")
         if self.turn_handler is None:
             payload = {"assistant_message": f"回合{len(self.calls)}：明白。", "brief_operations": []}
@@ -576,7 +615,7 @@ def test_model_call_carries_the_director_skill_and_the_whole_conversation(contai
     # 1. The Director Skill is the system prompt, verbatim and content-addressed.
     assert first_call["messages"][0]["role"] == "system"
     assert skill.system_prompt in first_call["messages"][0]["content"]
-    assert "Approval is not encouragement" in first_call["messages"][0]["content"]
+    assert "Approval here is not encouragement" in first_call["messages"][0]["content"]
     director_turns = [turn for turn in view["turns"] if turn["speaker"] == "DIRECTOR"]
     assert director_turns[0]["skill_content_hash"] == skill.content_hash
     assert director_turns[0]["skill_version"] == skill.version
@@ -947,7 +986,7 @@ def test_approval_is_refused_while_a_critical_question_is_open_and_allowed_once_
         assert approved["brief"]["status"] == "APPROVED"
         assert approved["brief"]["provenance"]["duration_seconds"]["source"] == "ASSUMPTION_ACCEPTED"
         assert approved["brief"]["provenance"]["duration_seconds"]["accepted_by"]
-        assert approved["screenplay"]["reasoner"] == "MODEL:DIRECTOR"
+        assert approved["screenplay"]["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
         view = _state(client, session_id)
         assert view["session"]["status"] == "SCREENPLAY_PROPOSED"
         assert view["brief"]["status"] == "APPROVED"
@@ -1052,8 +1091,8 @@ def test_the_model_writes_an_original_treatment_beats_dialogue_and_screenplay(co
         session_id = started["session_id"]
         approved = _approve_brief(client, session_id, started["brief_revision"])
         screenplay = approved["screenplay"]
-        assert screenplay["reasoner"] == "MODEL:DIRECTOR"
-        assert screenplay["deterministic"] is False
+        assert screenplay["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
+        assert screenplay["deterministic"] is False and screenplay["skill_driven"] is True
         assert screenplay["revision"] == 1 and screenplay["status"] == "PROPOSED"
         assert screenplay["skill_content_hash"] == skill.content_hash
         assert screenplay["model_execution_record_id"].startswith("exec-screenplay")
@@ -1085,14 +1124,21 @@ def test_the_model_writes_an_original_treatment_beats_dialogue_and_screenplay(co
             for shot in beat["shots"]:
                 assert shot["action"] is not None or shot["dialogue"] is not None
                 assert shot["start_state"] and shot["end_state"]
-        # The screenplay call was made through the Skill, with the approved brief and the conversation.
-        screenplay_call = director.calls[-1]
-        assert skill.system_prompt in screenplay_call["messages"][0]["content"]
-        request = _latest_state_block(screenplay_call["messages"])
-        assert request["task"] == "WRITE_SCREENPLAY"
+        # The story call was made through the Director Skill, with the approved brief and the
+        # conversation; the shot-plan call through the Shot Planner Skill, with the locked story.
+        story_call, shot_call = director.calls[-2], director.calls[-1]
+        assert skill.system_prompt in story_call["messages"][0]["content"]
+        request = _latest_state_block(story_call["messages"])
+        assert request["task"] == "WRITE_STORY"
         assert request["approved_brief"]["characters"][0]["name"] == "Mira"
         assert request["client_established_facts"]["setting.location"] == "rooftop"
-        assert screenplay_call["parameters"]["response_format"] == {"type": "json_object"}
+        assert story_call["parameters"]["response_format"] == {"type": "json_object"}
+        planner = SkillRegistry(SKILLS_ROOT).resolve("short-drama")
+        assert planner.system_prompt in shot_call["messages"][0]["content"]
+        assert skill.system_prompt not in shot_call["messages"][0]["content"]
+        assert _latest_state_block(shot_call["messages"])["task"] == "PLAN_SHOTS"
+        assert str(shot_call["role"]) == "SHOT_PLANNER"
+        assert str(story_call["role"]) == "DIRECTOR"
         view = _state(client, session_id)
         assert view["session"]["status"] == "SCREENPLAY_PROPOSED"
 
@@ -1100,8 +1146,8 @@ def test_the_model_writes_an_original_treatment_beats_dialogue_and_screenplay(co
 def test_the_user_can_request_a_rewrite_and_edit_the_screenplay_into_new_revisions(container, project):
     def screenplay(request: dict) -> dict:
         payload = json.loads(json.dumps(SCREENPLAY))
-        if request["task"] == "REVISE_SCREENPLAY":
-            assert request["previous_screenplay"]["treatment"]["title"] == "The Wrong Phone"
+        if request["task"] == "REVISE_STORY":
+            assert request["previous_story"]["treatment"]["title"] == "The Wrong Phone"
             assert "funnier" in request["client_revision_notes"]
             payload["treatment"]["title"] = "The Wrong Phone (funnier)"
         return payload
@@ -1168,7 +1214,7 @@ def test_the_deterministic_scaffold_appears_only_when_the_model_is_unavailable_a
     with _client(container) as client:
         started = _start(client, project.id, RICH_IDEA)
         approved = _approve_brief(client, started["session_id"], started["brief_revision"])
-        assert approved["screenplay"]["reasoner"] == "MODEL:DIRECTOR"
+        assert approved["screenplay"]["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
 
 
 def test_a_model_outage_during_the_screenplay_is_recorded_as_a_retryable_fallback(container, project):
@@ -1180,7 +1226,7 @@ def test_a_model_outage_during_the_screenplay_is_recorded_as_a_retryable_fallbac
     class Flaky(ScriptedDirector):
         async def execute_chat(self, project_id, role, *, messages, parameters=None):  # type: ignore[no-untyped-def]
             request = _latest_state_block(messages)
-            if request.get("task") == "WRITE_SCREENPLAY" and calls["n"] == 0:
+            if request.get("task") == "WRITE_STORY" and calls["n"] == 0:
                 calls["n"] += 1
                 raise ProviderError("upstream 503", RetryCategory.PROVIDER_BUSY, code="UPSTREAM")
             return await super().execute_chat(project_id, role, messages=messages, parameters=parameters)
@@ -1193,7 +1239,8 @@ def test_a_model_outage_during_the_screenplay_is_recorded_as_a_retryable_fallbac
         assert "MODEL_UNAVAILABLE" in approved["screenplay"]["reason_codes"]
         redrafted = client.post(f"/v1/creative/sessions/{started['session_id']}/screenplay/propose", json={})
         assert redrafted.status_code == 200, redrafted.text
-        assert redrafted.json()["reasoner"] == "MODEL:DIRECTOR" and redrafted.json()["revision"] == 2
+        assert redrafted.json()["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
+        assert redrafted.json()["revision"] == 2
 
 
 # --------------------------------------------------- key visuals and the bible
@@ -1497,7 +1544,10 @@ async def test_bible_lock_creates_identity_versions_and_a_style_lock_and_compile
             )
             assert episode.script_source == screenplay.script_text
             shots = [session.get(Shot, shot_id) for shot_id in result["shot_ids"]]
-            assert shots[0].shot_type == "WIDE"
+            # Shot size is Cinematography's decision, not the planner's: until
+            # the cinematography stage designs the shot it carries the
+            # undetermined kind, and a speaking shot its own kind.
+            assert shots[0].shot_type == "MEDIUM"
             assert any(shot.shot_type == "DIALOGUE" for shot in shots)
             assert [round(shot.duration) for shot in shots] == [5, 4, 6, 6, 5]
             lineage_rows = list(session.scalars(select(CreativeShotLineage)))
@@ -1875,7 +1925,7 @@ def test_typing_an_approval_approves_the_proposed_brief_and_drafts_the_screenpla
         body = approved.json()
         assert body["reasoner"] == "APPROVAL"
         assert body["approved_revision"] == started["brief_revision"] + 1
-        assert body["screenplay"]["reasoner"] == "MODEL:DIRECTOR"
+        assert body["screenplay"]["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
         view = _state(client, session_id)
     assert view["session"]["status"] == "SCREENPLAY_PROPOSED"
     assert view["brief"]["status"] == "APPROVED"

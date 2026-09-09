@@ -3093,7 +3093,7 @@ function renderProviders() {
   }
   catalog.className = "skill-catalog";
   catalog.innerHTML = state.operations.skills.map((skill) => `
-    <div class="skill-item"><strong>${escapeHTML(skill.name)} · ${escapeHTML(skill.version)}</strong><small>${escapeHTML(skill.category)} · ${escapeHTML(skill.description)}</small></div>`).join("");
+    <div class="skill-item"><strong>${escapeHTML(skill.name)} · ${escapeHTML(skill.version)}</strong><small>${escapeHTML(skill.role || skill.category)} · ${escapeHTML(skill.stage || "")} · ${skill.runtime_bound ? `runtime-bound (${escapeHTML((skill.operations || []).join(", "))}) · body injected` : `reference${skill.bound_to ? ` (folded into ${escapeHTML(skill.bound_to)})` : ""} · not invoked`}</small><small>${escapeHTML(skill.description)}</small></div>`).join("");
 }
 
 async function loadOperations() {
@@ -3479,9 +3479,21 @@ const QUESTION_LABEL = {
 const REASONER_LABEL = (reasoner) => {
   if (!reasoner) return "";
   if (reasoner === "DETERMINISTIC") return "rules engine (director model unavailable)";
+  if (reasoner === "MODEL:DIRECTOR+MODEL:SHOT_PLANNER") return "director + shot planner skills";
+  if (reasoner === "MODEL:DIRECTOR+DETERMINISTIC:SHOT_PLANNER") return "director skill; shots by rules (planner unavailable)";
   if (reasoner.startsWith("MODEL:")) return "director model";
   if (reasoner === "USER_EDIT") return "your edit";
   return reasoner.toLowerCase();
+};
+// Reason codes that only say a stage ran as designed; the rest are worth showing.
+const ROUTINE_SKILL_CODES = new Set([
+  "SKILL_LOADED", "MODEL_REPLY", "MODEL_OPERATIONS_APPLIED", "DETERMINISTIC_FALLBACK",
+  "SHOT_PLANNER:SKILL_LOADED", "SHOT_PLANNER:MODEL_REPLY",
+]);
+const SKILL_STAGE_LABEL = (invocation) => {
+  if (!invocation) return "";
+  if (invocation.skill_driven) return `${invocation.name} ${invocation.version}`;
+  return `${invocation.name || "no skill"} · ${String(invocation.execution_mode || "").toLowerCase()}${invocation.fallback_reason ? ` (${invocation.fallback_reason})` : ""}`;
 };
 // Key visuals poll with backoff: 3s, 5s, 8s, 13s, 20s, then every 30s, for at most 15 minutes.
 const CREATIVE_POLL_STEPS_MS = [3000, 5000, 8000, 13000, 20000, 30000];
@@ -3775,7 +3787,7 @@ function renderCreativeTurns(turns) {
     const meta = [];
     if (turn.speaker === "DIRECTOR") {
       meta.push(REASONER_LABEL(turn.reasoner));
-      const codes = (turn.reason_codes || []).filter((code) => !["SKILL_LOADED", "MODEL_REPLY", "MODEL_OPERATIONS_APPLIED"].includes(code));
+      const codes = (turn.reason_codes || []).filter((code) => !ROUTINE_SKILL_CODES.has(code));
       if (codes.length) meta.push(codes.join(", "));
       if (turn.context?.compressed) meta.push("earlier turns condensed");
     }
@@ -4054,7 +4066,7 @@ function renderScreenplay(view) {
     ${obligations.length ? `<h4>Continuity obligations opened</h4>${list(obligations)}` : ""}
     ${(content.unresolved || []).length ? `<h4>Unresolved creative choices</h4>${list(content.unresolved)}` : ""}
     <h4>Script as compiled</h4><pre class="mono" style="white-space:pre-wrap;font-size:11px">${escapeHTML(screenplay.script_text || "")}</pre>
-    <div class="creative-revisions">Revisions: ${escapeHTML(revisions)}${screenplay.skill_version ? ` · skill ${escapeHTML(screenplay.skill_version)}` : ""}</div>`;
+    <div class="creative-revisions">Revisions: ${escapeHTML(revisions)}${screenplay.skill_invocations ? ` · story: ${escapeHTML(SKILL_STAGE_LABEL(screenplay.skill_invocations.story))} · shots: ${escapeHTML(SKILL_STAGE_LABEL(screenplay.skill_invocations.shots))}` : (screenplay.skill_version ? ` · skill ${escapeHTML(screenplay.skill_version)}` : "")}</div>`;
 }
 
 function renderUncoveredElements(view) {
@@ -4269,8 +4281,11 @@ function renderCreative() {
         `<li><b>${escapeHTML(item.brief_path)}</b> — brief: <i>${escapeHTML(JSON.stringify(item.brief_value))}</i>; screenplay: <i>${escapeHTML(JSON.stringify(item.screenplay_value))}</i><br><small>${escapeHTML(item.reason)}</small></li>`).join("");
       setNotice("creativeScreenplayNotice", `<b>This screenplay contradicts your approved brief</b>Ask the director to redraft, or approve anyway to overrule your own brief.<ul>${rows}</ul>`, "is-error");
     } else if (screenplay?.deterministic) {
-      const codes = (screenplay.reason_codes || []).filter((code) => !["SKILL_LOADED", "DETERMINISTIC_FALLBACK"].includes(code)).join(", ");
-      setNotice("creativeScreenplayNotice", `<b>Deterministic scaffold — not the director's writing</b>The director model was unavailable (${escapeHTML(codes)}). Every line is a placeholder. Redraft with the director, or approve knowing this.`, "is-error");
+      const codes = (screenplay.reason_codes || []).filter((code) => !ROUTINE_SKILL_CODES.has(code)).join(", ");
+      const shotsOnly = screenplay.reasoner === "MODEL:DIRECTOR+DETERMINISTIC:SHOT_PLANNER";
+      setNotice("creativeScreenplayNotice", shotsOnly
+        ? `<b>Shots by rules — not the shot planner's work</b>The director wrote the story, but the shot planner model was unavailable or stepped outside its authority (${escapeHTML(codes)}). Every shot is one line with no staging. Redraft, or approve knowing this.`
+        : `<b>Deterministic scaffold — not the director's writing</b>The director model was unavailable (${escapeHTML(codes)}). Every line is a placeholder. Redraft with the director, or approve knowing this.`, "is-error");
     } else if (screenplay?.reasoner === "USER_EDIT") {
       setNotice("creativeScreenplayNotice", `<b>Your revision</b>This revision was edited by you from r${screenplay.parent_revision ?? "?"}.`);
     } else if (screenplay) {
@@ -4405,7 +4420,7 @@ function renderCreative() {
   const openQuestions = Object.values(brief?.question_states || {}).filter((item) => ["ASKED", "SKIPPED_BY_USER"].includes(item.status)).length;
   const meta = {
     reasoner: lastDirector ? REASONER_LABEL(lastDirector.reasoner) : "—",
-    skill: lastDirector?.skill_version || (lastDirector ? "not loaded" : "—"),
+    skill: lastDirector ? (lastDirector.skill_invocation ? SKILL_STAGE_LABEL(lastDirector.skill_invocation) : (lastDirector.skill_version || "not loaded")) : "—",
     open: brief ? String(openQuestions) : "—",
     assumptions: brief ? String((brief.assumptions || []).length) : "—",
   };

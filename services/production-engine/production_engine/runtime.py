@@ -331,6 +331,31 @@ class VisualProductionRuntime:
                 raise TimelineGenerationPlanStale("shot disappeared; plan the shot again")
             return self._timeline_fence(session, shot, shot.scene.episode.project_id)
 
+    def compiler_inputs(
+        self, shot_id: str, *, character_bindings: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        """Exactly the compiler inputs ``prepare_autopilot`` will pass for this shot.
+
+        The prompt-compiler Skill's package is reused by the generation path
+        only while the envelope is byte-identical, so the pre-generation
+        Skill compile must see the same bindings, canonical assets and
+        resolved dependencies the autopilot passes a moment later. A
+        dependency that cannot be resolved raises here as it would there.
+        """
+
+        with self.database.session() as session:
+            shot = session.get(Shot, shot_id)
+            if not shot:
+                raise LookupError("shot not found")
+            project_id = shot.scene.episode.project_id
+        dependency_contexts = self._resolve_dependencies(shot_id)
+        canonical_assets, _canonical_media_ids = self._canonical_assets(project_id)
+        return {
+            "character_bindings": list(character_bindings or []),
+            "canonical_assets": canonical_assets,
+            "dependency_contexts": dependency_contexts,
+        }
+
     def prepare_autopilot(
         self,
         shot_id: str,

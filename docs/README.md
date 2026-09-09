@@ -1,5 +1,9 @@
 # AI Director Platform — Documentation Index
 
+> **2026-09-08:** the Skill runtime — [SKILL_RUNTIME.md](SKILL_RUNTIME.md) is the entry point for how a
+> Skill reaches a model (five bound, seven reference), and
+> [SESSION_HANDOVER_2026-09-08.md](SESSION_HANDOVER_2026-09-08.md) records the session and its gates.
+
 Snapshot: 2026-08-30 · `main` `7e80d5a` · deployed and in sync at `153.75.95.10`
 Current migration head is **`0062_canonical_list_pricing`**; 21 of 24 models are
 `live_enabled` and three are unpriced on purpose. Start with

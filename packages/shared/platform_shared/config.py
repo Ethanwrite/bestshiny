@@ -318,6 +318,14 @@ class Settings(BaseSettings):
     relayer_sweep_interval_seconds: int = 5
     relayer_sweep_limit: int = 50
     skills_root: Path = Path("./skills")
+    # The Skill-bound visual stages (cinematography design, continuity review,
+    # prompt compilation through the prompt-compiler Skill) run over every
+    # episode the creative director compiles, one small text-model call per
+    # shot or pair. Off, the stages record SKILL_STAGE_DISABLED and the
+    # generation path compiles deterministically; the Director and Shot
+    # Planner stages are not gated by this switch - they replace calls that
+    # were already made.
+    feature_skill_stages_at_approval: bool = True
     model_infrastructure_config: Path = Path("./config/model-registry/defaults.json")
     # The hand-authored scene_type -> champion/fallback table the video router
     # selects within. Loaded and validated at container build; a missing or

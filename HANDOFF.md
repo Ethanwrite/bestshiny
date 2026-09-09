@@ -25,6 +25,18 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > asset or another live creation still references is kept and the holder recorded. Architecture:
 > `CURRENT_ARCHITECTURE.md` § "Removing a creation, without rewriting what it cost". Residual: OPEN_ISSUES 3.8.
 >
+> **2026-09-08 · branch `claude/bestshiny-skill-runtime-audit-533387` — the Skill runtime.**
+> Alembic head moves to `0082_shot_cinematography_plan` (`shots.cinematography_json`;
+> `REQUIRED_SCHEMA_REVISION` moves with it). Registry ≠ runtime was the finding: only the director
+> body ever reached a model. Now `skill_core.runtime.SkillRuntime` resolves each operation to one
+> Skill from machine-readable frontmatter, injects that body alone under the Skill's model role,
+> validates the stage contract and records resolved / loaded / model_invoked / execution_mode /
+> fallback_reason on every row; five Skills are integrated (director, short-drama as the new
+> `SHOT_PLANNER` role, cinematography, continuity, prompt-compiler), the screenplay is two Skill calls,
+> and beats approval runs cinematography, continuity and Skill compilation over the episode (paid under
+> live mode; `FEATURE_SKILL_STAGES_AT_APPROVAL`). Entry point `docs/SKILL_RUNTIME.md`; record
+> `docs/OPEN_ISSUES.md` §2.52 and `docs/SESSION_HANDOVER_2026-09-08.md`. §18 below is superseded.
+>
 > **2026-09-06 · branch `claude/reference-contract-embedding-fix-cb3881` — reference images reach
 > Seedream, the shot contract becomes one dominant action plus a line, execution duration is the
 > router's, identity references narrow to identity-critical characters, and both multimodal
@@ -2333,7 +2345,7 @@ The commit-per-workflow rule above held on that branch: every item — each fix,
 model's pricing — is its own commit with its own gate run. See §20 for the rule it
 has since been sharpened into.
 
-## 18. Model-backed prompt compilation (not started)
+## 18. Model-backed prompt compilation (superseded 2026-09-08 — built; see `docs/SKILL_RUNTIME.md` §6 and `docs/OPEN_ISSUES.md` §2.52; §1.7 decided: fallback retained, never labelled Skill-driven)
 
 `compile_input()` is deterministic. `skill_contract()` exposes the system prompt and both
 JSON Schemas but never calls a model. The `prompt-compiler` Skill now satisfies the

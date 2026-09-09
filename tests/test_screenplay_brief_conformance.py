@@ -285,7 +285,7 @@ def test_a_schema_valid_but_factually_conflicting_screenplay_cannot_be_approved(
         session_id = started["session_id"]
         _approve_brief(client, session_id, started["brief_revision"])
         view = _state(client, session_id)
-        assert view["screenplay"]["reasoner"] == "MODEL:DIRECTOR"
+        assert view["screenplay"]["reasoner"] == "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
         assert "SCREENPLAY_CONTRADICTS_BRIEF" in view["screenplay"]["reason_codes"]
         conflicts = [
             item for item in view["screenplay"]["brief_conformance"] if item["severity"] == "BLOCKING"

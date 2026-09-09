@@ -7,9 +7,12 @@ identity and style locks, episode creation, ledger writes - and never reaches
 a provider itself; the API layer executes generation actions through the
 existing admission / credit / router / gateway path, and the locks run
 through the platform's own ``CharacterIdentityService`` and
-``ProjectStyleService``. Model reasoning goes through ``ModelRoleRuntime``
-with the Director Skill as its system prompt and degrades to the deterministic
-rules engine with the degradation recorded on the row, never silently.
+``ProjectStyleService``. Model reasoning goes through the Skill runtime -
+the Director Skill for dialogue turns and the story, the Shot Planner Skill
+for the shot decomposition, each resolved by operation and injected alone -
+and degrades to the deterministic rules engine with the degradation recorded
+on the row (execution mode, fallback reason, which Skill version was loaded),
+never silently and never labelled as the Skill's work.
 
 Every dialogue round is one transaction: the user's message, the director's
 reply, the brief operations it applied, the question states it moved and the
@@ -59,6 +62,15 @@ from production_domain.models import (
     Workspace,
 )
 from pydantic import ValidationError
+from skill_core.runtime import (
+    DETERMINISTIC_FALLBACK,
+    EXECUTION_DETERMINISTIC,
+    AuthorityViolation,
+    SkillInvocation,
+    SkillOperation,
+    SkillRuntime,
+    Validated,
+)
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -77,8 +89,12 @@ from .brief import (
     set_path,
 )
 from .director_context import (
+    SHOT_PLAN_PROTOCOL,
+    STORY_PROTOCOL,
+    TURN_PROTOCOL,
     SkillText,
-    build_screenplay_messages,
+    build_shot_plan_messages,
+    build_story_messages,
     build_turn_messages,
 )
 from .evidence import UserTextIndex, UserUtterance
@@ -110,13 +126,21 @@ from .screenplay import (
     compiler_location,
     derive_anchors,
     deterministic_screenplay,
+    deterministic_shot_plan,
     global_invariants,
+    invariant_record,
     merge_shot_anchors,
+    merge_story_and_shot_plan,
     preserved_product_claims,
     screenplay_hash,
     script_name,
     shot_constraints,
+    shot_plan_from_screenplay,
+    shot_plan_violations,
+    story_from_screenplay,
     validate_screenplay,
+    validate_shot_plan,
+    validate_story,
 )
 from .screenplay_brief import ScreenplayBriefValidator, enforceable_prohibition, prohibited_terms
 
@@ -285,6 +309,16 @@ class LogicalAssets(Protocol):
 
 DIRECTOR_SKILL_NAME = "director"
 
+#: Screenplay reasoners. The story half and the shot half are reasoned by two
+#: different Skills, and the row says which of them a model actually did:
+#: any ``DETERMINISTIC`` component means the user must confirm the scaffold.
+REASONER_MODEL_SCREENPLAY = "MODEL:DIRECTOR+MODEL:SHOT_PLANNER"
+REASONER_MODEL_STORY_DETERMINISTIC_SHOTS = "MODEL:DIRECTOR+DETERMINISTIC:SHOT_PLANNER"
+REASONER_DETERMINISTIC = "DETERMINISTIC"
+#: Reason codes of the shot-planning stage are prefixed on the screenplay row
+#: so one list can carry both stages without confusing them.
+SHOT_PLANNER_CODE_PREFIX = "SHOT_PLANNER:"
+
 #: The system prompt used only when the Skill registry cannot supply the
 #: Director Skill. Recorded as SKILL_UNAVAILABLE on the turn; never silent.
 _SKILL_FALLBACK_PROMPT = (
@@ -413,6 +447,7 @@ class _TurnReasoning:
     skill_version: str | None
     skill_content_hash: str | None
     fallback_message: str | None = None
+    invocation: SkillInvocation | None = None
 
 
 def _aware(value: datetime) -> datetime:
@@ -481,6 +516,7 @@ class CreativeDirectorService:
         ledger: SeriesLedger | None = None,
         model_roles: ModelReasoner | None = None,
         skills: SkillResolver | None = None,
+        skill_runtime: SkillRuntime | None = None,
         characters: IdentityLocker | None = None,
         styles: StyleLocker | None = None,
         asset_registry: LogicalAssets | None = None,
@@ -492,6 +528,14 @@ class CreativeDirectorService:
         self.ledger = ledger
         self.model_roles = model_roles
         self.skills = skills
+        #: Every model call goes through the runtime: it resolves the one Skill
+        #: an operation binds to, injects its body, validates the output and
+        #: records what happened. A service built without a registry still has
+        #: a runtime - one that can resolve nothing, so every call is recorded
+        #: as SKILL_UNAVAILABLE and answered under the generic prompt.
+        self.skill_runtime = skill_runtime or SkillRuntime(
+            skills if skills is not None else _NoSkills()  # type: ignore[arg-type]
+        )
         self.characters = characters
         self.styles = styles
         self.asset_registry = asset_registry
@@ -500,26 +544,6 @@ class CreativeDirectorService:
         self.briefs = BriefEngine()
         #: Compares every screenplay revision with the brief the user approved.
         self.brief_validator = ScreenplayBriefValidator()
-
-    # ------------------------------------------------------------- the skill
-    def _skill(self) -> tuple[SkillText, list[str]]:
-        """The Director Skill text, content-addressed; a missing skill is recorded."""
-
-        if self.skills is None:
-            return SkillText(_SKILL_FALLBACK_PROMPT, None, None), [ReasonCode.SKILL_UNAVAILABLE.value]
-        try:
-            definition = self.skills.resolve(DIRECTOR_SKILL_NAME)
-        except (LookupError, ValueError, OSError) as exc:
-            logger.warning("director skill unavailable: %s", exc)
-            return SkillText(_SKILL_FALLBACK_PROMPT, None, None), [ReasonCode.SKILL_UNAVAILABLE.value]
-        return (
-            SkillText(
-                str(definition.system_prompt),
-                str(getattr(definition, "version", "") or None),
-                str(getattr(definition, "content_hash", "") or None),
-            ),
-            [ReasonCode.SKILL_LOADED.value],
-        )
 
     # ------------------------------------------------------------ reasoning
     async def _reason_turn(
@@ -535,22 +559,24 @@ class CreativeDirectorService:
         content: str,
         gap_candidates: list[dict[str, Any]],
     ) -> _TurnReasoning:
-        """Ask the DIRECTOR role, through the Skill, for one validated turn; degrade loudly."""
+        """Ask the DIRECTOR role, through the Director Skill, for one validated turn; degrade loudly."""
 
         if self.model_roles is None:
+            invocation = self.skill_runtime.deterministic(
+                SkillOperation.CREATIVE_CONVERSATION, reason=ReasonCode.MODEL_RUNTIME_NOT_CONFIGURED.value
+            )
             return _TurnReasoning(
                 None,
-                "DETERMINISTIC",
+                REASONER_DETERMINISTIC,
                 [ReasonCode.MODEL_RUNTIME_NOT_CONFIGURED.value],
-                {},
+                {"skill_invocation": invocation.as_json()},
                 None,
                 False,
                 None,
                 None,
+                invocation=invocation,
             )
-        skill, skill_codes = self._skill()
         messages, audit = build_turn_messages(
-            skill=skill,
             turns=turns,
             fields=fields,
             provenance=provenance,
@@ -561,75 +587,40 @@ class CreativeDirectorService:
             approved={},
             analysis_questions=gap_candidates,
         )
-        codes = list(skill_codes)
-        if audit.compressed:
-            codes.append(ReasonCode.CONTEXT_COMPRESSED.value)
-        execution, failure = await self._call_model(project_id, messages)
-        if failure is not None:
+        invocation = await self.skill_runtime.invoke(
+            SkillOperation.CREATIVE_CONVERSATION,
+            project_id=project_id,
+            protocol=TURN_PROTOCOL,
+            messages=messages,
+            validator=_validate_turn,
+            model_roles=self.model_roles,
+            fallback_system_prompt=_SKILL_FALLBACK_PROMPT,
+        )
+        audit.record(invocation)
+        codes = _stage_codes(invocation, compressed=audit.compressed)
+        if invocation.output is None:
             return _TurnReasoning(
                 None,
-                "DETERMINISTIC",
-                codes + failure,
+                REASONER_DETERMINISTIC,
+                codes,
                 audit.as_json(),
-                None,
-                True,
-                skill.version,
-                skill.content_hash,
-            )
-        execution_id = getattr(execution, "execution_record_id", None)
-        try:
-            raw = _first_choice_json(execution.response)
-            result, parse_codes = _parse_turn_result(raw)
-        except (ValueError, TypeError, ValidationError) as exc:
-            return _TurnReasoning(
-                None,
-                "DETERMINISTIC",
-                codes + [ReasonCode.MODEL_OUTPUT_INVALID.value, type(exc).__name__],
-                audit.as_json(),
-                execution_id,
-                True,
-                skill.version,
-                skill.content_hash,
+                invocation.execution_record_id,
+                invocation.retryable,
+                audit.skill_version,
+                audit.skill_content_hash,
+                invocation=invocation,
             )
         return _TurnReasoning(
-            result,
+            invocation.output,
             "MODEL:DIRECTOR",
-            codes + parse_codes,
+            codes,
             audit.as_json(),
-            execution_id,
+            invocation.execution_record_id,
             False,
-            skill.version,
-            skill.content_hash,
+            audit.skill_version,
+            audit.skill_content_hash,
+            invocation=invocation,
         )
-
-    async def _call_model(
-        self, project_id: str, messages: list[dict[str, Any]], *, max_tokens: int | None = None
-    ) -> tuple[Any, list[str] | None]:
-        """One DIRECTOR call. Returns (execution, None) or (None, failure reason codes)."""
-
-        from entitlement_core.canary import LiveCanaryConflict, LiveSpendDenied
-        from model_registry_core import ModelRole
-        from provider_sdk import ProviderError, ProviderTrustViolation
-
-        parameters: dict[str, Any] = {"response_format": {"type": "json_object"}}
-        if max_tokens:
-            parameters["max_tokens"] = max_tokens
-        assert self.model_roles is not None
-        try:
-            execution = await self.model_roles.execute_chat(
-                project_id, ModelRole.DIRECTOR, messages=messages, parameters=parameters
-            )
-        except (LiveCanaryConflict, LiveSpendDenied) as exc:
-            # A refused live-spend reservation is a budget refusal, not a
-            # platform fault: the turn degrades loudly instead of failing the
-            # user's whole request with a 500.
-            return None, [ReasonCode.MODEL_BUDGET_REFUSED.value, type(exc).__name__]
-        except (LookupError, ProviderError, ProviderTrustViolation, TypeError, ValueError) as exc:
-            return None, [ReasonCode.MODEL_UNAVAILABLE.value, type(exc).__name__]
-        except Exception as exc:  # noqa: BLE001 - recorded, never silent
-            logger.warning("director model call failed: %s", exc, exc_info=True)
-            return None, [ReasonCode.MODEL_CALL_ERROR.value, type(exc).__name__]
-        return execution, None
 
     # ------------------------------------------------------------- dialogue
     async def start_session(
@@ -1809,81 +1800,130 @@ class CreativeDirectorService:
         previous: dict[str, Any] | None,
         notes: str,
     ) -> tuple[Screenplay, str, list[str], dict[str, Any], str | None, SkillText]:
-        skill, skill_codes = self._skill()
+        """Two stages, two Skills: the Director writes the story, the Shot Planner cuts it.
+
+        Each stage resolves its own Skill through the runtime and degrades on
+        its own: a story the model could not write is the labelled scaffold;
+        a shot plan the model could not produce is the story's lines, one per
+        shot, under a reasoner that says so. Both invocations are recorded in
+        the revision's context.
+        """
+
+        story_operation = SkillOperation.STORY_REVISION if previous else SkillOperation.STORY_GENERATION
+        shot_operation = SkillOperation.SHOT_REVISION if previous else SkillOperation.SHOT_DECOMPOSITION
         if self.model_roles is None:
             reason = ReasonCode.MODEL_RUNTIME_NOT_CONFIGURED.value
+            story_invocation = self.skill_runtime.deterministic(story_operation, reason=reason)
+            plan_invocation = self.skill_runtime.deterministic(shot_operation, reason="STORY_DETERMINISTIC")
             return (
                 deterministic_screenplay(fields, format_value=format_value, reason=reason),
-                "DETERMINISTIC",
-                [*skill_codes, ReasonCode.DETERMINISTIC_FALLBACK.value, reason],
-                {},
+                REASONER_DETERMINISTIC,
+                [DETERMINISTIC_FALLBACK, reason, *_prefixed(plan_invocation.reason_codes)],
+                _screenplay_audit(None, story_invocation, plan_invocation),
                 None,
-                skill,
+                SkillText("", None, None),
             )
-        messages, audit = build_screenplay_messages(
-            skill=skill,
+        story_messages, audit = build_story_messages(
             turns=turns,
             fields=fields,
             provenance=provenance,
             format_value=format_value,
-            previous_screenplay=previous,
+            previous_story=story_from_screenplay(previous) if previous else None,
             user_notes=notes,
         )
-        codes = list(skill_codes)
-        if audit.compressed:
-            codes.append(ReasonCode.CONTEXT_COMPRESSED.value)
-        execution, failure = await self._call_model(project_id, messages, max_tokens=6000)
-        if failure is not None:
+        story_invocation = await self.skill_runtime.invoke(
+            story_operation,
+            project_id=project_id,
+            protocol=STORY_PROTOCOL,
+            messages=story_messages,
+            validator=_validate_story,
+            max_tokens=6000,
+            model_roles=self.model_roles,
+            fallback_system_prompt=_SKILL_FALLBACK_PROMPT,
+        )
+        audit.record(story_invocation)
+        skill = SkillText("", audit.skill_version, audit.skill_content_hash)
+        story_codes = _stage_codes(story_invocation, compressed=audit.compressed)
+        if story_invocation.output is None:
+            reason = story_invocation.fallback_reason or ReasonCode.MODEL_UNAVAILABLE.value
+            detail = ": ".join(
+                item for item in (reason, "; ".join(story_invocation.validation_errors[:3])) if item
+            )
+            plan_invocation = self.skill_runtime.deterministic(shot_operation, reason="STORY_DETERMINISTIC")
             return (
-                deterministic_screenplay(fields, format_value=format_value, reason=" ".join(failure)),
-                "DETERMINISTIC",
-                codes + [ReasonCode.DETERMINISTIC_FALLBACK.value, *failure],
-                audit.as_json(),
-                None,
+                deterministic_screenplay(fields, format_value=format_value, reason=detail),
+                REASONER_DETERMINISTIC,
+                [
+                    *story_codes,
+                    DETERMINISTIC_FALLBACK,
+                    *story_invocation.validation_errors[:5],
+                    *_prefixed(plan_invocation.reason_codes),
+                ],
+                _screenplay_audit(audit, story_invocation, plan_invocation),
+                story_invocation.execution_record_id,
                 skill,
             )
-        execution_id = getattr(execution, "execution_record_id", None)
+        story = story_invocation.output
+        plan_messages, _plan_audit = build_shot_plan_messages(
+            story=story.model_dump(by_alias=True),
+            fields=fields,
+            format_value=format_value,
+            prohibitions=self._session_prohibitions(turns),
+            previous_plan=shot_plan_from_screenplay(previous) if previous else None,
+            user_notes=notes,
+        )
+        plan_invocation = await self.skill_runtime.invoke(
+            shot_operation,
+            project_id=project_id,
+            protocol=SHOT_PLAN_PROTOCOL,
+            messages=plan_messages,
+            validator=partial(_validate_shot_plan, story),
+            max_tokens=6000,
+            model_roles=self.model_roles,
+        )
+        plan_codes = _prefixed(_stage_codes(plan_invocation, compressed=False))
+        if plan_invocation.output is not None:
+            try:
+                screenplay = merge_story_and_shot_plan(story, plan_invocation.output)
+            except ScreenplayInvalid as exc:
+                # The plan passed its own validation but the two halves do
+                # not make one screenplay; that is the plan's failure.
+                plan_invocation.output = None
+                plan_invocation.execution_mode = EXECUTION_DETERMINISTIC
+                plan_invocation.fallback_reason = ReasonCode.MODEL_OUTPUT_INVALID.value
+                plan_invocation.validation_errors.extend(exc.details[:5])
+                plan_codes = _prefixed(
+                    [*plan_invocation.reason_codes, ReasonCode.MODEL_OUTPUT_INVALID.value, *exc.details[:3]]
+                )
+        if plan_invocation.output is not None:
+            return (
+                screenplay,
+                REASONER_MODEL_SCREENPLAY,
+                [*story_codes, *plan_codes],
+                _screenplay_audit(audit, story_invocation, plan_invocation),
+                story_invocation.execution_record_id,
+                skill,
+            )
+        reason = plan_invocation.fallback_reason or ReasonCode.MODEL_UNAVAILABLE.value
         try:
-            raw = _first_choice_json(execution.response)
-            screenplay = validate_screenplay(raw)
+            screenplay = merge_story_and_shot_plan(story, deterministic_shot_plan(story, reason=reason))
         except ScreenplayInvalid as exc:
+            # Even the one-line-per-shot plan cannot carry this story (a line
+            # too long for any shot): the whole screenplay is the scaffold.
             return (
-                deterministic_screenplay(
-                    fields,
-                    format_value=format_value,
-                    reason=f"{ReasonCode.MODEL_OUTPUT_INVALID.value}: {exc.details[:3]}",
-                ),
-                "DETERMINISTIC",
-                codes
-                + [
-                    ReasonCode.DETERMINISTIC_FALLBACK.value,
-                    ReasonCode.MODEL_OUTPUT_INVALID.value,
-                    *exc.details[:5],
-                ],
-                audit.as_json(),
-                execution_id,
-                skill,
-            )
-        except (ValueError, TypeError) as exc:
-            return (
-                deterministic_screenplay(fields, format_value=format_value, reason=type(exc).__name__),
-                "DETERMINISTIC",
-                codes
-                + [
-                    ReasonCode.DETERMINISTIC_FALLBACK.value,
-                    ReasonCode.MODEL_OUTPUT_INVALID.value,
-                    type(exc).__name__,
-                ],
-                audit.as_json(),
-                execution_id,
+                deterministic_screenplay(fields, format_value=format_value, reason=f"{reason}: {exc}"),
+                REASONER_DETERMINISTIC,
+                [*story_codes, DETERMINISTIC_FALLBACK, *plan_codes, *exc.details[:3]],
+                _screenplay_audit(audit, story_invocation, plan_invocation),
+                story_invocation.execution_record_id,
                 skill,
             )
         return (
             screenplay,
-            "MODEL:DIRECTOR",
-            codes + [ReasonCode.MODEL_REPLY.value],
-            audit.as_json(),
-            execution_id,
+            REASONER_MODEL_STORY_DETERMINISTIC_SHOTS,
+            [*story_codes, *plan_codes, f"{SHOT_PLANNER_CODE_PREFIX}{DETERMINISTIC_FALLBACK}"],
+            _screenplay_audit(audit, story_invocation, plan_invocation),
+            story_invocation.execution_record_id,
             skill,
         )
 
@@ -2033,6 +2073,19 @@ class CreativeDirectorService:
             ):
                 stale.status = "SUPERSEDED"
             revision = row.current_screenplay_revision + 1
+            # Invariant versioning: a revision that moves identity, geography,
+            # required dialogue, the ending, claims or copy is a new version
+            # that records what it supersedes. The previous row is never
+            # rewritten; it is the baseline the change is measured against.
+            parent_row = (
+                self._screenplay_at(session, session_id, parent_revision)
+                if parent_revision is not None
+                else None
+            )
+            invariants = invariant_record(
+                _content_without_audit(parent_row.content_json) if parent_row is not None else None,
+                content,
+            )
             screenplay_row = CreativeScreenplayRevision(
                 session_id=session_id,
                 revision=revision,
@@ -2045,7 +2098,7 @@ class CreativeDirectorService:
                 skill_version=skill.version if skill else None,
                 skill_content_hash=skill.content_hash if skill else None,
                 model_execution_record_id=execution_id,
-                content_json={**content, "_context": audit} if audit else content,
+                content_json={**content, "_context": {**(audit or {}), "invariants": invariants}},
                 script_text=script,
                 content_hash=screenplay_hash(content),
             )
@@ -2095,10 +2148,10 @@ class CreativeDirectorService:
                     f"screenplay revision {revision} is superseded by {row.current_screenplay_revision}",
                     reason_code=ReasonCode.REVISION_SUPERSEDED.value,
                 )
-            if screenplay_row.reasoner == "DETERMINISTIC" and not accept_deterministic:
+            if REASONER_DETERMINISTIC in screenplay_row.reasoner and not accept_deterministic:
                 raise CreativeSessionConflict(
-                    "this screenplay is the deterministic scaffold, not the director's writing; "
-                    "redraft with the director, or approve it explicitly",
+                    "this screenplay is (in part) the deterministic scaffold, not the director's or "
+                    "the shot planner's writing; redraft, or approve it explicitly",
                     reason_code=ReasonCode.DETERMINISTIC_SCREENPLAY_UNCONFIRMED.value,
                     details={"reason_codes": list(screenplay_row.reason_codes)},
                 )
@@ -3952,10 +4005,17 @@ class CreativeDirectorService:
                             },
                         )
                     screenplay_row.status = "SUPERSEDED"
+                    previous_content = _content_without_audit(screenplay_row.content_json)
                     screenplay = edited
                     planned = self._materialize_beats(screenplay, fields)
                     script_text, _ = render_script(planned)
                     content = screenplay.model_dump(by_alias=True)
+                    content["_context"] = {
+                        "invariants": invariant_record(previous_content, content),
+                        "skill_invocations": dict(
+                            (screenplay_row.content_json.get("_context") or {}).get("skill_invocations") or {}
+                        ),
+                    }
                     new_row = CreativeScreenplayRevision(
                         session_id=session_id,
                         revision=row.current_screenplay_revision + 1,
@@ -4798,6 +4858,10 @@ class CreativeDirectorService:
                     "brief_revision": turn.brief_revision,
                     "skill_version": turn.skill_version,
                     "skill_content_hash": turn.skill_content_hash,
+                    "skill_invocation": (turn.context_json or {}).get("skill_invocation"),
+                    "skill_driven": bool(
+                        ((turn.context_json or {}).get("skill_invocation") or {}).get("skill_driven")
+                    ),
                     "model_execution_record_id": turn.model_execution_record_id,
                     "context": turn.context_json,
                     "result": turn.result_json,
@@ -4913,13 +4977,24 @@ class CreativeDirectorService:
         # renderer degrades to readable text rather than to noise.
         content["invariant_texts"] = _flat_texts(content.get("invariants"))
         content["required_copy_texts"] = _flat_texts(content.get("required_copy"))
+        invocations = dict((audit or {}).get("skill_invocations") or {})
+        invariants = dict((audit or {}).get("invariants") or {})
         return {
             "id": row.id,
             "revision": row.revision,
             "status": row.status,
             "reasoner": row.reasoner,
             "reason_codes": list(row.reason_codes or []),
-            "deterministic": row.reasoner == "DETERMINISTIC",
+            # Any deterministic component - the story scaffold or the
+            # one-line-per-shot plan - means this is not (only) a Skill's
+            # writing, and approval must say so explicitly.
+            "deterministic": REASONER_DETERMINISTIC in (row.reasoner or ""),
+            "skill_driven": bool(invocations)
+            and all(bool(item.get("skill_driven")) for item in invocations.values()),
+            "skill_invocations": invocations,
+            "invariant_version": invariants.get("version"),
+            "supersedes_version": invariants.get("supersedes_version"),
+            "invariant_changes": list(invariants.get("changed") or []),
             "parent_revision": row.parent_revision,
             "user_notes": row.user_notes,
             "skill_version": row.skill_version,
@@ -4972,6 +5047,77 @@ class CreativeDirectorService:
 
 
 # ------------------------------------------------------------------ helpers
+class _NoSkills:
+    """A registry with nothing installed: every operation resolves to nothing, on record."""
+
+    def list_skills(self) -> list[Any]:
+        return []
+
+    def resolve(self, name: str) -> Any:
+        raise LookupError(f"Skill not found: {name}")
+
+    def resolve_operation(self, operation: str) -> Any:
+        raise LookupError(f"no Skill registry is configured; cannot resolve {operation}")
+
+    def validate_bindings(self) -> list[str]:
+        return []
+
+
+def _validate_turn(raw: dict[str, Any]) -> Validated:
+    result, codes = _parse_turn_result(raw)
+    return Validated(result, reason_codes=codes)
+
+
+def _stripped_codes(stripped: list[str]) -> tuple[list[str], list[str]]:
+    """Reason codes and audit entries for out-of-authority keys a stage wrote."""
+
+    keys = list(dict.fromkeys(path.rsplit(".", 1)[-1] for path in stripped))
+    return [f"AUTHORITY_STRIPPED:{key}" for key in keys], [f"stripped:{path}" for path in stripped[:20]]
+
+
+def _validate_story(raw: dict[str, Any]) -> Validated:
+    story, stripped = validate_story(raw)
+    codes, violations = _stripped_codes(stripped)
+    return Validated(story, reason_codes=codes, authority_violations=violations)
+
+
+def _validate_shot_plan(story: Any, raw: dict[str, Any]) -> Validated:
+    plan, stripped = validate_shot_plan(raw)
+    violations = shot_plan_violations(story, plan)
+    if violations:
+        raise AuthorityViolation(violations)
+    codes, stripped_entries = _stripped_codes(stripped)
+    return Validated(plan, reason_codes=codes, authority_violations=stripped_entries)
+
+
+def _stage_codes(invocation: SkillInvocation, *, compressed: bool) -> list[str]:
+    """One stage's reason codes in the order the row has always carried them."""
+
+    codes = list(invocation.reason_codes)
+    if compressed:
+        insert_at = 1 if codes and codes[0] in {"SKILL_LOADED", "SKILL_UNAVAILABLE"} else 0
+        codes.insert(insert_at, ReasonCode.CONTEXT_COMPRESSED.value)
+    return list(dict.fromkeys(codes))
+
+
+def _prefixed(codes: list[str]) -> list[str]:
+    return [f"{SHOT_PLANNER_CODE_PREFIX}{code}" for code in codes]
+
+
+def _screenplay_audit(
+    audit: Any, story_invocation: SkillInvocation, plan_invocation: SkillInvocation
+) -> dict[str, Any]:
+    """The revision's context: the story call's audit plus both stage invocations."""
+
+    payload = dict(audit.as_json()) if audit is not None else {}
+    payload.pop("skill_invocation", None)
+    payload["skill_invocations"] = {
+        "story": story_invocation.as_json(),
+        "shots": plan_invocation.as_json(),
+    }
+    return payload
+
+
 def _first_choice_json(response: dict[str, Any]) -> dict[str, Any]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:

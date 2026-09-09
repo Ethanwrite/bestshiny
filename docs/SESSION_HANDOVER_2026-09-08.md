@@ -89,8 +89,11 @@ the runs completed.
    all answered by the FREE binding `doubao-seed-2-0-lite` because the project's workspace is on the FREE
    plan (what a free user gets); the director turns and the story were Skill-driven, the shot plan and the cinematography plan
    fell back on record (closed micro-action vocabulary; a 160-character `focus` limit), continuity
-   escalated on absent end-frame evidence, the compiler refused a subject-less first shot. The PRO-tier
-   bindings (opus / sonnet / gpt-5.6-sol / qwen) have still not answered under the new protocols.
+   escalated on absent end-frame evidence, the compiler refused a subject-less first shot. The three
+   contract fixes and a PRO-workspace rerun followed the same day (`docs/SKILL_RUNTIME.md` §8-§9): under
+   PRO, opus / sonnet / gpt-5.6-sol answered, every stage was Skill-driven once the shot-plan output cap was
+   raised (the first plan was cut at 6,000 tokens), and the compiler still refuses a script-only first shot
+   whose cinematography plan hedges - by design.
 2. **Cost.** Beats approval is now about 2N+1 small paid text calls per N-shot episode under live mode,
    and a generation request pays one prompt-compiler call when no fresh package exists for its exact
    envelope (a second request with the same bindings reuses it). `FEATURE_SKILL_STAGES_AT_APPROVAL=false`

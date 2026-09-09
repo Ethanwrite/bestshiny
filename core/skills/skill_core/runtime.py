@@ -44,6 +44,10 @@ MODEL_BUDGET_REFUSED = "MODEL_BUDGET_REFUSED"
 MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
 MODEL_CALL_ERROR = "MODEL_CALL_ERROR"
 MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID"
+#: The provider stopped the reply at the output cap. Recorded beside the
+#: parse failure it usually causes, so a truncated JSON object is diagnosed
+#: as a cap, not as a model that cannot follow the contract.
+MODEL_OUTPUT_TRUNCATED = "MODEL_OUTPUT_TRUNCATED"
 MODEL_REPLY = "MODEL_REPLY"
 AUTHORITY_VIOLATION = "AUTHORITY_VIOLATION"
 DETERMINISTIC_FALLBACK = "DETERMINISTIC_FALLBACK"
@@ -302,6 +306,16 @@ def first_choice_json(response: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("chat response is not a JSON object")
 
 
+def finish_reason(response: dict[str, Any]) -> str | None:
+    """The provider's finish reason for the first choice, when it reports one."""
+
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    reason = choices[0].get("finish_reason") or choices[0].get("stop_reason")
+    return str(reason) if reason else None
+
+
 def _hash(payload: Any) -> str:
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -503,12 +517,18 @@ class SkillRuntime:
         invocation.model_invoked = True
         invocation.execution_record_id = getattr(execution, "execution_record_id", None)
         invocation.decision_record_id = getattr(execution, "decision_record_id", None)
+        response = getattr(execution, "response", None) or {}
+        truncated = finish_reason(response) == "length"
+        if truncated:
+            invocation.reason_codes.append(MODEL_OUTPUT_TRUNCATED)
         try:
-            raw = first_choice_json(getattr(execution, "response", None) or {})
+            raw = first_choice_json(response)
         except (ValueError, TypeError) as exc:
             invocation.fallback_reason = MODEL_OUTPUT_INVALID
             invocation.reason_codes.extend([MODEL_OUTPUT_INVALID, type(exc).__name__])
-            invocation.validation_errors.append(str(exc)[:400])
+            invocation.validation_errors.append(
+                ("reply stopped at the output cap; " if truncated else "") + str(exc)[:400]
+            )
             self._count(invocation)
             return invocation
         invocation.raw = raw

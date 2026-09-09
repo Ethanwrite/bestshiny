@@ -168,3 +168,33 @@ under the daily production budget breaker. `scripts/skill_runtime_matrix.py` pri
 Five Skills are integrated (Runtime Bound = yes and Body Injected = yes). The seven reference Skills are
 reported honestly as registered only. `GET /v1/skills/runtime` computes the same rows from the live
 registry, with the per-process invocation counts beside them.
+
+## 8. Live check, 2026-09-09 (dev)
+
+One paid session was run on the dev stack (rebuilt at `1494e72`, database at `0082`, `PROVIDER_MODE=live`)
+through a temporary development-bypass API against the dev database: two director turns, two accepted
+assumptions, a brief approval (story + shot plan), and on a script-compiled three-shot episode one
+cinematography design, one continuity review and one Skill compile. Seven model calls, all `SUCCEEDED`,
+USD 0.0113 in total under the daily breaker. **Every role resolved to `doubao-seed-2-0-lite-260428`**
+(provider `seedance`): the project created under the bypass received a workspace on the FREE plan, and a
+FREE plan resolves only the FREE bindings - so this exercised exactly what a free-plan user gets, not the
+opus / sonnet / gpt-5.6-sol / qwen bindings a PRO workspace resolves to. What the reason codes said:
+
+| Call | Model role | Outcome | Reason codes / record |
+| --- | --- | --- | --- |
+| Turn 1, turn 2 | DIRECTOR | `MODEL:DIRECTOR`, Skill-driven | `SKILL_LOADED, MODEL_REPLY`; the protocol's own `EVIDENCE_UNVERIFIED`, `OPERATIONS_REJECTED`, `SKIP_UNVERIFIED` - the model paraphrased the client's words as evidence, so the critical fields landed as assumptions and the brief stayed CLARIFYING until they were accepted (the pre-existing residual of §2.46) |
+| Story | DIRECTOR | `MODEL`, Skill-driven, no stripped keys | `SKILL_LOADED, MODEL_REPLY`; one original story, one scene, five beats |
+| Shot plan | SHOT_PLANNER | `DETERMINISTIC` fallback, tracked | `SHOT_PLANNER:MODEL_OUTPUT_INVALID, SHOT_PLANNER:ScreenplayInvalid, SHOT_PLANNER:DETERMINISTIC_FALLBACK`: five shots carried micro-actions outside the closed vocabulary (`slight_head_tilt`, `slight eyebrow raise`, `slow shallow breathe`, `gaze widening`, `finger tremor slightly`). Reasoner `MODEL:DIRECTOR+DETERMINISTIC:SHOT_PLANNER`, `deterministic: true`; the conformance gate also raised `SCREENPLAY_CONTRADICTS_BRIEF` (`LOCATION_CHANGED`: a paraphrased location) |
+| Cinematography | CINEMATOGRAPHY_REASONING | `DETERMINISTIC` fallback, tracked | `MODEL_OUTPUT_INVALID, ValidationError`: `camera.focus` was a 200-character focus-pull description against a 160-character limit |
+| Continuity | CONTINUITY_REASONER | `MODEL`, Skill-driven | verdict `ESCALATE`, zero mismatches, `approval_required`: no registered `END_FRAME` evidence for the source shot and its cinematography was the deterministic fallback - "absent evidence is never a pass", applied as written |
+| Prompt compile | PROMPT_COMPILER | `MODEL`, Skill-driven | verdict `NOT_COMPILABLE`: the first shot of a script-compiled episode has an empty `subjects` array (the actor enters the timeline state only *after* the first action), no eyeline, no props; the Skill refused what the deterministic path would have compiled |
+
+What this says about the contracts, not the runtime: the runtime resolved, injected and recorded exactly
+one Skill per call with its version and hash, and every rejection was tracked as a fallback rather than
+passed off as the Skill's work. Four follow-ups are worth deciding: (1) treat an unknown micro-action as
+advisory - drop it and record it - rather than refusing the whole plan; (2) widen the cinematography
+string limits (`focus`, `path`, `position`) for a model writing real focus language; (3) give a
+script-compiled first shot its actor as a subject (from the output state) so the compiler Skill has
+something to compile, and decide whether a Skill `NOT_COMPILABLE` should block generation of such shots
+(today it does, by design, with the reason in the 409); (4) run the same session under a PRO workspace so
+the opus / sonnet / gpt-5.6-sol / qwen bindings are the ones observed.

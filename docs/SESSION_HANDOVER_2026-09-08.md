@@ -85,12 +85,12 @@ the runs completed.
 
 ## 4. Not verified here
 
-1. **No live model has answered under the new protocols.** The story, shot-plan, cinematography,
-   continuity and compiler calls have only been driven by scripted doubles. First thing on dev after
-   deploy: one paid session through beats approval, then read `creative_screenplays.reason_codes`
-   (`SHOT_PLANNER:*`), `decision_records` (`CINEMATOGRAPHY_DESIGN`, `CONTINUITY_REVIEW`) and
-   `prompt_compilations.diff_json.skill_invocation`. Expect the planner to be rejected whole if the model
-   rewords a line, and the compiler package to be discarded if gpt-5.6-sol names a provider.
+1. **Live check done 2026-09-09 on dev** - see `docs/SKILL_RUNTIME.md` §8. Seven paid calls (USD 0.011),
+   all answered by the FREE binding `doubao-seed-2-0-lite` because the project's workspace is on the FREE
+   plan (what a free user gets); the director turns and the story were Skill-driven, the shot plan and the cinematography plan
+   fell back on record (closed micro-action vocabulary; a 160-character `focus` limit), continuity
+   escalated on absent end-frame evidence, the compiler refused a subject-less first shot. The PRO-tier
+   bindings (opus / sonnet / gpt-5.6-sol / qwen) have still not answered under the new protocols.
 2. **Cost.** Beats approval is now about 2N+1 small paid text calls per N-shot episode under live mode,
    and a generation request pays one prompt-compiler call when no fresh package exists for its exact
    envelope (a second request with the same bindings reuses it). `FEATURE_SKILL_STAGES_AT_APPROVAL=false`

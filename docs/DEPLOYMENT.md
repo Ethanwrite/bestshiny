@@ -176,7 +176,60 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `60d7764` (`main`, the squash of
+- **Current release.** `1494e72` (`main`, the squash of
+  [#64](https://github.com/Ethanwrite/bestshiny/pull/64) — the Skill runtime: one operation resolves to
+  one Skill from machine-readable frontmatter, that body is injected alone under the Skill's model role,
+  every row records `resolved / loaded / model_invoked / execution_mode / fallback_reason`; five Skills
+  integrated (director, short-drama as the new `SHOT_PLANNER` role, cinematography, continuity,
+  prompt-compiler), the screenplay written as a Director story plus a Shot Planner plan, cinematography
+  design / continuity review / Skill-backed prompt compilation over every compiled episode, invariant
+  versioning on every revision; entry point `docs/SKILL_RUNTIME.md`, ledger entry `docs/OPEN_ISSUES.md`
+  §2.52), merged 2026-09-09 ≈10:01Z and deployed ≈10:12Z on the operator's "merge it and deploy to
+  production". `DEPLOYED_SHA.prev = 60d7764`. **One migration, `0081` → `0082_shot_cinematography_plan`**
+  — a plain `ADD COLUMN shots.cinematography_json JSON NOT NULL DEFAULT '{}'` (the migration's target
+  was read first: 8 shots, column absent, 0 `SHOT_PLANNER` bindings), run explicitly on the new image
+  after `stop worker` and before `up -d api web`, `alembic current` = `0082_shot_cinematography_plan
+  (head)` afterwards. No `.env` change: `FEATURE_SKILL_STAGES_AT_APPROVAL` is unset, so the code default
+  *on* applies — under `PROVIDER_MODE=live` a beats approval now pays about 2N+1 small text calls per
+  N-shot episode (cinematography per shot, continuity per adjacent pair, prompt compilation per shot)
+  and a generation request pays one prompt-compiler call when no fresh package exists for its exact
+  envelope (a replay or an identical binding set reuses it). `COMPOSE_UNCHANGED`. Same ordering as the
+  `60d7764` deploy (`deploy_remote.sh` rewritten for this SHA, log `deploy-1494e72.log`, `DEPLOY_EXIT=0`,
+  api healthy on the first check, about 2.5 minutes including the image build). Delta against the running
+  `60d7764`: `git diff --name-status 60d7764 1494e72` = the PR's 54 files plus the two release-record
+  commits' `docs/DEPLOYMENT.md` / `HANDOFF.md`; the archive's SHA-256 (`9c68fbba…`) was compared on both
+  ends before extraction.
+
+  Verified after (`verify_remote.sh` on the host): both markers written (`DEPLOYED_SHA` = the full
+  `1494e72ac…`, `.prev` = `60d77644…`), the compose file byte-equal to the `bak-20260909-100943` copy,
+  all three running image IDs equal the freshly built ones (api `cd99e3799e66`, worker `7c88db322a17`,
+  web `6da1c472f351`), `RestartCount=0` on all three, api healthy, local 8080/3000 200, public
+  `https://api.bestshiny.com/health`, `https://bestshiny.com/app` and `https://bestshiny.com/api/health`
+  all 200 from the host. New contracts answer: `GET /v1/skills`, `GET /v1/skills/runtime`,
+  `POST /v1/shots/{id}/cinematography`, `POST /v1/shots/{id}/continuity/review`,
+  `POST /v1/shots/{id}/prompt/compile` and `POST /v1/episodes/{id}/skill-stages` are 401
+  unauthenticated against a 404 control (routed and auth-gated) and all five new paths are in the
+  OpenAPI; inside the api container `SkillRuntime(SkillRegistry(Path("./skills"))).validate()` is empty
+  and the matrix reads five bound-and-injected (director, short-drama, cinematography, continuity,
+  prompt-compiler) and seven reference Skills. The startup sync inserted the three `SHOT_PLANNER`
+  bindings (ALL PRIMARY priority 0, ALL FALLBACK priority 10, FREE PRIMARY priority 0, all enabled);
+  `shots.cinematography_json` exists and all 8 shots carry `{}`. The served bundle
+  `/assets/index-B0M_LxJ6.js` carries "director + shot planner skills", "Shots by rules",
+  `SHOT_PLANNER:SKILL_LOADED`, "runtime-bound", "body injected" and `skill_invocations`. Zero
+  tracebacks in api or worker. Data untouched (14 sessions, 6 anchors, 29 jobs — 11 COMPLETED /
+  7 FAILED / 1 RETRY_WAIT live, 10 deleted — 16 READY media assets, 0 screenplay rows, 23 prompt
+  compilations, 194 decision records, `memory_index_outbox` empty). Disk 12% used.
+
+  **Not verified here: no live model has answered under the new protocols.** The story, shot-plan,
+  cinematography, continuity and compiler calls were only ever driven by scripted doubles. After the
+  first paid session through beats approval, read `creative_screenplays.reason_codes` (the
+  `SHOT_PLANNER:*` codes say whether the planner's plan was accepted or rejected whole), the
+  `CINEMATOGRAPHY_DESIGN` and `CONTINUITY_REVIEW` rows in `decision_records`, and
+  `prompt_compilations.diff_json.skill_invocation`. Rolling back to `60d7764` needs a downgrade to
+  `0081` (that image pins it); `0082`'s `downgrade()` is a plain `DROP COLUMN` and was exercised on a
+  scratch database only — prefer the `bak-20260909-100943` backups.
+
+- **Previous release.** `60d7764` (`main`, the squash of
   [#63](https://github.com/Ethanwrite/bestshiny/pull/63) — the third 2026-09-07 production review
   verified and fixed: the Director stage bound to the variant under review, a sequenced project
   switch, deleted creations forgotten everywhere, wallet polling that retries under backoff, parks

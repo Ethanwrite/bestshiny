@@ -36,6 +36,8 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > and beats approval runs cinematography, continuity and Skill compilation over the episode (paid under
 > live mode; `FEATURE_SKILL_STAGES_AT_APPROVAL`). Entry point `docs/SKILL_RUNTIME.md`; record
 > `docs/OPEN_ISSUES.md` §2.52 and `docs/SESSION_HANDOVER_2026-09-08.md`. §18 below is superseded.
+> **Merged as `1494e72` (#64) and deployed to production 2026-09-09 ≈10:12Z**, alembic `0082`,
+> `DEPLOYED_SHA.prev = 60d7764`; record in `docs/DEPLOYMENT.md` §6.
 >
 > **2026-09-06 · branch `claude/reference-contract-embedding-fix-cb3881` — reference images reach
 > Seedream, the shot contract becomes one dominant action plus a line, execution duration is the

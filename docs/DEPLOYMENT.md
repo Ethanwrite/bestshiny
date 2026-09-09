@@ -214,6 +214,17 @@ something else happens to reload it — the renewal succeeds and the site still 
   compile stage reruns. Rolling back to `1494e72` needs no downgrade (same schema); prefer the
   `bak-20260909-121048` backups.
 
+  **Redeployed ≈12:58Z as `4cf175b`** — `main`'s head at the time, which is `74beba5` plus this release
+  record (four documentation files, nothing that runs) — on the operator's "deploy the docs commit so
+  the marker matches main". `DEPLOYED_SHA.prev = 74beba5`, no migration, no `.env` change,
+  `COMPOSE_UNCHANGED`, `deploy-4cf175b.log`, `DEPLOY_EXIT=0` (the pip layer was rebuilt from scratch
+  this time, about 4 minutes). Behaviour-neutral by construction and verified so: all three running
+  image IDs equal the freshly built ones (api `8981137f6994`, worker `fe7f1728669c`, web
+  `188db9723ef9`), restarts 0, api healthy on the first check, local and public 200 on all three
+  paths, the same caps and codes importable, five Skills integrated, the served bundle byte-identical
+  (`/assets/index-B0M_LxJ6.js`), zero tracebacks, data untouched. Recording this redeploy is itself a
+  docs commit, so `main` is again one docs commit ahead of the marker - the runbook's steady state.
+
 - **Previous release.** `1494e72` (`main`, the squash of
   [#64](https://github.com/Ethanwrite/bestshiny/pull/64) — the Skill runtime: one operation resolves to
   one Skill from machine-readable frontmatter, that body is injected alone under the Skill's model role,

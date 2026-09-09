@@ -42,20 +42,25 @@ CINEMATOGRAPHY_FORBIDDEN_KEYS: frozenset[str] = frozenset(
 )
 
 
+#: The string limits below bound the prompt the compiler renders from a plan;
+#: they are not a style guide. A real focus pull or camera path runs past 160
+#: characters, and a plan refused for its wording costs the shot its design.
+
+
 class CinematographyCamera(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    framing: str = Field(default="medium", min_length=1, max_length=120)
-    angle: str = Field(default="eye level", min_length=1, max_length=120)
-    height: str = Field(default="subject eye height", max_length=120)
-    position: str = Field(default="approved position", min_length=1, max_length=200)
-    dominant_movement: str = Field(default="locked-off", min_length=1, max_length=120)
-    speed: str = Field(default="steady", max_length=80)
-    path: str = Field(default="none", max_length=200)
-    focus: str = Field(default="primary subject", max_length=160)
-    screen_axis: str = Field(default="preserve established axis", max_length=120)
-    lens_intent: str = Field(default="natural perspective", max_length=200)
-    depth_of_field: str = Field(default="moderate", max_length=120)
+    framing: str = Field(default="medium", min_length=1, max_length=200)
+    angle: str = Field(default="eye level", min_length=1, max_length=200)
+    height: str = Field(default="subject eye height", max_length=200)
+    position: str = Field(default="approved position", min_length=1, max_length=400)
+    dominant_movement: str = Field(default="locked-off", min_length=1, max_length=200)
+    speed: str = Field(default="steady", max_length=200)
+    path: str = Field(default="none", max_length=400)
+    focus: str = Field(default="primary subject", max_length=400)
+    screen_axis: str = Field(default="preserve established axis", max_length=200)
+    lens_intent: str = Field(default="natural perspective", max_length=400)
+    depth_of_field: str = Field(default="moderate", max_length=200)
 
     @field_validator("dominant_movement")
     @classmethod
@@ -69,15 +74,15 @@ class CinematographyCamera(BaseModel):
 class CinematographyLighting(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    direction: str = Field(default="preserve established direction", min_length=1, max_length=160)
-    quality: str = Field(default="preserve established quality", min_length=1, max_length=160)
-    contrast: str = Field(default="preserve established contrast", min_length=1, max_length=120)
+    direction: str = Field(default="preserve established direction", min_length=1, max_length=400)
+    quality: str = Field(default="preserve established quality", min_length=1, max_length=400)
+    contrast: str = Field(default="preserve established contrast", min_length=1, max_length=200)
     color_temperature: str = Field(
-        default="preserve established color temperature", min_length=1, max_length=120
+        default="preserve established color temperature", min_length=1, max_length=200
     )
-    practicals: list[str] = Field(default_factory=list, max_length=8)
-    motivation: str = Field(default="", max_length=200)
-    exposure_intent: str = Field(default="", max_length=160)
+    practicals: list[str] = Field(default_factory=list, max_length=12)
+    motivation: str = Field(default="", max_length=400)
+    exposure_intent: str = Field(default="", max_length=400)
 
 
 class CinematographyPlan(BaseModel):
@@ -88,11 +93,11 @@ class CinematographyPlan(BaseModel):
     camera: CinematographyCamera = Field(default_factory=CinematographyCamera)
     lighting: CinematographyLighting = Field(default_factory=CinematographyLighting)
     subject_positions: dict[str, str] = Field(default_factory=dict)
-    atmosphere: str = Field(default="", max_length=300)
-    start_composition: str = Field(default="", max_length=400)
-    end_composition: str = Field(default="", max_length=400)
-    continuity_checks: list[str] = Field(default_factory=list, max_length=12)
-    unresolved: list[str] = Field(default_factory=list, max_length=12)
+    atmosphere: str = Field(default="", max_length=600)
+    start_composition: str = Field(default="", max_length=800)
+    end_composition: str = Field(default="", max_length=800)
+    continuity_checks: list[str] = Field(default_factory=list, max_length=20)
+    unresolved: list[str] = Field(default_factory=list, max_length=20)
 
     def camera_values(self) -> dict[str, Any]:
         """The camera fields in the CanonicalCameraSpec vocabulary."""

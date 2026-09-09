@@ -1130,3 +1130,39 @@ def test_generation_compiles_through_the_skill_first_and_reuses_the_package(cont
     assert records[0].compiled_prompt.startswith("LinJin")
     with container.database.session() as session:
         assert session.get(Shot, shot_id).compiled_prompt == records[0].compiled_prompt
+
+
+# ------------------------------------------------------------ truncation
+@pytest.mark.asyncio
+async def test_a_reply_cut_at_the_output_cap_is_recorded_as_truncated(registry: SkillRegistry) -> None:
+    class Truncating:
+        async def execute_chat(self, project_id, role, *, messages, parameters=None, **_extra):  # type: ignore[no-untyped-def]
+            return type(
+                "Execution",
+                (),
+                {
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {"content": '{"beats": [{"sequence": 1, "shots": [{"seq'},
+                                "finish_reason": "length",
+                            }
+                        ]
+                    },
+                    "execution_record_id": "exec-cut",
+                },
+            )()
+
+    runtime = SkillRuntime(registry, Truncating())
+    invocation = await runtime.invoke(
+        SkillOperation.SHOT_DECOMPOSITION,
+        project_id="p",
+        protocol="p",
+        messages=[{"role": "user", "content": "{}"}],
+        validator=lambda raw: raw,
+    )
+    assert invocation.model_invoked and not invocation.skill_driven
+    assert invocation.fallback_reason == "MODEL_OUTPUT_INVALID"
+    assert "MODEL_OUTPUT_TRUNCATED" in invocation.reason_codes
+    assert invocation.validation_errors[0].startswith("reply stopped at the output cap")
+

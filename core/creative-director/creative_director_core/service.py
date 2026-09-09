@@ -127,6 +127,7 @@ from .screenplay import (
     derive_anchors,
     deterministic_screenplay,
     deterministic_shot_plan,
+    dropped_micro_actions,
     global_invariants,
     invariant_record,
     merge_shot_anchors,
@@ -318,6 +319,13 @@ REASONER_DETERMINISTIC = "DETERMINISTIC"
 #: Reason codes of the shot-planning stage are prefixed on the screenplay row
 #: so one list can carry both stages without confusing them.
 SHOT_PLANNER_CODE_PREFIX = "SHOT_PLANNER:"
+#: Output caps for the two authoring calls. A six-beat story runs to about
+#: 4,500 tokens of JSON; the shot plan that decomposes it - a staging
+#: description, two states and a gaze target per shot - ran to exactly the
+#: old 6,000 cap on 2026-09-09 and came back truncated, so the plan gets the
+#: larger cap. The caps bound spend on a runaway reply, not a normal one.
+STORY_MAX_OUTPUT_TOKENS = 12000
+SHOT_PLAN_MAX_OUTPUT_TOKENS = 16000
 
 #: The system prompt used only when the Skill registry cannot supply the
 #: Director Skill. Recorded as SKILL_UNAVAILABLE on the turn; never silent.
@@ -1837,7 +1845,7 @@ class CreativeDirectorService:
             protocol=STORY_PROTOCOL,
             messages=story_messages,
             validator=_validate_story,
-            max_tokens=6000,
+            max_tokens=STORY_MAX_OUTPUT_TOKENS,
             model_roles=self.model_roles,
             fallback_system_prompt=_SKILL_FALLBACK_PROMPT,
         )
@@ -1878,7 +1886,7 @@ class CreativeDirectorService:
             protocol=SHOT_PLAN_PROTOCOL,
             messages=plan_messages,
             validator=partial(_validate_shot_plan, story),
-            max_tokens=6000,
+            max_tokens=SHOT_PLAN_MAX_OUTPUT_TOKENS,
             model_roles=self.model_roles,
         )
         plan_codes = _prefixed(_stage_codes(plan_invocation, compressed=False))
@@ -5086,7 +5094,12 @@ def _validate_shot_plan(story: Any, raw: dict[str, Any]) -> Validated:
     violations = shot_plan_violations(story, plan)
     if violations:
         raise AuthorityViolation(violations)
+    # An unknown micro-action is advisory motion dropped on record, not a key
+    # the planner had no authority to write: its own code, never an authority
+    # violation.
+    dropped, stripped = dropped_micro_actions(stripped)
     codes, stripped_entries = _stripped_codes(stripped)
+    codes.extend(f"MICRO_ACTION_DROPPED:{value}" for value in dropped)
     return Validated(plan, reason_codes=codes, authority_violations=stripped_entries)
 
 

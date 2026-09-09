@@ -88,8 +88,8 @@ deterministic corrector. Their records say `execution_mode: DETERMINISTIC`, `loa
 | Stage | Owns | Must never decide | Enforcement |
 | --- | --- | --- | --- |
 | Director (WHY) | intent, hook, promise, invariants, variables, emotional and creative visual direction, forbidden zones, required dialogue, ending, final decision | shot count, start/end state, gaze, composition, framing, lens, focal length, movement, lighting, model, provider | `StoryDraft` has no shot fields; forbidden keys are stripped and recorded (`AUTHORITY_STRIPPED:<key>`); the story is kept |
-| Shot Planner (WHAT HAPPENS) | shot boundaries, one dominant action, subject, line placement, start/end state, gaze target, spatial state, continuity handoff, duration intent, mobile hook check | dialogue text, characters, ending, identity, product facts, shot size, framing, lens, movement, light, model | every story line placed once, verbatim, in order; unknown character, unplanned or invented beat → the plan is rejected whole (`AUTHORITY_VIOLATION:dialogue_changed:beat n`); photographic keys and `shot_type` stripped |
-| Cinematography (HOW WE SEE IT) | shot size, framing, composition, angle, height, position, one movement, lens intent, DOF, focus, lighting, contrast, colour temperature, exposure, atmosphere | plot, action, dialogue, characters, product facts, ending, states, boundaries, continuity verdict, model, provider | a plan carrying a forbidden key is refused as a whole (`AUTHORITY_VIOLATION:<path>`); deterministic defaults stand in |
+| Shot Planner (WHAT HAPPENS) | shot boundaries, one dominant action, subject, line placement, start/end state, gaze target, spatial state, continuity handoff, duration intent, mobile hook check | dialogue text, characters, ending, identity, product facts, shot size, framing, lens, movement, light, model | every story line placed once, verbatim, in order; unknown character, unplanned or invented beat → the plan is rejected whole (`AUTHORITY_VIOLATION:dialogue_changed:beat n`); photographic keys and `shot_type` stripped; a micro-action outside the closed vocabulary, a malformed `micro_actions` field or a fifth micro-action is dropped and recorded (`MICRO_ACTION_DROPPED:<value>`), never fatal |
+| Cinematography (HOW WE SEE IT) | shot size, framing, composition, angle, height, position, one movement, lens intent, DOF, focus, lighting, contrast, colour temperature, exposure, atmosphere | plot, action, dialogue, characters, product facts, ending, states, boundaries, continuity verdict, model, provider | a plan carrying a forbidden key is refused as a whole (`AUTHORITY_VIOLATION:<path>`); deterministic defaults stand in; string limits bound prompt size (400 characters for focus / path / position / lens intent, 800 for a composition), not wording |
 | Continuity | identity/wardrobe/prop/geography/screen-direction/gaze/body-state/entrance-exit/lighting/axis continuity, canonical binding, end→start contract, `PASS / REPAIRABLE / ESCALATE`, minimal repair | framing, movement, lighting design, composition, action, dialogue, ending, identity version creation, canonical promotion, model, provider | a review carrying a forbidden key is refused as a whole; the deterministic state comparison stands in |
 | Prompt Compiler | prompt wording and ordering, negative prompt, asset echo, one assertion per fact, QC checklist, compilability verdict | plot, action, dialogue, composition, framing, camera, lighting, unresolved creative fields, asset invention, model, provider, vendor syntax | a deterministic preflight (two actions, two movements, any `unresolved`/`tbd` value, `unresolved:` constraints) returns `NOT_COMPILABLE` before any model call; a model package is re-verified (asset echo, assertion count, action / subjects / line / claims / copy verbatim, no provider or model name, no vendor syntax, no envelope key) and discarded on failure |
 
@@ -191,10 +191,43 @@ opus / sonnet / gpt-5.6-sol / qwen bindings a PRO workspace resolves to. What th
 
 What this says about the contracts, not the runtime: the runtime resolved, injected and recorded exactly
 one Skill per call with its version and hash, and every rejection was tracked as a fallback rather than
-passed off as the Skill's work. Four follow-ups are worth deciding: (1) treat an unknown micro-action as
-advisory - drop it and record it - rather than refusing the whole plan; (2) widen the cinematography
-string limits (`focus`, `path`, `position`) for a model writing real focus language; (3) give a
-script-compiled first shot its actor as a subject (from the output state) so the compiler Skill has
-something to compile, and decide whether a Skill `NOT_COMPILABLE` should block generation of such shots
-(today it does, by design, with the reason in the 409); (4) run the same session under a PRO workspace so
-the opus / sonnet / gpt-5.6-sol / qwen bindings are the ones observed.
+passed off as the Skill's work. Four follow-ups came out of it; three landed the same day: (1) an unknown
+micro-action is advisory - dropped and recorded as `SHOT_PLANNER:MICRO_ACTION_DROPPED:<value>` (a string
+field is read as a comma-separated list, a malformed field is dropped by type, a fifth canonical key is
+dropped as surplus) and the plan keeps the planner's staging; the schema stays strict for user edits;
+(2) the cinematography string limits bound prompt size rather than wording (focus / path / position /
+lens intent 400, framing / angle / height / DOF 200, compositions 800, atmosphere 600); (3) a
+script-compiled first shot takes its actor and the acted-upon prop from its output state - the prompt
+carries no claim about where they were at the shot's start, and the compilation record's
+`derived_from_output_state` says where the compiler learned them; a Skill `NOT_COMPILABLE` still blocks
+generation of such a shot, by design, with the reason in the 409. A package the Skill produced before
+this change no longer matches such a shot's envelope hash, so its first generation after the change
+compiles deterministically (`NO_FRESH_SKILL_COMPILATION`) until the stage reruns. (4) is the PRO-workspace
+run recorded in §9.
+
+## 9. Live check under a PRO workspace, 2026-09-09 (dev, after the fixes)
+
+The same flow, with the project's workspace moved to the PRO plan, on the tree carrying follow-ups (1)-(3).
+Eight calls, USD 0.69; all `SUCCEEDED`; the bindings a paying user resolves to answered.
+
+| Call | Model | Outcome |
+| --- | --- | --- |
+| Turn 1 | claude-opus-5 | `MODEL:DIRECTOR`, Skill-driven; the brief was proposable after one turn (`SKILL_LOADED, MODEL_REPLY`, plus the protocol's `EVIDENCE_UNVERIFIED` / `OPERATIONS_REJECTED` on a paraphrased quote) |
+| Story | claude-opus-5 | `MODEL`, Skill-driven, no stripped keys; six beats, title 她的名字亮着 |
+| Shot plan, first attempt | claude-sonnet-5 | `DETERMINISTIC` fallback, tracked: `SHOT_PLANNER:MODEL_OUTPUT_INVALID` - the reply stopped at exactly the 6,000-token output cap (`completion_tokens = 6000`), so the JSON was cut. Reasoner `MODEL:DIRECTOR+DETERMINISTIC:SHOT_PLANNER` |
+| Cinematography | gpt-5.6-sol | `MODEL`, Skill-driven; the plan named four unresolved points that are real for a script-only shot (empty gaze target, empty cast list, empty start state, no canonical bindings) and framed its shot size as "provisional" |
+| Continuity | claude-sonnet-5 | `MODEL`, Skill-driven, `ESCALATE` with zero mismatches: no registered `END_FRAME` evidence for a `CONTINUOUS` transition |
+| Prompt compile | gpt-5.6-sol | `MODEL`, Skill-driven, `NOT_COMPILABLE`: "`shot_spec.camera.framing` is marked as provisional and therefore remains unresolved" - the compiler read the cinematography plan's hedge as an unresolved field, which is its Unresolved Policy applied as written; the first shot now carried its subject 雨桐 and the phone (`derived_from_output_state`) |
+| Redraft after the cap fix (story revision + shot plan) | claude-opus-5 + claude-sonnet-5 | **`MODEL:DIRECTOR+MODEL:SHOT_PLANNER`, `deterministic: false`, `skill_driven: true`.** The plan ran to 7,898 output tokens: eight shots over six beats, one action per shot, every line placed verbatim, every gaze target named, micro-actions inside the vocabulary (`gaze_shift`, `blink`, `breathe`, `mouth_movement`, `slight_head_turn`). Invariant versioning recorded `supersedes_version` with `changed: [invariants, obligations]` |
+
+Changes made from it: `STORY_MAX_OUTPUT_TOKENS = 12000` and `SHOT_PLAN_MAX_OUTPUT_TOKENS = 16000` (the caps
+bound a runaway reply, not a normal one), and the runtime records `MODEL_OUTPUT_TRUNCATED` beside the parse
+failure when the provider's `finish_reason` is `length`, so a cut reply is diagnosed as a cap rather than as
+a model that cannot follow the contract. The conformance gate's `SCREENPLAY_CONTRADICTS_BRIEF`
+(`LOCATION_CHANGED`: the screenplay describes the brief's location in more words) is the pre-existing
+brief gate, not the runtime; approval takes `accept_brief_violations`.
+
+Open after this run: for a script-only episode (no director intent) the cinematography stage hedges and the
+compiler Skill refuses, so generation of such a shot through the Skill path stays blocked by design until
+the shot is given a gaze target and a cast or the stage is rerun; a creative-director episode carries
+those in its director intent. Spend for both checks: USD 0.70 under the USD 10 daily breaker.

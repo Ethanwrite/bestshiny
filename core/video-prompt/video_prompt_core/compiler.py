@@ -226,6 +226,12 @@ class _Envelope:
     action: str
     input_hash: str
     cinematography: dict[str, Any]
+    #: Subjects and props the envelope took from the shot's OUTPUT state
+    #: because its input state had none (the first shot of a scripted
+    #: episode). Recorded on the compilation, never written into the prompt:
+    #: the prompt says what the frame contains, the record says where the
+    #: compiler learned it.
+    derived_from_output_state: dict[str, list[str]] = field(default_factory=dict)
 
 
 class PromptCompilerService:
@@ -311,6 +317,73 @@ class PromptCompilerService:
             payload["asset_id"] = str(prop_id)
             props.append(payload)
         return props
+
+    @classmethod
+    def _state_subjects(
+        cls,
+        characters: object,
+        *,
+        binding_by_character: dict[str, dict[str, Any]],
+        director_gaze: str,
+    ) -> list[CanonicalSubjectSpec]:
+        """Build the subjects one timeline state's character map describes, bindings folded in by id."""
+
+        subjects: list[CanonicalSubjectSpec] = []
+        if not isinstance(characters, dict):
+            return subjects
+        for state_key, state in characters.items():
+            state = state if isinstance(state, dict) else {}
+            explicit_character_id = state.get("character_id")
+            normalized_state_key = cls._uuid_key(state_key)
+            key_character_id = (
+                str(state_key) if str(state_key) in binding_by_character else normalized_state_key
+            )
+            character_id = (
+                cls._uuid_key(explicit_character_id) or str(explicit_character_id)
+                if explicit_character_id is not None
+                else key_character_id
+            )
+            binding = binding_by_character.get(character_id or "", {})
+            resolved_character_id = binding.get("character_id") or character_id
+            subject_name = state.get("name") or binding.get("name") or state_key
+            subjects.append(
+                CanonicalSubjectSpec(
+                    name=str(subject_name),
+                    asset_id=resolved_character_id,
+                    asset_version_id=binding.get("identity_version_id"),
+                    screen_position=str(state.get("screen_position") or state.get("position") or "center"),
+                    body_orientation=str(
+                        state.get("body_orientation")
+                        or state.get("orientation")
+                        or "three-quarter toward scene"
+                    ),
+                    eyeline_target=str(
+                        state.get("eyeline_target")
+                        # The director said where this shot looks. It wins
+                        # over the compiler's inference and over the
+                        # default, but not over an explicit approved state.
+                        or director_gaze
+                        or state.get("gaze_target")
+                        or "approved scene partner or action target, never the camera"
+                    ),
+                    pose=str(state.get("pose") or "preserve approved pose"),
+                    wardrobe_version_id=state.get("wardrobe_id"),
+                    identity_constraints=[
+                        constraint
+                        for constraint in (
+                            f"identity version {binding.get('identity_version_id')}"
+                            if binding.get("identity_version_id")
+                            else "",
+                            f"hair: {binding.get('hair_signature')}" if binding.get("hair_signature") else "",
+                            f"wardrobe: {binding.get('costume_signature')}"
+                            if binding.get("costume_signature")
+                            else "",
+                        )
+                        if constraint
+                    ],
+                )
+            )
+        return subjects
 
     @staticmethod
     def _prompt_facts(
@@ -618,70 +691,34 @@ class PromptCompilerService:
             for item in (director.get("prohibited_terms") or [])
             if str(item).strip()
         ]
-        state_characters = start_state.get("characters", {})
         binding_by_character = {
             self._uuid_key(character_id) or str(character_id): binding
             for binding in character_bindings
             if (character_id := binding.get("character_id")) is not None
         }
-        subjects: list[CanonicalSubjectSpec] = []
-        if isinstance(state_characters, dict):
-            for state_key, state in state_characters.items():
-                state = state if isinstance(state, dict) else {}
-                explicit_character_id = state.get("character_id")
-                normalized_state_key = self._uuid_key(state_key)
-                key_character_id = (
-                    str(state_key) if str(state_key) in binding_by_character else normalized_state_key
-                )
-                character_id = (
-                    self._uuid_key(explicit_character_id) or str(explicit_character_id)
-                    if explicit_character_id is not None
-                    else key_character_id
-                )
-                binding = binding_by_character.get(character_id or "", {})
-                resolved_character_id = binding.get("character_id") or character_id
-                subject_name = state.get("name") or binding.get("name") or state_key
-                subjects.append(
-                    CanonicalSubjectSpec(
-                        name=str(subject_name),
-                        asset_id=resolved_character_id,
-                        asset_version_id=binding.get("identity_version_id"),
-                        screen_position=str(
-                            state.get("screen_position") or state.get("position") or "center"
-                        ),
-                        body_orientation=str(
-                            state.get("body_orientation")
-                            or state.get("orientation")
-                            or "three-quarter toward scene"
-                        ),
-                        eyeline_target=str(
-                            state.get("eyeline_target")
-                            # The director said where this shot looks. It wins
-                            # over the compiler's inference and over the
-                            # default, but not over an explicit approved state.
-                            or director_gaze
-                            or state.get("gaze_target")
-                            or "approved scene partner or action target, never the camera"
-                        ),
-                        pose=str(state.get("pose") or "preserve approved pose"),
-                        wardrobe_version_id=state.get("wardrobe_id"),
-                        identity_constraints=[
-                            constraint
-                            for constraint in (
-                                f"identity version {binding.get('identity_version_id')}"
-                                if binding.get("identity_version_id")
-                                else "",
-                                f"hair: {binding.get('hair_signature')}"
-                                if binding.get("hair_signature")
-                                else "",
-                                f"wardrobe: {binding.get('costume_signature')}"
-                                if binding.get("costume_signature")
-                                else "",
-                            )
-                            if constraint
-                        ],
-                    )
-                )
+        subjects = self._state_subjects(
+            start_state.get("characters", {}),
+            binding_by_character=binding_by_character,
+            director_gaze=director_gaze,
+        )
+        # The narrative compiler adds a character to the timeline only when it
+        # acts, so the first shot of a scripted episode starts with an empty
+        # cast and its actor exists only in the output state - though it is in
+        # frame for the whole shot. Read the cast from there and record the
+        # provenance on the compilation, not in the prompt: a prompt line about
+        # "entering" would be a second action the script does not contain. The
+        # timeline state itself stays as written. Bindings keep their own
+        # fallback below, and a start state that has a cast is never widened
+        # from the end state.
+        derived_from_output_state: dict[str, list[str]] = {}
+        if not subjects and not character_bindings:
+            subjects = self._state_subjects(
+                end_state.get("characters", {}),
+                binding_by_character=binding_by_character,
+                director_gaze=director_gaze,
+            )
+            if subjects:
+                derived_from_output_state["subjects"] = [subject.name for subject in subjects]
         if not subjects:
             for index, binding in enumerate(character_bindings, 1):
                 subjects.append(
@@ -765,6 +802,18 @@ class PromptCompilerService:
             end_state.get("dialogue") or start_state.get("dialogue") or director.get("dialogue") or ""
         )
         props = self._canonical_props(start_state.get("props", []))
+        if not props:
+            # The same gap as the cast: a prop the narrative compiler first
+            # meets in this shot's action is in the output state only. It is
+            # carried through as the state recorded it - no claim about where
+            # it was at the shot's start, which the action may contradict
+            # ("takes the phone out of her pocket") - and its provenance goes
+            # on the compilation record.
+            props = self._canonical_props(end_state.get("props", []))
+            if props:
+                derived_from_output_state["props"] = [
+                    str(prop.get("name") or prop.get("asset_id") or "") for prop in props
+                ]
         # A canonical PRODUCT or PROP the DIRECTOR bound to *this* shot is a
         # thing the shot must render exactly, so it enters the spec's own prop
         # list and every adapter's prompt names it. Only this shot's own
@@ -978,6 +1027,7 @@ class PromptCompilerService:
                 )
             ).hexdigest(),
             cinematography=cinematography,
+            derived_from_output_state=derived_from_output_state,
         )
 
     def compile(
@@ -1203,6 +1253,7 @@ class PromptCompilerService:
                     if envelope.cinematography
                     else {"execution_mode": None, "fallback_reason": "NOT_DESIGNED"},
                     "preserved_facts": [envelope.action],
+                    "derived_from_output_state": dict(envelope.derived_from_output_state),
                     "provider_specific": False,
                 },
             )

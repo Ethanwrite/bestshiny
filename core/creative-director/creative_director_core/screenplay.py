@@ -30,6 +30,7 @@ from .schemas import (
     COMMERCE_FORMATS,
     DIRECTOR_FORBIDDEN_KEYS,
     MAX_CAST,
+    MAX_MICRO_ACTIONS,
     MAX_PROP_ANCHORS,
     MAX_SCENE_ANCHORS,
     SHOT_PLANNER_FORBIDDEN_BEAT_KEYS,
@@ -38,6 +39,7 @@ from .schemas import (
     Screenplay,
     ShotPlan,
     StoryDraft,
+    normalize_micro_action,
     normalize_name,
     strip_forbidden_keys,
 )
@@ -1028,8 +1030,84 @@ def validate_story(payload: Any) -> tuple[StoryDraft, list[str]]:
     return story, stripped
 
 
+#: How ``validate_shot_plan`` reports a dropped micro-action: the shot's path
+#: ending in the raw value, so the entry sits beside the stripped keys in the
+#: same list and can still be told apart from them.
+_MICRO_ACTION_DROP = re.compile(r"\.micro_actions\[(.*)\]$")
+_MICRO_ACTION_SEPARATORS = re.compile(r"[,;，；、/\n]+")
+MAX_MICRO_ACTION_REPORT_CHARS = 60
+
+
+def _drop_unknown_micro_actions(shot: dict[str, Any], *, path: str) -> list[str]:
+    """Keep the micro-actions the vocabulary accepts, as canonical keys; name the rest.
+
+    A micro-action is advisory motion riding beside the dominant action; one
+    the vocabulary does not know is not worth losing the planner's staging
+    over, so it is dropped and reported here, before the strict schema sees
+    the shot. The advisory rule covers the field's shape too: a string is read
+    as a comma-separated list, anything else that is not a list is dropped
+    and reported by its type, and canonical keys beyond ``MAX_MICRO_ACTIONS``
+    are dropped and reported as surplus. The schema itself stays strict: a
+    user edit carrying an unknown value is still refused. An empty value is
+    dropped without a report - nothing was written.
+    """
+
+    if "micro_actions" not in shot:
+        return []
+    raw = shot.get("micro_actions")
+    dropped: list[str] = []
+    if isinstance(raw, str):
+        raw = [part for part in _MICRO_ACTION_SEPARATORS.split(raw) if part.strip()]
+    elif raw is None:
+        raw = []
+    elif not isinstance(raw, list):
+        dropped.append(f"{path}.micro_actions[<{type(raw).__name__}>]")
+        raw = []
+    kept: list[str] = []
+    for item in raw:
+        try:
+            key = normalize_micro_action(item)
+        except ValueError:
+            label = " ".join(str(item).split())[:MAX_MICRO_ACTION_REPORT_CHARS]
+            if label and item is not None:
+                dropped.append(f"{path}.micro_actions[{label}]")
+            continue
+        if key in kept:
+            continue
+        if len(kept) >= MAX_MICRO_ACTIONS:
+            dropped.append(f"{path}.micro_actions[{key} (surplus)]")
+            continue
+        kept.append(key)
+    shot["micro_actions"] = kept
+    return dropped
+
+
+def dropped_micro_actions(stripped: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split a plan's report into the micro-action values dropped and the key paths stripped.
+
+    They are different findings: a stripped key is one the planner had no
+    authority to write; a dropped micro-action is advisory motion the
+    vocabulary does not know. Values come back deduplicated, first seen first.
+    """
+
+    values: list[str] = []
+    paths: list[str] = []
+    for entry in stripped:
+        match = _MICRO_ACTION_DROP.search(entry)
+        if match is None:
+            paths.append(entry)
+        elif match.group(1) not in values:
+            values.append(match.group(1))
+    return values, paths
+
+
 def validate_shot_plan(payload: Any) -> tuple[ShotPlan, list[str]]:
-    """Validate the Shot Planner's plan; photographic and story keys are stripped and named."""
+    """Validate the Shot Planner's plan; photographic and story keys are stripped and named.
+
+    Unknown micro-actions are dropped and named in the same list, as
+    ``beats[i].shots[j].micro_actions[<value>]``; ``dropped_micro_actions``
+    separates them from the stripped keys.
+    """
 
     if not isinstance(payload, dict):
         raise ScreenplayInvalid("shot plan must be a JSON object", ["root is not an object"])
@@ -1050,12 +1128,12 @@ def validate_shot_plan(payload: Any) -> tuple[ShotPlan, list[str]]:
             if not isinstance(shot, dict):
                 shots.append(shot)
                 continue
+            shot_path = f"beats[{index}].shots[{shot_index}]"
             shot_clean, shot_stripped = strip_forbidden_keys(
-                shot,
-                SHOT_PLANNER_FORBIDDEN_SHOT_KEYS,
-                path=f"beats[{index}].shots[{shot_index}]",
+                shot, SHOT_PLANNER_FORBIDDEN_SHOT_KEYS, path=shot_path
             )
             stripped.extend(shot_stripped)
+            stripped.extend(_drop_unknown_micro_actions(shot_clean, path=shot_path))
             shots.append(shot_clean)
         beat_clean["shots"] = shots
         beats.append(beat_clean)

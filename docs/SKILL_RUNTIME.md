@@ -353,6 +353,21 @@ committed and produced ten further corrections, all in this branch:
   driven through `run_episode`, the acknowledge route's 409 and its idempotent 200 are both pinned, and the
   single-design cinematography fallback has its own test.
 
+**The verbatim action check, after the live check (2026-09-10).** The first live production compile was
+discarded with `dominant_action_missing`: the model rendered
+`雨桐进入城市天台上发现了一部不属于她的手机` as `雨桐进入城市天台，发现了一部不属于她的手机。` - one particle
+fewer and a comma more - and the exact-substring test made that a rewrite. The paid wording was thrown away
+in favour of the deterministic JSON dump, which is the defect this whole branch exists to remove, arriving
+one step further down the pipe. `action_preserved` now decides it: an exact quotation passes as before; a
+run of the action's own tokens passes (only punctuation or spacing differed); otherwise the package must
+carry at least 80% of the action's adjacent-token pairs, which is what survives a stylistic edit and what a
+different action destroys. Tokens are words in scripts that separate them and characters in scripts that do
+not, so the rule reads Chinese and English alike. A package that renders rather than quotes ships with
+`ACTION_PARAPHRASED` on the invocation, so the row still says which it was. Dropping the action, swapping
+its verb, or swapping its actor all still fail — those cases are pinned in
+`tests/test_skill_quality_gates.py`. The line, product claims and required copy keep the exact test:
+they are quoted material, not prose.
+
 Skill bodies edited (their hashes moved): `prompt-compiler` (Pipeline Position: delivery and freshness;
 Inputs and Decision Rules: the new fields; Unresolved Policy: markers, hedges and the cinematography entries),
 `continuity` (Escalation Rules: the runtime enforces a Skill-driven escalation, re-reviewed once per change

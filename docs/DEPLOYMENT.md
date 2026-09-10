@@ -224,8 +224,11 @@ something else happens to reload it — the renewal succeeds and the site still 
   `74beba5`). Worth checking on every deploy: compare each running image ID against its freshly built one
   rather than trusting `up -d` to have recreated everything.
 
-  **Known effect worth watching:** every prompt-compiler package recorded before this release is stale at
-  once — the new spec fields (`camera.height` / `lens_intent` / `depth_of_field`, `lighting.motivation` /
+  **Known effect worth watching** (measured after the deploy, and smaller here than the general case):
+  production held **no** Skill-compiled packages at all — all 23 `prompt_compilations` rows are
+  image-prompt-corrector records with `execution_mode` unset — so nothing was invalidated and the "one paid
+  compile per shot" cost is simply the first compile each shot was always going to pay. Where such packages
+  do exist, they are stale at once, because the new spec fields (`camera.height` / `lens_intent` / `depth_of_field`, `lighting.motivation` /
   `exposure_intent`, `atmosphere`, `composition`) change every envelope hash, and the three edited Skill
   bodies change their content hashes. Under `FEATURE_SKILL_STAGES_AT_APPROVAL` (unset, so the code default
   *on* applies) a shot's next generate pays one prompt-compiler call; a synchronous compile before that is
@@ -237,6 +240,36 @@ something else happens to reload it — the renewal succeeds and the site still 
   the continuity gate as a 409 naming the decision, where before the same verdict was only recorded.
   Rolling back to `4cf175b` needs no downgrade (same schema); prefer the `bak-20260910-124704` compose copy
   and the pre-extraction database backup.
+
+  **Live check on production, 2026-09-10 ≈13:53Z, USD 0.0041.** Three paid calls on the platform's own
+  `E2E 短剧 audit` project (the `e2e-free-audit-0830@bestshiny.com` test account; no real user's project was
+  touched), all answered by the FREE binding `doubao-seed-2-0-lite-260428` under the USD 200/day breaker.
+  What it proved, on real production rows: **cinematography** ran Skill-driven (`SKILL_LOADED, MODEL_REPLY`)
+  and its whole design reached the shot spec — `camera.height` "2.2 meters above rooftop concrete surface",
+  a lens intent, a depth of field and an atmosphere, and `subject_positions` moved 雨桐 from the timeline's
+  `midground_center` to `screen left, midground` with the plan's stray "phone" entry recorded as
+  `unmatched_subject_positions` (gap 4, live); **continuity** ran Skill-driven and returned `ESCALATE` with
+  `approval_required` on the second shot — no registered `END_FRAME` for a `CONTINUOUS` transition, zero
+  mismatches — and the gate closed on that shot for the first time in production (decision `e8442e9e`,
+  gap 2, live); **prompt compilation** ran, and the model's package was **discarded** (below).
+
+  **Residual the live check exposed — `dominant_action_missing`.** The compiler Skill answered, but the
+  runtime's re-verification rejected its package because the shot's `dominant_action`
+  ("雨桐进入城市天台上发现了一部不属于她的手机") did not appear as an exact casefolded substring of the model's
+  positive prompt, so the deterministic JSON package stood in (`MODEL_OUTPUT_INVALID`, on record) and the
+  adapter delivered the canonical rendering rather than the paid wording. The delivery path built in this
+  release is therefore correct but unexercised in production: it only carries a package that survives
+  re-verification. The check is pre-existing (`verify_compiled_package`, shipped in `1494e72`/#64) and is
+  there so the compiler cannot quietly drop or reword the action; the open question is whether a whole
+  Chinese sentence is the right unit for a verbatim substring test, or whether it should compare
+  punctuation- and whitespace-normalised content. **Not changed here** — loosening it is a contract decision
+  about how much rewording the compiler may do, and it wants its own review. Recorded as
+  `docs/OPEN_ISSUES.md` §2.53's residual.
+
+  One shot of the E2E project (`ded8a661`) is left blocked by the gate, which is the correct outcome of a
+  real `ESCALATE` and is also the first end-to-end proof that the gate works in production. Clearing it
+  needs `POST /v1/shots/ded8a661…/continuity/review/acknowledge` from a real user, or a registered
+  `END_FRAME` on the previous shot and a re-review.
 
 - **Previous release.** `74beba5` (`main`, the squash of
   [#65](https://github.com/Ethanwrite/bestshiny/pull/65) — the Skill contracts tolerate live replies:

@@ -543,7 +543,17 @@ once per generate attempt; the cinematography stage's own write-back (`shot_type
 single Skill design is recognised again and a fallback no longer overwrites a paid plan (a defect that
 shipped in #64); the plan-`unresolved` filter no longer swallows entries beginning "None of the…" and numbers
 them by their place in the plan; and a retry whose stored package fails validation records
-`ADAPTER_CANONICAL`. Tests: `tests/test_skill_quality_gates.py` (18). Entry point: `docs/SKILL_RUNTIME.md` §10; record `docs/SESSION_HANDOVER_2026-09-09.md`. | `core/adapters/video_adapter_core/{base,adapters}.py`, `core/video-prompt/video_prompt_core/compiler.py`, `core/continuity/continuity_core/review.py`, `core/production/director_production/{cinematography,stages}.py`, `core/skills/skill_core/{__init__,compiler}.py`, `packages/contracts/platform_contracts/{shot,cinematography,__init__}.py`, `services/production-engine/production_engine/runtime.py`, `apps/api/video_platform_api/{container,main,skill_routes}.py`, `skills/{prompt-compiler,continuity,cinematography}/SKILL.md` |
+`ADAPTER_CANONICAL`. **Residual, found by the live check on production 2026-09-10 (USD 0.0041, three calls on the E2E audit
+project):** cinematography and continuity ran Skill-driven and behaved exactly as designed — the whole
+design reached the spec, `subject_positions` were applied and the unmatched one recorded, and a real
+`ESCALATE` closed the gate on a shot for the first time — but the prompt-compiler Skill's package was
+discarded by `verify_compiled_package` with `dominant_action_missing`: the shot's Chinese action line did
+not appear as an exact casefolded substring of the model's prose, so the deterministic package stood in and
+the adapter delivered the canonical rendering. The delivery path is correct and unexercised: it carries only
+a package that survives re-verification. The check predates this branch (`1494e72`/#64) and exists so the
+compiler cannot drop or reword the action; whether a whole sentence is the right unit for that test, or
+whether it should compare normalised content, is a contract decision left open here.
+Tests: `tests/test_skill_quality_gates.py` (18). Entry point: `docs/SKILL_RUNTIME.md` §10; record `docs/SESSION_HANDOVER_2026-09-09.md`. | `core/adapters/video_adapter_core/{base,adapters}.py`, `core/video-prompt/video_prompt_core/compiler.py`, `core/continuity/continuity_core/review.py`, `core/production/director_production/{cinematography,stages}.py`, `core/skills/skill_core/{__init__,compiler}.py`, `packages/contracts/platform_contracts/{shot,cinematography,__init__}.py`, `services/production-engine/production_engine/runtime.py`, `apps/api/video_platform_api/{container,main,skill_routes}.py`, `skills/{prompt-compiler,continuity,cinematography}/SKILL.md` |
 
 ## 3. Incomplete work
 

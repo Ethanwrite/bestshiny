@@ -91,7 +91,7 @@ worktree's `video_prompt_core`).
 | `pytest -q tests/test_skill_quality_gates.py` | 18 passed |
 | targeted suites (`test_skill_runtime`, `test_video_adapters`, `test_cinematography_contract`, `test_compiler_first_shot_subjects`, `test_video_prompt_compiler`, `test_installed_skills`, `test_visual_runtime`, `test_provider_payload_contracts`, `test_project_style_lock`, `test_pipeline_semantic_consistency`, `test_director_shot_intent`, `test_screenplay_invariants`, `test_director_api`, `test_episode_continuation`, `test_dependency_context_pipeline`, `test_audit_p1_p2_fixes`, `test_creative_director`, `test_creative_visual_retry`, `test_director_canonical_assets`, `test_compile_refusal_ordering`, `test_bible_lock_resume`) | 296 passed, 1 skipped |
 | `pytest -q` (SQLite half, whole tree, detached) | 1840 passed, 20 skipped, exit 0 (10m35s), rerun after the review fixes |
-| `pytest -q --database=postgres` (whole tree, detached) | 1850 passed, 7 skipped, exit 0 (21m37s) before the review fixes; rerunning on the final tree |
+| `pytest -q --database=postgres` (whole tree, detached) | 1853 passed, 7 skipped, exit 0 (23m41s), rerun on the final tree |
 
 ## 4a. The adversarial review of the fixes
 

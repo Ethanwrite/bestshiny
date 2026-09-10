@@ -262,6 +262,26 @@ def test_prompt_lines_deliver_the_package_with_the_guards_the_package_does_not_c
         "a second action, an unintended cut, identity drift, visual style drift, palette drift, "
         "altered canonical product, extra subjects, duplicate limbs, extra cuts"
     )
+    # A Skill that writes its negative prompt as a sentence is joined cleanly:
+    # the real production package ended "…inconsistent night rooftop setting."
+    sentence = package.model_copy(
+        update={"negative_prompt": "Identity drift for 雨桐, unintended hard cuts."}
+    )
+    joined = negative_prompt(sentence)
+    assert ".," not in joined and "., " not in joined
+    assert joined.startswith("Identity drift for 雨桐, unintended hard cuts, visual style drift")
+    for terminal in ("识别漂移。", "identity drift;", "identity drift ，"):
+        assert ", ," not in negative_prompt(package.model_copy(update={"negative_prompt": terminal}))
+    # Nothing to append: the Skill's own text, punctuation and all, goes out untouched.
+    complete = package.model_copy(
+        update={
+            "negative_prompt": (
+                "identity drift, visual style drift, palette drift, altered canonical product, "
+                "extra subjects, duplicate limbs, extra cuts."
+            )
+        }
+    )
+    assert negative_prompt(complete) == complete.negative_prompt
     # No package, or a refusal: the canonical rendering and the baseline guards.
     assert prompt_lines(spec, {}, None) == canonical_lines(spec, {})
     refusal = PromptCompilerOutput(status="NOT_COMPILABLE", review_reason="no")

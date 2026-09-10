@@ -189,10 +189,18 @@ def negative_prompt(package: PromptCompilerOutput | None, spec: CanonicalShotSpe
     required = [*BASELINE_NEGATIVE_TERMS, *(forbidden_terms(spec) if spec is not None else [])]
     if package is None or package.status != "COMPILED" or not (package.negative_prompt or "").strip():
         return ", ".join(dict.fromkeys(required))
-    own = (package.negative_prompt or "").strip().rstrip(",")
+    own = (package.negative_prompt or "").strip()
     folded = own.casefold()
     extra = [term for term in dict.fromkeys(required) if term.casefold() not in folded]
-    return ", ".join([own, *extra]) if extra else own
+    if not extra:
+        # The Skill named everything required; its own text goes out untouched.
+        return own
+    # A Skill writes the negative prompt as a sentence about as often as a
+    # list, and joining "…inconsistent night rooftop setting." to a
+    # comma-separated tail reads as a typo in every record that quotes it.
+    # Terminal punctuation is dropped only when something is actually being
+    # appended, in both the Latin and the CJK forms a model may end on.
+    return ", ".join([own.rstrip(" ,.;:、，。；："), *extra])
 
 
 def common_payload(spec: CanonicalShotSpec, context: dict[str, Any]) -> dict[str, Any]:

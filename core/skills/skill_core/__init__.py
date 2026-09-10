@@ -1,4 +1,4 @@
-from .compiler import PromptCompilerResult, PromptCompilerService
+from .compiler import ContinuityApprovalRequired, PromptCompilerResult, PromptCompilerService
 from .registry import REQUIRED_SECTIONS, SkillDefinition, SkillRegistry, SkillRegistryError
 from .runtime import (
     CALL_SITES,
@@ -22,6 +22,7 @@ __all__ = [
     "REQUIRED_SECTIONS",
     "AuthorityViolation",
     "CallSite",
+    "ContinuityApprovalRequired",
     "LoadedSkill",
     "PromptCompilerResult",
     "PromptCompilerService",

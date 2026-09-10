@@ -6,8 +6,9 @@ from .base import (
     AdapterInput,
     ModelGenerationRequest,
     VideoModelAdapter,
-    canonical_lines,
     common_payload,
+    negative_prompt,
+    prompt_lines,
 )
 
 
@@ -17,8 +18,10 @@ def _result(
     model: str,
     prompt: str,
     payload: dict[str, Any],
-    context: dict[str, Any],
+    value: AdapterInput,
 ) -> ModelGenerationRequest:
+    context = value.context
+    package = value.skill_package
     assets = [
         *context.get("canonical_asset_ids", []),
         *context.get("reference_images", []),
@@ -27,17 +30,21 @@ def _result(
         provider=provider,
         model=model,
         prompt=prompt,
-        negative_prompt=(
-            "identity drift, visual style drift, palette drift, altered canonical product, "
-            "extra subjects, duplicate limbs, extra cuts"
-        ),
+        # The Skill's negative prompt when it compiled the shot, with the
+        # baseline guards and the shot's own prohibitions it left out; those
+        # alone otherwise.
+        negative_prompt=negative_prompt(package, value.shot),
         payload=payload,
         asset_bindings=list(dict.fromkeys(asset for asset in assets if asset)),
-        continuity_assertions=[
-            "canonical identity and product invariants remain unchanged",
-            "the end composition equals the approved end state",
-            "screen direction and eyelines remain as specified",
-        ],
+        continuity_assertions=(
+            list(package.continuity_assertions)
+            if package is not None and package.continuity_assertions
+            else [
+                "canonical identity and product invariants remain unchanged",
+                "the end composition equals the approved end state",
+                "screen direction and eyelines remain as specified",
+            ]
+        ),
     )
 
 
@@ -47,7 +54,7 @@ class KlingAdapter(VideoModelAdapter):
     def compile(self, model: str, value: AdapterInput) -> ModelGenerationRequest:
         prompt = "\n".join(
             [
-                *canonical_lines(value.shot, value.context),
+                *prompt_lines(value.shot, value.context, value.skill_package),
                 "Execute continuous physical motion with precise first/last-frame control.",
             ]
         )
@@ -63,7 +70,7 @@ class KlingAdapter(VideoModelAdapter):
             "generate_audio": bool(common["audio"]),
             "style_control": common["style_control"],
         }
-        return _result(provider="kling", model=model, prompt=prompt, payload=payload, context=value.context)
+        return _result(provider="kling", model=model, prompt=prompt, payload=payload, value=value)
 
 
 class VeoAdapter(VideoModelAdapter):
@@ -72,7 +79,7 @@ class VeoAdapter(VideoModelAdapter):
     def compile(self, model: str, value: AdapterInput) -> ModelGenerationRequest:
         prompt = "\n".join(
             [
-                *canonical_lines(value.shot, value.context),
+                *prompt_lines(value.shot, value.context, value.skill_package),
                 "Use concise spatial language and one continuous physically plausible trajectory.",
             ]
         )
@@ -89,7 +96,7 @@ class VeoAdapter(VideoModelAdapter):
             "style_control": common["style_control"],
         }
         provider = "google_flow" if model.startswith("flow-") else "veo_official"
-        return _result(provider=provider, model=model, prompt=prompt, payload=payload, context=value.context)
+        return _result(provider=provider, model=model, prompt=prompt, payload=payload, value=value)
 
 
 class SeedanceAdapter(VideoModelAdapter):
@@ -98,7 +105,7 @@ class SeedanceAdapter(VideoModelAdapter):
     def compile(self, model: str, value: AdapterInput) -> ModelGenerationRequest:
         prompt = "\n".join(
             [
-                *canonical_lines(value.shot, value.context),
+                *prompt_lines(value.shot, value.context, value.skill_package),
                 "Preserve complex blocking as ordered temporal beats; never merge another story action.",
             ]
         )
@@ -115,7 +122,7 @@ class SeedanceAdapter(VideoModelAdapter):
             "style_control": common["style_control"],
         }
         return _result(
-            provider="seedance", model=model, prompt=prompt, payload=payload, context=value.context
+            provider="seedance", model=model, prompt=prompt, payload=payload, value=value
         )
 
 
@@ -131,7 +138,7 @@ class GrokAdapter(VideoModelAdapter):
                 "Never acknowledge or look into the camera; preserve the approved body orientation.",
             ]
         )
-        prompt = "\n".join([*canonical_lines(value.shot, value.context), *gaze_constraints])
+        prompt = "\n".join([*prompt_lines(value.shot, value.context, value.skill_package), *gaze_constraints])
         common = common_payload(value.shot, value.context)
         payload = {
             "prompt": prompt,
@@ -142,7 +149,7 @@ class GrokAdapter(VideoModelAdapter):
             "audio": common["audio"],
             "style_control": common["style_control"],
         }
-        return _result(provider="grok", model=model, prompt=prompt, payload=payload, context=value.context)
+        return _result(provider="grok", model=model, prompt=prompt, payload=payload, value=value)
 
 
 class WanAdapter(VideoModelAdapter):
@@ -151,7 +158,7 @@ class WanAdapter(VideoModelAdapter):
     def compile(self, model: str, value: AdapterInput) -> ModelGenerationRequest:
         prompt = "\n".join(
             [
-                *canonical_lines(value.shot, value.context),
+                *prompt_lines(value.shot, value.context, value.skill_package),
                 "Keep long-form temporal state explicit and preserve all multimodal references.",
             ]
         )
@@ -184,4 +191,4 @@ class WanAdapter(VideoModelAdapter):
             "reference_voice": value.context.get("reference_voice"),
             "style_control": common["style_control"],
         }
-        return _result(provider="wan", model=model, prompt=prompt, payload=payload, context=value.context)
+        return _result(provider="wan", model=model, prompt=prompt, payload=payload, value=value)

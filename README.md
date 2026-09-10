@@ -14,6 +14,12 @@ Before taking over development, read [the documentation index](docs/README.md)ใ€
 > 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
 > callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 >
+> **2026-09-09:** no migration. What a Skill decides now reaches the output: the prompt-compiler
+> Skill's package is the body of the provider request, a Skill-driven continuity `ESCALATE` blocks the shot
+> until a real user acknowledges it, unresolved or hedged photography and a plan's own `unresolved` entries
+> are refused on every path, the whole cinematography plan reaches the shot spec, and a package from an
+> earlier Skill version is never reused. Entry point: [docs/SKILL_RUNTIME.md](docs/SKILL_RUNTIME.md) ยง10.
+>
 > **2026-09-08:** migration head `0082_shot_cinematography_plan`. The Skill runtime
 > (`core/skills/skill_core/runtime.py`) is the only path by which a Skill body reaches a model: five
 > Skills are runtime-bound and injected alone under their own model role (director, short-drama as

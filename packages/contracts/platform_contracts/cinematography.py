@@ -111,6 +111,9 @@ class CinematographyPlan(BaseModel):
             "path": self.camera.path,
             "focus": self.camera.focus,
             "screen_axis": self.camera.screen_axis,
+            "height": self.camera.height,
+            "lens_intent": self.camera.lens_intent,
+            "depth_of_field": self.camera.depth_of_field,
         }
 
     def lighting_values(self) -> dict[str, Any]:
@@ -120,6 +123,8 @@ class CinematographyPlan(BaseModel):
             "contrast": self.lighting.contrast,
             "color_temperature": self.lighting.color_temperature,
             "practicals": list(self.lighting.practicals),
+            "motivation": self.lighting.motivation,
+            "exposure_intent": self.lighting.exposure_intent,
         }
 
 

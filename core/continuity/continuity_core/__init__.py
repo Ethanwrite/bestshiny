@@ -6,11 +6,20 @@ from .frame_anchor import (
     FrameAnchorPlanUnresolved,
     FrameAnchorStrategy,
 )
-from .review import CONTINUITY_PROTOCOL, ContinuityReviewer, deterministic_review, validate_review
+from .review import (
+    ACKNOWLEDGEMENT_DECISION_TYPE,
+    CONTINUITY_PROTOCOL,
+    ContinuityAcknowledgementConflict,
+    ContinuityReviewer,
+    deterministic_review,
+    validate_review,
+)
 
 __all__ = [
+    "ACKNOWLEDGEMENT_DECISION_TYPE",
     "CONTINUITY_PROTOCOL",
     "AnchorSubject",
+    "ContinuityAcknowledgementConflict",
     "ContinuityReviewer",
     "deterministic_review",
     "validate_review",

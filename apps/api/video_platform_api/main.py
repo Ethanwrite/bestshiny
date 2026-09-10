@@ -149,6 +149,7 @@ from provider_sdk import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 from qa_core import HumanReviewNotAllowed
+from skill_core import ContinuityApprovalRequired
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -1070,6 +1071,21 @@ def create_app(container: Container | None = None) -> FastAPI:
                 raise HTTPException(422, "state delta characters must be included in character_ids")
             if delta_character_ids and principal.development_bypass:
                 raise HTTPException(403, "角色状态变更需要真实登录用户确认来源")
+        # The Continuity Skill's standing verdict on this shot's handoff. A
+        # stale escalation is reviewed again first (the previous shot's end
+        # frame may have been registered since); one that still stands
+        # refuses the request here, before anything is planned, compiled or
+        # reserved - the compile inside the candidate path is the backstop.
+        try:
+            pending = (
+                await container.continuity_reviewer.ensure_reviewed(shot_id)
+                if container.settings.feature_skill_stages_at_approval
+                else await run_in_threadpool(container.continuity_reviewer.pending_escalation, shot_id)
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if pending is not None:
+            raise HTTPException(409, ContinuityApprovalRequired(shot_id, pending).as_detail())
         try:
             bindings = [
                 container.characters.binding(
@@ -1130,6 +1146,8 @@ def create_app(container: Container | None = None) -> FastAPI:
             raise HTTPException(403, str(exc)) from exc
         except WorkspaceCreditConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        except ContinuityApprovalRequired as exc:
+            raise HTTPException(409, exc.as_detail()) from exc
         except (CharacterStateConflict, CharacterStatePolicyViolation, ValueError) as exc:
             raise HTTPException(409, str(exc)) from exc
 

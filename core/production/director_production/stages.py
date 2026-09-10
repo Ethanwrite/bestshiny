@@ -77,6 +77,11 @@ class VisualStageRunner:
             "cinematography": [],
             "continuity": [],
             "prompt_compilation": [],
+            # Handoffs the Continuity Skill escalated: their shots are not
+            # compiled below (the compiler records the refusal) and cannot be
+            # generated until a human acknowledges the decision or a re-run
+            # of the review clears it.
+            "approval_required": [],
             "errors": [],
         }
         if not self.enabled:
@@ -106,10 +111,20 @@ class VisualStageRunner:
                         "to_shot_id": shot_id,
                         "from_shot_id": reviewed.get("from_shot_id"),
                         "verdict": (reviewed.get("review") or {}).get("verdict"),
+                        "approval_required": bool(reviewed.get("approval_required")),
                         "skill_driven": bool(reviewed.get("skill_driven")),
                         "execution_mode": reviewed.get("execution_mode"),
+                        "decision_record_id": reviewed.get("decision_record_id"),
                     }
                 )
+                if reviewed.get("approval_required") and reviewed.get("skill_driven"):
+                    report["approval_required"].append(
+                        {
+                            "shot_id": shot_id,
+                            "from_shot_id": reviewed.get("from_shot_id"),
+                            "decision_id": reviewed.get("decision_record_id"),
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("continuity review failed for %s: %s", shot_id, exc, exc_info=True)
                 report["errors"].append({"stage": "continuity", "shot_id": shot_id, "error": str(exc)[:300]})

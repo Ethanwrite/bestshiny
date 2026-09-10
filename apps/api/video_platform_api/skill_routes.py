@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from continuity_core import ContinuityAcknowledgementConflict
 from fastapi import Depends, FastAPI, HTTPException
 from production_domain.models import Episode, Scene, Shot
 from pydantic import BaseModel, Field
+from skill_core import ContinuityApprovalRequired
 
 from .auth import AuthPrincipal, AuthService
 from .container import Container
@@ -20,6 +22,14 @@ from .container import Container
 
 class StageRun(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
+
+
+class ContinuityAcknowledge(BaseModel):
+    project_id: str = Field(min_length=1, max_length=36)
+    #: The CONTINUITY_REVIEW decision being approved: the one standing on the
+    #: shot, named so the approval is of that verdict and no other.
+    decision_id: str = Field(min_length=1, max_length=36)
+    note: str = Field(default="", max_length=600)
 
 
 def register_skill_routes(app: FastAPI, container: Container, auth: AuthService) -> None:
@@ -88,6 +98,46 @@ def register_skill_routes(app: FastAPI, container: Container, auth: AuthService)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 
+    @app.get("/v1/shots/{shot_id}/continuity/review")
+    def get_shot_continuity_review(
+        shot_id: str,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ) -> dict[str, Any]:
+        """The latest review, the escalation the shot is blocked on (if any), and its acknowledgements."""
+
+        project_id, _episode = _shot_project(shot_id)
+        auth.require_project(principal, project_id)
+        return container.continuity_reviewer.gate_view(shot_id)
+
+    @app.post("/v1/shots/{shot_id}/continuity/review/acknowledge")
+    def acknowledge_shot_continuity(
+        shot_id: str,
+        body: ContinuityAcknowledge,
+        principal: AuthPrincipal = Depends(auth.current_user),
+    ) -> dict[str, Any]:
+        """A human approves the handoff the Continuity Skill escalated.
+
+        The approval is traceable to a real user: the development bypass may
+        not release a Skill's escalation, as it may not confirm a character
+        state change.
+        """
+
+        _require_shot(shot_id, body.project_id, principal)
+        if principal.development_bypass:
+            raise HTTPException(403, "连续性升级的确认必须由真实登录用户完成")
+        try:
+            return container.continuity_reviewer.acknowledge(
+                shot_id,
+                decision_id=body.decision_id,
+                actor=principal.user_id or "unknown",
+                actor_user_id=principal.user_id,
+                note=body.note,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ContinuityAcknowledgementConflict as exc:
+            raise HTTPException(409, exc.as_detail()) from exc
+
     @app.post("/v1/shots/{shot_id}/prompt/compile")
     async def compile_shot_prompt(
         shot_id: str,
@@ -99,6 +149,8 @@ def register_skill_routes(app: FastAPI, container: Container, auth: AuthService)
             result = await container.prompts.compile_shot_with_skill(shot_id)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except ContinuityApprovalRequired as exc:
+            raise HTTPException(409, exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {

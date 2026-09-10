@@ -55,6 +55,14 @@ output fails re-verification, the deterministic package stands in and the compil
 fell back. Model Router chooses which model renders the work; the Adapter maps the package onto that model's
 API. Neither decision may be anticipated here, and no Provider or model name belongs anywhere in the output.
 
+The package is what the Provider receives. When this Skill compiled the shot, the Adapter delivers
+`positive_prompt` as the body of its request and appends only its model-specific lines, the locked style
+when the project has one, any `continuity_assertions` entry not already restated in the prose, and the
+bounded production context; `negative_prompt` is delivered with the platform's baseline guards it does not
+name. A package is reused while the envelope hash *and* this Skill's content hash are unchanged; a package
+from an earlier version of this Skill is compiled again. A handoff the Continuity Skill escalated is not
+compiled at all until a real user acknowledges the decision or a later Continuity review clears it.
+
 ## Inputs
 
 The `PromptCompilerInput` envelope. Three top-level keys; the envelope is not the specification, and its keys
@@ -72,9 +80,14 @@ through which continuity claims may enter the output.
 
 Inside `shot_spec`, the fields that carry rendered meaning are `intent`, `dominant_action`, `subjects` (each
 with `screen_position`, `body_orientation`, `eyeline_target`, `pose`, `identity_constraints`), `props`,
-`start_state`, `blocking`, `camera` (with `position`, `angle`, `framing`, `dominant_movement`, `speed`,
-`path`, `focus`, `screen_axis`), `lighting`, `dialogue`, `end_state`, `continuity`, `style_lock`,
-`constraints`, `allow_camera_gaze`, `duration`, `aspect_ratio` and `resolution`.
+`start_state`, `blocking`, `camera` (with `position`, `angle`, `height`, `framing`, `dominant_movement`,
+`speed`, `path`, `focus`, `screen_axis`, `lens_intent`, `depth_of_field`), `lighting` (with `direction`,
+`quality`, `contrast`, `color_temperature`, `practicals`, `motivation`, `exposure_intent`), `atmosphere`,
+`composition` (with `start` and `end`, arrangements of the frame), `dialogue`, `end_state`, `continuity`,
+`style_lock`, `constraints`, `allow_camera_gaze`, `duration`, `aspect_ratio` and `resolution`. The
+Cinematography stage wrote `height`, `lens_intent`, `depth_of_field`, `motivation`, `exposure_intent`,
+`atmosphere`, `composition` and each subject's `screen_position` when it designed the shot; they are empty
+for a shot it did not design, and an empty field is not an unresolved one.
 
 ## Authority
 
@@ -125,10 +138,12 @@ Preflight before writing a single word; if any check fails, stop and return `NOT
 Compile `positive_prompt` in this order, so immutable facts land before motion: identity and canon first
 (named subjects with their `identity_constraints`, canonical wardrobe, products, props, the location);
 opening composition (each subject's `screen_position`, `body_orientation`, the `blocking`, every
-`eyeline_target`); one action (`dominant_action` and nothing else); one camera movement (with `speed`,
-`path`, `framing`, `angle`, `focus`, `screen_axis`); light (direction, quality, contrast, colour temperature,
-practicals); closing composition (the `end_state` as an arrangement, never as a further action); locked style
-(restate `style_lock` verbatim). No adjective soup: "cinematic", "masterpiece", "8K" describe nothing.
+`eyeline_target`, and `composition.start` when the Cinematography stage wrote one); one action
+(`dominant_action` and nothing else); one camera movement (with `speed`, `path`, `framing`, `angle`,
+`height`, `lens_intent`, `depth_of_field`, `focus`, `screen_axis`); light (direction, quality, contrast,
+colour temperature, practicals, `motivation`, `exposure_intent`) and `atmosphere`; closing composition (the
+`end_state` as an arrangement, never as a further action, with `composition.end` when there is one); locked
+style (restate `style_lock` verbatim). No adjective soup: "cinematic", "masterpiece", "8K" describe nothing.
 
 Compile `negative_prompt` from what this specification actually risks: identity drift, style or palette
 drift, altered canonical products or wardrobe, extra or duplicated subjects, duplicated limbs, a second
@@ -176,5 +191,10 @@ key leaked into the prose - and falls back to the deterministic package when any
 ## Unresolved Policy
 
 An unresolved creative field is never resolved here. A specification with an unresolved eyeline, state,
-action, asset or claim is `NOT_COMPILABLE` with the field named; a wording choice inside the compiler's own
-authority (how to order two clauses, how to phrase an assertion) is decided and traceable to its field.
+action, asset or claim is `NOT_COMPILABLE` with the field named; so is one whose photographic field carries
+a marker (`TBD`, `unresolved`, `待定`) or a hedge (`provisional`, `tentative`, `暂定`), and one whose
+`constraints` carry an `unresolved: cinematography[n]:` entry - a decision the Cinematography stage left
+open, reported as `cinematography.unresolved[n]`. The runtime's own preflight refuses all of these before
+any model call, on every path, so the deterministic package can never complete what a stage left open. A
+wording choice inside the compiler's own authority (how to order two clauses, how to phrase an assertion) is
+decided and traceable to its field.

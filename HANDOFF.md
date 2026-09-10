@@ -35,6 +35,10 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > the shot spec and every prompt surface; package freshness keys on the producing Skill's content hash. Every
 > stored Skill package goes stale once at deploy (one paid compile per shot at its next generate). Entry point
 > `docs/SKILL_RUNTIME.md` §10; record `docs/OPEN_ISSUES.md` §2.53 and `docs/SESSION_HANDOVER_2026-09-09.md`.
+> **Merged as `5c89736` (#66) and deployed to production 2026-09-10 ≈12:48Z**, no migration (alembic stays
+> `0082`), `DEPLOYED_SHA.prev = 4cf175b`; gated on both engines on the exact tree that shipped (SQLite 1840,
+> PostgreSQL 1853, both exit 0). Record in `docs/DEPLOYMENT.md` §6 — including that `up -d` left the `web`
+> container on its previous image and needed an explicit `--force-recreate`.
 >
 > **2026-09-08 · branch `claude/bestshiny-skill-runtime-audit-533387` — the Skill runtime.**
 > Alembic head moves to `0082_shot_cinematography_plan` (`shots.cinematography_json`;

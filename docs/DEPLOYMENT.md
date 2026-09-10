@@ -176,7 +176,69 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `74beba5` (`main`, the squash of
+- **Current release.** `5c89736` (`main`, the squash of
+  [#66](https://github.com/Ethanwrite/bestshiny/pull/66) — the Skill runtime's decisions reach the output:
+  the prompt-compiler Skill's package is the body every adapter delivers (`AdapterInput.package`, with the
+  locked style, the unrestated continuity assertions and constraints and the bounded context after it, and
+  the shot's prohibitions merged into the negative prompt); a Skill-driven continuity `ESCALATE` blocks the
+  shot's compilation and generation until a real user acknowledges it
+  (`POST /v1/shots/{id}/continuity/review/acknowledge`, `GET …/continuity/review`, 409
+  `CONTINUITY_APPROVAL_REQUIRED`), while deterministic reviews stay advisory; the compiler's preflight
+  refuses markers and hedges in every photographic field and the cinematography plan's own `unresolved`
+  entries; the whole cinematography design reaches the shot spec and every prompt surface; package freshness
+  keys on the producing Skill's content hash; entry point `docs/SKILL_RUNTIME.md` §10, ledger
+  `docs/OPEN_ISSUES.md` §2.53), merged 2026-09-10 ≈12:44Z and deployed ≈12:48Z on the operator's "merge the
+  PR and deploy once postgres is green". `DEPLOYED_SHA.prev = 4cf175b`. **No migration** (`alembic current`
+  stayed `0082_shot_cinematography_plan (head)`), no `.env` change, `COMPOSE_UNCHANGED` (byte-equal to
+  `docker-compose.prod.yml.bak-20260910-124704`, taken before extraction). Gated before the merge on both
+  engines on the exact tree that shipped — the squash commit's tree hash equals the gated branch tip's
+  (`ab04eff9…`): SQLite 1840 passed / 20 skipped, PostgreSQL 1853 passed / 7 skipped, both exit 0, ruff and
+  mypy clean, `review_skill_contract.py` 3 × PASS, plus a five-reviewer adversarial review of the diff whose
+  three confirmed findings and ten corrections are in the branch. Delta against the running `4cf175b`: 29
+  files, no `migrations/`, no `apps/web/`, `REQUIRED_SCHEMA_REVISION` unchanged; the archive's SHA-256
+  (`7bbab0dc…`) was compared on both ends before extraction (`deploy-5c89736.log`, `DEPLOY_EXIT=0`, about
+  two minutes).
+
+  Verified after (`verify_remote_66.sh` on the host): markers written (`5c89736`, `.prev` =
+  `4cf175ba1d45…`), api healthy on the first check, `RestartCount=0` on all three, local 8080/3000 200 and
+  public `https://api.bestshiny.com/health`, `https://bestshiny.com/app`,
+  `https://bestshiny.com/api/health` all 200. Inside the running api image the release's own behaviour was
+  exercised, not merely imported: `AdapterInput.package` exists, `prompt_lines` returns the package as the
+  body, a `must not show or do:` constraint is delivered and merged into the negative prompt beside the
+  baseline guards, `ContinuityReviewer` carries `pending_escalation` / `ensure_reviewed` / `acknowledge` /
+  `gate_view` with `CONTINUITY_ESCALATION_ACKNOWLEDGED` and `CONTINUITY_APPROVAL_REQUIRED`, `_preflight`
+  refuses `['atmosphere', 'camera.framing']` on a TBD / "provisional" spec, the camera design fields and
+  `atmosphere` / `composition` are on the spec, freshness compares the producing hash, and both new routes
+  are registered. `SkillRuntime.validate()` empty, five Skills integrated, and the three edited bodies are
+  the ones running (`prompt-compiler sha256:eab237b8a3c8feab`, `continuity sha256:28480306a9819c03`,
+  `cinematography sha256:f04d93bb07befd85`). Zero tracebacks in api or worker. Data untouched (5 projects,
+  29 generation jobs, 23 prompt compilations, 194 decision records, 16 media assets). Disk 13% used.
+
+  **The web container needed an explicit recreate.** `up -d` rebuilt all three images and recreated api and
+  worker, but left `web` on the previous image (`188db9723ef9`) while the `bestshiny-web:latest` tag had
+  moved to the freshly built `2aac31a24f13` — so "what runs" briefly disagreed with "what was deployed".
+  This release touches no `apps/web/` file and no web build input, so the new image differs only because the
+  build context (the whole repository) is part of a `COPY` layer; a
+  `docker compose -f docker-compose.prod.yml up -d --force-recreate web` settled it, and the served bundle
+  is byte-identical before and after (`/assets/index-B0M_LxJ6.js`, the same hash as `1494e72` and
+  `74beba5`). Worth checking on every deploy: compare each running image ID against its freshly built one
+  rather than trusting `up -d` to have recreated everything.
+
+  **Known effect worth watching:** every prompt-compiler package recorded before this release is stale at
+  once — the new spec fields (`camera.height` / `lens_intent` / `depth_of_field`, `lighting.motivation` /
+  `exposure_intent`, `atmosphere`, `composition`) change every envelope hash, and the three edited Skill
+  bodies change their content hashes. Under `FEATURE_SKILL_STAGES_AT_APPROVAL` (unset, so the code default
+  *on* applies) a shot's next generate pays one prompt-compiler call; a synchronous compile before that is
+  the deterministic package on record (`NO_FRESH_SKILL_COMPILATION`, plus `SKILL_VERSION_CHANGED:<old>`);
+  and a same-key generate straddling the deploy is a 409 rather than a replay, because
+  `metadata.canonical_shot_spec` is inside the gateway's idempotency hash. The cinematography reuse key
+  moved with it (the stage's own `shot_type` write-back left the key), so the first re-run of that stage per
+  shot re-designs rather than reusing. A shot whose previous shot has no registered `END_FRAME` will now meet
+  the continuity gate as a 409 naming the decision, where before the same verdict was only recorded.
+  Rolling back to `4cf175b` needs no downgrade (same schema); prefer the `bak-20260910-124704` compose copy
+  and the pre-extraction database backup.
+
+- **Previous release.** `74beba5` (`main`, the squash of
   [#65](https://github.com/Ethanwrite/bestshiny/pull/65) — the Skill contracts tolerate live replies:
   a Shot Planner micro-action outside the closed vocabulary, a malformed `micro_actions` field or a
   fifth canonical key is dropped and recorded (`SHOT_PLANNER:MICRO_ACTION_DROPPED:<value>`) instead of

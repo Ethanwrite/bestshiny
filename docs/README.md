@@ -3,8 +3,11 @@
 > **2026-09-09:** production is `74beba5` (`main`, PR #65 — the Skill contracts tolerate live replies,
 > on PR #64 — the Skill runtime), alembic `0082`;
 > [SKILL_RUNTIME.md](SKILL_RUNTIME.md) is the entry point for how a Skill reaches a model (five bound,
-> seven reference), [SESSION_HANDOVER_2026-09-08.md](SESSION_HANDOVER_2026-09-08.md) records the
-> session and its gates, and [DEPLOYMENT.md](DEPLOYMENT.md) §6 the release.
+> seven reference) and, in its §10, for the content-quality acceptance fixes of 2026-09-09 (branch
+> `claude/skill-optimization-quality-dd745b`, no migration) recorded in
+> [SESSION_HANDOVER_2026-09-09.md](SESSION_HANDOVER_2026-09-09.md);
+> [SESSION_HANDOVER_2026-09-08.md](SESSION_HANDOVER_2026-09-08.md) records the runtime session and its
+> gates, and [DEPLOYMENT.md](DEPLOYMENT.md) §6 the release.
 
 Snapshot: 2026-08-30 · `main` `7e80d5a` · deployed and in sync at `153.75.95.10`
 Current migration head is **`0062_canonical_list_pricing`**; 21 of 24 models are

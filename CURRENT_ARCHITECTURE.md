@@ -11,6 +11,22 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-09-09 update — what a Skill decides reaches the output.** No migration. The dependency, series and
+> obligation facts still live inside `CanonicalShotSpec.continuity["facts"]`, which the deterministic path
+> serialises as each adapter's `Continuity:` line; on the Skill path they reach the provider through the
+> package's re-verified `continuity_assertions` (one per fact, appended when the Skill's prose did not
+> already restate them), and the shot's own constraints and prohibitions are appended and merged into the
+> negative prompt so no client instruction is lost by a change of compiler. The prompt-compiler
+> Skill's package is the body of the provider request (`AdapterInput.package`; every adapter appends only
+> its model-specific lines; `GenerationRequest.metadata.prompt_delivery` names the source and
+> `prompt_package` follows a retry); a Skill-driven continuity `ESCALATE` gates the shot's compilation and
+> generation until a real user acknowledges it (`CONTINUITY_ESCALATION_ACKNOWLEDGED`; deterministic reviews
+> are advisory); the compiler's preflight refuses markers and hedges in every photographic field and a Skill
+> plan's own `unresolved` entries on every path; the whole cinematography plan (height, lens intent, depth of
+> field, motivation, exposure intent, subject placement, atmosphere, compositions) reaches the
+> `CanonicalShotSpec` and every prompt surface; package freshness keys on the envelope hash *and* the
+> producing Skill's content hash. Entry point `docs/SKILL_RUNTIME.md` §10; record `docs/OPEN_ISSUES.md` §2.53.
+
 > **2026-09-08 update — the Skill runtime: registered is not invoked.** Migration head is now
 > `0082_shot_cinematography_plan` (`shots.cinematography_json`). Every Skill call goes through
 > `skill_core.runtime.SkillRuntime`, which resolves one operation to one Skill from the frontmatter's
@@ -202,12 +218,18 @@ the `prompt-compiler` Skill through `SkillRuntime` under `PROMPT_COMPILER`, afte
 (two sequenced actions, two camera movements, any unresolved value → `NOT_COMPILABLE` before a model is
 called) and before a re-verification of the package (asset echo, one assertion per fact, the action, subjects,
 line, claims and copy verbatim, no provider or model name, no vendor syntax, no envelope key). The synchronous
-generation path (`compile()`) reuses that package while the envelope hash is unchanged and compiles
-deterministically otherwise, with the invocation recorded either way; a fresh Skill verdict of
-`NOT_COMPILABLE` is honoured. The deterministic fallback is retained by the 2026-09-08 instruction and is
-never labelled Skill-driven (`prompt_compilations.diff_json.execution_mode`, `skill_driven`,
-`skill_invocation`). `scripts/review_skill_contract.py` checks every Skill's ten sections and its binding;
-`tests/test_installed_skills.py` and `tests/test_skill_runtime.py` keep the registry and the runtime green.
+generation path (`compile()`) reuses that package while the envelope hash and the producing Skill's content
+hash are unchanged and compiles deterministically otherwise (`NO_FRESH_SKILL_COMPILATION`,
+`SKILL_VERSION_CHANGED:<old>`), with the invocation recorded either way; a Skill verdict of `NOT_COMPILABLE`
+for the current envelope is honoured whatever Skill is installed, until the new Skill answers. Since
+2026-09-09 the preflight covers every photographic field (markers and word-bounded hedges) and the
+cinematography plan's own `unresolved` entries, the compiler consults the continuity gate before compiling
+(`ContinuityApprovalRequired`), and a Skill-driven package is what the adapter delivers to the provider
+(`AdapterInput.package`, `metadata.prompt_delivery`). The deterministic fallback is retained by the 2026-09-08
+instruction and is never labelled Skill-driven (`prompt_compilations.diff_json.execution_mode`,
+`skill_driven`, `skill_invocation`). `scripts/review_skill_contract.py` checks every Skill's ten sections and
+its binding; `tests/test_installed_skills.py`, `tests/test_skill_runtime.py` and
+`tests/test_skill_quality_gates.py` keep the registry, the runtime and its content-quality gates green.
 
 ## The Skill runtime
 

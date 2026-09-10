@@ -11,6 +11,11 @@ from functools import partial
 from typing import Any, Literal, Protocol
 
 from platform_contracts import (
+    FORBIDDEN_PREFIX,
+    PRODUCT_CLAIM_PREFIX,
+    PROHIBITION_PREFIX,
+    REQUIRED_COPY_PREFIX,
+    UNRESOLVED_PREFIX,
     CanonicalCameraSpec,
     CanonicalLightingSpec,
     CanonicalShotSpec,
@@ -19,6 +24,7 @@ from platform_contracts import (
     PromptCompilerOutput,
     PromptContinuityContext,
     approved_aspect_ratio,
+    identity_key,
 )
 from platform_database import Database
 from production_domain.models import PromptCompilation, Shot, TimelineState
@@ -36,12 +42,17 @@ from sqlalchemy import select
 #: Constraint prefixes the compiler writes and reads back: a prohibition in
 #: the client's own words, and one thing that must not be shown or done.
 #: Prefixed so `compile_input` can lift them out of a spec's constraints into
-#: the QC checklist and the negative prompt without a second channel.
-PROHIBITION_PREFIX = "the client forbade, in their words: "
-FORBIDDEN_PREFIX = "must not show or do: "
-PRODUCT_CLAIM_PREFIX = "product claim, verbatim and unparaphrased: "
-REQUIRED_COPY_PREFIX = "required on-screen copy, exactly these words: "
-UNRESOLVED_PREFIX = "unresolved:"
+#: the QC checklist and the negative prompt without a second channel. They
+#: live with the spec contract (`platform_contracts.shot`) because the
+#: adapters read them too - a prohibition must reach the provider whichever
+#: path compiled the shot - and are re-exported here for every existing caller.
+__all_prefixes__ = (
+    PROHIBITION_PREFIX,
+    FORBIDDEN_PREFIX,
+    PRODUCT_CLAIM_PREFIX,
+    REQUIRED_COPY_PREFIX,
+    UNRESOLVED_PREFIX,
+)
 
 #: Connectors that sequence two actions in one line: the second action is a
 #: second shot, and the compiler refuses to render both in one.
@@ -54,6 +65,60 @@ _MOVEMENT_CONNECTORS = re.compile(r"(\s(?:and|then|plus)\s|\s\+\s|,\s*then|然�
 #: Values a stage may leave in a field to say it is not decided. The compiler
 #: never resolves them; it returns NOT_COMPILABLE naming the field.
 _UNRESOLVED_VALUES = frozenset({"unresolved", "tbd", "to be decided", "undecided", "?", "待定", "未定"})
+#: Hedges a stage may write *inside* a photographic value ("provisional medium
+#: shot", "焦段暂定") to say it has not decided. Word-bounded for the Latin
+#: tokens so "tentatively" in an action line is not a hit; the CJK tokens are
+#: plain substrings. Applied to photographic fields only - never to the action,
+#: the line, a pose or the director's staging, which are prose, and never to a
+#: constraint, where the `unresolved:` prefix is the marker.
+_HEDGE_TOKENS = re.compile(
+    r"\b(?:provisional|tentative|placeholder|tbc|to be confirmed|to be determined|not yet decided)\b",
+    re.IGNORECASE,
+)
+_HEDGE_TOKENS_CJK: tuple[str, ...] = ("待确认", "暂定")
+#: What a model writes in a plan's `unresolved` list to say there is nothing
+#: unresolved. Compared after casefolding and stripping punctuation.
+#: A leading "none" / "N/A" and the phrases that say the design is complete.
+#: An entry is discarded only when *nothing but* these remain: "None of the
+#: practicals have been chosen" is a real unresolved entry, and dropping it
+#: for its first word would let an undecided shot compile.
+_NO_UNRESOLVED_LEAD = re.compile(r"^(?:none|nothing|na|n a|nil|无|没有|暂无)\b\s*")
+_NO_UNRESOLVED_PHRASES = re.compile(
+    r"^(?:"
+    r"at all|here|outstanding|to report|further|"
+    r"no unresolved(?: \w+)*|nothing unresolved|not applicable|"
+    r"all (?:fields |points |items )?decided|all resolved|"
+    r"无未解决\S*|没有未解决\S*|暂无未解决\S*|全部已决定"
+    r")$"
+)
+#: The constraint a Skill-driven cinematography plan's unresolved entry becomes:
+#: "unresolved: cinematography[<i>]: <entry>". The preflight reports it under
+#: the stage's own path so the record says who left the decision open.
+CINEMATOGRAPHY_UNRESOLVED_PREFIX = f"{UNRESOLVED_PREFIX} cinematography["
+_CINEMATOGRAPHY_UNRESOLVED = re.compile(r"^unresolved:\s*cinematography\[(\d+)\]:", re.IGNORECASE)
+
+
+def _plan_unresolved_entries(plan: dict[str, Any]) -> list[tuple[int, str]]:
+    """A plan's unresolved entries that say something, each with its place in the plan.
+
+    The index is the entry's own position in ``plan["unresolved"]``, not its
+    position after filtering, so the field path the compilation record and the
+    refusal name (``cinematography.unresolved[n]``) points at the entry a
+    reader will find in the plan.
+    """
+
+    entries = plan.get("unresolved")
+    if not isinstance(entries, list):
+        return []
+    kept: list[tuple[int, str]] = []
+    for index, item in enumerate(entries):
+        text = " ".join(str(item or "").split())
+        normalized = " ".join(re.sub(r"[^\w\s]", " ", text.casefold()).split())
+        remainder = _NO_UNRESOLVED_LEAD.sub("", normalized, count=1).strip()
+        if not normalized or not remainder or _NO_UNRESOLVED_PHRASES.match(remainder):
+            continue
+        kept.append((index, text))
+    return kept
 #: Names that belong to Model Router and the adapters, never to a prompt.
 _PROVIDER_MODEL_TERMS = re.compile(
     r"\b(kling|veo|seedance|seedream|runway|grok|openrouter|doubao|qwen|gemini|sora|pika|luma|"
@@ -180,6 +245,59 @@ class ResolvedDependency(Protocol):
     def payload(self) -> dict[str, Any]: ...
 
 
+class ContinuityGateSource(Protocol):
+    """The continuity stage's standing verdict on one shot's handoff.
+
+    ``pending_escalation`` returns the Skill-driven ESCALATE the shot still
+    awaits a human decision on - the decision id, the review, whether its
+    inputs have changed since - or None when nothing blocks the shot. The
+    compiler consults it because its own pipeline position is *after*
+    Continuity approval: a package compiled around an escalated handoff is a
+    package nobody approved.
+    """
+
+    def pending_escalation(self, shot_id: str) -> dict[str, Any] | None: ...
+
+
+class ContinuityApprovalRequired(ValueError):
+    """The Continuity Skill escalated this shot's handoff and nobody has approved it.
+
+    Raised by the generation-path compile so no request can be prepared for a
+    shot whose handoff the Skill sent to the Director. Carries the decision a
+    human must acknowledge - or the review must be run again - to release it.
+    """
+
+    reason_code = "CONTINUITY_APPROVAL_REQUIRED"
+
+    def __init__(self, shot_id: str, pending: dict[str, Any]):
+        self.shot_id = shot_id
+        self.pending = dict(pending)
+        self.decision_id = str(pending.get("decision_id") or "")
+        review = pending.get("review") if isinstance(pending.get("review"), dict) else {}
+        named = [
+            str(item)
+            for item in [*(review.get("unresolved") or []), *(review.get("evidence") or [])]
+            if str(item).strip()
+        ][:3]
+        stale = " (its inputs changed since; run the review again)" if pending.get("stale") else ""
+        super().__init__(
+            "the continuity review escalated this shot's handoff and awaits approval"
+            + (": " + "; ".join(named) if named else "")
+            + f"; acknowledge decision {self.decision_id} or run the review again"
+            + stale
+        )
+
+    def as_detail(self) -> dict[str, Any]:
+        return {
+            "message": str(self),
+            "reason_code": self.reason_code,
+            "shot_id": self.shot_id,
+            **{key: value for key, value in self.pending.items() if key != "shot_id"},
+            "acknowledge": f"POST /v1/shots/{self.shot_id}/continuity/review/acknowledge",
+            "review_again": f"POST /v1/shots/{self.shot_id}/continuity/review",
+        }
+
+
 class ShotDependencySource(Protocol):
     """Explicit shot dependencies, resolved or refused — never guessed.
 
@@ -204,6 +322,9 @@ class PromptCompilerResult:
     #: record saying why.
     execution_mode: str = EXECUTION_DETERMINISTIC
     skill_invocation: dict[str, Any] = field(default_factory=dict)
+    #: The envelope hash the package was compiled for; replay-stable, unlike
+    #: the record id, so a generation request may carry it.
+    input_hash: str = ""
 
     @property
     def neutral_prompt(self) -> str:
@@ -232,6 +353,25 @@ class _Envelope:
     #: the prompt says what the frame contains, the record says where the
     #: compiler learned it.
     derived_from_output_state: dict[str, list[str]] = field(default_factory=dict)
+    #: What the envelope did with the cinematography plan beyond the camera
+    #: and light: the subject placements it applied (and the ones it kept from
+    #: an explicit approved state), the plan names it could not match, and the
+    #: unresolved entries it carried into the constraints. On the record.
+    cinematography_notes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _FreshPackage:
+    """The newest Skill-produced package for an envelope, and which Skill produced it."""
+
+    row: PromptCompilation
+    output: PromptCompilerOutput
+    producing_version: str | None
+    producing_hash: str | None
+    #: Produced by the Skill that is installed now. A package from an earlier
+    #: Skill is not fresh: reusing it would record the new version over the
+    #: old Skill's work.
+    current: bool
 
 
 class PromptCompilerService:
@@ -247,12 +387,17 @@ class PromptCompilerService:
         ledger: SeriesLedgerSource | None = None,
         dependencies: ShotDependencySource | None = None,
         runtime: SkillRuntime | None = None,
+        continuity: ContinuityGateSource | None = None,
     ):
         self.database = database
         self.skills = skills
         self.styles = styles
         self.ledger = ledger
         self.dependencies = dependencies
+        #: The continuity stage's standing verdicts. A shot whose handoff the
+        #: Continuity Skill escalated is not compiled until a human approves
+        #: it or the stage clears it; without a source nothing is gated.
+        self.continuity = continuity
         #: The Skill runtime that runs the prompt-compiler Skill on a model.
         #: Without one, every compilation is the deterministic package and the
         #: record says the stage was not configured.
@@ -771,7 +916,17 @@ class PromptCompilerService:
         plan = cinematography.get("plan") if isinstance(cinematography.get("plan"), dict) else {}
         plan_camera = dict(plan.get("camera") or {}) if isinstance(plan.get("camera"), dict) else {}
         plan_lighting = dict(plan.get("lighting") or {}) if isinstance(plan.get("lighting"), dict) else {}
+        # Only a plan the Cinematography Skill wrote carries decisions of its
+        # own beyond the camera and light: a deterministic plan is the
+        # compiler's old defaults with a fallback note, and that note is a
+        # record, not an unresolved creative field.
+        plan_skill_driven = cinematography.get("execution_mode") == EXECUTION_MODEL
+        plan_unresolved = _plan_unresolved_entries(plan) if plan_skill_driven else []
         camera_values = {**state_camera, **plan_camera, **(camera or {})}
+        # The design fields exist only where a stage designed them: a caller's
+        # explicit override counts, a Skill-driven plan counts, a deterministic
+        # fallback's contract defaults do not.
+        design_values = {**(plan_camera if plan_skill_driven else {}), **(camera or {})}
         camera_spec = CanonicalCameraSpec(
             position=str(camera_values.get("position", "approved position")),
             angle=str(camera_values.get("angle", "eye level")),
@@ -783,17 +938,103 @@ class PromptCompilerService:
             path=str(camera_values.get("path", "none")),
             focus=str(camera_values.get("focus", "primary subject")),
             screen_axis=str(camera_values.get("screen_axis") or camera_values.get("axis") or "A"),
+            # The rest of the Skill's camera design, and only the Skill's:
+            # `deterministic_plan` validates a CinematographyPlan, so a
+            # fallback plan carries the contract's own defaults ("subject eye
+            # height", "natural perspective", "moderate"). Rendering those as
+            # a design would tell the provider a stage decided something no
+            # stage decided. Empty otherwise, and printed only when set.
+            height=str(design_values.get("height") or ""),
+            lens_intent=str(design_values.get("lens_intent") or design_values.get("lens") or ""),
+            depth_of_field=str(design_values.get("depth_of_field") or design_values.get("dof") or ""),
         )
         lighting_values = {
             **(start_state.get("lighting", {}) if isinstance(start_state.get("lighting"), dict) else {}),
             **{
                 key: value
                 for key, value in plan_lighting.items()
-                if key in {"direction", "quality", "contrast", "color_temperature", "practicals"}
+                if key
+                in {
+                    "direction",
+                    "quality",
+                    "contrast",
+                    "color_temperature",
+                    "practicals",
+                    # Designed, not defaulted: a fallback plan's empty
+                    # motivation and exposure intent say nothing anyway, and a
+                    # future default would not become a decision by accident.
+                    *({"motivation", "exposure_intent"} if plan_skill_driven else set()),
+                }
             },
             **(lighting or {}),
         }
         lighting_spec = CanonicalLightingSpec.model_validate(lighting_values or {})
+        designed = plan if plan_skill_driven else {}
+        atmosphere = " ".join(str(designed.get("atmosphere") or "").split())
+        composition = {
+            key: " ".join(str(designed.get(f"{key}_composition") or "").split())
+            for key in ("start", "end")
+            if " ".join(str(designed.get(f"{key}_composition") or "").split())
+        }
+        # The Skill's subject placements (screen left / centre / right,
+        # foreground / midground / background) are its authority over where a
+        # subject sits in the frame. They fill a subject whose approved state
+        # has no explicit screen position - the narrative `position` is
+        # blocking, not framing - and never override one that has. Names are
+        # matched the way the identity lock matches them; what was applied,
+        # kept and unmatched goes on the record.
+        cinematography_notes: dict[str, Any] = {}
+        plan_positions = (
+            plan.get("subject_positions") if isinstance(plan.get("subject_positions"), dict) else {}
+        )
+        if plan_positions and subjects:
+            explicit: set[str] = set()
+            for source in (start_state.get("characters"), end_state.get("characters")):
+                if not isinstance(source, dict):
+                    continue
+                for key, state in source.items():
+                    if isinstance(state, dict) and state.get("screen_position"):
+                        explicit.update({identity_key(key), identity_key(state.get("name"))})
+            explicit.discard("")
+            binding_names = {
+                identity_key(binding.get("character_id")): identity_key(binding.get("name"))
+                for binding in character_bindings
+                if binding.get("character_id")
+            }
+            by_key: dict[str, CanonicalSubjectSpec] = {}
+            for subject in subjects:
+                for candidate in (
+                    subject.name,
+                    subject.asset_id,
+                    binding_names.get(identity_key(subject.asset_id), ""),
+                ):
+                    key = identity_key(candidate)
+                    if key:
+                        by_key.setdefault(key, subject)
+            applied: dict[str, dict[str, str]] = {}
+            kept: dict[str, dict[str, str]] = {}
+            unmatched: list[str] = []
+            for name, placement in plan_positions.items():
+                placement_text = " ".join(str(placement or "").split())
+                subject = by_key.get(identity_key(name))
+                if subject is None or not placement_text:
+                    unmatched.append(str(name))
+                    continue
+                if identity_key(subject.name) in explicit or identity_key(subject.asset_id) in explicit:
+                    kept[subject.name] = {"state": subject.screen_position, "plan": placement_text}
+                    continue
+                if subject.screen_position != placement_text:
+                    applied[subject.name] = {"from": subject.screen_position, "to": placement_text}
+                    subject.screen_position = placement_text
+            for key, value in (
+                ("subject_position_overrides", applied),
+                ("state_positions_kept", kept),
+                ("unmatched_subject_positions", unmatched),
+            ):
+                if value:
+                    cinematography_notes[key] = value
+        if plan_unresolved:
+            cinematography_notes["unresolved"] = [entry for _index, entry in plan_unresolved]
         # A speaking shot's line is in the compiled state; a line spoken during
         # an action shot rides on the director intent, because the narrative
         # compiler read the action line and the line beside it never entered
@@ -895,6 +1136,15 @@ class PromptCompilerService:
         # what is actually rendered.
         constraints.extend(f"{PROHIBITION_PREFIX}{item}" for item in director_prohibitions)
         constraints.extend(f"{FORBIDDEN_PREFIX}{item}" for item in director_prohibited_terms)
+        # A Skill-driven cinematography plan's own unresolved entries: the
+        # stage said it could not decide these, so the compiler must not
+        # render around them. They enter the envelope (the hash covers them)
+        # and the deterministic preflight refuses them, naming the stage,
+        # before any model call - the same refusal the compiler Skill gave a
+        # hedged plan in the live run, now on every path.
+        constraints.extend(
+            f"{UNRESOLVED_PREFIX} cinematography[{index}]: {entry}" for index, entry in plan_unresolved
+        )
         spec = CanonicalShotSpec(
             project_id=project_id,
             shot_id=shot_id,
@@ -967,6 +1217,8 @@ class PromptCompilerService:
             },
             style_lock=locked_style,
             constraints=list(dict.fromkeys(constraints)),
+            atmosphere=atmosphere,
+            composition=composition,
             allow_camera_gaze=allow_camera_gaze,
             generation_policy=generation_policy,
             profile=self._profile(shot_type, dialogue),
@@ -1028,6 +1280,7 @@ class PromptCompilerService:
             ).hexdigest(),
             cinematography=cinematography,
             derived_from_output_state=derived_from_output_state,
+            cinematography_notes=cinematography_notes,
         )
 
     def compile(
@@ -1059,23 +1312,43 @@ class PromptCompilerService:
             resolution=resolution,
             dependency_contexts=dependency_contexts,
         )
-        fresh = self._fresh_skill_compilation(envelope)
+        skill = self.skills.resolve("prompt-compiler")
+        # The compiler's position is after Continuity approval: a handoff the
+        # Continuity Skill escalated is not compiled around, whichever path
+        # asked, until a human approves it or the stage clears it.
+        pending = self._pending_continuity_escalation(shot_id)
+        if pending is not None:
+            raise ContinuityApprovalRequired(shot_id, pending)
+        fresh = self._fresh_skill_compilation(envelope, skill)
         if fresh is not None:
-            output = PromptCompilerOutput.model_validate(fresh.diff_json["prompt_compiler_output"])
-            if output.status != "COMPILED":
+            if fresh.output.status != "COMPILED":
+                # A Skill refusal of exactly this envelope stands whatever
+                # Skill is installed now: the refusal is about the unchanged
+                # shot, and only a newer Skill verdict for it replaces it.
                 raise ValueError(
                     "the prompt compiler Skill judged this shot not compilable: "
-                    + str(output.review_reason or "unspecified")
+                    + str(fresh.output.review_reason or "unspecified")
                 )
-            recorded = dict(fresh.diff_json.get("skill_invocation") or {})
-            return self._record(
-                envelope, output, recorded, EXECUTION_MODEL, reused_from=_original_record_id(fresh)
-            )
+            if fresh.current:
+                recorded = dict(fresh.row.diff_json.get("skill_invocation") or {})
+                return self._record(
+                    envelope,
+                    fresh.output,
+                    recorded,
+                    EXECUTION_MODEL,
+                    skill=skill,
+                    reused_from=_original_record_id(fresh.row),
+                )
         output = self.compile_input(envelope.compiler_input)
         if output.status != "COMPILED":
             raise ValueError(output.review_reason or "approved shot is not compilable")
-        fallback = self._deterministic_invocation("NO_FRESH_SKILL_COMPILATION")
-        return self._record(envelope, output, fallback.as_json(), EXECUTION_DETERMINISTIC)
+        fallback = self._deterministic_invocation(
+            "NO_FRESH_SKILL_COMPILATION",
+            extra_codes=(
+                (f"SKILL_VERSION_CHANGED:{fresh.producing_version}",) if fresh is not None else ()
+            ),
+        )
+        return self._record(envelope, output, fallback.as_json(), EXECUTION_DETERMINISTIC, skill=skill)
 
     async def compile_shot_with_skill(
         self,
@@ -1109,18 +1382,52 @@ class PromptCompilerService:
             resolution=resolution,
             dependency_contexts=dependency_contexts,
         )
+        skill = self.skills.resolve("prompt-compiler")
+        pending = self._pending_continuity_escalation(shot_id)
+        if pending is not None:
+            # Recorded, not raised: the stage runner and the compile route
+            # report a blocked shot as a verdict. No package is reused and no
+            # model is paid for a handoff nobody approved.
+            blocked = ContinuityApprovalRequired(shot_id, pending)
+            output = PromptCompilerOutput(
+                status="NOT_COMPILABLE",
+                missing_fields=["continuity.approval"],
+                review_reason=str(blocked),
+            )
+            invocation = self._deterministic_invocation(
+                blocked.reason_code, extra_codes=(f"CONTINUITY_DECISION:{blocked.decision_id}",)
+            )
+            return self._record(
+                envelope,
+                output,
+                invocation.as_json(),
+                EXECUTION_DETERMINISTIC,
+                skill=skill,
+                continuity_gate=pending,
+            )
+        superseded: str | None = None
         if reuse_fresh:
-            fresh = self._fresh_skill_compilation(envelope)
-            if fresh is not None:
-                output = PromptCompilerOutput.model_validate(fresh.diff_json["prompt_compiler_output"])
-                recorded = dict(fresh.diff_json.get("skill_invocation") or {})
+            fresh = self._fresh_skill_compilation(envelope, skill)
+            if fresh is not None and fresh.current:
+                recorded = dict(fresh.row.diff_json.get("skill_invocation") or {})
                 return self._record(
-                    envelope, output, recorded, EXECUTION_MODEL, reused_from=_original_record_id(fresh)
+                    envelope,
+                    fresh.output,
+                    recorded,
+                    EXECUTION_MODEL,
+                    skill=skill,
+                    reused_from=_original_record_id(fresh.row),
                 )
+            if fresh is not None:
+                superseded = fresh.producing_version
         output, invocation = await self.compile_input_with_skill(
             envelope.compiler_input, project_id=envelope.project_id, model_roles=model_roles
         )
-        return self._record(envelope, output, invocation.as_json(), invocation.execution_mode)
+        if superseded:
+            # The Skill changed since the last package for this envelope: this
+            # call is the new Skill's answer, and the record says why it paid.
+            invocation.reason_codes.append(f"SKILL_VERSION_CHANGED:{superseded}")
+        return self._record(envelope, output, invocation.as_json(), invocation.execution_mode, skill=skill)
 
     async def compile_input_with_skill(
         self,
@@ -1141,7 +1448,10 @@ class PromptCompilerService:
         deterministic = self.compile_input(value)
         operation = SkillOperation.PROMPT_COMPILATION
         if deterministic.status != "COMPILED":
-            invocation = self._deterministic_invocation("PREFLIGHT_NOT_COMPILABLE")
+            codes = [f"PREFLIGHT:{path}" for path in deterministic.missing_fields[:8]]
+            if any(path.startswith("cinematography.") for path in deterministic.missing_fields):
+                codes.insert(0, "CINEMATOGRAPHY_UNRESOLVED")
+            invocation = self._deterministic_invocation("PREFLIGHT_NOT_COMPILABLE", extra_codes=tuple(codes))
             return deterministic, invocation
         if self.runtime is None:
             return deterministic, self._deterministic_invocation("SKILL_RUNTIME_NOT_CONFIGURED")
@@ -1168,13 +1478,15 @@ class PromptCompilerService:
             return deterministic, invocation
         return invocation.output, invocation
 
-    def _deterministic_invocation(self, reason: str) -> SkillInvocation:
+    def _deterministic_invocation(self, reason: str, *, extra_codes: tuple[str, ...] = ()) -> SkillInvocation:
         if self.runtime is not None:
-            return self.runtime.deterministic(SkillOperation.PROMPT_COMPILATION, reason=reason)
+            invocation = self.runtime.deterministic(SkillOperation.PROMPT_COMPILATION, reason=reason)
+            invocation.reason_codes.extend(extra_codes)
+            return invocation
         invocation = SkillInvocation(
             operation=SkillOperation.PROMPT_COMPILATION.value,
             fallback_reason=reason,
-            reason_codes=[reason],
+            reason_codes=[reason, *extra_codes],
         )
         try:
             skill = self.skills.resolve("prompt-compiler")
@@ -1188,8 +1500,19 @@ class PromptCompilerService:
             invocation.resolved = True
         return invocation
 
-    def _fresh_skill_compilation(self, envelope: _Envelope) -> PromptCompilation | None:
-        """The latest Skill-produced package for exactly this envelope, if any."""
+    def _pending_continuity_escalation(self, shot_id: str) -> dict[str, Any] | None:
+        if self.continuity is None:
+            return None
+        return self.continuity.pending_escalation(shot_id)
+
+    def _fresh_skill_compilation(self, envelope: _Envelope, skill: ResolvedSkill) -> _FreshPackage | None:
+        """The newest Skill-produced package for exactly this envelope, and whether it is current.
+
+        Fresh means the same envelope hash *and* the same Skill: the producing
+        identity is the invocation the row recorded (a reuse copies it
+        verbatim, so a chain of reuses still names the Skill that wrote the
+        package), never the version installed when the row was written.
+        """
 
         with self.database.session() as session:
             rows = list(
@@ -1207,8 +1530,23 @@ class PromptCompilerService:
                     and diff.get("input_hash") == envelope.input_hash
                     and isinstance(diff.get("prompt_compiler_output"), dict)
                 ):
+                    invocation = (
+                        diff.get("skill_invocation") if isinstance(diff.get("skill_invocation"), dict) else {}
+                    )
+                    producing_hash = str(
+                        invocation.get("content_hash") or diff.get("skill_content_hash") or ""
+                    )
+                    producing_version = str(
+                        invocation.get("version") or (row.skill_versions or {}).get("prompt-compiler") or ""
+                    )
                     session.expunge(row)
-                    return row
+                    return _FreshPackage(
+                        row=row,
+                        output=PromptCompilerOutput.model_validate(diff["prompt_compiler_output"]),
+                        producing_version=producing_version or None,
+                        producing_hash=producing_hash or None,
+                        current=bool(producing_hash) and producing_hash == skill.content_hash,
+                    )
         return None
 
     def _record(
@@ -1218,10 +1556,31 @@ class PromptCompilerService:
         invocation: dict[str, Any],
         execution_mode: str,
         *,
+        skill: ResolvedSkill,
         reused_from: str | None = None,
+        continuity_gate: dict[str, Any] | None = None,
     ) -> PromptCompilerResult:
-        skill = self.skills.resolve("prompt-compiler")
+        # The Skill on the row is the one that produced the package: on a
+        # Skill-driven result that is the recorded invocation (a reuse carries
+        # the producing Skill's identity, not the installed one); on a
+        # deterministic result it is the Skill that was resolved and not run.
+        skill_driven = execution_mode == EXECUTION_MODEL
+        producing_name = str(invocation.get("name") or skill.name) if skill_driven else skill.name
+        producing_version = str(invocation.get("version") or skill.version) if skill_driven else skill.version
+        producing_hash = (
+            str(invocation.get("content_hash") or skill.content_hash) if skill_driven else skill.content_hash
+        )
         neutral_prompt = output.positive_prompt or ""
+        cinematography_record: dict[str, Any] = (
+            {
+                "execution_mode": envelope.cinematography.get("execution_mode"),
+                "skill_version": (envelope.cinematography.get("skill_invocation") or {}).get("version"),
+                "input_hash": envelope.cinematography.get("input_hash"),
+                **envelope.cinematography_notes,
+            }
+            if envelope.cinematography
+            else {"execution_mode": None, "fallback_reason": "NOT_DESIGNED"}
+        )
         with self.database.session() as session:
             shot = session.get(Shot, envelope.shot_id)
             if shot is None:
@@ -1232,26 +1591,20 @@ class PromptCompilerService:
                 user_prompt=envelope.raw_action,
                 compiled_prompt=neutral_prompt,
                 compiler_version=self.version,
-                skill_versions={"prompt-compiler": skill.version},
+                skill_versions={"prompt-compiler": producing_version},
                 diff_json={
                     "canonical_shot_spec": envelope.spec.model_dump(mode="json"),
                     "prompt_compiler_input": envelope.compiler_input.model_dump(mode="json"),
                     "prompt_compiler_output": output.model_dump(mode="json"),
-                    "skill_content_hash": skill.content_hash,
+                    "skill_content_hash": producing_hash,
+                    "installed_skill_version": skill.version,
                     "skill_invocation": invocation,
                     "execution_mode": execution_mode,
-                    "skill_driven": execution_mode == EXECUTION_MODEL,
+                    "skill_driven": skill_driven,
                     "input_hash": envelope.input_hash,
                     "reused_from": reused_from,
-                    "cinematography": {
-                        "execution_mode": envelope.cinematography.get("execution_mode"),
-                        "skill_version": (envelope.cinematography.get("skill_invocation") or {}).get(
-                            "version"
-                        ),
-                        "input_hash": envelope.cinematography.get("input_hash"),
-                    }
-                    if envelope.cinematography
-                    else {"execution_mode": None, "fallback_reason": "NOT_DESIGNED"},
+                    "cinematography": cinematography_record,
+                    **({"continuity_gate": dict(continuity_gate)} if continuity_gate is not None else {}),
                     "preserved_facts": [envelope.action],
                     "derived_from_output_state": dict(envelope.derived_from_output_state),
                     "provider_specific": False,
@@ -1266,10 +1619,11 @@ class PromptCompilerService:
                 input=envelope.compiler_input,
                 output=output,
                 record_id=record.id,
-                skill_name=skill.name,
-                skill_version=skill.version,
+                skill_name=producing_name,
+                skill_version=producing_version,
                 execution_mode=execution_mode,
                 skill_invocation=dict(invocation),
+                input_hash=envelope.input_hash,
             )
 
     @staticmethod
@@ -1317,13 +1671,64 @@ class PromptCompilerService:
                     missing.append(f"subjects[{index}].{key}")
                     reasons.append(f"subjects[{index}].{key} is unresolved")
         for index, constraint in enumerate(spec.constraints):
-            if str(constraint).strip().lower().startswith(UNRESOLVED_PREFIX):
+            text = str(constraint).strip()
+            if not text.lower().startswith(UNRESOLVED_PREFIX):
+                continue
+            plan_entry = _CINEMATOGRAPHY_UNRESOLVED.match(text)
+            if plan_entry is not None:
+                # The cinematography stage's own entry: reported under its
+                # path, so the record says which stage left the decision open.
+                missing.append(f"cinematography.unresolved[{plan_entry.group(1)}]")
+                reasons.append(
+                    "the cinematography stage left a decision unresolved: " + text[plan_entry.end() :].strip()
+                )
+            else:
                 missing.append(f"constraints[{index}]")
                 reasons.append(f"a stage left a decision unresolved: {constraint}")
+
+        # Photographic fields: a stage that has not decided one writes a
+        # marker value or hedges inside it ("provisional medium shot"). Both
+        # refuse compilation here; the compiler never completes them. Prose
+        # fields (the action, the line, a pose, the staging) are never hedge-
+        # scanned: "a tentative step" is a performance, not an open decision.
+        def hedged(value: Any) -> bool:
+            text = " ".join(str(value or "").split())
+            return bool(_HEDGE_TOKENS.search(text)) or any(token in text for token in _HEDGE_TOKENS_CJK)
+
+        photographic: list[tuple[str, Any]] = [
+            (f"camera.{key}", value) for key, value in spec.camera.model_dump().items()
+        ]
+        lighting_fields = spec.lighting.model_dump()
+        photographic.extend(
+            (f"lighting.{key}", value) for key, value in lighting_fields.items() if key != "practicals"
+        )
+        photographic.extend(
+            (f"lighting.practicals[{index}]", item)
+            for index, item in enumerate(lighting_fields.get("practicals") or [])
+        )
+        for index, subject in enumerate(spec.subjects):
+            if unresolved(subject.name):
+                missing.append(f"subjects[{index}].name")
+                reasons.append(f"subjects[{index}].name is unresolved")
+            photographic.extend(
+                (f"subjects[{index}].{key}", getattr(subject, key))
+                for key in ("screen_position", "body_orientation", "eyeline_target")
+            )
+        for index, prop in enumerate(spec.props):
+            photographic.extend(
+                (f"props[{index}].{key}", value) for key, value in prop.items() if isinstance(value, str)
+            )
+        photographic.append(("aspect_ratio", spec.aspect_ratio))
+        photographic.append(("atmosphere", spec.atmosphere))
+        photographic.extend((f"composition.{key}", value) for key, value in spec.composition.items())
+        for path, value in photographic:
+            if unresolved(value) or hedged(value):
+                missing.append(path)
+                reasons.append(f"{path} is unresolved")
         if not str(spec.aspect_ratio).strip():
             missing.append("aspect_ratio")
             reasons.append("aspect_ratio is empty")
-        return list(dict.fromkeys(missing)), reasons
+        return list(dict.fromkeys(missing)), list(dict.fromkeys(reasons))
 
     def compile_input(self, value: PromptCompilerInput) -> PromptCompilerOutput:
         """Compile one typed envelope without leaking Skill instructions into the prompt.
@@ -1376,9 +1781,13 @@ class PromptCompilerService:
             f"camera_movement={spec.camera.dominant_movement}",
             "lighting="
             + json.dumps(
-                spec.lighting.model_dump(mode="json"),
+                _pruned_lighting(spec.lighting.model_dump(mode="json")),
                 ensure_ascii=False,
                 sort_keys=True,
+            ),
+            *([f"atmosphere={spec.atmosphere}"] if spec.atmosphere else []),
+            *(
+                [f"composition_{key}={value}" for key, value in spec.composition.items() if value]
             ),
             f"duration={spec.duration:g}s",
             f"aspect_ratio={spec.aspect_ratio}",
@@ -1447,22 +1856,52 @@ class PromptCompilerService:
     @staticmethod
     def to_neutral_prompt(spec: CanonicalShotSpec) -> str:
         payload = spec.model_dump(mode="json")
-        ordered = {
+        ordered: dict[str, Any] = {
             "intent": payload["intent"],
             "subjects": payload["subjects"],
             "props": payload["props"],
             "start_state": payload["start_state"],
             "dominant_action": payload["dominant_action"],
             "blocking": payload["blocking"],
-            "camera": payload["camera"],
-            "lighting": payload["lighting"],
-            "dialogue": payload["dialogue"],
-            "end_state": payload["end_state"],
-            "continuity": payload["continuity"],
-            "style_lock": payload["style_lock"],
-            "constraints": payload["constraints"],
+            "camera": _pruned_camera(payload["camera"]),
+            "lighting": _pruned_lighting(payload["lighting"]),
         }
+        # The cinematography design beyond camera and light, when a stage
+        # decided it; a shot nobody designed renders exactly as before.
+        if payload.get("atmosphere"):
+            ordered["atmosphere"] = payload["atmosphere"]
+        if any((payload.get("composition") or {}).values()):
+            ordered["composition"] = {
+                key: value for key, value in payload["composition"].items() if value
+            }
+        ordered.update(
+            {
+                "dialogue": payload["dialogue"],
+                "end_state": payload["end_state"],
+                "continuity": payload["continuity"],
+                "style_lock": payload["style_lock"],
+                "constraints": payload["constraints"],
+            }
+        )
         return json.dumps(ordered, ensure_ascii=False, indent=2)
+
+
+def _pruned_camera(camera: dict[str, Any]) -> dict[str, Any]:
+    """The camera dict without the optional design fields a stage left empty."""
+
+    return {
+        key: value
+        for key, value in camera.items()
+        if not (key in ("height", "lens_intent", "depth_of_field") and not value)
+    }
+
+
+def _pruned_lighting(lighting: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in lighting.items()
+        if not (key in ("motivation", "exposure_intent") and not value)
+    }
 
 
 def _original_record_id(record: PromptCompilation) -> str:

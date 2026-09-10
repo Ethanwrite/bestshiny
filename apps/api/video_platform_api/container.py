@@ -829,6 +829,9 @@ def build_container(settings: Settings | None = None) -> Container:
         semantic_mode = "enforced"
     styles = ProjectStyleService(database, storage, semantic=semantic_style, semantic_mode=semantic_mode)
     style_drift = StyleDriftMonitor(database)
+    continuity_reviewer = ContinuityReviewer(
+        database, skill_runtime, enabled=settings.feature_skill_stages_at_approval
+    )
     prompts = PromptCompilerService(
         database,
         skills,
@@ -837,17 +840,19 @@ def build_container(settings: Settings | None = None) -> Container:
         dependencies=shot_dependencies,
         # The prompt-compiler Skill runs on a model through the runtime;
         # the generation path reuses its verified package while the envelope
-        # is unchanged and compiles deterministically (on record) otherwise.
+        # and the Skill are unchanged and compiles deterministically (on
+        # record) otherwise.
         runtime=skill_runtime,
+        # The compiler sits after Continuity approval: a handoff the
+        # Continuity Skill escalated is not compiled around until a human
+        # acknowledges the decision or the stage clears it.
+        continuity=continuity_reviewer,
     )
     cinematography_designer = CinematographyDesigner(
         database,
         skill_runtime,
         styles=styles,
         enabled=settings.feature_skill_stages_at_approval,
-    )
-    continuity_reviewer = ContinuityReviewer(
-        database, skill_runtime, enabled=settings.feature_skill_stages_at_approval
     )
     visual_stages = VisualStageRunner(
         database,

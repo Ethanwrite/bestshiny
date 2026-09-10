@@ -51,6 +51,7 @@ from platform_contracts import (
     CanonicalShotSpec,
     GenerationRequest,
     PassengerGenerationCommand,
+    PromptCompilerOutput,
     authoritative_timeline_state_hash,
     identity_critical_subjects,
 )
@@ -70,6 +71,7 @@ from production_domain.models import (
     new_id,
     utcnow,
 )
+from pydantic import ValidationError
 from router_evidence_core import (
     CandidateModel,
     ConditionBucket,
@@ -114,6 +116,18 @@ def _new_trace_id() -> str:
 #: one query rather than one each, short enough that an operator who has just
 #: saved a run sees it take effect without a restart.
 _LCB_SNAPSHOT_TTL_SECONDS = 60.0
+
+
+def _stored_prompt_package(metadata: dict[str, Any]) -> PromptCompilerOutput | None:
+    """The prompt-compiler Skill's package a request carried, if it still validates."""
+
+    stored = metadata.get("prompt_package")
+    if not isinstance(stored, dict):
+        return None
+    try:
+        return PromptCompilerOutput.model_validate(stored)
+    except ValidationError:
+        return None
 
 
 def _spend_cap(metadata: dict[str, Any]) -> float | None:
@@ -577,10 +591,37 @@ class VisualProductionRuntime:
                 **({"frame_anchor": frame_anchor_plan} if frame_anchor_plan else {}),
             }
         )
+        # The prompt-compiler Skill's package, when the Skill compiled this
+        # shot, is the body of what the provider receives: the adapter
+        # delivers its wording and adds only its model-specific lines. A
+        # deterministic compilation keeps the adapter's canonical rendering,
+        # and the request records which of the two it carries.
+        skill_package = compiled.output if compiled.skill_driven else None
         model_request = self.adapters.get(selected.adapter).compile(
             selected.model,
-            AdapterInput(shot=execution_spec, context=adapter_context),
+            AdapterInput(shot=execution_spec, context=adapter_context, package=skill_package),
         )
+        # Replay-stable facts only: the gateway hashes request metadata for
+        # idempotency, so a value that moves without the request moving turns
+        # a legitimate replay into a conflict. The Skill's identity is one of
+        # those unless the Skill actually wrote this prompt - on the
+        # deterministic path it is merely whichever version is installed, and
+        # editing a SKILL.md would break every in-flight idempotency key. The
+        # resolved-but-unused identity is on the compilation record instead.
+        prompt_delivery: dict[str, Any] = {
+            "prompt_source": "SKILL_PACKAGE" if skill_package is not None else "ADAPTER_CANONICAL",
+            "execution_mode": compiled.execution_mode,
+            "skill_driven": compiled.skill_driven,
+            "input_hash": compiled.input_hash,
+        }
+        if skill_package is not None:
+            prompt_delivery.update(
+                {
+                    "skill_name": compiled.skill_name,
+                    "skill_version": compiled.skill_version,
+                    "skill_content_hash": (compiled.skill_invocation or {}).get("content_hash"),
+                }
+            )
         request = GenerationRequest(
             project_id=project_id,
             shot_id=shot_id,
@@ -616,6 +657,18 @@ class VisualProductionRuntime:
                 # The frame strategy that governed this request; a retry keeps
                 # it, and reference strengthening draws from its anchors.
                 **({"frame_anchor": frame_anchor_plan} if frame_anchor_plan else {}),
+                # Which prompt the provider was given and which Skill wrote it.
+                # Replay-stable facts only (the gateway hashes the metadata for
+                # idempotency): the compilation record id lives on the
+                # candidate's generation plan instead. The package itself
+                # rides along so a retry onto another model keeps the Skill's
+                # wording and changes only the model-specific lines.
+                "prompt_delivery": prompt_delivery,
+                **(
+                    {"prompt_package": skill_package.model_dump(mode="json")}
+                    if skill_package is not None
+                    else {}
+                ),
                 # Recorded at decision time rather than re-derived at evaluation
                 # time. The shot spec can be edited between the two, and an
                 # observation filed under the scene the shot *became* would be
@@ -1040,6 +1093,7 @@ class VisualProductionRuntime:
                     dict.fromkeys([*reference_asset_ids, *canonical_reference_ids])
                 )[:20]
         target_changed = next_model != request["model"] or next_provider != request["provider"]
+        stored_package = _stored_prompt_package(metadata)
         references_changed = reference_asset_ids != list(request.get("reference_asset_ids") or [])
         provider_payload = dict(request.get("provider_payload") or {})
         # The alternative was ranked for the same request and carries the
@@ -1101,6 +1155,11 @@ class VisualProductionRuntime:
                             else spec_data
                         ),
                         context=context,
+                        # The Skill's package the first attempt was admitted
+                        # with, so a retry onto another model keeps its
+                        # wording; a package that no longer validates is
+                        # treated as absent rather than failing the retry.
+                        package=stored_package,
                     ),
                 )
                 provider_payload = dict(adapted.payload)
@@ -1123,6 +1182,17 @@ class VisualProductionRuntime:
             or bool(metadata.get("references_strengthened")),
             "retry_plan": plan.model_dump(mode="json"),
         }
+        if target_changed and metadata.get("prompt_package") is not None and stored_package is None:
+            # The stored package no longer validates, so this retry delivered
+            # the canonical rendering. The record says what was sent, not what
+            # the first attempt sent.
+            retry_metadata.pop("prompt_package", None)
+            retry_metadata["prompt_delivery"] = {
+                **(metadata.get("prompt_delivery") or {}),
+                "prompt_source": "ADAPTER_CANONICAL",
+                "skill_driven": False,
+                "prompt_package_invalid": True,
+            }
         if target_changed:
             # `routing_context.exact_version` describes the model the *previous*
             # attempt ran. Carrying it onto a retry that re-routes would file

@@ -155,3 +155,8 @@ If a field is unknown and photographic - a height, a lens intent, a fill ratio -
 approved intent and say why in the plan. If it depends on an invariant the plan did not receive - a canonical
 look, a product's true colour, a required text, an identity - leave it unresolved and reference the asset
 rather than describing it. Never invent a story fact, a state or a gaze to make a frame work.
+
+An entry in `unresolved` is a decision left open, not a note: the Prompt Compiler refuses the shot with
+that entry named (`cinematography.unresolved[n]`) until this stage is run again with it decided, and a hedge
+written into a field (`provisional`, `tentative`, `暂定`) is refused the same way. An empty list means the
+design is complete; write there only what you could not decide.

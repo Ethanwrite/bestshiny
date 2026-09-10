@@ -32,6 +32,21 @@ from .prompt import PromptCompilerInput as PromptCompilerInput
 from .prompt import PromptCompilerOutput as PromptCompilerOutput
 from .prompt import PromptContinuityContext as PromptContinuityContext
 from .shot import (
+    FORBIDDEN_PREFIX as FORBIDDEN_PREFIX,
+)
+from .shot import (
+    PRODUCT_CLAIM_PREFIX as PRODUCT_CLAIM_PREFIX,
+)
+from .shot import (
+    PROHIBITION_PREFIX as PROHIBITION_PREFIX,
+)
+from .shot import (
+    REQUIRED_COPY_PREFIX as REQUIRED_COPY_PREFIX,
+)
+from .shot import (
+    UNRESOLVED_PREFIX as UNRESOLVED_PREFIX,
+)
+from .shot import (
     CanonicalCameraSpec as CanonicalCameraSpec,
 )
 from .shot import (
@@ -50,5 +65,11 @@ from .shot import (
     approved_aspect_ratio as approved_aspect_ratio,
 )
 from .shot import (
+    forbidden_terms as forbidden_terms,
+)
+from .shot import (
     identity_critical_subjects as identity_critical_subjects,
+)
+from .shot import (
+    identity_key as identity_key,
 )

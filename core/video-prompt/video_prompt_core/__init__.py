@@ -1,4 +1,6 @@
 from .compiler import (
+    ContinuityApprovalRequired,
+    ContinuityGateSource,
     PromptCompilerResult,
     PromptCompilerService,
     VideoPromptCompilation,
@@ -6,6 +8,8 @@ from .compiler import (
 )
 
 __all__ = [
+    "ContinuityApprovalRequired",
+    "ContinuityGateSource",
     "PromptCompilerResult",
     "PromptCompilerService",
     "VideoPromptCompilation",

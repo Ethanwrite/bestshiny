@@ -132,6 +132,14 @@ review carries the deterministic comparison and says so.
 - A repair that would need a new shot, a changed line or a different action: `ESCALATE` to the Shot Planner
   through the Director, never a silent bridge.
 - Missing end-frame evidence on a `CONTINUOUS` transition: `ESCALATE` with the evidence gap named.
+- The runtime enforces the escalation. A Skill-driven `ESCALATE` (or `approval_required: true`) blocks the
+  target shot's prompt compilation and generation until a real user acknowledges that decision or a later
+  Skill-driven review replaces it. When the handoff's inputs change (a registered end frame, a redesigned
+  plan), the next attempt to generate runs the review again - once per change, not once per attempt - so a
+  verdict is re-reached on the current evidence rather than inherited; a person may still approve a verdict
+  whose inputs have moved, and the approval records that it was stale. A deterministic comparison that stood
+  in for the model is advisory: it records `approval_required` and never blocks, because it did not read the
+  director's text and a fallback must not pass off as the Skill's verdict.
 
 ## Output Contract
 

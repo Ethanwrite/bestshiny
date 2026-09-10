@@ -9,6 +9,26 @@ from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 _ASPECT_RATIO = re.compile(r"^\d{1,2}:\d{1,2}$")
 
+#: How a `CanonicalShotSpec.constraints` entry is written. The prompt compiler
+#: writes them and reads them back; the adapters read them to deliver what a
+#: Skill's package is not required to carry (the client's prohibitions go to
+#: the negative prompt, whichever path compiled the shot).
+PROHIBITION_PREFIX = "the client forbade, in their words: "
+FORBIDDEN_PREFIX = "must not show or do: "
+PRODUCT_CLAIM_PREFIX = "product claim, verbatim and unparaphrased: "
+REQUIRED_COPY_PREFIX = "required on-screen copy, exactly these words: "
+UNRESOLVED_PREFIX = "unresolved:"
+
+
+def forbidden_terms(spec: CanonicalShotSpec) -> list[str]:
+    """The things this shot must not show or do, as the client's own list."""
+
+    return [
+        item.removeprefix(FORBIDDEN_PREFIX)
+        for item in spec.constraints
+        if item.startswith(FORBIDDEN_PREFIX)
+    ]
+
 
 def _identity_key(name: Any) -> str:
     """Case-, space- and hyphen-blind key for matching a screenplay name to a Character row.
@@ -18,6 +38,12 @@ def _identity_key(name: Any) -> str:
     """
 
     return "".join(ch for ch in str(name or "").casefold() if ch.isalnum())
+
+
+def identity_key(name: Any) -> str:
+    """The public form of `_identity_key`: one key for every spelling of one name."""
+
+    return _identity_key(name)
 
 
 def identity_critical_subjects(
@@ -81,6 +107,13 @@ class CanonicalCameraSpec(BaseModel):
     path: str = "none"
     focus: str = "primary subject"
     screen_axis: str = "preserve established axis"
+    #: The Cinematography Skill's remaining camera decisions - camera height,
+    #: lens intent (spatial exaggeration, natural perspective, compression,
+    #: macro detail) and depth of field. Empty for a shot the stage has not
+    #: designed; a renderer prints them only when they are set.
+    height: str = ""
+    lens_intent: str = ""
+    depth_of_field: str = ""
 
 
 class CanonicalLightingSpec(BaseModel):
@@ -89,6 +122,10 @@ class CanonicalLightingSpec(BaseModel):
     contrast: str = "preserve established contrast"
     color_temperature: str = "preserve established color temperature"
     practicals: list[str] = Field(default_factory=list)
+    #: What in the scene justifies the light, and what the exposure protects.
+    #: Empty until the Cinematography Skill decides them.
+    motivation: str = ""
+    exposure_intent: str = ""
 
 
 class CanonicalShotSpec(BaseModel):
@@ -114,6 +151,11 @@ class CanonicalShotSpec(BaseModel):
     continuity: dict[str, Any] = Field(default_factory=dict)
     style_lock: dict[str, Any] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
+    #: The Cinematography Skill's atmosphere and its start / end composition
+    #: (``{"start": …, "end": …}``): arrangements of the frame, never actions.
+    #: Empty for a shot the stage has not designed.
+    atmosphere: str = ""
+    composition: dict[str, str] = Field(default_factory=dict)
     allow_camera_gaze: bool = False
     generation_policy: str = "TEXT_TO_VIDEO"
     profile: Literal["generic", "action", "commercial_hero", "dialogue"] = "generic"

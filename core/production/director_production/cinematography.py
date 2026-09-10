@@ -237,7 +237,24 @@ class CinematographyDesigner:
 
     @staticmethod
     def input_hash(context: dict[str, Any]) -> str:
-        encoded = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
+        """The hash of everything this stage was given - never of what it wrote back.
+
+        A Skill-driven design writes its framing onto ``shots.shot_type``,
+        which is part of the shot's context. Hashing it made the stage
+        non-idempotent: the digest of a designed shot no longer matched the
+        digest its own plan was stored under, so a later fallback did not
+        recognise the plan as its own and overwrote a paid design with the
+        deterministic defaults. The shot kind still reaches the Skill in the
+        context; it is simply not part of the reuse key.
+        """
+
+        shot = {
+            key: value
+            for key, value in (context.get("shot") or {}).items()
+            if key != "shot_type"
+        }
+        keyed = {**context, "shot": shot} if context.get("shot") else dict(context)
+        encoded = json.dumps(keyed, sort_keys=True, ensure_ascii=False, default=str)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     # ----------------------------------------------------------------- design
@@ -305,6 +322,7 @@ class CinematographyDesigner:
             existing = dict(shot.cinematography_json or {})
             existing_invocation = existing.get("skill_invocation") or {}
             reused = False
+            superseded_version: str | None = None
             if (
                 not invocation.skill_driven
                 and existing.get("input_hash") == digest
@@ -312,9 +330,15 @@ class CinematographyDesigner:
             ):
                 # A Skill-designed plan for exactly these inputs already
                 # exists; a fallback does not overwrite it. The decision
-                # record still says this run fell back.
+                # record still says this run fell back - and, when the plan
+                # was designed under an earlier version of the Skill than
+                # the one installed now, that the plan on the shot is the
+                # earlier Skill's work (the shot row keeps its own provenance).
                 reused = True
                 record = existing
+                installed_hash = invocation.content_hash
+                if installed_hash and existing_invocation.get("content_hash") != installed_hash:
+                    superseded_version = str(existing_invocation.get("version") or "unknown")
             else:
                 record = {
                     "version": self.version,
@@ -337,9 +361,20 @@ class CinematographyDesigner:
                     "input_hash": digest,
                     "skill_invocation": invocation.as_json(),
                     "reused_existing_plan": reused,
+                    **(
+                        {
+                            "reused_plan_skill_version": existing_invocation.get("version"),
+                            "reused_plan_content_hash": existing_invocation.get("content_hash"),
+                        }
+                        if reused
+                        else {}
+                    ),
                 },
                 selected_action=("REUSED_SKILL_PLAN" if reused else invocation.execution_mode),
-                reason_codes=list(invocation.reason_codes),
+                reason_codes=[
+                    *invocation.reason_codes,
+                    *([f"SKILL_VERSION_CHANGED:{superseded_version}"] if superseded_version else []),
+                ],
                 model_version=(invocation.version if invocation.loaded else self.version) or self.version,
                 policy_version=self.version,
             )
@@ -349,6 +384,7 @@ class CinematographyDesigner:
                 "shot_id": shot_id,
                 "shot_type": shot.shot_type,
                 "reused_existing_plan": reused,
+                **({"reused_plan_skill_version": superseded_version} if superseded_version else {}),
                 "skill_driven": bool(record.get("skill_invocation", {}).get("skill_driven"))
                 and record.get("execution_mode", EXECUTION_MODEL) == EXECUTION_MODEL,
                 **{key: value for key, value in record.items() if key != "version"},

@@ -25,6 +25,17 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 > asset or another live creation still references is kept and the holder recorded. Architecture:
 > `CURRENT_ARCHITECTURE.md` § "Removing a creation, without rewriting what it cost". Residual: OPEN_ISSUES 3.8.
 >
+> **2026-09-09 · branch `claude/skill-optimization-quality-dd745b` — the Skill runtime's content-quality
+> acceptance.** No migration (head stays `0082`). Five gaps reproduced on the merged #64 + #65 tree and
+> fixed: the prompt-compiler Skill's package is now the body of the provider request (adapters deliver it;
+> `metadata.prompt_delivery` / `prompt_package`); a Skill-driven continuity `ESCALATE` blocks compilation and
+> generation until a real user acknowledges the decision (`POST /v1/shots/{id}/continuity/review/acknowledge`,
+> `GET …/continuity/review`, 409 `CONTINUITY_APPROVAL_REQUIRED`); the preflight refuses unresolved or hedged
+> photography and a Skill plan's own `unresolved` entries on every path; the whole cinematography plan reaches
+> the shot spec and every prompt surface; package freshness keys on the producing Skill's content hash. Every
+> stored Skill package goes stale once at deploy (one paid compile per shot at its next generate). Entry point
+> `docs/SKILL_RUNTIME.md` §10; record `docs/OPEN_ISSUES.md` §2.53 and `docs/SESSION_HANDOVER_2026-09-09.md`.
+>
 > **2026-09-08 · branch `claude/bestshiny-skill-runtime-audit-533387` — the Skill runtime.**
 > Alembic head moves to `0082_shot_cinematography_plan` (`shots.cinematography_json`;
 > `REQUIRED_SCHEMA_REVISION` moves with it). Registry ≠ runtime was the finding: only the director

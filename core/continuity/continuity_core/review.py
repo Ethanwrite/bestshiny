@@ -12,6 +12,7 @@ promotes a rendered frame to canon.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any, Literal
@@ -28,6 +29,7 @@ from production_domain.models import (
     TimelineTransitionType,
 )
 from skill_core.runtime import (
+    EXECUTION_MODEL,
     SKILL_STAGE_DISABLED,
     AuthorityViolation,
     SkillInvocation,
@@ -37,6 +39,32 @@ from skill_core.runtime import (
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+#: The decision a human writes to release a Skill-driven ESCALATE: it names
+#: the review decision it approves, and only that one. A later escalation
+#: needs a later acknowledgement.
+ACKNOWLEDGEMENT_DECISION_TYPE = "CONTINUITY_ESCALATION_ACKNOWLEDGED"
+
+
+class ContinuityAcknowledgementConflict(ValueError):
+    """The decision a caller tried to acknowledge is not the one standing on the shot."""
+
+    reason_code = "CONTINUITY_ESCALATION_NOT_PENDING"
+
+    def __init__(self, message: str, *, pending_decision_id: str | None):
+        super().__init__(message)
+        self.pending_decision_id = pending_decision_id
+
+    def as_detail(self) -> dict[str, Any]:
+        return {
+            "message": str(self),
+            "reason_code": self.reason_code,
+            "pending_decision_id": self.pending_decision_id,
+        }
+
+
+def _escalates(review: dict[str, Any]) -> bool:
+    return str(review.get("verdict") or "").upper() == "ESCALATE" or bool(review.get("approval_required"))
 
 CONTINUITY_PROTOCOL = """
 ## Reviewing one handoff (application protocol)
@@ -237,6 +265,13 @@ class ContinuityReviewer:
         self.runtime = runtime
         self.enabled = enabled
 
+    @staticmethod
+    def input_hash(context: dict[str, Any]) -> str:
+        """One canonical serialisation of the pair context, so 'stale' means 'the inputs moved'."""
+
+        encoded = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     # ---------------------------------------------------------------- context
     def pair_context(self, target_shot_id: str) -> dict[str, Any]:
         with self.database.session() as session:
@@ -388,11 +423,253 @@ class ContinuityReviewer:
             )
         return [await self.review_pair(shot_id, model_roles=model_roles) for shot_id in shot_ids]
 
+    # ------------------------------------------------------------------ gate
+    def _decisions(self, shot_id: str) -> list[dict[str, Any]]:
+        """The shot's review and acknowledgement decisions, newest first, as plain dicts."""
+
+        with self.database.session() as session:
+            rows = list(
+                session.scalars(
+                    select(DecisionRecord)
+                    .where(
+                        DecisionRecord.shot_id == shot_id,
+                        DecisionRecord.decision_type.in_(
+                            [self.decision_type, ACKNOWLEDGEMENT_DECISION_TYPE]
+                        ),
+                    )
+                    # Ordered here, never compared in Python: SQLite hands back
+                    # naive datetimes and PostgreSQL aware ones.
+                    .order_by(DecisionRecord.created_at.desc(), DecisionRecord.id.desc())
+                )
+            )
+            return [
+                {
+                    "id": row.id,
+                    "decision_type": row.decision_type,
+                    "input_features": dict(row.input_features or {}),
+                    "selected_action": row.selected_action,
+                    "reason_codes": list(row.reason_codes or []),
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    @staticmethod
+    def _review_view(decision: dict[str, Any]) -> dict[str, Any]:
+        features = decision["input_features"]
+        raw_invocation = features.get("skill_invocation")
+        invocation = raw_invocation if isinstance(raw_invocation, dict) else {}
+        review = features.get("review") if isinstance(features.get("review"), dict) else {}
+        return {
+            "decision_id": decision["id"],
+            "from_shot_id": features.get("from_shot_id"),
+            "verdict": review.get("verdict"),
+            "approval_required": bool(review.get("approval_required")),
+            "escalated": _escalates(review),
+            "execution_mode": invocation.get("execution_mode"),
+            "skill_driven": bool(invocation.get("skill_driven")),
+            "fallback_reason": invocation.get("fallback_reason"),
+            "skill_version": invocation.get("version"),
+            "input_hash": features.get("input_hash"),
+            "created_at": decision["created_at"],
+            "review": dict(review),
+        }
+
+    def pending_escalation(self, shot_id: str) -> dict[str, Any] | None:
+        """The Skill-driven ESCALATE this shot still awaits a human decision on, or None.
+
+        The newest Skill-driven review decides: an escalation stands until a
+        later Skill-driven review replaces it (whatever its verdict) or an
+        acknowledgement names it. A deterministic review is advisory - it
+        never creates or clears a pending escalation, because it read the
+        timeline states and not the director's text - and it says
+        ``approval_required`` on its own record only. ``stale`` says the
+        handoff's inputs (states, transition, plans, the previous shot's end
+        frame) have changed since the Skill looked, so the review can be run
+        again before anyone approves the old verdict.
+        """
+
+        decisions = self._decisions(shot_id)
+        acknowledged = {
+            str(item["input_features"].get("review_decision_id") or "")
+            for item in decisions
+            if item["decision_type"] == ACKNOWLEDGEMENT_DECISION_TYPE
+        }
+        pending: dict[str, Any] | None = None
+        newer_fallback: dict[str, Any] | None = None
+        for decision in decisions:
+            if decision["decision_type"] != self.decision_type:
+                continue
+            view = self._review_view(decision)
+            if view["execution_mode"] != EXECUTION_MODEL or not view["skill_driven"]:
+                # A deterministic review newer than the escalation: it could
+                # not release it, and the reason it fell back is worth naming.
+                if newer_fallback is None:
+                    newer_fallback = view
+                continue
+            if not view["escalated"] or decision["id"] in acknowledged:
+                return None
+            pending = view
+            break
+        if pending is None:
+            return None
+        if newer_fallback is not None:
+            pending["latest_review_decision_id"] = newer_fallback["decision_id"]
+            pending["latest_review_fallback_reason"] = newer_fallback["fallback_reason"]
+            pending["latest_review_input_hash"] = newer_fallback["input_hash"]
+        try:
+            current = self.input_hash(self.pair_context(shot_id))
+        except LookupError:
+            current = None
+        pending["stale"] = pending["input_hash"] != current
+        return pending
+
+    async def ensure_reviewed(self, shot_id: str, *, model_roles: Any | None = None) -> dict[str, Any] | None:
+        """Re-run a stale pending escalation once, and say what still stands.
+
+        No call when nothing is pending or the escalation is fresh. A re-run
+        that fell back to the deterministic comparison cannot release a
+        Skill's escalation: it stays pending and the fallback reason rides
+        with it, so a provider outage never turns an ESCALATE into a pass.
+        """
+
+        pending = self.pending_escalation(shot_id)
+        if pending is None or not pending.get("stale") or not self.enabled:
+            return pending
+        current = self.input_hash(self.pair_context(shot_id))
+        if pending.get("latest_review_input_hash") == current:
+            # The moved inputs have already been reviewed - the re-review fell
+            # back, so the escalation still stands - and asking again would buy
+            # the same answer. One paid call per change of inputs, not one per
+            # generate attempt.
+            return pending
+        rerun = await self.review_pair(shot_id, model_roles=model_roles)
+        after = self.pending_escalation(shot_id)
+        if after is not None and not rerun.get("skill_driven"):
+            after["rereview_fallback_reason"] = (rerun.get("skill_invocation") or {}).get("fallback_reason")
+            after["rereview_decision_id"] = rerun.get("decision_record_id")
+        return after
+
+    def gate_view(self, shot_id: str) -> dict[str, Any]:
+        """The latest review of any kind, the pending escalation, and whether the shot is blocked."""
+
+        decisions = self._decisions(shot_id)
+        latest = next(
+            (self._review_view(item) for item in decisions if item["decision_type"] == self.decision_type),
+            None,
+        )
+        acknowledgements = [
+            {
+                "decision_id": item["id"],
+                "review_decision_id": item["input_features"].get("review_decision_id"),
+                "actor": item["input_features"].get("actor"),
+                "actor_user_id": item["input_features"].get("actor_user_id"),
+                "note": item["input_features"].get("note"),
+                "created_at": item["created_at"],
+            }
+            for item in decisions
+            if item["decision_type"] == ACKNOWLEDGEMENT_DECISION_TYPE
+        ]
+        pending = self.pending_escalation(shot_id)
+        return {
+            "shot_id": shot_id,
+            "latest_review": latest,
+            "pending_escalation": pending,
+            "blocked": pending is not None,
+            "acknowledgements": acknowledgements,
+        }
+
+    def acknowledge(
+        self,
+        shot_id: str,
+        *,
+        decision_id: str,
+        actor: str,
+        actor_user_id: str | None,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """A human approves the escalated handoff: the decision is released, on record.
+
+        Only the escalation that is standing can be acknowledged; an older or
+        already replaced one is refused so the approval is always of the
+        verdict the shot is blocked on. Acknowledging the same decision twice
+        returns the first acknowledgement. The release is of that decision
+        alone: a later Skill escalation needs its own approval.
+        """
+
+        decisions = self._decisions(shot_id)
+        review = next(
+            (
+                item
+                for item in decisions
+                if item["id"] == decision_id and item["decision_type"] == self.decision_type
+            ),
+            None,
+        )
+        if review is None:
+            raise LookupError("continuity review decision not found for this shot")
+        for item in decisions:
+            if (
+                item["decision_type"] == ACKNOWLEDGEMENT_DECISION_TYPE
+                and str(item["input_features"].get("review_decision_id") or "") == decision_id
+            ):
+                return {
+                    "shot_id": shot_id,
+                    "acknowledgement_id": item["id"],
+                    "review_decision_id": decision_id,
+                    "already_acknowledged": True,
+                    "pending_escalation": self.pending_escalation(shot_id),
+                }
+        pending = self.pending_escalation(shot_id)
+        if pending is None or pending["decision_id"] != decision_id:
+            raise ContinuityAcknowledgementConflict(
+                "that continuity decision is not the escalation standing on this shot"
+                + (
+                    f"; the pending decision is {pending['decision_id']}"
+                    if pending is not None
+                    else "; nothing is pending"
+                ),
+                pending_decision_id=pending["decision_id"] if pending else None,
+            )
+        with self.database.session() as session:
+            source = session.get(DecisionRecord, decision_id)
+            if source is None:  # pragma: no cover - read a moment ago
+                raise LookupError("continuity review decision disappeared")
+            acknowledgement = DecisionRecord(
+                project_id=source.project_id,
+                shot_id=shot_id,
+                decision_type=ACKNOWLEDGEMENT_DECISION_TYPE,
+                input_features={
+                    "review_decision_id": decision_id,
+                    "review": dict(pending.get("review") or {}),
+                    "input_hash": pending.get("input_hash"),
+                    "stale_when_acknowledged": bool(pending.get("stale")),
+                    "note": " ".join(str(note or "").split())[:600],
+                    "actor": actor,
+                    "actor_user_id": actor_user_id,
+                },
+                selected_action="APPROVED",
+                reason_codes=[ACKNOWLEDGEMENT_DECISION_TYPE],
+                model_version=str(pending.get("skill_version") or self.version),
+                policy_version=self.version,
+            )
+            session.add(acknowledgement)
+            session.flush()
+            acknowledgement_id = acknowledgement.id
+        return {
+            "shot_id": shot_id,
+            "acknowledgement_id": acknowledgement_id,
+            "review_decision_id": decision_id,
+            "already_acknowledged": False,
+            "pending_escalation": self.pending_escalation(shot_id),
+        }
+
     # ---------------------------------------------------------------- persist
     def _persist(
         self, context: dict[str, Any], review: ContinuityReview, invocation: SkillInvocation
     ) -> dict[str, Any]:
         from_shot = context["from_shot"]
+        digest = self.input_hash(context)
         with self.database.session() as session:
             decision = DecisionRecord(
                 project_id=str(context["project_id"]),
@@ -403,6 +680,10 @@ class ContinuityReviewer:
                     "transition": dict(context["transition"]),
                     "review": review.model_dump(mode="json"),
                     "skill_invocation": invocation.as_json(),
+                    # The handoff's inputs the verdict was reached on. A
+                    # later change to them makes the verdict stale, and the
+                    # gate re-runs the review before anyone approves it.
+                    "input_hash": digest,
                 },
                 selected_action=review.verdict,
                 reason_codes=[invocation.execution_mode, *invocation.reason_codes],
@@ -419,5 +700,7 @@ class ContinuityReviewer:
                 "skill_invocation": invocation.as_json(),
                 "skill_driven": invocation.skill_driven,
                 "execution_mode": invocation.execution_mode,
+                "approval_required": _escalates(review.model_dump(mode="json")),
+                "input_hash": digest,
                 "decision_record_id": decision.id,
             }

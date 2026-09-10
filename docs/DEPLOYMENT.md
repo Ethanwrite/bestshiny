@@ -176,7 +176,30 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `064a577` (`main`, the squash of
+- **Current release.** `c91114b` (`main`, the squash of
+  [#68](https://github.com/Ethanwrite/bestshiny/pull/68) — the appended negative-prompt guards are joined
+  without a full stop in front of them), merged 2026-09-10 ≈15:51Z and deployed ≈15:54Z on the operator's
+  "deploy it once both are green". `DEPLOYED_SHA.prev = 064a577`. **No migration** (`alembic current` stayed
+  `0082_shot_cinematography_plan (head)`), no `.env` change, `COMPOSE_UNCHANGED`, archive SHA-256
+  `aea03358…` compared on both ends, `DEPLOY_EXIT=0`. Gated on the exact tree that shipped (squash tree
+  `d4701f0b…` equals the gated branch tip's): SQLite 1843 passed / 20 skipped, PostgreSQL 1856 passed /
+  7 skipped, both exit 0, ruff and mypy clean. Three files against `064a577`.
+
+  The cosmetic residual recorded under `064a577`: a Skill writes its negative prompt as a sentence about as
+  often as a list, and appending the baseline guards to `…inconsistent night rooftop setting.` produced
+  `…setting., visual style drift, …`. Terminal punctuation is now dropped from the Skill's own text only
+  when something is actually being appended (`. , ; :` and `。，、；：`); when the Skill already named every
+  guard its text goes out untouched, where a trailing comma used to be stripped for nothing.
+
+  Verified on the deployed image against the real stored package: the provider now receives
+  `…out of frame city skyline, inconsistent night rooftop setting, visual style drift, palette drift, …`
+  with no baseline guard absent. All three running image IDs equal the freshly built ones (api
+  `e69a5e6b58a2`, worker `270e108f329c`, web `1eb8ba7d93bf`), restarts 0, served bundle unchanged
+  (`/assets/index-B0M_LxJ6.js`), local and public 200 on all three paths, zero tracebacks. `web` needed
+  `up -d --force-recreate web` for the third deploy running — treat it as part of the procedure, not an
+  anomaly.
+
+- **Previous release.** `064a577` (`main`, the squash of
   [#67](https://github.com/Ethanwrite/bestshiny/pull/67) — the compiler Skill's package ships when it
   renders the action instead of quoting it), merged 2026-09-10 ≈14:55Z and deployed ≈14:58Z on the
   operator's "ship it once postgres is green". `DEPLOYED_SHA.prev = 5c89736`. **No migration** (`alembic

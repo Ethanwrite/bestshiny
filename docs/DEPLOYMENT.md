@@ -176,7 +176,39 @@ something else happens to reload it — the renewal succeeds and the site still 
 
 ## 6. Operational state
 
-- **Current release.** `5c89736` (`main`, the squash of
+- **Current release.** `064a577` (`main`, the squash of
+  [#67](https://github.com/Ethanwrite/bestshiny/pull/67) — the compiler Skill's package ships when it
+  renders the action instead of quoting it), merged 2026-09-10 ≈14:55Z and deployed ≈14:58Z on the
+  operator's "ship it once postgres is green". `DEPLOYED_SHA.prev = 5c89736`. **No migration** (`alembic
+  current` stayed `0082_shot_cinematography_plan (head)`), no `.env` change, `COMPOSE_UNCHANGED`, archive
+  SHA-256 `957e2882…` compared on both ends, `DEPLOY_EXIT=0`. Gated on the exact tree that shipped (the
+  squash tree hash equals the gated branch tip's, `e0018f25…`): SQLite 1843 passed / 20 skipped,
+  PostgreSQL 1856 passed / 7 skipped, both exit 0, ruff and mypy clean, `review_skill_contract.py` PASS.
+
+  **Why.** The `5c89736` live check was discarded with `dominant_action_missing`: the model rendered
+  `雨桐进入城市天台上发现了一部不属于她的手机` as `雨桐进入城市天台，发现了一部不属于她的手机。` — one particle
+  fewer, one comma more — and the exact-substring test made that a rewrite, so the deterministic JSON dump
+  went to the provider instead of the paid wording. `action_preserved` now accepts an exact quotation, a run
+  of the action's own tokens (only punctuation or spacing differed), or a package carrying at least 80% of
+  the action's adjacent-token pairs; tokens are words in scripts that separate them and characters in
+  scripts that do not. A package that renders rather than quotes ships with `ACTION_PARAPHRASED` recorded.
+
+  **Live check after the deploy, 2026-09-10 ≈15:02Z, USD 0.0016** (one `PROMPT_COMPILER` call on the same
+  E2E-audit shot that had failed): `status COMPILED, execution_mode MODEL, skill_driven True`, no fallback,
+  reason codes `SKILL_LOADED, MODEL_REPLY`. **The paid wording is what the provider receives** — the
+  delivered prompt is the Skill's prose, not the JSON dump, with the Seedance adapter's own line after it.
+  This run happened to quote the action exactly, so the strict rule would also have passed it; what the
+  change buys is that the *class* of reply which renders the action no longer loses its package. The
+  negative prompt merge was verified on the real package: the Skill named identity drift itself and the
+  remaining baseline guards were appended, none absent. `web` again needed
+  `up -d --force-recreate web` (same systematic behaviour as `5c89736`; served bundle byte-identical,
+  `/assets/index-B0M_LxJ6.js`). Zero tracebacks, restarts 0, local and public 200.
+
+  **One cosmetic residual:** the merge joins the Skill's sentence-terminated negative prompt to the appended
+  guards with a comma, so the string reads `… night rooftop setting., visual style drift, …`. Harmless to a
+  renderer, ugly in a record; the joiner strips a trailing comma but not a trailing full stop.
+
+- **Previous release.** `5c89736` (`main`, the squash of
   [#66](https://github.com/Ethanwrite/bestshiny/pull/66) — the Skill runtime's decisions reach the output:
   the prompt-compiler Skill's package is the body every adapter delivers (`AdapterInput.package`, with the
   locked style, the unrestated continuity assertions and constraints and the bounded context after it, and

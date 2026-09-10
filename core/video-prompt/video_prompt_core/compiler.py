@@ -36,6 +36,7 @@ from skill_core.runtime import (
     SkillInvocation,
     SkillOperation,
     SkillRuntime,
+    Validated,
 )
 from sqlalchemy import select
 
@@ -126,6 +127,75 @@ _PROVIDER_MODEL_TERMS = re.compile(
     re.IGNORECASE,
 )
 _VENDOR_SYNTAX = re.compile(r"(--\w+|\([^()]{1,60}:\d(?:\.\d+)?\)|::\d)")
+#: A word in scripts that separate them, a single character in scripts that do
+#: not (CJK and kana). The action's tokens, in other words, whichever language
+#: the director wrote it in.
+_ACTION_TOKEN = re.compile(
+    r"[0-9A-Za-z\u00c0-\u024f']+|[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]"
+)
+#: How much of the action's adjacent-token structure a package must still carry
+#: when it did not quote the action exactly. Calibrated on the first live
+#: production compile (2026-09-10): the model rendered
+#: "雨桐进入城市天台上发现了一部不属于她的手机" as "雨桐进入城市天台，发现了一部不属于她的手机。" -
+#: one dropped particle and an inserted comma - and scored 0.90. A reworded or
+#: substituted action scores far below this floor, because its verb pairs are
+#: absent.
+_ACTION_COVERAGE_FLOOR = 0.8
+
+
+def _action_tokens(text: str) -> list[str]:
+    return [match.group(0).casefold() for match in _ACTION_TOKEN.finditer(text)]
+
+
+def _contains_run(written: list[str], wanted: list[str]) -> bool:
+    """Does `written` contain `wanted` as a consecutive run of tokens?"""
+
+    if not wanted or len(wanted) > len(written):
+        return False
+    head = wanted[0]
+    span = len(wanted)
+    return any(
+        written[index] == head and written[index : index + span] == wanted
+        for index in range(len(written) - span + 1)
+    )
+
+
+def action_preserved(action: str, positive: str) -> tuple[bool, bool]:
+    """Is the approved action still the action this prompt renders? -> (carried, verbatim).
+
+    The compiler may not change what happens in the shot, and this is the check
+    that holds it to that. It used to demand the action as an exact substring,
+    which is a test of punctuation as much as of meaning: the first live
+    production compile was discarded because the model wrote the approved
+    sentence with a comma in it and one particle fewer. That is a rewrite of
+    nothing, and refusing it threw away the paid wording in favour of a JSON
+    dump.
+
+    So: an exact quotation passes, as before. A run of the action's own tokens
+    passes - only punctuation or spacing differed. Otherwise the package must
+    still carry the action's adjacent-token pairs, which is what survives a
+    stylistic edit and is what a *different* action destroys: drop the action
+    and the score is near zero, swap its verb and the pairs around that verb
+    go with it. `verbatim` says which of those happened, so a paraphrase is
+    recorded rather than passed off as a quotation.
+    """
+
+    action_text = action.strip()
+    if not action_text:
+        return True, True
+    if action_text.casefold() in positive.casefold():
+        return True, True
+    wanted = _action_tokens(action_text)
+    if not wanted:
+        return True, True
+    written = _action_tokens(positive)
+    if _contains_run(written, wanted):
+        return True, True
+    if len(wanted) == 1:
+        return wanted[0] in written, False
+    pairs = {(wanted[index], wanted[index + 1]) for index in range(len(wanted) - 1)}
+    seen = {(written[index], written[index + 1]) for index in range(len(written) - 1)}
+    return (len(pairs & seen) / len(pairs)) >= _ACTION_COVERAGE_FLOOR, False
 _ENVELOPE_KEYS = (
     "shot_spec",
     "asset_bindings",
@@ -1931,7 +2001,8 @@ def verify_compiled_package(
         contract.append("asset_bindings_not_echoed")
     if len(output.continuity_assertions) != len(value.continuity_context.facts):
         contract.append("continuity_assertions_count")
-    if spec.dominant_action.casefold() not in positive:
+    carried, _verbatim = action_preserved(spec.dominant_action, output.positive_prompt or "")
+    if not carried:
         contract.append("dominant_action_missing")
     for subject in spec.subjects:
         if subject.name.strip() and subject.name.casefold() not in positive:
@@ -1965,7 +2036,7 @@ def verify_compiled_package(
 
 def _validate_compiler_output(
     spec: CanonicalShotSpec, value: PromptCompilerInput, raw: dict[str, Any]
-) -> PromptCompilerOutput:
+) -> PromptCompilerOutput | Validated:
     output = PromptCompilerOutput.model_validate(raw)
     if output.status != "COMPILED":
         return output
@@ -1974,6 +2045,12 @@ def _validate_compiler_output(
         raise AuthorityViolation(authority)
     if contract:
         raise ValueError("compiled package failed re-verification: " + ", ".join(contract))
+    _carried, verbatim = action_preserved(spec.dominant_action, output.positive_prompt or "")
+    if not verbatim:
+        # The action survived but was not quoted. The package ships; the row
+        # says the wording is the compiler's rendering of the action rather
+        # than the director's own sentence.
+        return Validated(output, reason_codes=["ACTION_PARAPHRASED"])
     return output
 
 

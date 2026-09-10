@@ -117,6 +117,12 @@ for a shot it did not design, and an empty field is not an unresolved one.
 - The specification's own wording is preserved for canonical nouns, the dominant action, the line, product
   claims and required copy. Do not upgrade "red coat" into "crimson greatcoat" - a renamed fact is a changed
   fact, and a paraphrased claim is a different claim.
+- The action may be *punctuated* as prose - a comma where the specification had none, the sentence carried
+  inside a longer one - but not reworded. The runtime re-verifies that the action's own words are still
+  there in their own order; a package that quotes it passes silently, one that only renders it is recorded
+  as `ACTION_PARAPHRASED`, and one that changes the verb, the actor or the object is refused whole. Quoting
+  it exactly is always the safe choice. The line, product claims and required copy have no such latitude:
+  they are compared verbatim.
 - One action, one camera movement, one eyeline per subject.
 - When `allow_camera_gaze` is false, no subject acknowledges the lens.
 - `COMPILED` and `NOT_COMPILABLE` are mutually exclusive shapes; there is no partial success, because half a

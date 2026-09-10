@@ -59,6 +59,7 @@ from production_domain.models import (
 )
 from provider_sdk import ProviderError
 from skill_core import ContinuityApprovalRequired
+from skill_core.runtime import Validated
 from sqlalchemy import select
 from test_creative_director import _registered_pro
 from test_provider_payload_contracts import (
@@ -80,6 +81,7 @@ from test_skill_runtime import (
 from video_adapter_core import AdapterInput, KlingAdapter, VideoAdapterRegistry
 from video_adapter_core.base import canonical_lines, negative_prompt, prompt_lines
 from video_platform_api.main import create_app
+from video_prompt_core.compiler import _validate_compiler_output, action_preserved
 
 SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 ADAPTER_MODELS = {
@@ -385,6 +387,124 @@ def test_a_retry_onto_another_model_keeps_the_skills_wording(retry_container):  
     assert delivery["prompt_source"] == "ADAPTER_CANONICAL" and delivery["skill_driven"] is False
     assert delivery["prompt_package_invalid"] is True
     assert "prompt_package" not in stored["metadata"]
+
+
+def test_the_action_check_holds_meaning_not_punctuation() -> None:
+    """The verbatim rule that discarded the first live production package.
+
+    A model rendered the approved action `雨桐进入城市天台上发现了一部不属于她的手机`
+    as `雨桐进入城市天台，发现了一部不属于她的手机。` - one particle fewer, one comma
+    more - and the package was refused with `dominant_action_missing`, so the
+    deterministic JSON dump went to the provider instead of the paid wording.
+    The check exists so the compiler cannot change what happens in the shot;
+    it must not also be a test of punctuation.
+    """
+
+    action = "雨桐进入城市天台上发现了一部不属于她的手机"
+    live = "夜间城市天台场景，人物雨桐。雨桐进入城市天台，发现了一部不属于她的手机。相机缓慢向前推轨。"
+
+    # Carried, and recorded as a paraphrase rather than a quotation.
+    assert action_preserved(action, live) == (True, False)
+    assert action_preserved(action, f"前缀。{action}。后缀。") == (True, True)
+    assert action_preserved("Mira picks up the phone", "Mira picks up the phone, slowly.") == (True, True)
+    assert action_preserved(
+        "Mira picks up the phone", "In the rain, Mira picks up the phone from the ledge."
+    ) == (True, True)
+    assert action_preserved("", "anything at all") == (True, True)
+
+    # What the check is actually for: a different action, or none.
+    for prose in (
+        "夜间城市天台，空无一人的画面，远处霓虹灯。",
+        "雨桐进入城市天台，扔掉了那一部不属于她的手机。",
+    ):
+        assert action_preserved(action, prose)[0] is False, prose
+    for prose in (
+        "A quiet moment on the rooftop; the skyline glows.",
+        "Mira throws the phone off the ledge.",
+        "Theo picks up the phone.",
+    ):
+        assert action_preserved("Mira picks up the phone", prose)[0] is False, prose
+
+
+def test_a_package_that_renders_the_action_without_quoting_it_is_recorded_as_a_paraphrase() -> None:
+    """The advisory the runtime carries when the action survives but is not quoted."""
+
+    action = "雨桐进入城市天台上发现了一部不属于她的手机"
+    spec = CanonicalShotSpec(
+        intent=action,
+        dominant_action=action,
+        subjects=[{"name": "雨桐", "eyeline_target": "the phone"}],
+    )
+    envelope = PromptCompilerInput(
+        shot_spec=spec.model_dump(mode="json"),
+        asset_bindings=[],
+        continuity_context=PromptContinuityContext(),
+    )
+    package = {
+        "status": "COMPILED",
+        "positive_prompt": "夜间城市天台。雨桐进入城市天台，发现了一部不属于她的手机。相机缓慢推轨。",
+        "negative_prompt": "禁止第二个动作",
+        "asset_bindings": [],
+        "continuity_assertions": [],
+        "qc_checklist": ["one action"],
+        "missing_fields": [],
+        "review_reason": None,
+    }
+    validated = _validate_compiler_output(spec, envelope, package)
+    assert isinstance(validated, Validated)
+    assert validated.reason_codes == ["ACTION_PARAPHRASED"]
+    assert validated.output.status == "COMPILED"
+
+    # Quoted exactly: no advisory, the output itself comes back.
+    quoted = {**package, "positive_prompt": f"夜间城市天台。{action}。相机缓慢推轨。"}
+    assert isinstance(_validate_compiler_output(spec, envelope, quoted), PromptCompilerOutput)
+
+    # A different action is still refused.
+    swapped = {**package, "positive_prompt": "雨桐进入城市天台，扔掉了那一部不属于她的手机。"}
+    with pytest.raises(ValueError, match="dominant_action_missing"):
+        _validate_compiler_output(spec, envelope, swapped)
+
+
+@pytest.mark.asyncio
+async def test_a_package_that_does_not_quote_the_action_still_ships(container, project):  # type: ignore[no-untyped-def]
+    """The whole point of the fix: the paid wording reaches the provider."""
+
+    _episode_id, (first, _second) = _compiled_episode(container, project)
+    action = container.prompts._envelope(first).spec.dominant_action
+
+    def rendering(role: str, request: dict[str, Any]) -> dict[str, Any]:
+        package = _compiled_package(request["envelope"])
+        # The approved action, punctuated as prose rather than quoted.
+        package["positive_prompt"] = package["positive_prompt"].replace(
+            action, action.rstrip(".") + ", slowly."
+        )
+        return package
+
+    container.skill_runtime.model_roles = StageModel(rendering)
+    result = await container.prompts.compile_shot_with_skill(first)
+    assert result.output.status == "COMPILED"
+    assert result.skill_driven and result.execution_mode == "MODEL"
+    assert action.rstrip(".") in (result.output.positive_prompt or "")
+    with container.database.session() as session:
+        assert session.get(PromptCompilation, result.record_id).diff_json["skill_driven"] is True
+
+    # And it is what the provider receives.
+    request = (
+        VideoAdapterRegistry()
+        .get("kling")
+        .compile("kling-3.0", AdapterInput(shot=result.spec, context={}, package=result.output))
+    )
+    assert request.prompt.startswith(result.output.positive_prompt.strip().splitlines()[0])
+    assert "Shot intent:" not in request.prompt
+
+    # A model that drops the action still loses its package. `reuse_fresh=False`,
+    # or the fresh package from the call above would be returned untouched.
+    container.skill_runtime.model_roles = StageModel(
+        lambda role, req: _compiled_package(req["envelope"], drop_action=True)
+    )
+    refused = await container.prompts.compile_shot_with_skill(first, reuse_fresh=False)
+    assert refused.execution_mode == "DETERMINISTIC" and not refused.skill_driven
+    assert "dominant_action_missing" in refused.skill_invocation["validation_errors"][0]
 
 
 # ------------------------------------------------------------ 2. the continuity gate

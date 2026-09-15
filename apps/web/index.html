@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/public.css" />
     <link rel="stylesheet" href="/admin.css" />
+    <link rel="stylesheet" href="/canvas/canvas.css" />
   </head>
   <body>
     <!-- ============================================================ -->
@@ -106,6 +107,7 @@
         </div>
 
         <nav class="app-nav" aria-label="Workspace">
+          <a class="app-nav-item" href="/app" data-link title="Back to the node canvas">Canvas</a>
           <button class="app-nav-item active" data-mode="create" type="button">Create</button>
           <!-- The data-mode values are the routing contract; only the labels are the
                product's own vocabulary. Do not rename ai-director / director. -->
@@ -857,6 +859,11 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
     </div>
 
     <!-- ============================================================ -->
+    <!-- CANVAS SHELL — /app; canvas/canvas-app.js renders into it     -->
+    <!-- ============================================================ -->
+    <section id="canvasShell" class="cv-shell" hidden></section>
+
+    <!-- ============================================================ -->
     <!-- DIALOGS                                                      -->
     <!-- ============================================================ -->
     <dialog id="newProjectDialog" class="sheet" aria-labelledby="newProjectTitle" aria-describedby="newProjectDescription">
@@ -1189,5 +1196,6 @@ LIN JIN turns and takes two steps toward the edge of the awning."></textarea>
     <script type="module" src="/app.js"></script>
     <script type="module" src="/wallet.js"></script>
     <script type="module" src="/admin.js"></script>
+    <script type="module" src="/canvas/canvas-app.js"></script>
   </body>
 </html>

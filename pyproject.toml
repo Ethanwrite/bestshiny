@@ -90,6 +90,8 @@ packages = [
   "core/router-evidence/router_evidence_core",
   "core/creative-director/creative_director_core",
   "core/episode-continuation/episode_continuation_core",
+  "core/connections/connection_core",
+  "core/workflows/workflow_core",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
@@ -124,6 +126,8 @@ pythonpath = [
   "core/router-evidence",
   "core/creative-director",
   "core/episode-continuation",
+  "core/connections",
+  "core/workflows",
 ]
 
 [tool.ruff]
@@ -140,6 +144,7 @@ select = ["E", "F", "I", "B", "UP"]
 "apps/api/video_platform_api/admin_routes.py" = ["B008"]
 "apps/api/video_platform_api/creative_routes.py" = ["B008"]
 "apps/api/video_platform_api/skill_routes.py" = ["B008"]
+"apps/api/video_platform_api/canvas_routes.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -169,4 +174,6 @@ files = [
   "core/router-evidence",
   "core/creative-director",
   "core/episode-continuation",
+  "core/connections",
+  "core/workflows",
 ]

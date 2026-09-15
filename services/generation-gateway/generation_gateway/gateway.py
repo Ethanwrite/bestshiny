@@ -80,6 +80,7 @@ from production_domain.models import (
     Shot,
     ShotStatus,
     TimelineState,
+    UserConnection,
     WorkerCommand,
     WorkerStatus,
     WorkspaceCreditEntry,
@@ -94,6 +95,7 @@ from provider_sdk import (
     ProviderMode,
     ProviderPollIdentity,
     ProviderReferenceMode,
+    RemoteMediaFetchPolicy,
 )
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -105,6 +107,7 @@ from .affinity import (
     FlowAffinityUnavailable,
     FlowProjectAllocator,
 )
+from .connections import UserConnectionResolver, is_connection_provider
 from .providers import GenerationTargetError, ProviderRouter
 from .retry import RetryPolicy
 from .scheduler import AccountScheduler, NoAccountAvailable
@@ -299,6 +302,7 @@ class GenerationGateway:
         flow_affinity: FlowProjectAllocator | None = None,
         live_canary: LiveCanaryPermitService | None = None,
         production_budget: ProductionBudgetService | None = None,
+        user_connections: UserConnectionResolver | None = None,
     ):
         if claim_lease_seconds < 30:
             raise ValueError("claim_lease_seconds must be at least 30")
@@ -317,6 +321,7 @@ class GenerationGateway:
         self.flow_affinity = flow_affinity or FlowProjectAllocator(database, scheduler)
         self.live_canary = live_canary
         self.production_budget = production_budget
+        self.user_connections = user_connections
         # A synchronous result is not held in this process. It goes into the
         # `provider_synchronous_results` inbox in the same transaction that
         # confirms the submission, because a paid artefact must not depend on
@@ -344,6 +349,12 @@ class GenerationGateway:
         definition remains authoritative in every mode.
         """
 
+        if is_connection_provider(provider):
+            # A connection's model is the workspace's own choice on its own
+            # account; the platform registry does not describe it and its
+            # switches do not govern it. The connection itself is fenced at the
+            # submission boundary instead.
+            return None
         definition = None
         if self.model_infrastructure is not None:
             if session is None:
@@ -398,6 +409,46 @@ class GenerationGateway:
     def _next_poll_at(self) -> datetime:
         return utcnow() + timedelta(seconds=self.poll_interval_seconds)
 
+    def _job_provider(
+        self,
+        provider_name: str,
+        model: str,
+        capability: str,
+        *,
+        connection_id: str | None,
+        project_id: str,
+    ) -> GenerationProvider:
+        """The provider implementation a job runs on.
+
+        A platform job resolves through the provider router and its kill
+        switches, exactly as before. A connection job resolves through its own
+        connection, built for this call with the connection's key; a deleted or
+        foreign connection, or one no longer enabled for the media type, is a
+        target error like a disabled model.
+        """
+
+        if connection_id is None or not is_connection_provider(provider_name):
+            if connection_id is not None or is_connection_provider(provider_name):
+                raise GenerationTargetError(
+                    "CONNECTION_TARGET_MISMATCH",
+                    "the job's provider and connection disagree",
+                )
+            return self.providers.validate_target(provider_name, model, capability)
+        if self.user_connections is None:
+            raise GenerationTargetError(
+                "CONNECTIONS_UNAVAILABLE", "workspace connections are not configured on this server"
+            )
+        try:
+            return self.user_connections.generation_provider(
+                connection_id, project_id=project_id, media_type=capability
+            )
+        except GenerationTargetError:
+            raise
+        except Exception as exc:
+            raise GenerationTargetError(
+                str(getattr(exc, "code", "") or "CONNECTION_UNAVAILABLE"), str(exc)
+            ) from exc
+
     @staticmethod
     def _live_canary_operation_key(job_id: str) -> str:
         return f"generation:{job_id}"
@@ -433,7 +484,7 @@ class GenerationGateway:
         job cannot prove stays UNCERTAIN for an operator.
         """
 
-        if self.provider_mode is not ProviderMode.LIVE:
+        if self.provider_mode is not ProviderMode.LIVE or is_connection_provider(provider):
             return None
         key = self._live_canary_operation_key(job_id)
         recovered_evidence = f"generation-boundary-recovered-before-transport:{job_id}"
@@ -557,7 +608,7 @@ class GenerationGateway:
     ) -> LiveGenerationFence | None:
         """Assert the operation owns the durable hold(s) its fence kind requires."""
 
-        if self.provider_mode is not ProviderMode.LIVE:
+        if self.provider_mode is not ProviderMode.LIVE or is_connection_provider(provider):
             return None
         key = self._live_canary_operation_key(job_id)
         allowed = frozenset({"UNCERTAIN", "SETTLED"}) if allow_settled else frozenset({"UNCERTAIN"})
@@ -600,7 +651,7 @@ class GenerationGateway:
         provider_job_id: str,
         raw: dict[str, Any],
     ) -> None:
-        if self.provider_mode is not ProviderMode.LIVE:
+        if self.provider_mode is not ProviderMode.LIVE or is_connection_provider(provider):
             return
         actual, _, _, _, _ = _provider_billing_facts(raw)
         key = self._live_canary_operation_key(job_id)
@@ -677,7 +728,8 @@ class GenerationGateway:
         gate on paying traffic.
         """
 
-        if self.provider_mode is not ProviderMode.LIVE:
+        if self.provider_mode is not ProviderMode.LIVE or is_connection_provider(provider):
+            # A workspace's own endpoint is not evidence about a platform model.
             return
         key = self._live_canary_operation_key(job_id)
         with self.database.session() as session:
@@ -802,6 +854,7 @@ class GenerationGateway:
         quoted_cost_usd: float | Decimal | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
+        connection_id: str | None = None,
     ) -> tuple[GenerationJob, bool]:
         attempts = 6 if self.database.engine.dialect.name == "sqlite" else 1
         for attempt in range(attempts):
@@ -814,6 +867,7 @@ class GenerationGateway:
                     quoted_cost_usd=quoted_cost_usd,
                     resolution=resolution,
                     timeline_fence=timeline_fence,
+                    connection_id=connection_id,
                 )
             except OperationalError as exc:
                 locked = "database is locked" in str(exc).lower()
@@ -832,13 +886,36 @@ class GenerationGateway:
         quoted_cost_usd: float | Decimal | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
+        connection_id: str | None = None,
     ) -> tuple[GenerationJob, bool]:
-        self.providers.validate_target(
-            request.provider,
-            request.model,
-            request.type,
-            asset_criticality=request.asset_criticality,
-        )
+        on_connection = connection_id is not None
+        if on_connection != is_connection_provider(request.provider):
+            # The provider name and the connection travel together: a platform
+            # provider can never be paid by a connection, and "byok" never names
+            # the platform's own account.
+            raise GenerationTargetError(
+                "CONNECTION_TARGET_MISMATCH",
+                "a connection generation must name the connection provider, and only it",
+            )
+        if on_connection:
+            if self.user_connections is None:
+                raise GenerationTargetError(
+                    "CONNECTIONS_UNAVAILABLE", "workspace connections are not configured on this server"
+                )
+            if not request.model.strip():
+                raise GenerationTargetError(
+                    "CONNECTION_MODEL_REQUIRED", "a connection generation needs a model"
+                )
+            if estimated_credits:
+                # Who pays is decided by the connection, never by a caller's quote.
+                raise WorkspaceCreditConflict("a connection generation is not charged workspace credits")
+        else:
+            self.providers.validate_target(
+                request.provider,
+                request.model,
+                request.type,
+                asset_criticality=request.asset_criticality,
+            )
         payload = request.model_dump(mode="json", exclude={"idempotency_key", "candidate_id"})
         metadata = dict(payload.get("metadata") or {})
         # This namespace is exclusively server-owned. Public request metadata
@@ -849,6 +926,10 @@ class GenerationGateway:
         # server fence is execution metadata: persisting it is required for
         # audit, but including it here would turn a normal post-QUEUE replay
         # into a false conflict merely because the Shot status advanced.
+        if on_connection:
+            # Part of what the caller asked for: the same key sent for another
+            # connection is a different request.
+            payload["connection_id"] = connection_id
         request_hash = canonical_hash(payload)
         if timeline_fence is not None:
             payload["metadata"] = {
@@ -872,11 +953,29 @@ class GenerationGateway:
             if project is None:
                 raise LookupError(f"project not found: {request.project_id}")
             workspace_credit_required = False
-            if self.workspace_credits is not None:
+            if on_connection:
+                assert self.user_connections is not None and connection_id is not None
+                # The connection's own account pays; its workspace must own it,
+                # it must be live and enabled for this media type.
+                try:
+                    self.user_connections.assert_generation_target_in_session(
+                        session,
+                        connection_id=connection_id,
+                        project_id=request.project_id,
+                        media_type=request.type,
+                    )
+                except GenerationTargetError:
+                    raise
+                except Exception as exc:
+                    raise GenerationTargetError(
+                        str(getattr(exc, "code", "") or "CONNECTION_UNAVAILABLE"), str(exc)
+                    ) from exc
+            elif self.workspace_credits is not None:
                 credit_context = self.workspace_credits.balance_in_session(session, request.project_id)
                 # One definition of who pays, on the balance itself: every plan
                 # does, and the development bypass and pre-commercial projects
-                # do not.
+                # do not. A connection job is outside it: its workspace pays the
+                # provider directly.
                 workspace_credit_required = credit_context.billable
                 if workspace_credit_required and estimated_credits is None:
                     raise WorkspaceCreditConflict("workspace generation requires a server-owned credit quote")
@@ -926,6 +1025,7 @@ class GenerationGateway:
                         cost_estimate=request.cost_estimate,
                         workspace_credit_required=workspace_credit_required,
                         quoted_credits=estimated_credits or 0,
+                        connection_id=connection_id,
                     )
                     shot = None
                     if request.shot_id:
@@ -954,7 +1054,11 @@ class GenerationGateway:
                             raise LookupError("candidate does not belong to shot")
                     session.add(job)
                     session.flush([job])
-                    if estimated_credits is not None and self.workspace_credits is not None:
+                    if (
+                        not on_connection
+                        and estimated_credits is not None
+                        and self.workspace_credits is not None
+                    ):
                         credit_reservation = self.workspace_credits.reserve_generation(
                             session,
                             job,
@@ -971,7 +1075,8 @@ class GenerationGateway:
                                 balance_after=credit_reservation.balance_after,
                             )
                     if (
-                        self.provider_mode is ProviderMode.LIVE
+                        not on_connection
+                        and self.provider_mode is ProviderMode.LIVE
                         and self.production_budget is not None
                         and self.production_budget.enabled
                     ):
@@ -1032,6 +1137,11 @@ class GenerationGateway:
                         "JOB_CREATED",
                         idempotency_key=request.idempotency_key,
                         request_hash=request_hash,
+                        **(
+                            {"billing_owner": "USER_CONNECTION", "connection_id": connection_id}
+                            if on_connection
+                            else {}
+                        ),
                     )
                     if shot:
                         shot.generation_job_id = job.id
@@ -1137,6 +1247,9 @@ class GenerationGateway:
                 "credits_field": credits_field,
                 "provider_response_sha256": raw_hash,
                 "provider_mode": self.provider_mode.value,
+                # A connection job is billed to the workspace's own provider
+                # account; its evidence is never a platform cost.
+                "billing_owner": "USER_CONNECTION" if job.connection_id else "PLATFORM",
                 # What we asked for, recorded beside what we were charged.
                 # OpenRouter returns `usage: {cost, is_byok}` and nothing else --
                 # no billable duration, no resolution echo, no audio flag -- so
@@ -1376,6 +1489,8 @@ class GenerationGateway:
                 provider_job_id = claimed.provider_job_id
                 account_id = claimed.account_id
                 worker_id = claimed.worker_id
+                connection_id = claimed.connection_id
+                job_project_id = claimed.project_id
                 current = claimed
         if current is None:
             latest = self.get(job_id)
@@ -1389,7 +1504,13 @@ class GenerationGateway:
                 "confirmed provider job is missing routing data",
             )
         try:
-            provider = self.providers.validate_target(provider_name, model, capability)
+            provider = self._job_provider(
+                provider_name,
+                model,
+                capability,
+                connection_id=connection_id,
+                project_id=job_project_id,
+            )
             self._require_live_generation_fence_boundary(
                 job_id=job_id,
                 provider=provider_name,
@@ -2129,6 +2250,7 @@ class GenerationGateway:
         capability: str,
         asset_type: str,
         result: ProviderJob,
+        media_policy: RemoteMediaFetchPolicy | None = None,
     ) -> tuple[StagedProviderOutput, list[tuple[int, StagedProviderOutput]]]:
         """Validate every provider artefact and write it to its staging slot.
 
@@ -2179,14 +2301,27 @@ class GenerationGateway:
         else:
             assert result.output_url is not None
             suffix = "mp4" if capability == "video" else "png"
-            primary = await self.media.download_provider_output_to_staging(
-                result.output_url,
-                key_prefix=key_prefix,
-                index=0,
-                filename=f"{job_id}.{suffix}",
-                provider=provider_name,
-                asset_type=asset_type,
-            )
+            if media_policy is None:
+                primary = await self.media.download_provider_output_to_staging(
+                    result.output_url,
+                    key_prefix=key_prefix,
+                    index=0,
+                    filename=f"{job_id}.{suffix}",
+                    provider=provider_name,
+                    asset_type=asset_type,
+                )
+            else:
+                # Only a connection job carries a policy; a platform download
+                # keeps its exact call, allowlist included.
+                primary = await self.media.download_provider_output_to_staging(
+                    result.output_url,
+                    key_prefix=key_prefix,
+                    index=0,
+                    filename=f"{job_id}.{suffix}",
+                    provider=provider_name,
+                    asset_type=asset_type,
+                    policy=media_policy,
+                )
             extras = []
         with self.database.session() as session:
             self._event(
@@ -2675,6 +2810,7 @@ class GenerationGateway:
         now = utcnow()
         target_fence_lost = False
         flow_affinity_fence_lost = False
+        connection_fence_lost = False
         flow_boundary_submitted = False
         with self.database.session() as session:
             boundary_conditions = [
@@ -2773,6 +2909,16 @@ class GenerationGateway:
                 )
             if flow_binding_predicate is not None:
                 update_conditions.append(flow_binding_predicate.exists())
+            connection_predicate = None
+            if is_connection_provider(provider_name):
+                # The same EXISTS fence the model switch gets: a connection
+                # deleted between routing and this transaction stops the call.
+                connection_predicate = select(UserConnection.id).where(
+                    UserConnection.id == boundary_job.connection_id,
+                    UserConnection.deleted_at.is_(None),
+                    UserConnection.status != "DELETED",
+                )
+                update_conditions.append(connection_predicate.exists())
             result = session.execute(
                 update(GenerationJob)
                 .where(*update_conditions)
@@ -2789,6 +2935,8 @@ class GenerationGateway:
                 )
                 if flow_binding_predicate is not None and boundary_still_owned:
                     flow_affinity_fence_lost = session.scalar(flow_binding_predicate) is None
+                if connection_predicate is not None and boundary_still_owned:
+                    connection_fence_lost = session.scalar(connection_predicate) is None
                 target_fence_lost = (
                     not flow_affinity_fence_lost and definition is not None and boundary_still_owned
                 )
@@ -2809,6 +2957,11 @@ class GenerationGateway:
                 RetryCategory.PERMANENT_ERROR,
                 code="FLOW_AFFINITY_CHANGED",
                 submitted=flow_boundary_submitted,
+            )
+        if connection_fence_lost:
+            raise GenerationTargetError(
+                "CONNECTION_UNAVAILABLE",
+                "the connection was removed before the generation was submitted",
             )
         if target_fence_lost:
             # Resolve again after the failed atomic predicate so callers receive
@@ -2868,6 +3021,7 @@ class GenerationGateway:
                 model = job.model
                 project_id = job.project_id
                 priority = job.priority
+                connection_id = job.connection_id
                 pre_boundary_proven = job.submission_state == "NOT_SENT" and not job.provider_job_id
                 project = session.get(Project, job.project_id)
                 workspace_scoped = bool(project and project.workspace_id)
@@ -2881,13 +3035,26 @@ class GenerationGateway:
                 claim_token=claim_token,
             )
         try:
-            provider = self.providers.validate_target(provider_name, model, capability)
+            provider = self._job_provider(
+                provider_name,
+                model,
+                capability,
+                connection_id=connection_id,
+                project_id=project_id,
+            )
             self._validate_persisted_generation_target(
                 provider_name,
                 model,
                 capability,
                 workspace_scoped=workspace_scoped,
             )
+            pinned_account_id: str | None = None
+            if connection_id is not None:
+                assert self.user_connections is not None
+                try:
+                    pinned_account_id = self.user_connections.ensure_resources(connection_id)
+                except Exception as exc:
+                    raise GenerationTargetError("CONNECTION_UNAVAILABLE", str(exc)) from exc
         except GenerationTargetError as exc:
             return self._schedule_error(
                 job_id,
@@ -2987,6 +3154,9 @@ class GenerationGateway:
                     project_id=project_id,
                     generation_job_id=job_id,
                     claim_token=claim_token,
+                    # A connection job may only ever run on its own connection's
+                    # capacity; every connection shares the provider name.
+                    account_id=pinned_account_id,
                 )
                 provider_project_id = None
         except FlowAffinityUnavailable as exc:
@@ -3345,8 +3515,16 @@ class GenerationGateway:
             provider_project_id = job.provider_project_id
             provider_job_id = job.provider_job_id
             capability = job.generation_type
+            connection_id = job.connection_id
+            job_project_id = job.project_id
         try:
-            provider = self.providers.validate_target(provider_name, model, capability)
+            provider = self._job_provider(
+                provider_name,
+                model,
+                capability,
+                connection_id=connection_id,
+                project_id=job_project_id,
+            )
         except GenerationTargetError as exc:
             return self._schedule_error(
                 job_id,
@@ -3596,6 +3774,9 @@ class GenerationGateway:
                 capability=capability,
                 asset_type=asset_type,
                 result=result,
+                media_policy=getattr(provider, "media_fetch_policy", None)
+                if is_connection_provider(provider_name)
+                else None,
             )
             job = self._finalize_completed_generation(
                 job_id,

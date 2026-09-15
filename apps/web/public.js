@@ -4,7 +4,7 @@
  * state. The only thing it shares with the app is the token layer in
  * styles.css.
  */
-import { onRoute, navigate, currentUser, currentRoute, AUTH_ROUTES } from "./router.js";
+import { onRoute, navigate, currentUser, currentRoute, isAppRoute, AUTH_ROUTES } from "./router.js";
 
 const mount = () => document.getElementById("publicPages");
 const API = window.AI_DIRECTOR_API
@@ -565,7 +565,9 @@ function render(route) {
 }
 
 onRoute((route) => {
-  if (route === "/app") { stopDemo(); return; }
+  // Every application route - the canvas at /app and the workbench at
+  // /app/studio - hides the public site; nothing here should render behind it.
+  if (isAppRoute(route)) { stopDemo(); return; }
   render(route);
 });
 loadPacks();

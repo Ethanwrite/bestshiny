@@ -260,6 +260,33 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model_id: str = ""
+    # A workspace's own provider credentials ("connections"). A generation on
+    # a connection is paid by the workspace's provider account, so it reserves
+    # no credits and takes no platform spend authorization or canary permit;
+    # every other gateway guarantee (durable boundary, fenced media download,
+    # storage quota) still applies. Off stops new connection use everywhere.
+    user_connections_enabled: bool = True
+    # Development only: lets a connection reach a private or loopback address
+    # (a local Ollama or vLLM). Startup refuses it in production, where it
+    # would turn every connection into a probe of the internal network.
+    user_connection_allow_private_network: bool = False
+    user_connection_http_timeout_seconds: float = 120
+    # Concurrent generation jobs per connection. The provider's own rate limit
+    # is the real ceiling; this keeps one workspace's key from monopolizing the
+    # worker's poll loop.
+    user_connection_max_concurrent_jobs: int = 4
+    # Bound on one provider response body (JSON can carry inline base64
+    # images). Artefact downloads keep `max_provider_download_bytes`.
+    user_connection_max_response_bytes: int = 64 * 1024 * 1024
+    # The network-free `mock` protocol, for demos and browser QA without a real
+    # key. Development and test only; startup refuses it in production.
+    user_connection_mock_protocol_enabled: bool = False
+    # Canvas workflow runs are advanced by the worker. 0 disables the worker
+    # loop; `POST /internal/maintenance/workflow-runs` still advances them.
+    workflow_run_interval_seconds: float = 2.0
+    workflow_run_batch_limit: int = 20
+    workflow_run_lease_seconds: int = 300
+    workflow_llm_timeout_seconds: float = 300
     alchemy_webhook_signing_key: str = ""
     alchemy_webhook_id: str = ""
     alchemy_network: Literal["BASE_MAINNET", "BASE_SEPOLIA"] = "BASE_MAINNET"

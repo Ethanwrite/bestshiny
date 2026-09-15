@@ -14,6 +14,13 @@ Before taking over development, read [the documentation index](docs/README.md)�
 > 0 authorized validation samples and is explicitly disabled for this deployment because Modal/public HTTPS
 > callback reachability is unproven. Payment and whole-episode export are excluded from this release.
 >
+> **2026-09-14:** migration head `0083_canvas_workflows_user_connections`. `/app` is a node canvas (Text,
+> Image, LLM, Image generation, Video generation, Note; typed ports, drag-and-drop, durable server-side runs
+> that reuse unchanged nodes), and a workspace can bring its own API keys ("connections") for chat
+> (OpenAI-compatible, Anthropic, OpenRouter, Ark, DashScope) and for image/video (OpenRouter, Ark, DashScope).
+> Connection-paid generations are billed by that provider, not credits. The previous workbench is
+> `/app/studio`. Entry point: [docs/CANVAS_AND_CONNECTIONS.md](docs/CANVAS_AND_CONNECTIONS.md).
+>
 > **2026-09-09:** no migration. What a Skill decides now reaches the output: the prompt-compiler
 > Skill's package is the body of the provider request, a Skill-driven continuity `ESCALATE` blocks the shot
 > until a real user acknowledges it, unresolved or hedged photography and a plan's own `unresolved` entries
@@ -286,6 +293,24 @@ API 的完整请求/响应 schema 以 `/docs` 为准。普通用户使用登录�
 | `POST` | `/v1/characters/{character_id}/narrative-state/initialize` | 从已采用镜头建立人工显式确认的角色叙事状态 v1 |
 | `GET` | `/v1/projects/{project_id}/characters/{character_id}/narrative-state` | 读取指定 timeline scope 的当前状态 head 和不可变 identity 绑定 |
 | `GET` | `/v1/shots/{shot_id}/candidates/{candidate_id}/state-transitions` | 读取 candidate 的 delta、分阶段验证和已提交版本审计视图 |
+
+### Workspace connections and canvas workflows
+
+See [docs/CANVAS_AND_CONNECTIONS.md](docs/CANVAS_AND_CONNECTIONS.md) for the full contract.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/v1/connections/protocols` | Connection protocols, presets and suggested models |
+| `GET/POST` | `/v1/workspaces/{workspace_id}/connections` | List (any member) / add (owner or admin) a workspace's own provider key; no route returns a key |
+| `PATCH/DELETE` | `/v1/workspaces/{workspace_id}/connections/{id}` | Change / remove a connection (owner or admin); deletion erases the key |
+| `POST` | `/v1/workspaces/{workspace_id}/connections/{id}/test` | Check a key without generating anything (owner or admin) |
+| `GET` | `/v1/workspaces/{workspace_id}/connections/{id}/remote-models` | The provider's own model list (owner or admin) |
+| `GET` | `/v1/workflows/node-types` | The canvas node catalogue |
+| `GET/POST` | `/v1/projects/{project_id}/workflows` | A project's canvases / create one |
+| `GET/PUT/DELETE` | `/v1/workflows/{id}` | Read (with each node's latest result) / save with `base_version` (409 when stale) / soft-delete |
+| `POST` | `/v1/workflows/{id}/runs` | Run everything or `node_ids` (plus what feeds them); unchanged nodes reuse results unless `force` |
+| `GET` | `/v1/workflows/{id}/runs`, `/v1/workflow-runs/{run_id}` | Run history / one run with every node's status, outputs and job |
+| `POST` | `/v1/workflow-runs/{run_id}/cancel` | Stop a run, its pending nodes and the jobs they created |
 
 ### Assets
 

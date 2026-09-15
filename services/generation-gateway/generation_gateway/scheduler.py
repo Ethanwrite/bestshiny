@@ -72,20 +72,29 @@ class AccountScheduler:
         project_id: str | None = None,
         generation_job_id: str | None = None,
         claim_token: str | None = None,
+        account_id: str | None = None,
     ) -> tuple[ProviderAccount, BrowserWorker]:
+        """Reserve capacity on the best eligible account for one job.
+
+        ``account_id`` pins the choice to a single account. A workspace
+        connection's jobs all share one provider name, so without the pin the
+        ranking below could place one workspace's job on another workspace's
+        key; with it, the only candidate is the connection's own resource.
+        """
         del priority
         if capability not in {"image", "video"}:
             raise ValueError(f"unsupported generation capability: {capability}")
         if (generation_job_id is None) != (claim_token is None):
             raise ValueError("generation_job_id and claim_token must be supplied together")
         with self.database.session() as session:
-            accounts = session.scalars(
-                select(ProviderAccount).where(
-                    ProviderAccount.provider == provider,
-                    ProviderAccount.status.in_([AccountStatus.READY.value, AccountStatus.BUSY.value]),
-                    ProviderAccount.credits > 0,
-                )
-            ).all()
+            account_filter = [
+                ProviderAccount.provider == provider,
+                ProviderAccount.status.in_([AccountStatus.READY.value, AccountStatus.BUSY.value]),
+                ProviderAccount.credits > 0,
+            ]
+            if account_id is not None:
+                account_filter.append(ProviderAccount.id == account_id)
+            accounts = session.scalars(select(ProviderAccount).where(*account_filter)).all()
             if project_id:
                 project_bindings = list(
                     session.scalars(
@@ -144,10 +153,10 @@ class AccountScheduler:
                 candidates.append((score, account.id, worker.id))
             if not candidates:
                 raise NoAccountAvailable(f"no ready {provider} account for {capability}/{model}")
-        for _, account_id, worker_id in sorted(candidates, key=lambda item: item[0]):
+        for _, candidate_account_id, candidate_worker_id in sorted(candidates, key=lambda item: item[0]):
             reserved = self._try_reserve(
-                account_id,
-                worker_id,
+                candidate_account_id,
+                candidate_worker_id,
                 provider=provider,
                 capability=capability,
                 model=model,

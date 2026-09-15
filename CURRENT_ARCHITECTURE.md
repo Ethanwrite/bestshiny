@@ -11,6 +11,17 @@ Phase III implementation: commit `99f9c60`, evidence tag `v0.3.0-production-evid
 Migration head: `0060_flow_remote_owner_index`
 Release posture: **NOT PRODUCTION-READY**
 
+> **2026-09-14 update — workspace connections and the canvas.** Migration head is now
+> `0083_canvas_workflows_user_connections`. A workspace's own provider key (`user_connections`) runs canvas
+> nodes: chat through `connection_core` clients (OpenAI-compatible, Anthropic Messages), image/video through
+> the platform's reviewed OpenRouter/Ark/Wan adapters rebuilt per job on the connection's key behind the
+> connect-time egress fence. The gateway treats `provider = byok` jobs as paid by that account: no credit
+> reservation, spend authorization, canary permit or verdict; capacity pinned to the connection; the
+> connection re-fenced at the submission boundary; artefacts fetched under a per-job media policy. The node
+> canvas (`workflow_core`, `workflows` / `workflow_runs` / `workflow_node_runs`) is `/app`; its runs advance
+> on a worker task beside the job loop and create ordinary generation jobs. See the section "Workspace
+> connections and the canvas" below and `docs/CANVAS_AND_CONNECTIONS.md`.
+
 > **2026-09-09 update — what a Skill decides reaches the output.** No migration. The dependency, series and
 > obligation facts still live inside `CanonicalShotSpec.continuity["facts"]`, which the deterministic path
 > serialises as each adapter's `Continuity:` line; on the Skill path they reach the provider through the
@@ -173,7 +184,9 @@ return edge does not exist at runtime — the router receives byte-for-byte the 
 before any of this was added.
 
 Passenger and Autopilot share `VisualProductionRuntime`, `GenerationGateway`, `MediaRegistry`, storage, routing,
-provider execution and accounting. A second generation engine or wallet is not allowed.
+provider execution and accounting. A second generation engine or wallet is not allowed. Canvas nodes join them: a
+credit-paid node is admitted and submitted exactly like a Passenger request, and a connection-paid node is an
+ordinary gateway job whose payer is the workspace's own provider account.
 
 ## Repository layers
 
@@ -361,6 +374,29 @@ live creations, style checks, quality reviews, project memory, story references 
 row as `KEPT_SHARED` with that holder named. The storage key is checked separately, because content addressing can
 put one object behind several rows. The asset row itself always survives as the anchor its `RESTRICT` foreign keys
 and evidence trail need; what changes is a record that its bytes are gone.
+
+## Workspace connections and the canvas
+
+Entry point: [`docs/CANVAS_AND_CONNECTIONS.md`](docs/CANVAS_AND_CONNECTIONS.md).
+
+```text
+browser canvas (/app)
+-> PUT /v1/workflows/{id}            optimistic version; structural validation (parse_graph)
+-> POST /v1/workflows/{id}/runs      snapshot + node runs; input nodes resolve; fingerprint reuse
+-> worker workflow_run_loop          lease per run; conditional update per node
+   -> LLM node          UserConnectionService.chat -> fenced ConnectionTransport -> provider
+   -> generation node   source=platform:   admit_passenger -> submit_passenger(mode=CANVAS) -> gateway
+                        source=connection: submit(connection_id=...) -> gateway (provider=byok)
+-> GenerationGateway   byok: resolver builds the adapter on the connection's key; no credits,
+                       no spend authorization, no canary; capacity pinned to byok://<connection>
+```
+
+Who pays is decided in one place per job: `workspace_credit_required` from `WorkspaceCreditBalance.billable`
+for a platform job, `false` with `connection_id` set for a connection job. The platform's `LiveProviderGate`
+does not govern connection transports (it exists so the platform cannot spend its own provider money by
+accident); `USER_CONNECTIONS_ENABLED` does. User-supplied URLs pass the connect-time egress fence
+(`connection_core.egress.FencedNetworkBackend`): every resolved address must be public and the address
+dialled is the one validated.
 
 ## Authentication, tenancy and storage
 

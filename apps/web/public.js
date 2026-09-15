@@ -20,14 +20,14 @@ const API = window.AI_DIRECTOR_API
    rows verbatim - a test pins the two together - so the page paints the right
    numbers before the request answers and keeps them if it never does. */
 const STATIC_PACKS = [
-  { sku: "starter_20", amount: "20.00", currency: "USDC", credits: 1800, recommended: false },
-  { sku: "creator_50", amount: "50.00", currency: "USDC", credits: 6000, recommended: true },
-  { sku: "pro_100", amount: "100.00", currency: "USDC", credits: 11000, recommended: false },
+  { sku: "starter_20", amount: "3.00", currency: "USDC", credits: 300, recommended: false },
+  { sku: "creator_50", amount: "7.00", currency: "USDC", credits: 700, recommended: true },
+  { sku: "pro_100", amount: "23.00", currency: "USDC", credits: 2300, recommended: false },
 ];
 const STATIC_CNY_PACKS = [
-  { sku: "starter_20", amount: "140.00", currency: "CNY", credits: 1800, recommended: false },
-  { sku: "creator_50", amount: "450.00", currency: "CNY", credits: 6000, recommended: true },
-  { sku: "pro_100", amount: "700.00", currency: "CNY", credits: 11000, recommended: false },
+  { sku: "starter_20", amount: "18.00", currency: "CNY", credits: 300, recommended: false },
+  { sku: "creator_50", amount: "48.00", currency: "CNY", credits: 700, recommended: true },
+  { sku: "pro_100", amount: "158.00", currency: "CNY", credits: 2300, recommended: false },
 ];
 const PACK_NAMES = { starter_20: "ESSENTIAL", creator_50: "MOST POPULAR", pro_100: "PROFESSIONAL" };
 let packs = STATIC_PACKS;

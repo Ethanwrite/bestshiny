@@ -45,7 +45,7 @@ def _container(tmp_path):  # type: ignore[no-untyped-def]
     def gateway(request: httpx.Request) -> httpx.Response:
         assert request.url == GATEWAY_URL
         payload = json.loads(request.content)
-        assert payload["total_fee"] in {"140.00", "450.00", "700.00"}
+        assert payload["total_fee"] in {"18.00", "48.00", "158.00"}
         assert payload["hash"] == XunhuPayPaymentService.generate_hash(payload, APP_SECRET)
         response: dict[str, object] = {
             "openid": f"gateway-{payload['trade_order_id']}",
@@ -139,11 +139,11 @@ def test_checkout_uses_only_server_owned_plan_price_and_credits(tmp_path) -> Non
     assert config.status_code == 200
     assert config.json()["xunhupay_configured"] is True
     assert config.json()["xunhupay_packages"] == [
-        {"sku": "starter_20", "amount": "140.00", "currency": "CNY", "credits": 1_800,
+        {"sku": "starter_20", "amount": "18.00", "currency": "CNY", "credits": 300,
          "recommended": False},
-        {"sku": "creator_50", "amount": "450.00", "currency": "CNY", "credits": 6_000,
+        {"sku": "creator_50", "amount": "48.00", "currency": "CNY", "credits": 700,
          "recommended": True},
-        {"sku": "pro_100", "amount": "700.00", "currency": "CNY", "credits": 11_000,
+        {"sku": "pro_100", "amount": "158.00", "currency": "CNY", "credits": 2_300,
          "recommended": False},
     ]
 
@@ -162,9 +162,9 @@ def test_checkout_uses_only_server_owned_plan_price_and_credits(tmp_path) -> Non
 
     checkout = _checkout(client, workspace_id)
     assert (checkout["amount"], checkout["currency"], checkout["credits"]) == (
-        "450.00",
+        "48.00",
         "CNY",
-        6_000,
+        700,
     )
     assert "secret" not in json.dumps(checkout).lower()
     with container.database.session() as session:
@@ -173,8 +173,8 @@ def test_checkout_uses_only_server_owned_plan_price_and_credits(tmp_path) -> Non
         assert order is not None and workspace is not None
         assert (order.provider, order.amount, order.credits, order.status) == (
             "XUNHUPAY",
-            450,
-            6_000,
+            48,
+            700,
             "PENDING",
         )
         assert workspace.credit_balance == 50
@@ -184,7 +184,7 @@ def test_signed_notification_posts_once_through_unified_credit_ledger(tmp_path) 
     container = _container(tmp_path)
     client, workspace_id = _registered(container)
     _checkout(client, workspace_id, "starter_20")
-    payload = _notification(container, total_fee="140")
+    payload = _notification(container, total_fee="18")
 
     first = _post_notification(client, payload)
     second = _post_notification(client, payload)
@@ -198,9 +198,9 @@ def test_signed_notification_posts_once_through_unified_credit_ledger(tmp_path) 
             "id": history.json()["items"][0]["id"],
             "plan_id": "starter_20",
             "provider": "xunhupay",
-            "amount": "140.00",
+            "amount": "18.00",
             "currency": "CNY",
-            "credits": 1_800,
+            "credits": 300,
             "status": "PAID",
             "created_at": history.json()["items"][0]["created_at"],
             "paid_at": history.json()["items"][0]["paid_at"],
@@ -214,14 +214,14 @@ def test_signed_notification_posts_once_through_unified_credit_ledger(tmp_path) 
         settlements = list(session.scalars(select(XunhuPaySettlement)))
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
         assert workspace is not None and order is not None and checkout is not None
-        assert (workspace.plan_tier, workspace.credit_balance) == ("PRO", 1_850)
+        assert (workspace.plan_tier, workspace.credit_balance) == ("PRO", 350)
         assert order.status == checkout.status == "PAID"
         assert len(settlements) == len(ledger) == 1
         assert settlements[0].status == "CREDITED"
         assert ledger[0].entry_type == "CNY_PURCHASE"
         assert ledger[0].payment_id is None
         assert ledger[0].xunhupay_settlement_id == settlements[0].id
-        assert ledger[0].credits == 1_800
+        assert ledger[0].credits == 300
 
 
 def test_bad_signature_and_amount_mismatch_never_credit_workspace(tmp_path) -> None:
@@ -254,7 +254,7 @@ def test_notification_requires_form_encoding_and_paid_status(tmp_path) -> None:
     container = _container(tmp_path)
     client, workspace_id = _registered(container)
     _checkout(client, workspace_id)
-    payload = _notification(container, total_fee="450.00")
+    payload = _notification(container, total_fee="48.00")
 
     wrong_content_type = client.post(
         "/v1/payments/xunhupay/notify",

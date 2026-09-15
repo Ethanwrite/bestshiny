@@ -211,8 +211,8 @@ def test_relayer_pays_gas_and_exact_usdc_purchase_fulfills_once(tmp_path) -> Non
     assert config.json()["gas_sponsored"] is True
 
     checkout = _checkout(client, workspace_id, payer)
-    assert checkout["amount_usdc"] == "20.00"
-    assert checkout["credits"] == 1_800
+    assert checkout["amount_usdc"] == "3.00"
+    assert checkout["credits"] == 300
     assert checkout["gas_sponsored"] is True
     assert checkout["typed_data"]["domain"] == {
         "name": "USD Coin",
@@ -239,7 +239,7 @@ def test_relayer_pays_gas_and_exact_usdc_purchase_fulfills_once(tmp_path) -> Non
     )
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["status"] == "CONFIRMED"
-    assert confirmed.json()["credits_granted"] == 1_800
+    assert confirmed.json()["credits_granted"] == 300
 
     replay = client.post(
         f"/v1/workspaces/{workspace_id}/relayed-authorizations/{checkout['id']}/reconcile",
@@ -254,7 +254,7 @@ def test_relayer_pays_gas_and_exact_usdc_purchase_fulfills_once(tmp_path) -> Non
         payment = session.scalar(select(OnchainPayment))
         ledger = list(session.scalars(select(WorkspaceCreditLedgerEntry)))
         assert workspace is not None
-        assert (workspace.plan_tier, workspace.credit_balance) == ("PRO", 1_850)
+        assert (workspace.plan_tier, workspace.credit_balance) == ("PRO", 350)
         assert order is not None and order.status == "PAID"
         assert order.provider == "EIP3009_RELAYER"
         assert authorization is not None and authorization.status == "CONFIRMED"
@@ -301,7 +301,7 @@ def test_insufficient_usdc_is_rejected_before_requesting_a_signature(tmp_path) -
 
     assert response.status_code == 422
     assert response.json()["detail"] == (
-        "Insufficient Base USDC balance: connected wallet has 0.545686 USDC; 20 USDC is required"
+        "Insufficient Base USDC balance: connected wallet has 0.545686 USDC; 3 USDC is required"
     )
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)) is None
@@ -322,7 +322,7 @@ def test_balance_is_checked_again_before_relayer_broadcast(tmp_path) -> None:
     )
 
     assert response.status_code == 422
-    assert "connected wallet has 0 USDC; 20 USDC is required" in response.json()["detail"]
+    assert "connected wallet has 0 USDC; 3 USDC is required" in response.json()["detail"]
     assert fake.sent_raw == []
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)).status == "PENDING"
@@ -472,7 +472,7 @@ def test_alchemy_observation_arriving_first_is_adopted_without_double_credit(tmp
                 to_address=TREASURY,
                 token_address=USDC,
                 token_decimals=6,
-                raw_amount_microunits=20_000_000,
+                raw_amount_microunits=3_000_000,
                 workspace_id=None,
                 wallet_binding_id=None,
                 payment_intent_id=None,
@@ -532,7 +532,7 @@ def test_worker_sweep_confirms_without_browser_polling(tmp_path) -> None:
     assert result.confirmed == 1
     with container.database.session() as session:
         assert session.scalar(select(PaymentOrder)).status == "PAID"
-        assert session.scalar(select(WorkspaceCreditLedgerEntry)).credits == 1_800
+        assert session.scalar(select(WorkspaceCreditLedgerEntry)).credits == 300
 
 
 def test_private_key_must_match_the_configured_relayer_address(tmp_path) -> None:

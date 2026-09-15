@@ -8,8 +8,16 @@ from types import MappingProxyType
 # Bumping this never rewrites an order that already froze the old value: the
 # snapshot is copied onto the order row at checkout, and settlement reads the
 # row, not this module. Change the packages and the version together.
-PRICING_VERSION = "2026-09-01.v2"
-XUNHUPAY_PRICING_VERSION = "2026-09-02.cny.v2"
+PRICING_VERSION = "2026-09-15.v3"
+XUNHUPAY_PRICING_VERSION = "2026-09-15.cny.v3"
+
+# The packs are priced in CNY first: 18 / 48 / 158 (the operator's prices,
+# 2026-09-15). The USDC price is the same amount at the platform's CNY snapshot
+# (about 6.78 to the dollar) rounded to a whole dollar, and the credits are that
+# dollar price at the rate credits are spent (1 credit = USD 0.01), so a pack
+# buys what it costs. A SKU is an identifier frozen onto every order row and
+# keyed by the web copy, so it does not follow a reprice: `starter_20` sells
+# for 3 USDC.
 
 
 @dataclass(frozen=True)
@@ -75,19 +83,19 @@ PAYMENT_PACKAGES: Mapping[str, PaymentPackage] = MappingProxyType(
     {
         "starter_20": PaymentPackage(
             sku="starter_20",
-            amount=Decimal("20"),
-            credits=1_800,
+            amount=Decimal("3"),
+            credits=300,
         ),
         "creator_50": PaymentPackage(
             sku="creator_50",
-            amount=Decimal("50"),
-            credits=6_000,
+            amount=Decimal("7"),
+            credits=700,
             recommended=True,
         ),
         "pro_100": PaymentPackage(
             sku="pro_100",
-            amount=Decimal("100"),
-            credits=11_000,
+            amount=Decimal("23"),
+            credits=2_300,
         ),
     }
 )
@@ -97,16 +105,16 @@ XUNHUPAY_PACKAGES: Mapping[str, PaymentPackage] = MappingProxyType(
     {
         "starter_20": PaymentPackage(
             sku="starter_20",
-            amount=Decimal("140"),
-            credits=1_800,
+            amount=Decimal("18"),
+            credits=300,
             currency="CNY",
             provider="XUNHUPAY",
             pricing_version=XUNHUPAY_PRICING_VERSION,
         ),
         "creator_50": PaymentPackage(
             sku="creator_50",
-            amount=Decimal("450"),
-            credits=6_000,
+            amount=Decimal("48"),
+            credits=700,
             currency="CNY",
             provider="XUNHUPAY",
             pricing_version=XUNHUPAY_PRICING_VERSION,
@@ -114,8 +122,8 @@ XUNHUPAY_PACKAGES: Mapping[str, PaymentPackage] = MappingProxyType(
         ),
         "pro_100": PaymentPackage(
             sku="pro_100",
-            amount=Decimal("700"),
-            credits=11_000,
+            amount=Decimal("158"),
+            credits=2_300,
             currency="CNY",
             provider="XUNHUPAY",
             pricing_version=XUNHUPAY_PRICING_VERSION,

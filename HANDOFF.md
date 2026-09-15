@@ -11,6 +11,15 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
 `0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
+> **2026-09-15 · branch `claude/pack-prices-18-48-158` — the credit packs repriced.** No migration.
+> On the operator's prices, WeChat Pay (XunHuPay) sells the three packs at ¥18 / ¥48 / ¥158 and USDC at
+> 3 / 7 / 23 (the CNY price at the platform's CNY snapshot, about 6.78 to the dollar, rounded to a whole
+> dollar), each for 300 / 700 / 2,300 credits: the dollar price at the rate credits are spent (1 credit =
+> USD 0.01). `PRICING_VERSION` is `2026-09-15.v3` and `XUNHUPAY_PRICING_VERSION` `2026-09-15.cny.v3`; the SKUs
+> (`starter_20` / `creator_50` / `pro_100`) are identifiers frozen onto order rows and stay as they are. An
+> order placed before the deploy settles on its own frozen snapshot. The public pricing page's fallback rows
+> moved with the catalogue. Record `docs/OPEN_ISSUES.md` §2.55.
+>
 > **2026-09-14 · branch `claude/canvas-workflows-byok` — workspace connections and the canvas.**
 > Alembic head moves to `0083_canvas_workflows_user_connections` (`REQUIRED_SCHEMA_REVISION` moves with it):
 > `user_connections`, `workflows`, `workflow_runs`, `workflow_node_runs` and `generation_jobs.connection_id`.

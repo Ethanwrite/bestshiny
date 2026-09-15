@@ -11,6 +11,21 @@ integration of origin/main `4f5dd11` (#10 batch atomicity, #11 video reference a
 2026-08-28 Character Evidence working tree from the main checkout · required Alembic head
 `0060_flow_remote_owner_index` · **NOT PRODUCTION-READY**
 
+> **2026-09-14 · branch `claude/canvas-workflows-byok` — workspace connections and the canvas.**
+> Alembic head moves to `0083_canvas_workflows_user_connections` (`REQUIRED_SCHEMA_REVISION` moves with it):
+> `user_connections`, `workflows`, `workflow_runs`, `workflow_node_runs` and `generation_jobs.connection_id`.
+> A workspace owner or admin adds the workspace's own provider key ("bring your own API"): OpenAI-compatible and
+> Anthropic for chat; OpenRouter, Volcengine Ark and Alibaba DashScope for chat plus image/video through the
+> platform's reviewed adapters. Keys are Fernet ciphertext bound to their row and never returned; every
+> connection request dials only addresses the connect-time egress fence validated. A connection-paid
+> generation is an ordinary gateway job (`provider = byok`) that reserves no credits and takes no spend
+> authorization, canary permit or verdict, runs only on its own connection's capacity, and is fenced on the
+> connection at the submission boundary. `/app` is now a node canvas whose runs the worker advances on its own
+> task (Text, Image, LLM, Image generation, Video generation, Note; unchanged nodes reuse results by
+> fingerprint); the previous workbench is `/app/studio`. `CREDENTIAL_ENCRYPTION_KEY` must match between the
+> api and the worker. No live connection call has been made from this branch. Entry point
+> `docs/CANVAS_AND_CONNECTIONS.md`; record `docs/OPEN_ISSUES.md` §2.54.
+>
 > **2026-09-03 · branch `claude/production-creation-deletion-f848a1` — deleting a creation.**
 > Alembic head moves to `0072_creation_soft_delete`. `DELETE /v1/generations/{job_id}` removes a creation
 > from Productions by stamping `deleted_at`/`deleted_by`: no row is deleted, nothing is refunded, and no

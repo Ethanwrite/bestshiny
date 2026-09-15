@@ -2832,6 +2832,13 @@ class GenerationJob(Base, TimestampMixin):
     #: attribution field. It is written from the authenticated principal and is
     #: null only for the development bypass, which has no user row.
     deleted_by: Mapped[str | None] = mapped_column(String(36), index=True)
+    #: The workspace connection (``user_connections``) whose own provider
+    #: account runs this job, or null for a platform-paid job. It decides who
+    #: pays: a connection job reserves no credits and takes no platform spend
+    #: authorization, and its provider is resolved from the connection, never
+    #: from the platform's provider router. Not a foreign key for the same
+    #: reason as ``deleted_by``: SQLite would rebuild this table to add one.
+    connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class CreationMediaCleanup(Base, TimestampMixin):
@@ -5066,6 +5073,206 @@ class EpisodeContinuation(Base, TimestampMixin):
     script_rendered: Mapped[str] = mapped_column(Text, default="", nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_by: Mapped[str | None] = mapped_column(String(120))
+
+
+class UserConnectionStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    #: The provider refused the key on the last check. Still usable, so a
+    #: transient 401 cannot strand every canvas; the check result is shown.
+    INVALID = "INVALID"
+    #: Removed by a user. The row stays as the anchor jobs point at; the
+    #: ciphertext is erased in the same transaction.
+    DELETED = "DELETED"
+
+
+class UserConnection(Base, TimestampMixin):
+    """A workspace's own API credential for a model provider.
+
+    The secret is Fernet ciphertext (``CredentialVault``) bound to this row's
+    id, is never returned by any route, and is decrypted only inside the
+    connection transport. ``protocol`` names the wire format and therefore the
+    adapter; ``capabilities`` is the subset of that protocol's chat/image/video
+    the workspace enabled; ``models`` are the model ids its members pick from.
+    """
+
+    __tablename__ = "user_connections"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE', 'INVALID', 'DELETED')",
+            name="ck_user_connection_status",
+        ),
+        Index(
+            "ix_user_connections_workspace_live",
+            "workspace_id",
+            "created_at",
+            sqlite_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    protocol: Mapped[str] = mapped_column(String(40), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    models_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    secret_ciphertext: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    #: A recognisable fragment (``sk-…9f2a``), never enough to use the key.
+    secret_hint: Mapped[str] = mapped_column(String(40), default="", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default=UserConnectionStatus.ACTIVE.value, nullable=False
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(36))
+
+
+class WorkflowRunStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class WorkflowNodeRunStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    #: Not run because an input it needed failed or was cancelled.
+    SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
+    #: Satisfied by an earlier run's result for an identical fingerprint.
+    CACHED = "CACHED"
+
+
+class Workflow(Base, TimestampMixin):
+    """A canvas: nodes, typed connections between their ports, and a viewport.
+
+    ``graph_json`` is the editor's document (``canvas-graph-v1``). ``version``
+    is an optimistic-concurrency counter: a save names the version it edited
+    and a stale save is refused rather than silently overwriting a newer one.
+    """
+
+    __tablename__ = "workflows"
+    __table_args__ = (
+        CheckConstraint("version >= 1", name="ck_workflow_version"),
+        Index(
+            "ix_workflows_project_live",
+            "project_id",
+            "updated_at",
+            sqlite_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    updated_by: Mapped[str | None] = mapped_column(String(36))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(36))
+
+
+class WorkflowRun(Base, TimestampMixin):
+    """One execution of a workflow's graph, advanced by the worker under a lease.
+
+    The graph is snapshotted at start, so editing the canvas during a run
+    changes the next run, never this one. ``enforce_plan`` records whether the
+    starting principal was a real user (plan gates apply to platform-paid
+    nodes) or the development bypass.
+    """
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')",
+            name="ck_workflow_run_status",
+        ),
+        Index("ix_workflow_runs_due", "status", "next_advance_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    workspace_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    enforce_plan: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=WorkflowRunStatus.QUEUED.value, nullable=False)
+    graph_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    graph_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    workflow_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    scope_node_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    force_node_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    claim_token: Mapped[str | None] = mapped_column(String(64))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_advance_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkflowNodeRun(Base, TimestampMixin):
+    """What one node did in one run: its fingerprint, inputs, outputs or error.
+
+    A generation node points at the ``GenerationJob`` it created, which stays
+    the authority for that job's lifecycle and charge. ``fingerprint`` hashes
+    the node's type, parameters and upstream fingerprints, so an unchanged
+    node can reuse an earlier run's result instead of paying for it again.
+    """
+
+    __tablename__ = "workflow_node_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "node_id", name="uq_workflow_node_run_node"),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED', 'CANCELLED', 'CACHED')",
+            name="ck_workflow_node_run_status",
+        ),
+        Index("ix_workflow_node_runs_cache", "workflow_id", "node_id", "fingerprint"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    node_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default=WorkflowNodeRunStatus.PENDING.value, nullable=False
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    inputs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    outputs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    usage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    connection_id: Mapped[str | None] = mapped_column(String(36))
+    cached_from_node_run_id: Mapped[str | None] = mapped_column(String(36))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 def _install_character_state_integrity_ddl() -> None:

@@ -155,6 +155,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .admin_routes import register_admin_routes
 from .auth import AuthPrincipal, AuthService, CookieCSRFMiddleware
+from .canvas_routes import register_canvas_routes
 from .container import Container, build_container
 from .creative_routes import register_creative_routes
 from .payment_routes import register_payment_routes
@@ -4312,6 +4313,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     register_payment_routes(app, container, auth)
     register_runtime_routes(app, container, verify_api_key, auth)
     register_skill_routes(app, container, auth)
+    register_canvas_routes(app, container, auth, verify_api_key)
     register_admin_routes(app, container, auth, verify_api_key)
     register_creative_routes(
         app,

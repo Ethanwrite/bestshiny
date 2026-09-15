@@ -1,4 +1,5 @@
 from .base import (
+    USER_CONNECTION_PROVIDER,
     GenerationProvider,
     ProviderHealth,
     ProviderInlineOutput,
@@ -7,6 +8,7 @@ from .base import (
     ProviderReferenceConstraints,
     ProviderReferenceMode,
     ProviderSubmission,
+    RemoteMediaFetchPolicy,
     VideoConstraintViolation,
     VideoReferenceConstraints,
 )
@@ -74,6 +76,8 @@ __all__ = [
     "ProviderReferenceConstraints",
     "ProviderReferenceMode",
     "ProviderSubmission",
+    "RemoteMediaFetchPolicy",
+    "USER_CONNECTION_PROVIDER",
     "VideoConstraintViolation",
     "VideoReferenceConstraints",
     "ProviderError",

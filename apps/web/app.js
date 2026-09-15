@@ -13,7 +13,7 @@ import {
   settleCreativeTurn,
   turnScopeKey,
 } from "./creative-turn-id.js";
-import { currentRoute, isAdminRoute, navigate, onRoute, setAuth } from "./router.js";
+import { currentRoute, isAdminRoute, isAppRoute, isStudioRoute, navigate, onRoute, setAuth } from "./router.js";
 
 const API = window.AI_DIRECTOR_API
   || (location.hostname === "127.0.0.1" && location.port === "18081"
@@ -178,7 +178,12 @@ const MODEL_LABELS = {
   "kwaivgi/kling-v3.0-pro": "Shiniest Motion · Continuity",
   "flow-veo-3.1": "Shiniest Motion · Studio",
 };
-const friendlyModel = (modelId) => MODEL_LABELS[modelId] || (modelId ? "BestShiny model" : "—");
+/* A job on a workspace's own API connection (provider "byok") ran on that
+   account's model, not a BestShiny route: it is named as such, never as one of
+   the product's tiers. */
+const friendlyModel = (modelId, provider = "") => (provider === "byok" && modelId
+  ? `Your API · ${modelId}`
+  : MODEL_LABELS[modelId] || (modelId ? "BestShiny model" : "—"));
 
 /** The Director page holds a provider string but never a model id, so it can
  *  only name the tier the route belongs to. Tier-only is the honest answer:
@@ -408,7 +413,8 @@ function lockAuth() {
   setAuthMode("login");
   $("authPassword").value = "";
   setAuth(null);
-  if (currentRoute() === "/app") navigate("/login", { replace: true });
+  // Canvas and studio alike: a locked session never stays on an app route.
+  if (isAppRoute(currentRoute())) navigate("/login", { replace: true });
   window.dispatchEvent(new CustomEvent("ai-director:auth", { detail: null }));
 }
 
@@ -1196,7 +1202,7 @@ function generatingMarkup(job, { progress, startedAt }) {
     <p class="gen-sub mono">
       <span data-gen-pct>${det ? `${pct}%` : "Working"}</span> ·
       <span data-gen-clock>${clockOf(Date.now() - startedAt)}</span> ·
-      ${escapeHTML(friendlyModel(job.model))}
+      ${escapeHTML(friendlyModel(job.model, job.provider))}
     </p>
     <p class="gen-note" data-gen-note>${escapeHTML(genNote(job, det))}</p>
     <button class="btn btn-tertiary" type="button" data-gen-cancel="${escapeHTML(job.id)}">Cancel</button>
@@ -1411,7 +1417,7 @@ async function renderPassengerJob(job) {
       <button class="result-id" type="button" data-copy-id="${escapeHTML(job.id)}"
               title="Copy this creation's ID">Copy ID</button>
       <div class="result-meta">
-        <div><span>Look</span><strong>${escapeHTML(friendlyModel(job.model))}</strong></div>
+        <div><span>Look</span><strong>${escapeHTML(friendlyModel(job.model, job.provider))}</strong></div>
         <div><span>Frame</span><strong>${escapeHTML(frame)}</strong></div>
         ${isVideo && lengthLabel ? `<div><span>Length</span><strong>${escapeHTML(lengthLabel)}</strong></div>` : ""}
         <div class="is-cost"><span>Cost</span><strong>${credits ? `${credits} credits` : "—"}</strong></div>
@@ -2785,7 +2791,7 @@ function renderProductions() {
       <span class="job-rail ${tone}"></span>
       <span class="job-main">
         <span class="job-title">
-          <strong>${escapeHTML(job.shotLabel || friendlyModel(job.model))}</strong>
+          <strong>${escapeHTML(job.shotLabel || friendlyModel(job.model, job.provider))}</strong>
           <span class="status-chip ${tone}">${simpleLabel(job.status)}</span>
         </span>
         <span class="job-sub mono">${escapeHTML(job.id)}</span>
@@ -2872,7 +2878,7 @@ function renderCreationsGallery(jobs = projectJobs()) {
         ${finished ? "" : `<span class="status-chip ${tone}">${simpleLabel(job.status)}</span>`}
       </div>
       <figcaption>
-        <b>${escapeHTML(job.shotLabel || friendlyModel(job.model))}</b>
+        <b>${escapeHTML(job.shotLabel || friendlyModel(job.model, job.provider))}</b>
         <small class="mono">${escapeHTML(when)}</small>
       </figcaption>
       ${finished ? `<div class="creation-actions">
@@ -2936,7 +2942,7 @@ function openDeleteCreationDialog(jobId) {
   const job = state.jobs.get(jobId);
   if (!job) return toast("Select a creation first");
   pendingDeleteJobId = jobId;
-  const label = job.shotLabel || friendlyModel(job.model);
+  const label = job.shotLabel || friendlyModel(job.model, job.provider);
   const credits = jobCredits(job);
   $("deleteCreationSummary").innerHTML = `
     <strong>${escapeHTML(label)}</strong><br>
@@ -3179,7 +3185,7 @@ function renderGenerationControl(job) {
   $("generationControlStatus").className = "output-box";
   $("generationControlStatus").innerHTML = `
     <span class="status-chip ${statusTone(job.status)}">${simpleLabel(job.status)}</span><br>
-    ${escapeHTML(friendlyModel(job.model))}<br>
+    ${escapeHTML(friendlyModel(job.model, job.provider))}<br>
     ${escapeHTML(creditLine(job))}<br>
     Tried ${attempts} time${attempts === 1 ? "" : "s"}
     ${job.error_message ? `<br><span class="output-error">${escapeHTML(job.error_message)}</span>` : ""}
@@ -5322,8 +5328,22 @@ window.addEventListener("bestshiny:auth-route", (event) => {
   setAuthMode(event.detail.route === "/signup" ? "register" : "login");
 });
 
+/* The canvas (canvas/canvas-app.js) owns no session: it signs out through the
+   one real sign-out path here, and hands an expired session to the same lock
+   a 401 on this module's own requests triggers. */
+window.addEventListener("ai-director:request-logout", () => { guard(logout)(); });
+window.addEventListener("ai-director:session-expired", () => { if (state.authUser) lockAuth(); });
+
 onRoute((route) => {
-  if (route !== "/app") return;
+  // The workbench lives at /app/studio; /app is the canvas.
+  if (!isStudioRoute(route)) return;
+  // The canvas may have pointed the wallet at its own project's workspace;
+  // coming back, the wallet follows the project open here again.
+  if (state.workspaceId) {
+    window.dispatchEvent(new CustomEvent("ai-director:workspace-changed", {
+      detail: { workspaceId: state.workspaceId, projectId: state.project?.id || null },
+    }));
+  }
   if (state.authUser && !state.projects.length) startWorkspace().catch((error) => toast(error.message));
 });
 

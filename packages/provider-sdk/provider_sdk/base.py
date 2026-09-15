@@ -459,6 +459,38 @@ class ProviderHealth:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+#: The provider name every generation job paid by a workspace's own connection
+#: carries. No platform provider or account ever uses it, so the gateway can
+#: tell a connection job apart from a platform job by name alone.
+USER_CONNECTION_PROVIDER = "byok"
+
+
+@dataclass(frozen=True)
+class RemoteMediaFetchPolicy:
+    """How an artefact URL from a provider outside the platform allowlist may be fetched.
+
+    A platform provider's artefacts are fetched only from hosts an operator
+    reviewed (``PROVIDER_MEDIA_ALLOWED_HOSTS``). A workspace connection's
+    provider names hosts nobody at the platform reviewed, and the account that
+    paid is the workspace's own, so there is no allowlist to consult. What
+    remains is everything that makes the fetch itself safe - HTTPS on port 443,
+    no userinfo, every resolved and connected address public, each redirect hop
+    re-validated, the byte cap - plus a credential presented only to the host
+    the provider's API named. A provider exposes one as ``media_fetch_policy``.
+    """
+
+    #: ``None`` admits any public host; a tuple keeps the allowlist semantics.
+    allowed_host_patterns: tuple[str, ...] | None = None
+    #: ``(header, value)`` sent to the origin host only; never repr'd or logged.
+    credential_header: tuple[str, str] | None = field(default=None, repr=False)
+    #: When set, the credential is presented only if the origin host is also
+    #: this host - the provider's own API host - so an artefact URL naming any
+    #: other host is fetched without it.
+    credential_host: str | None = None
+    #: Development only, mirroring ``user_connection_allow_private_network``.
+    allow_non_public_addresses: bool = False
+
+
 @dataclass(frozen=True)
 class ProviderPollIdentity:
     """Server-owned routing identity for a single remote-job poll."""

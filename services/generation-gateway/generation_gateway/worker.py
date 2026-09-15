@@ -404,8 +404,40 @@ def sweep_eip3009_payments_once(container) -> int:  # type: ignore[no-untyped-de
     return result.confirmed
 
 
+async def advance_workflow_runs_once(container) -> int:  # type: ignore[no-untyped-def]
+    """Advance due canvas runs once; the worker loop and the internal endpoint share it."""
+
+    runs = getattr(container, "workflow_runs", None)
+    if runs is None:
+        return 0
+    limit = max(1, int(getattr(container.settings, "workflow_run_batch_limit", 20)))
+    return int(await runs.advance_due(limit=limit))
+
+
+async def workflow_run_loop(container) -> None:  # type: ignore[no-untyped-def]
+    """Canvas runs, on their own task beside the job loop.
+
+    A canvas node can wait minutes on a model call. Sharing `run_loop`'s single
+    sequential pass would hold paid generation jobs off for that long, so runs
+    advance on a separate task; the two meet only at the database, where every
+    run is claimed under a lease and every node moves by conditional update.
+    """
+
+    interval = float(getattr(container.settings, "workflow_run_interval_seconds", 0) or 0)
+    if interval <= 0:
+        return
+    while True:
+        try:
+            advanced = await advance_workflow_runs_once(container)
+        except Exception:
+            logger.exception("workflow run advance failed")
+            advanced = 0
+        await asyncio.sleep(0.2 if advanced else interval)
+
+
 async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
     container.gateway.recover_after_restart()
+    workflow_task = asyncio.create_task(workflow_run_loop(container))
     try:
         resume_interrupted_candidate_qa(container)
     except Exception:
@@ -517,6 +549,11 @@ async def run_loop(container) -> None:  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("memory index outbox drain failed")
             next_memory_index = asyncio.get_running_loop().time() + memory_index_interval
+        if workflow_task.done() and not workflow_task.cancelled() and workflow_task.exception() is not None:
+            # The loop catches its own errors; an escape is a bug, not a reason
+            # to stop advancing canvases for the life of the process.
+            logger.error("workflow run loop stopped", exc_info=workflow_task.exception())
+            workflow_task = asyncio.create_task(workflow_run_loop(container))
         if not await process_next_job(container):
             await asyncio.sleep(container.settings.worker_poll_interval_seconds)
 

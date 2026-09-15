@@ -13,6 +13,7 @@ from character_core import (
 )
 from character_evidence.client import ModalCharacterEvidenceProducer
 from character_evidence.tracking import CharacterEvidenceTracker
+from connection_core import UserConnectionService
 from continuity_core import ContinuityDecisionEngine, ContinuityReviewer, FrameAnchorPlanner
 from cost_core import CostEngine, CreditPricingEngine, TokenCostEngine
 from creative_director_core import CreativeDirectorService
@@ -106,6 +107,7 @@ from veo_provider import VeoOfficialProvider
 from video_adapter_core import VideoAdapterRegistry
 from voyage_provider import VoyageProvider
 from wan_provider import WanProvider
+from workflow_core import WorkflowRunService, WorkflowService, build_submitter, node_failure_code
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +213,12 @@ class Container:
     credit_pricing: CreditPricingEngine
     creative_director: CreativeDirectorService
     episode_continuations: EpisodeContinuationService
+    #: A workspace's own provider keys ("connections"), their chat calls and
+    #: the providers that run connection-paid generation jobs.
+    connections: UserConnectionService
+    #: Canvases and their durable runs.
+    workflows: WorkflowService
+    workflow_runs: WorkflowRunService
 
     @property
     def video_prompt_compiler(self) -> PromptCompilerService:
@@ -256,6 +264,14 @@ def build_container(settings: Settings | None = None) -> Container:
                 f"production requires a PostgreSQL DATABASE_URL, not {backend}; "
                 "SQLite savepoints do not roll back under pysqlite"
             )
+    if settings.deployment_environment == "production":
+        if settings.user_connection_allow_private_network:
+            raise RuntimeError(
+                "USER_CONNECTION_ALLOW_PRIVATE_NETWORK is development-only; in production it would let "
+                "any workspace connection reach the platform's internal network"
+            )
+        if settings.user_connection_mock_protocol_enabled:
+            raise RuntimeError("USER_CONNECTION_MOCK_PROTOCOL_ENABLED is development-only")
     # Every guard above and this one read configuration only. They run before
     # the first connection is opened, so a misconfigured deployment is refused
     # for the reason it is actually misconfigured rather than for whichever
@@ -749,6 +765,19 @@ def build_container(settings: Settings | None = None) -> Container:
     flow_affinity = FlowProjectAllocator(database, scheduler)
     continuity = ShotContinuityService(database, media)
     workspace_credits = WorkspaceCreditService()
+    connections = UserConnectionService(
+        database,
+        credentials,
+        enabled=settings.user_connections_enabled,
+        allow_private_network=settings.user_connection_allow_private_network,
+        http_timeout_seconds=settings.user_connection_http_timeout_seconds,
+        max_response_bytes=settings.user_connection_max_response_bytes,
+        max_concurrent_jobs=settings.user_connection_max_concurrent_jobs,
+        mock_protocol_enabled=(
+            settings.user_connection_mock_protocol_enabled
+            and settings.deployment_environment in {"development", "test"}
+        ),
+    )
     gateway = GenerationGateway(
         database,
         providers,
@@ -764,6 +793,7 @@ def build_container(settings: Settings | None = None) -> Container:
         flow_affinity=flow_affinity,
         live_canary=live_canary,
         production_budget=production_budget,
+        user_connections=connections,
     )
     production = ProductionEngine(database)
     skills = SkillRegistry(settings.skills_root)
@@ -1007,6 +1037,24 @@ def build_container(settings: Settings | None = None) -> Container:
         model_roles=model_roles,
         skill_runtime=skill_runtime,
     )
+    workflows = WorkflowService(database)
+    workflow_runs = WorkflowRunService(
+        database,
+        connections=connections,
+        # The same admission, pricing and runtime the Create page uses: a canvas
+        # node paying with credits is priced, reserved and run exactly like a
+        # passenger generation, and one paying with a connection goes through the
+        # gateway's connection path.
+        submitter=build_submitter(
+            admission=generation_admission,
+            visual_runtime=visual_runtime,
+            pricing_version=lambda: credit_pricing.version,
+            error_codes=node_failure_code,
+        ),
+        cancel_job=gateway.cancel,
+        llm_timeout_seconds=settings.workflow_llm_timeout_seconds,
+        lease_seconds=settings.workflow_run_lease_seconds,
+    )
     return Container(
         settings=settings,
         database=database,
@@ -1080,4 +1128,7 @@ def build_container(settings: Settings | None = None) -> Container:
         credit_pricing=credit_pricing,
         creative_director=creative_director,
         episode_continuations=episode_continuations,
+        connections=connections,
+        workflows=workflows,
+        workflow_runs=workflow_runs,
     )

@@ -1,15 +1,21 @@
 /**
- * Path router for the two shells.
+ * Path router for the shells.
  *
  * The public site and the application never share chrome, so routing is a
  * question of which shell is mounted, not which panel is visible. Auth state
- * arrives asynchronously from app.js; until it does, neither shell is shown,
+ * arrives asynchronously from app.js; until it does, no shell is shown,
  * which avoids the login form flashing in front of an already-signed-in user.
+ *
+ * The application has two shells: the canvas (`/app`, `/app/canvas/...`,
+ * canvas/canvas-app.js) and the classic workbench (`/app/studio`, app.js).
+ * Both are protected the same way; any other `/app/...` path is the canvas.
  */
 
 export const MARKETING_ROUTES = ["/", "/product", "/models", "/pricing"];
 export const AUTH_ROUTES = ["/login", "/signup"];
 export const APP_ROUTE = "/app";
+export const CANVAS_ROUTE = "/app/canvas";
+export const STUDIO_ROUTE = "/app/studio";
 export const ADMIN_ROUTE = "/admin";
 
 const listeners = new Set();
@@ -18,7 +24,8 @@ const state = { route: normalize(location.pathname), user: null, authResolved: f
 function normalize(pathname) {
   const path = (pathname || "/").replace(/\/+$/, "") || "/";
   if (MARKETING_ROUTES.includes(path) || AUTH_ROUTES.includes(path) || path === APP_ROUTE) return path;
-  if (path.startsWith(`${APP_ROUTE}/`)) return path;
+  if (isStudioRoute(path) || isCanvasRoute(path)) return path;
+  if (path.startsWith(`${APP_ROUTE}/`)) return APP_ROUTE;
   if (path === ADMIN_ROUTE || path.startsWith(`${ADMIN_ROUTE}/`)) return path;
   return "/";
 }
@@ -27,8 +34,19 @@ export function currentRoute() {
   return state.route;
 }
 
+/** Any application route - canvas or studio. Protected: signed out, it resolves to /login. */
 export function isAppRoute(route = state.route) {
   return route === APP_ROUTE || route.startsWith(`${APP_ROUTE}/`);
+}
+
+/** The classic workbench (#appShell). */
+export function isStudioRoute(route = state.route) {
+  return route === STUDIO_ROUTE || route.startsWith(`${STUDIO_ROUTE}/`);
+}
+
+/** The canvas (#canvasShell): `/app` itself and `/app/canvas/...`. */
+export function isCanvasRoute(route = state.route) {
+  return route === APP_ROUTE || route === CANVAS_ROUTE || route.startsWith(`${CANVAS_ROUTE}/`);
 }
 
 export function isAdminRoute(route = state.route) {
@@ -60,17 +78,23 @@ function apply({ replace = false } = {}) {
 
   const publicShell = document.getElementById("publicShell");
   const appShell = document.getElementById("appShell");
+  const canvasShell = document.getElementById("canvasShell");
   const adminShell = document.getElementById("adminShell");
   const ready = state.authResolved;
   const onAdmin = ready && isAdminRoute(state.route);
   const onApp = ready && isAppRoute(state.route) && !onAdmin;
+  // Without a canvas shell in the page, every app route is the workbench.
+  const onCanvas = onApp && Boolean(canvasShell) && isCanvasRoute(state.route);
+  const onStudio = onApp && !onCanvas;
 
   publicShell.hidden = !ready || onApp || onAdmin;
-  appShell.hidden = !onApp;
+  appShell.hidden = !onStudio;
+  if (canvasShell) canvasShell.hidden = !onCanvas;
   if (adminShell) adminShell.hidden = !onAdmin;
-  appShell.classList.toggle("auth-locked", !onApp);
+  appShell.classList.toggle("auth-locked", !onStudio);
   document.body.classList.toggle("public-route", ready && !onApp && !onAdmin);
   document.body.classList.toggle("admin-route", onAdmin);
+  document.body.classList.toggle("canvas-route", onCanvas);
 
   document.querySelectorAll("[data-nav]").forEach((link) => {
     link.classList.toggle("active", link.dataset.nav === state.route);

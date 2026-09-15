@@ -34,7 +34,7 @@ from production_domain.models import (
     new_id,
     utcnow,
 )
-from provider_sdk import GenerationProvider, ProviderReferenceConstraints
+from provider_sdk import GenerationProvider, ProviderReferenceConstraints, RemoteMediaFetchPolicy
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -205,7 +205,13 @@ class MediaRegistry:
             return host.endswith(suffix) and host != suffix[1:]
         return host == normalized
 
-    async def _validate_remote_url(self, url: str, *, provider: str) -> None:
+    async def _validate_remote_url(
+        self,
+        url: str,
+        *,
+        provider: str,
+        policy: RemoteMediaFetchPolicy | None = None,
+    ) -> None:
         try:
             parsed = urlsplit(url)
             port = parsed.port or 443
@@ -216,8 +222,18 @@ class MediaRegistry:
         if parsed.username or parsed.password or port != 443:
             raise RemoteMediaSecurityError("provider media URL contains forbidden authority fields")
         host = parsed.hostname.lower().rstrip(".")
-        patterns = self.provider_media_hosts.get(provider, ())
-        if not patterns or not any(self._host_matches(host, pattern) for pattern in patterns):
+        # A job's own policy replaces the provider-name allowlist only for a
+        # provider the platform does not operate (a workspace connection).
+        # Every other check below applies to it unchanged.
+        if policy is not None and policy.allowed_host_patterns is None:
+            patterns: tuple[str, ...] | None = None
+        elif policy is not None:
+            patterns = policy.allowed_host_patterns
+        else:
+            patterns = self.provider_media_hosts.get(provider, ())
+        if patterns is not None and (
+            not patterns or not any(self._host_matches(host, pattern) for pattern in patterns)
+        ):
             # Name the host. The generation that hits this has already been paid
             # for, and without the host the operator is left re-running a billed
             # call to learn a string the provider already told us. A hostname
@@ -239,16 +255,17 @@ class MediaRegistry:
             raise RemoteMediaSecurityError("provider media host could not be resolved") from exc
         if not addresses:
             raise RemoteMediaSecurityError("provider media host resolved to no addresses")
+        allow_non_public = bool(policy is not None and policy.allow_non_public_addresses)
         for address in addresses:
             try:
                 ip = ipaddress.ip_address(address[4][0])
             except ValueError as exc:
                 raise RemoteMediaSecurityError("provider media host returned an invalid address") from exc
-            if not ip.is_global:
+            if not ip.is_global and not allow_non_public:
                 raise RemoteMediaSecurityError("provider media host resolved to a non-public address")
 
     @staticmethod
-    def _validate_connected_peer(response: httpx.Response) -> None:
+    def _validate_connected_peer(response: httpx.Response, *, allow_non_public: bool = False) -> None:
         stream = response.extensions.get("network_stream")
         if stream is None or not hasattr(stream, "get_extra_info"):
             return
@@ -259,7 +276,7 @@ class MediaRegistry:
             ip = ipaddress.ip_address(peer[0] if isinstance(peer, tuple) else peer)
         except ValueError as exc:
             raise RemoteMediaSecurityError("provider media peer address is invalid") from exc
-        if not ip.is_global:
+        if not ip.is_global and not allow_non_public:
             raise RemoteMediaSecurityError("provider media connection reached a non-public address")
 
     @staticmethod
@@ -1024,6 +1041,12 @@ class MediaRegistry:
         "image/png": "png",
         "image/jpeg": "jpg",
         "image/webp": "webp",
+        # A provider may return a finished clip as bytes rather than a URL. The
+        # bytes pass the same content validation as a downloaded clip, and the
+        # asset type still has to agree with what they decode as.
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+        "video/webm": "webm",
     }
 
     def find_by_content(
@@ -1326,7 +1349,14 @@ class MediaRegistry:
         session.flush([asset])
         return asset, False
 
-    async def _download_provider_media(self, content: BinaryIO, url: str, *, provider: str) -> str:
+    async def _download_provider_media(
+        self,
+        content: BinaryIO,
+        url: str,
+        *,
+        provider: str,
+        policy: RemoteMediaFetchPolicy | None = None,
+    ) -> str:
         """Stream one provider artefact into ``content`` behind the SSRF boundary.
 
         Returns the response's declared MIME type. Every hop of a redirect
@@ -1344,17 +1374,30 @@ class MediaRegistry:
         # the rule curl applies, made explicit because redirects are followed by
         # hand here.
         origin_host = (urlsplit(url).hostname or "").lower().rstrip(".")
-        credential = self.provider_media_credentials.get(provider, "").strip()
+        credential_header: tuple[str, str] | None = None
+        if policy is not None:
+            credential_header = policy.credential_header
+            if policy.credential_host and policy.credential_host.lower().rstrip(".") != origin_host:
+                credential_header = None
+        else:
+            credential = self.provider_media_credentials.get(provider, "").strip()
+            if credential:
+                credential_header = ("Authorization", f"Bearer {credential}")
+        allow_non_public = bool(policy is not None and policy.allow_non_public_addresses)
         async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
             for redirect_count in range(6):
-                await self._validate_remote_url(current_url, provider=provider)
+                if policy is None:
+                    # A platform provider's download is validated exactly as it always was.
+                    await self._validate_remote_url(current_url, provider=provider)
+                else:
+                    await self._validate_remote_url(current_url, provider=provider, policy=policy)
                 headers: dict[str, str] = {}
-                if credential:
+                if credential_header is not None:
                     hop_host = (urlsplit(current_url).hostname or "").lower().rstrip(".")
                     if hop_host == origin_host:
-                        headers["Authorization"] = f"Bearer {credential}"
+                        headers[credential_header[0]] = credential_header[1]
                 async with client.stream("GET", current_url, headers=headers) as response:
-                    self._validate_connected_peer(response)
+                    self._validate_connected_peer(response, allow_non_public=allow_non_public)
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if not location or redirect_count == 5:
@@ -1397,6 +1440,7 @@ class MediaRegistry:
         filename: str,
         provider: str,
         asset_type: str,
+        policy: RemoteMediaFetchPolicy | None = None,
     ) -> StagedProviderOutput:
         """Fetch one provider artefact and stage it; no database row is written.
 
@@ -1411,7 +1455,12 @@ class MediaRegistry:
         source_url = urlunsplit((source_parts.scheme, source_parts.netloc, source_parts.path, "", ""))
         with tempfile.SpooledTemporaryFile(max_size=min(self.max_download_bytes, 8 * 1024 * 1024)) as content:
             binary_content = cast(BinaryIO, content)
-            mime_type = await self._download_provider_media(binary_content, url, provider=provider)
+            if policy is None:
+                mime_type = await self._download_provider_media(binary_content, url, provider=provider)
+            else:
+                mime_type = await self._download_provider_media(
+                    binary_content, url, provider=provider, policy=policy
+                )
             binary_content.seek(0)
             # The caller named this file before anything was downloaded, and a
             # provider's artefact URL is not a meaningful filename: Ark serves

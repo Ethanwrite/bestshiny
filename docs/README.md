@@ -1,5 +1,10 @@
 # AI Director Platform — Documentation Index
 
+> **2026-09-14 (branch `claude/canvas-workflows-byok`, alembic `0083`):**
+> [CANVAS_AND_CONNECTIONS.md](CANVAS_AND_CONNECTIONS.md) is the entry point for workspace connections (a
+> workspace's own API keys for chat, image and video providers) and the node canvas that replaced `/app`
+> (the previous workbench is `/app/studio`).
+>
 > **2026-09-09:** production is `74beba5` (`main`, PR #65 — the Skill contracts tolerate live replies,
 > on PR #64 — the Skill runtime), alembic `0082`;
 > [SKILL_RUNTIME.md](SKILL_RUNTIME.md) is the entry point for how a Skill reaches a model (five bound,

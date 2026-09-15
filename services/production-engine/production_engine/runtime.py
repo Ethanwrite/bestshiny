@@ -204,7 +204,16 @@ class VisualProductionRuntime:
         estimated_credits: int | None = None,
         pricing_version: str = "",
         quoted_cost_usd: float | None = None,
+        mode: str = "PASSENGER_SEAT",
+        extra_metadata: dict[str, Any] | None = None,
     ):  # type: ignore[no-untyped-def]
+        """Submit an admitted single generation.
+
+        ``mode`` and ``extra_metadata`` label where the request came from (the
+        canvas records its workflow, run and node); they never change what is
+        priced, reserved or run, which only admission's result decides.
+        """
+
         request = GenerationRequest(
             project_id=command.project_id,
             type=command.media_type,
@@ -221,7 +230,8 @@ class VisualProductionRuntime:
             idempotency_key=command.idempotency_key,
             cost_estimate=command.estimated_cost,
             metadata={
-                "mode": "PASSENGER_SEAT",
+                **(extra_metadata or {}),
+                "mode": mode,
                 "resolution": command.resolution,
                 # Why this model ran, so the choice stays auditable after the fact.
                 # Admission clears model_role when it obeyed a named model, so its
@@ -232,7 +242,7 @@ class VisualProductionRuntime:
         )
         return self.submit(
             request,
-            mode="PASSENGER_SEAT",
+            mode=mode,
             prompt_version="user-authored-v1",
             # Public command models are never a billing authority. Only the
             # server Admission result supplied by the caller may price a job.
@@ -257,6 +267,7 @@ class VisualProductionRuntime:
         quoted_cost_usd: float | None = None,
         resolution: str = "720p",
         timeline_fence: AuthoritativeTimelineFence | None = None,
+        connection_id: str | None = None,
     ):  # type: ignore[no-untyped-def]
         trace_id = _new_trace_id()
 
@@ -295,6 +306,9 @@ class VisualProductionRuntime:
             quoted_cost_usd=quoted_cost_usd,
             resolution=resolution,
             timeline_fence=timeline_fence,
+            # A workspace's own connection pays for this job instead of the
+            # workspace's credits; the gateway enforces what that means.
+            connection_id=connection_id,
         )
         return job, replayed
 
